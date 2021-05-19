@@ -166,11 +166,13 @@ typedef struct grant_entry_v1 grant_entry_v1_t;
 #define GTF_type_mask       (3U<<0)
 
 /*
- * Subflags for GTF_permit_access.
+ * Subflags for GTF_permit_access and GTF_transitive.
  *  GTF_readonly: Restrict @domid to read-only mappings and accesses. [GST]
  *  GTF_reading: Grant entry is currently mapped for reading by @domid. [XEN]
  *  GTF_writing: Grant entry is currently mapped for writing by @domid. [XEN]
- *  GTF_PAT, GTF_PWT, GTF_PCD: (x86) cache attribute flags for the grant [GST]
+ * Further subflags for GTF_permit_access only.
+ *  GTF_PAT, GTF_PWT, GTF_PCD: (x86) cache attribute flags to be used for
+ *                             mappings of the grant [GST]
  *  GTF_sub_page: Grant access to only a subrange of the page.  @domid
  *                will only be allowed to copy from the grant, and not
  *                map it. [GST]
@@ -411,12 +413,13 @@ typedef struct gnttab_dump_table gnttab_dump_table_t;
 DEFINE_XEN_GUEST_HANDLE(gnttab_dump_table_t);
 
 /*
- * GNTTABOP_transfer_grant_ref: Transfer <frame> to a foreign domain. The
- * foreign domain has previously registered its interest in the transfer via
- * <domid, ref>.
+ * GNTTABOP_transfer: Transfer <frame> to a foreign domain. The foreign domain
+ * has previously registered its interest in the transfer via <domid, ref>.
  *
  * Note that, even if the transfer fails, the specified page no longer belongs
  * to the calling domain *unless* the error is GNTST_bad_page.
+ *
+ * Note further that only PV guests can use this operation.
  */
 struct gnttab_transfer {
     /* IN parameters. */
@@ -514,10 +517,9 @@ DEFINE_XEN_GUEST_HANDLE(gnttab_unmap_and_replace_t);
 #if __XEN_INTERFACE_VERSION__ >= 0x0003020a
 /*
  * GNTTABOP_set_version: Request a particular version of the grant
- * table shared table structure.  This operation can only be performed
- * once in any given domain.  It must be performed before any grants
- * are activated; otherwise, the domain will be stuck with version 1.
- * The only defined versions are 1 and 2.
+ * table shared table structure.  This operation may be used to toggle
+ * between different versions, but must be performed while no grants
+ * are active.  The only defined versions are 1 and 2.
  */
 struct gnttab_set_version {
     /* IN/OUT parameters */
@@ -588,9 +590,9 @@ struct gnttab_cache_flush {
     } a;
     uint16_t offset; /* offset from start of grant */
     uint16_t length; /* size within the grant */
-#define GNTTAB_CACHE_CLEAN          (1<<0)
-#define GNTTAB_CACHE_INVAL          (1<<1)
-#define GNTTAB_CACHE_SOURCE_GREF    (1<<31)
+#define GNTTAB_CACHE_CLEAN          (1u<<0)
+#define GNTTAB_CACHE_INVAL          (1u<<1)
+#define GNTTAB_CACHE_SOURCE_GREF    (1u<<31)
     uint32_t op;
 };
 typedef struct gnttab_cache_flush gnttab_cache_flush_t;

@@ -18,19 +18,106 @@
 #include <xen/guest_access.h>
 #include <xen/event.h>
 #include <xen/softirq.h>
+#include <xen/vm_event.h>
 #include <xsm/xsm.h>
+
+#include <asm/hvm/io.h>
+#include <asm/io_apic.h>
+#include <asm/setup.h>
+
+const struct iommu_init_ops *__initdata iommu_init_ops;
+struct iommu_ops __read_mostly iommu_ops;
+
+enum iommu_intremap __read_mostly iommu_intremap = iommu_intremap_full;
+
+#ifndef iommu_intpost
+/*
+ * In the current implementation of VT-d posted interrupts, in some extreme
+ * cases, the per cpu list which saves the blocked vCPU will be very long,
+ * and this will affect the interrupt latency, so let this feature off by
+ * default until we find a good solution to resolve it.
+ */
+bool __read_mostly iommu_intpost;
+#endif
+
+int __init iommu_hardware_setup(void)
+{
+    struct IO_APIC_route_entry **ioapic_entries = NULL;
+    int rc;
+
+    if ( !iommu_init_ops )
+        return -ENODEV;
+
+    rc = scan_pci_devices();
+    if ( rc )
+        return rc;
+
+    if ( !iommu_ops.init )
+        iommu_ops = *iommu_init_ops->ops;
+    else
+        /* x2apic setup may have previously initialised the struct. */
+        ASSERT(iommu_ops.init == iommu_init_ops->ops->init);
+
+    if ( !x2apic_enabled && iommu_intremap )
+    {
+        /*
+         * If x2APIC is enabled interrupt remapping is already enabled, so
+         * there's no need to mess with the IO-APIC because the remapping
+         * entries are already correctly setup by x2apic_bsp_setup.
+         */
+        ioapic_entries = alloc_ioapic_entries();
+        if ( !ioapic_entries )
+            return -ENOMEM;
+        rc = save_IO_APIC_setup(ioapic_entries);
+        if ( rc )
+        {
+            free_ioapic_entries(ioapic_entries);
+            return rc;
+        }
+
+        mask_8259A();
+        mask_IO_APIC_setup(ioapic_entries);
+    }
+
+    rc = iommu_init_ops->setup();
+
+    if ( ioapic_entries )
+    {
+        restore_IO_APIC_setup(ioapic_entries, rc);
+        unmask_8259A();
+        free_ioapic_entries(ioapic_entries);
+    }
+
+    return rc;
+}
+
+int iommu_enable_x2apic(void)
+{
+    if ( system_state < SYS_STATE_active )
+    {
+        if ( !iommu_supports_x2apic() )
+            return -EOPNOTSUPP;
+
+        iommu_ops = *iommu_init_ops->ops;
+    }
+    else if ( !x2apic_enabled )
+        return -EOPNOTSUPP;
+
+    if ( !iommu_ops.enable_x2apic )
+        return -EOPNOTSUPP;
+
+    return iommu_ops.enable_x2apic();
+}
 
 void iommu_update_ire_from_apic(
     unsigned int apic, unsigned int reg, unsigned int value)
 {
-    const struct iommu_ops *ops = iommu_get_ops();
-    ops->update_ire_from_apic(apic, reg, value);
+    iommu_vcall(&iommu_ops, update_ire_from_apic, apic, reg, value);
 }
 
 unsigned int iommu_read_apic_from_ire(unsigned int apic, unsigned int reg)
 {
-    const struct iommu_ops *ops = iommu_get_ops();
-    return ops->read_apic_from_ire(apic, reg);
+    return iommu_call(&iommu_ops, read_apic_from_ire, apic, reg);
 }
 
 int __init iommu_setup_hpet_msi(struct msi_desc *msi)
@@ -39,104 +126,13 @@ int __init iommu_setup_hpet_msi(struct msi_desc *msi)
     return ops->setup_hpet_msi ? ops->setup_hpet_msi(msi) : -ENODEV;
 }
 
-int arch_iommu_populate_page_table(struct domain *d)
-{
-    const struct domain_iommu *hd = dom_iommu(d);
-    struct page_info *page;
-    int rc = 0, n = 0;
-
-    d->need_iommu = -1;
-
-    this_cpu(iommu_dont_flush_iotlb) = 1;
-    spin_lock(&d->page_alloc_lock);
-
-    if ( unlikely(d->is_dying) )
-        rc = -ESRCH;
-
-    while ( !rc && (page = page_list_remove_head(&d->page_list)) )
-    {
-        if ( has_hvm_container_domain(d) ||
-            (page->u.inuse.type_info & PGT_type_mask) == PGT_writable_page )
-        {
-            unsigned long mfn = page_to_mfn(page);
-            unsigned long gfn = mfn_to_gmfn(d, mfn);
-
-            if ( gfn != gfn_x(INVALID_GFN) )
-            {
-                ASSERT(!(gfn >> DEFAULT_DOMAIN_ADDRESS_WIDTH));
-                BUG_ON(SHARED_M2P(gfn));
-                rc = hd->platform_ops->map_page(d, gfn, mfn,
-                                                IOMMUF_readable |
-                                                IOMMUF_writable);
-
-                /*
-                 * We may be working behind the back of a running guest, which
-                 * may change the type of a page at any time.  We can't prevent
-                 * this (for instance, by bumping the type count while mapping
-                 * the page) without causing legitimate guest type-change
-                 * operations to fail.  So after adding the page to the IOMMU,
-                 * check again to make sure this is still valid.  NB that the
-                 * writable entry in the iommu is harmless until later, when
-                 * the actual device gets assigned.
-                 */
-                if ( !rc && !is_hvm_domain(d) &&
-                     ((page->u.inuse.type_info & PGT_type_mask) !=
-                      PGT_writable_page) )
-                {
-                    rc = hd->platform_ops->unmap_page(d, gfn);
-                    /* If the type changed yet again, simply force a retry. */
-                    if ( !rc && ((page->u.inuse.type_info & PGT_type_mask) ==
-                                 PGT_writable_page) )
-                        rc = -ERESTART;
-                }
-            }
-            if ( rc )
-            {
-                page_list_add(page, &d->page_list);
-                break;
-            }
-        }
-        page_list_add_tail(page, &d->arch.relmem_list);
-        if ( !(++n & 0xff) && !page_list_empty(&d->page_list) &&
-             hypercall_preempt_check() )
-            rc = -ERESTART;
-    }
-
-    if ( !rc )
-    {
-        /*
-         * The expectation here is that generally there are many normal pages
-         * on relmem_list (the ones we put there) and only few being in an
-         * offline/broken state. The latter ones are always at the head of the
-         * list. Hence we first move the whole list, and then move back the
-         * first few entries.
-         */
-        page_list_move(&d->page_list, &d->arch.relmem_list);
-        while ( !page_list_empty(&d->page_list) &&
-                (page = page_list_first(&d->page_list),
-                 (page->count_info & (PGC_state|PGC_broken))) )
-        {
-            page_list_del(page, &d->page_list);
-            page_list_add_tail(page, &d->arch.relmem_list);
-        }
-    }
-
-    spin_unlock(&d->page_alloc_lock);
-    this_cpu(iommu_dont_flush_iotlb) = 0;
-
-    if ( !rc )
-        rc = iommu_iotlb_flush_all(d);
-
-    if ( rc && rc != -ERESTART )
-        iommu_teardown(d);
-
-    return rc;
-}
-
 void __hwdom_init arch_iommu_check_autotranslated_hwdom(struct domain *d)
 {
-    if ( !iommu_enabled )
+    if ( !is_iommu_enabled(d) )
         panic("Presently, iommu must be enabled for PVH hardware domain\n");
+
+    if ( !iommu_hwdom_strict )
+        panic("PVH hardware domain iommu must be set in 'strict' mode\n");
 }
 
 int arch_iommu_domain_init(struct domain *d)
@@ -144,24 +140,204 @@ int arch_iommu_domain_init(struct domain *d)
     struct domain_iommu *hd = dom_iommu(d);
 
     spin_lock_init(&hd->arch.mapping_lock);
-    INIT_LIST_HEAD(&hd->arch.g2m_ioport_list);
-    INIT_LIST_HEAD(&hd->arch.mapped_rmrrs);
+
+    INIT_PAGE_LIST_HEAD(&hd->arch.pgtables.list);
+    spin_lock_init(&hd->arch.pgtables.lock);
 
     return 0;
 }
 
 void arch_iommu_domain_destroy(struct domain *d)
 {
-    const struct domain_iommu *hd = dom_iommu(d);
-    struct list_head *ioport_list, *tmp;
-    struct g2m_ioport *ioport;
+    /*
+     * There should be not page-tables left allocated by the time the
+     * domain is destroyed. Note that arch_iommu_domain_destroy() is
+     * called unconditionally, so pgtables may be uninitialized.
+     */
+    ASSERT(!dom_iommu(d)->platform_ops ||
+           page_list_empty(&dom_iommu(d)->arch.pgtables.list));
+}
 
-    list_for_each_safe ( ioport_list, tmp, &hd->arch.g2m_ioport_list )
+static bool __hwdom_init hwdom_iommu_map(const struct domain *d,
+                                         unsigned long pfn,
+                                         unsigned long max_pfn)
+{
+    mfn_t mfn = _mfn(pfn);
+    unsigned int i, type;
+
+    /*
+     * Set up 1:1 mapping for dom0. Default to include only conventional RAM
+     * areas and let RMRRs include needed reserved regions. When set, the
+     * inclusive mapping additionally maps in every pfn up to 4GB except those
+     * that fall in unusable ranges for PV Dom0.
+     */
+    if ( (pfn > max_pfn && !mfn_valid(mfn)) || xen_in_range(pfn) )
+        return false;
+
+    switch ( type = page_get_ram_type(mfn) )
     {
-        ioport = list_entry(ioport_list, struct g2m_ioport, list);
-        list_del(&ioport->list);
-        xfree(ioport);
+    case RAM_TYPE_UNUSABLE:
+        return false;
+
+    case RAM_TYPE_CONVENTIONAL:
+        if ( iommu_hwdom_strict )
+            return false;
+        break;
+
+    default:
+        if ( type & RAM_TYPE_RESERVED )
+        {
+            if ( !iommu_hwdom_inclusive && !iommu_hwdom_reserved )
+                return false;
+        }
+        else if ( is_hvm_domain(d) || !iommu_hwdom_inclusive || pfn > max_pfn )
+            return false;
     }
+
+    /* Check that it doesn't overlap with the Interrupt Address Range. */
+    if ( pfn >= 0xfee00 && pfn <= 0xfeeff )
+        return false;
+    /* ... or the IO-APIC */
+    for ( i = 0; has_vioapic(d) && i < d->arch.hvm.nr_vioapics; i++ )
+        if ( pfn == PFN_DOWN(domain_vioapic(d, i)->base_address) )
+            return false;
+    /*
+     * ... or the PCIe MCFG regions.
+     * TODO: runtime added MMCFG regions are not checked to make sure they
+     * don't overlap with already mapped regions, thus preventing trapping.
+     */
+    if ( has_vpci(d) && vpci_is_mmcfg_address(d, pfn_to_paddr(pfn)) )
+        return false;
+
+    return true;
+}
+
+void __hwdom_init arch_iommu_hwdom_init(struct domain *d)
+{
+    unsigned long i, top, max_pfn;
+    unsigned int flush_flags = 0;
+
+    BUG_ON(!is_hardware_domain(d));
+
+    /* Reserved IOMMU mappings are enabled by default. */
+    if ( iommu_hwdom_reserved == -1 )
+        iommu_hwdom_reserved = 1;
+
+    if ( iommu_hwdom_inclusive )
+    {
+        printk(XENLOG_WARNING
+               "IOMMU inclusive mappings are deprecated and will be removed in future versions\n");
+
+        if ( !is_pv_domain(d) )
+        {
+            printk(XENLOG_WARNING
+                   "IOMMU inclusive mappings are only supported on PV Dom0\n");
+            iommu_hwdom_inclusive = false;
+        }
+    }
+
+    if ( iommu_hwdom_passthrough )
+        return;
+
+    max_pfn = (GB(4) >> PAGE_SHIFT) - 1;
+    top = max(max_pdx, pfn_to_pdx(max_pfn) + 1);
+
+    for ( i = 0; i < top; i++ )
+    {
+        unsigned long pfn = pdx_to_pfn(i);
+        int rc;
+
+        if ( !hwdom_iommu_map(d, pfn, max_pfn) )
+            rc = 0;
+        else if ( paging_mode_translate(d) )
+            rc = set_identity_p2m_entry(d, pfn, p2m_access_rw, 0);
+        else
+            rc = iommu_map(d, _dfn(pfn), _mfn(pfn), 1ul << PAGE_ORDER_4K,
+                           IOMMUF_readable | IOMMUF_writable, &flush_flags);
+
+        if ( rc )
+            printk(XENLOG_WARNING "%pd: identity %smapping of %lx failed: %d\n",
+                   d, !paging_mode_translate(d) ? "IOMMU " : "", pfn, rc);
+
+        if (!(i & 0xfffff))
+            process_pending_softirqs();
+    }
+
+    /* Use if to avoid compiler warning */
+    if ( iommu_iotlb_flush_all(d, flush_flags) )
+        return;
+}
+
+int iommu_free_pgtables(struct domain *d)
+{
+    struct domain_iommu *hd = dom_iommu(d);
+    struct page_info *pg;
+    unsigned int done = 0;
+
+    if ( !is_iommu_enabled(d) )
+        return 0;
+
+    /* After this barrier, no new IOMMU mappings can be inserted. */
+    spin_barrier(&hd->arch.mapping_lock);
+
+    /*
+     * Pages will be moved to the free list below. So we want to
+     * clear the root page-table to avoid any potential use after-free.
+     */
+    hd->platform_ops->clear_root_pgtable(d);
+
+    while ( (pg = page_list_remove_head(&hd->arch.pgtables.list)) )
+    {
+        free_domheap_page(pg);
+
+        if ( !(++done & 0xff) && general_preempt_check() )
+            return -ERESTART;
+    }
+
+    return 0;
+}
+
+struct page_info *iommu_alloc_pgtable(struct domain *d)
+{
+    struct domain_iommu *hd = dom_iommu(d);
+    unsigned int memflags = 0;
+    struct page_info *pg;
+    void *p;
+
+#ifdef CONFIG_NUMA
+    if ( hd->node != NUMA_NO_NODE )
+        memflags = MEMF_node(hd->node);
+#endif
+
+    pg = alloc_domheap_page(NULL, memflags);
+    if ( !pg )
+        return NULL;
+
+    p = __map_domain_page(pg);
+    clear_page(p);
+
+    if ( hd->platform_ops->sync_cache )
+        iommu_vcall(hd->platform_ops, sync_cache, p, PAGE_SIZE);
+
+    unmap_domain_page(p);
+
+    spin_lock(&hd->arch.pgtables.lock);
+    page_list_add(pg, &hd->arch.pgtables.list);
+    spin_unlock(&hd->arch.pgtables.lock);
+
+    return pg;
+}
+
+bool arch_iommu_use_permitted(const struct domain *d)
+{
+    /*
+     * Prevent device assign if mem paging, mem sharing or log-dirty
+     * have been enabled for this domain.
+     */
+    return d == dom_io ||
+           (likely(!mem_sharing_enabled(d)) &&
+            likely(!vm_event_check_ring(d->vm_event_paging)) &&
+            likely(!p2m_get_hostp2m(d)->global_logdirty));
 }
 
 /*

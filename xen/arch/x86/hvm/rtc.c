@@ -28,6 +28,7 @@
 #include <asm/hvm/support.h>
 #include <asm/current.h>
 #include <xen/trace.h>
+#include <public/hvm/params.h>
 
 #define USEC_PER_SEC    1000000UL
 #define NS_PER_USEC     1000UL
@@ -38,7 +39,7 @@
 #define MIN_PER_HOUR    60
 #define HOUR_PER_DAY    24
 
-#define domain_vrtc(x) (&(x)->arch.hvm_domain.pl_time->vrtc)
+#define domain_vrtc(x) (&(x)->arch.hvm.pl_time->vrtc)
 #define vcpu_vrtc(x)   (domain_vrtc((x)->domain))
 #define vrtc_domain(x) (container_of(x, struct pl_time, vrtc)->domain)
 #define vrtc_vcpu(x)   (pt_global_vcpu_target(vrtc_domain(x)))
@@ -75,7 +76,7 @@ static void rtc_update_irq(RTCState *s)
     s->hw.cmos_data[RTC_REG_C] |= RTC_IRQF;
     if ( rtc_mode_is(s, no_ack) )
         hvm_isa_irq_deassert(vrtc_domain(s), RTC_IRQ);
-    hvm_isa_irq_assert(vrtc_domain(s), RTC_IRQ);
+    hvm_isa_irq_assert(vrtc_domain(s), RTC_IRQ, NULL);
 }
 
 /* Called by the VPT code after it's injected a PF interrupt for us.
@@ -148,7 +149,7 @@ static void rtc_timer_update(RTCState *s)
                 s_time_t now = NOW();
 
                 s->period = period;
-                if ( v->domain->arch.hvm_domain.params[HVM_PARAM_VPT_ALIGN] )
+                if ( v->domain->arch.hvm.params[HVM_PARAM_VPT_ALIGN] )
                     delta = 0;
                 else
                     delta = period - ((now - s->start_time) % period);
@@ -156,7 +157,7 @@ static void rtc_timer_update(RTCState *s)
                 {
                     TRACE_2D(TRC_HVM_EMUL_RTC_START_TIMER, delta, period);
                     create_periodic_time(v, &s->pt, delta, period,
-                                         RTC_IRQ, rtc_pf_callback, s);
+                                         RTC_IRQ, rtc_pf_callback, s, false);
                 }
                 else
                     s->check_ticks_since = now;
@@ -594,7 +595,7 @@ static void rtc_set_time(RTCState *s)
 
     /* We use the guest's setting of the RTC to define the local-time 
      * offset for this domain. */
-    d->time_offset_seconds += (after - before);
+    d->time_offset.seconds += (after - before);
     update_domain_wallclock_time(d);
     /* Also tell qemu-dm about it so it will be remembered for next boot. */
     send_timeoffset_req(after - before);
@@ -730,15 +731,16 @@ void rtc_migrate_timers(struct vcpu *v)
 
     if ( v->vcpu_id == 0 )
     {
-        migrate_timer(&s->update_timer, v->processor);;
-        migrate_timer(&s->update_timer2, v->processor);;
-        migrate_timer(&s->alarm_timer, v->processor);;
+        migrate_timer(&s->update_timer, v->processor);
+        migrate_timer(&s->update_timer2, v->processor);
+        migrate_timer(&s->alarm_timer, v->processor);
     }
 }
 
 /* Save RTC hardware state */
-static int rtc_save(struct domain *d, hvm_domain_context_t *h)
+static int rtc_save(struct vcpu *v, hvm_domain_context_t *h)
 {
+    const struct domain *d = v->domain;
     RTCState *s = domain_vrtc(d);
     int rc;
 
@@ -746,8 +748,10 @@ static int rtc_save(struct domain *d, hvm_domain_context_t *h)
         return 0;
 
     spin_lock(&s->lock);
+    s->hw.rtc_offset = d->time_offset.seconds;
     rc = hvm_save_entry(RTC, 0, h, &s->hw);
     spin_unlock(&s->lock);
+
     return rc;
 }
 
@@ -762,7 +766,7 @@ static int rtc_load(struct domain *d, hvm_domain_context_t *h)
     spin_lock(&s->lock);
 
     /* Restore the registers */
-    if ( hvm_load_entry(RTC, h, &s->hw) != 0 )
+    if ( hvm_load_entry_zeroextend(RTC, h, &s->hw) != 0 )
     {
         spin_unlock(&s->lock);
         return -EINVAL;
@@ -770,6 +774,12 @@ static int rtc_load(struct domain *d, hvm_domain_context_t *h)
 
     /* Reset the wall-clock time.  In normal running, this runs with host 
      * time, so let's keep doing that. */
+    if ( !d->time_offset.set )
+    {
+        d->time_offset.seconds = s->hw.rtc_offset;
+        update_domain_wallclock_time(d);
+    }
+
     s->current_tm = gmtime(get_localtime(d));
     rtc_copy_date(s);
 
@@ -798,12 +808,38 @@ void rtc_reset(struct domain *d)
     s->pt.source = PTSRC_isa;
 }
 
+/* RTC mediator for HVM hardware domain. */
+static int hw_rtc_io(int dir, unsigned int port, unsigned int size,
+                     uint32_t *val)
+{
+    if ( dir == IOREQ_READ )
+        *val = ~0;
+
+    if ( size != 1 )
+    {
+        gdprintk(XENLOG_WARNING, "bad RTC access size (%u)\n", size);
+        return X86EMUL_OKAY;
+    }
+
+    if ( dir == IOREQ_WRITE )
+        rtc_guest_write(port, *val);
+    else
+        *val = rtc_guest_read(port);
+
+    return X86EMUL_OKAY;
+}
+
 void rtc_init(struct domain *d)
 {
     RTCState *s = domain_vrtc(d);
 
     if ( !has_vrtc(d) )
+    {
+        if ( is_hardware_domain(d) )
+            /* Hardware domain gets mediated access to the physical RTC. */
+            register_portio_handler(d, RTC_PORT(0), 2, hw_rtc_io);
         return;
+    }
 
     spin_lock_init(&s->lock);
 
@@ -835,7 +871,8 @@ void rtc_deinit(struct domain *d)
 {
     RTCState *s = domain_vrtc(d);
 
-    if ( !has_vrtc(d) )
+    if ( !has_vrtc(d) || !d->arch.hvm.pl_time ||
+         s->update_timer.status == TIMER_STATUS_invalid )
         return;
 
     spin_barrier(&s->lock);

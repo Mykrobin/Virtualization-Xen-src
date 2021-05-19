@@ -40,11 +40,11 @@
 #include <xen/watchdog.h>
 #include <asm/debugger.h>
 #include <xen/init.h>
+#include <xen/param.h>
 #include <xen/smp.h>
 #include <xen/console.h>
 #include <xen/errno.h>
 #include <xen/delay.h>
-#include <xen/init.h>
 #include <asm/byteorder.h>
 
 /* Printk isn't particularly safe just after we've trapped to the
@@ -69,7 +69,7 @@ static void gdb_smp_resume(void);
 static char __initdata opt_gdb[30];
 string_param("gdb", opt_gdb);
 
-static void gdbstub_console_puts(const char *str);
+static void gdbstub_console_puts(const char *str, size_t nr);
 
 /* value <-> char (de)serialzers */
 static char
@@ -547,14 +547,14 @@ __gdb_ctx = {
 static struct gdb_context *gdb_ctx = &__gdb_ctx;
 
 static void
-gdbstub_console_puts(const char *str)
+gdbstub_console_puts(const char *str, size_t nr)
 {
     const char *p;
 
     gdb_start_packet(gdb_ctx);
     gdb_write_to_packet_char('O', gdb_ctx);
 
-    for ( p = str; *p != '\0'; p++ )
+    for ( p = str; nr > 0; p++, nr-- )
     {
         gdb_write_to_packet_char(hex2char((*p>>4) & 0x0f), gdb_ctx );
         gdb_write_to_packet_char(hex2char((*p) & 0x0f), gdb_ctx );

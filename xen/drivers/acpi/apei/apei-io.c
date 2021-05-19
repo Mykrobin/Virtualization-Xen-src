@@ -21,6 +21,7 @@
 #include <xen/kernel.h>
 #include <xen/errno.h>
 #include <xen/delay.h>
+#include <xen/init.h>
 #include <xen/string.h>
 #include <xen/xmalloc.h>
 #include <xen/types.h>
@@ -92,7 +93,7 @@ static void __iomem *__init apei_range_map(paddr_t paddr, unsigned long size)
 		apei_range_nr++;
 	}
 
-	return (void __iomem *)fix_to_virt(FIX_APEI_RANGE_BASE + start_nr);
+	return fix_to_virt(FIX_APEI_RANGE_BASE + start_nr);
 }
 
 /*

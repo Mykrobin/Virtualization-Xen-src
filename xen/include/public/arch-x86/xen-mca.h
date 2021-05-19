@@ -88,6 +88,8 @@
 #define XEN_MC_NOTDELIVERED 0x10
 /* Note, XEN_MC_CANNOTHANDLE and XEN_MC_NOTDELIVERED are mutually exclusive. */
 
+/* Applicable to all mc_vcpuid fields below. */
+#define XEN_MC_VCPUID_INVALID 0xffff
 
 #ifndef __ASSEMBLY__
 
@@ -110,7 +112,7 @@ struct mcinfo_common {
     uint16_t type;      /* structure type */
     uint16_t size;      /* size of this struct in bytes */
 };
-
+typedef struct mcinfo_common xen_mcinfo_common_t;
 
 #define MC_FLAG_CORRECTABLE     (1 << 0)
 #define MC_FLAG_UNCORRECTABLE   (1 << 1)
@@ -121,7 +123,7 @@ struct mcinfo_common {
 #define MC_FLAG_MCE		(1 << 6)
 /* contains global x86 mc information */
 struct mcinfo_global {
-    struct mcinfo_common common;
+    xen_mcinfo_common_t common;
 
     /* running domain at the time in error (most likely the impacted one) */
     uint16_t mc_domid;
@@ -136,7 +138,7 @@ struct mcinfo_global {
 
 /* contains bank local x86 mc information */
 struct mcinfo_bank {
-    struct mcinfo_common common;
+    xen_mcinfo_common_t common;
 
     uint16_t mc_bank; /* bank nr */
     uint16_t mc_domid; /* Usecase 5: domain referenced by mc_addr on dom0
@@ -154,11 +156,12 @@ struct mcinfo_msr {
     uint64_t reg;   /* MSR */
     uint64_t value; /* MSR value */
 };
+typedef struct mcinfo_msr xen_mcinfo_msr_t;
 
 /* contains mc information from other
  * or additional mc MSRs */
 struct mcinfo_extended {
-    struct mcinfo_common common;
+    xen_mcinfo_common_t common;
 
     /* You can fill up to five registers.
      * If you need more, then use this structure
@@ -168,9 +171,9 @@ struct mcinfo_extended {
     /*
      * Currently Intel extended MSR (32/64) include all gp registers
      * and E(R)FLAGS, E(R)IP, E(R)MISC, up to 11/19 of them might be
-     * useful at present. So expand this array to 16/32 to leave room.
+     * useful at present. So expand this array to 32 to leave room.
      */
-    struct mcinfo_msr mc_msr[sizeof(void *) * 4];
+    xen_mcinfo_msr_t mc_msr[32];
 };
 
 /* Recovery Action flags. Giving recovery result information to DOM0 */
@@ -206,6 +209,7 @@ struct page_offline_action
     uint64_t mfn;
     uint64_t status;
 };
+typedef struct page_offline_action xen_page_offline_action_t;
 
 struct cpu_offline_action
 {
@@ -214,17 +218,18 @@ struct cpu_offline_action
     uint16_t mc_coreid;
     uint16_t mc_core_threadid;
 };
+typedef struct cpu_offline_action xen_cpu_offline_action_t;
 
 #define MAX_UNION_SIZE 16
 struct mcinfo_recovery
 {
-    struct mcinfo_common common;
+    xen_mcinfo_common_t common;
     uint16_t mc_bank; /* bank nr */
     uint8_t action_flags;
     uint8_t action_types;
     union {
-        struct page_offline_action page_retire;
-        struct cpu_offline_action cpu_offline;
+        xen_page_offline_action_t page_retire;
+        xen_cpu_offline_action_t cpu_offline;
         uint8_t pad[MAX_UNION_SIZE];
     } action_info;
 };
@@ -244,7 +249,9 @@ typedef struct mc_info mc_info_t;
 DEFINE_XEN_GUEST_HANDLE(mc_info_t);
 
 #define __MC_MSR_ARRAYSIZE 8
+#if __XEN_INTERFACE_VERSION__ <= 0x00040d00
 #define __MC_NMSRS 1
+#endif
 #define MC_NCAPS	7	/* 7 CPU feature flag words */
 #define MC_CAPS_STD_EDX	0	/* cpuid level 0x00000001 (%edx) */
 #define MC_CAPS_AMD_EDX	1	/* cpuid level 0x80000001 (%edx) */
@@ -275,7 +282,7 @@ struct mcinfo_logical_cpu {
     uint32_t mc_cache_size;
     uint32_t mc_cache_alignment;
     int32_t mc_nmsrvals;
-    struct mcinfo_msr mc_msrvalues[__MC_MSR_ARRAYSIZE];
+    xen_mcinfo_msr_t mc_msrvalues[__MC_MSR_ARRAYSIZE];
 };
 typedef struct mcinfo_logical_cpu xen_mc_logical_cpu_t;
 DEFINE_XEN_GUEST_HANDLE(xen_mc_logical_cpu_t);
@@ -312,8 +319,8 @@ DEFINE_XEN_GUEST_HANDLE(xen_mc_logical_cpu_t);
         struct mcinfo_common *_mic;                             \
                                                                 \
         found = 0;                                              \
-	(_ret) = NULL;						\
-	if (_mi == NULL) break;					\
+        (_ret) = NULL;                                          \
+        if (_mi == NULL) break;                                 \
         _mic = x86_mcinfo_first(_mi);                           \
         for (i = 0; i < x86_mcinfo_nentries(_mi); i++) {        \
             if (_mic->type == (_type)) {                        \
@@ -345,8 +352,8 @@ struct xen_mc_fetch {
     /* IN/OUT variables. */
     uint32_t flags;	/* IN: XEN_MC_NONURGENT, XEN_MC_URGENT,
                            XEN_MC_ACK if ack'ing an earlier fetch */
-			/* OUT: XEN_MC_OK, XEN_MC_FETCHFAILED,
-			   XEN_MC_NODATA, XEN_MC_NOMATCH */
+                       /* OUT: XEN_MC_OK, XEN_MC_FETCHFAILED,
+                          XEN_MC_NODATA, XEN_MC_NOMATCH */
     uint32_t _pad0;
     uint64_t fetch_id;	/* OUT: id for ack, IN: id we are ack'ing */
 
@@ -378,12 +385,13 @@ DEFINE_XEN_GUEST_HANDLE(xen_mc_notifydomain_t);
 
 #define XEN_MC_physcpuinfo 3
 struct xen_mc_physcpuinfo {
-	/* IN/OUT */
-	uint32_t ncpus;
-	uint32_t _pad0;
-	/* OUT */
-	XEN_GUEST_HANDLE(xen_mc_logical_cpu_t) info;
+    /* IN/OUT */
+    uint32_t ncpus;
+    uint32_t _pad0;
+    /* OUT */
+    XEN_GUEST_HANDLE(xen_mc_logical_cpu_t) info;
 };
+typedef struct xen_mc_physcpuinfo xen_mc_physcpuinfo_t;
 
 #define XEN_MC_msrinject    4
 #define MC_MSRINJ_MAXMSRS       8
@@ -395,8 +403,9 @@ struct xen_mc_msrinject {
     domid_t  mcinj_domid;           /* valid only if MC_MSRINJ_F_GPADDR is
                                        present in mcinj_flags */
     uint16_t _pad0;
-    struct mcinfo_msr mcinj_msr[MC_MSRINJ_MAXMSRS];
+    xen_mcinfo_msr_t mcinj_msr[MC_MSRINJ_MAXMSRS];
 };
+typedef struct xen_mc_msrinject xen_mc_msrinject_t;
 
 /* Flags for mcinj_flags above; bits 16-31 are reserved */
 #define MC_MSRINJ_F_INTERPOSE   0x1
@@ -404,34 +413,37 @@ struct xen_mc_msrinject {
 
 #define XEN_MC_mceinject    5
 struct xen_mc_mceinject {
-	unsigned int mceinj_cpunr;      /* target processor id */
+    unsigned int mceinj_cpunr;      /* target processor id */
 };
+typedef struct xen_mc_mceinject xen_mc_mceinject_t;
 
 #if defined(__XEN__) || defined(__XEN_TOOLS__)
 #define XEN_MC_inject_v2        6
 #define XEN_MC_INJECT_TYPE_MASK     0x7
 #define XEN_MC_INJECT_TYPE_MCE      0x0
 #define XEN_MC_INJECT_TYPE_CMCI     0x1
+#define XEN_MC_INJECT_TYPE_LMCE     0x2
 
 #define XEN_MC_INJECT_CPU_BROADCAST 0x8
 
 struct xen_mc_inject_v2 {
-	uint32_t flags;
-	struct xenctl_bitmap cpumap;
+    uint32_t flags;
+    xenctl_bitmap_t cpumap;
 };
+typedef struct xen_mc_inject_v2 xen_mc_inject_v2_t;
 #endif
 
 struct xen_mc {
     uint32_t cmd;
     uint32_t interface_version; /* XEN_MCA_INTERFACE_VERSION */
     union {
-        struct xen_mc_fetch        mc_fetch;
-        struct xen_mc_notifydomain mc_notifydomain;
-        struct xen_mc_physcpuinfo  mc_physcpuinfo;
-        struct xen_mc_msrinject    mc_msrinject;
-        struct xen_mc_mceinject    mc_mceinject;
+        xen_mc_fetch_t             mc_fetch;
+        xen_mc_notifydomain_t      mc_notifydomain;
+        xen_mc_physcpuinfo_t       mc_physcpuinfo;
+        xen_mc_msrinject_t         mc_msrinject;
+        xen_mc_mceinject_t         mc_mceinject;
 #if defined(__XEN__) || defined(__XEN_TOOLS__)
-        struct xen_mc_inject_v2    mc_inject_v2;
+        xen_mc_inject_v2_t         mc_inject_v2;
 #endif
     } u;
 };

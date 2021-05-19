@@ -871,10 +871,37 @@ static unsigned long acpi_v2p(struct acpi_ctxt *ctxt, void *v)
     return virt_to_phys(v);
 }
 
+static unsigned long acpi_alloc_up = ACPI_MEMORY_DYNAMIC_START - 1;
+
+unsigned long acpi_pages_allocated(void)
+{
+    return (acpi_alloc_up >> PAGE_SHIFT) -
+            ((ACPI_MEMORY_DYNAMIC_START - 1) >> PAGE_SHIFT);
+}
+
 static void *acpi_mem_alloc(struct acpi_ctxt *ctxt,
                             uint32_t size, uint32_t align)
 {
-    return mem_alloc(size, align);
+    unsigned long s, e;
+
+    /* Align to at least 16 bytes. */
+    if ( align < 16 )
+        align = 16;
+
+    s = (acpi_alloc_up + align) & ~(align - 1);
+    e = s + size - 1;
+
+    BUG_ON((e < s) || (e >= RESERVED_MEMORY_DYNAMIC_START));
+
+    while ( (acpi_alloc_up >> PAGE_SHIFT) != (e >> PAGE_SHIFT) )
+    {
+        acpi_alloc_up += PAGE_SIZE;
+        mem_hole_populate_ram(acpi_alloc_up >> PAGE_SHIFT, 1);
+    }
+
+    acpi_alloc_up = e;
+
+    return (void *)s;
 }
 
 static void acpi_mem_free(struct acpi_ctxt *ctxt,
@@ -883,7 +910,7 @@ static void acpi_mem_free(struct acpi_ctxt *ctxt,
     /* ACPI builder currently doesn't free memory so this is just a stub */
 }
 
-static uint8_t acpi_lapic_id(unsigned cpu)
+static uint32_t acpi_lapic_id(unsigned cpu)
 {
     return LAPIC_ID(cpu);
 }
@@ -896,6 +923,23 @@ void hvmloader_acpi_build_tables(struct acpi_config *config,
 
     /* Allocate and initialise the acpi info area. */
     mem_hole_populate_ram(ACPI_INFO_PHYSICAL_ADDRESS >> PAGE_SHIFT, 1);
+
+    /* If the device model is specified switch to the corresponding tables */
+    s = xenstore_read("platform/device-model", "");
+    if ( !strncmp(s, "qemu_xen_traditional", 21) )
+    {
+        config->dsdt_anycpu = dsdt_anycpu;
+        config->dsdt_anycpu_len = dsdt_anycpu_len;
+        config->dsdt_15cpu = dsdt_15cpu;
+        config->dsdt_15cpu_len = dsdt_15cpu_len;
+    }
+    else if ( !strncmp(s, "qemu_xen", 9) )
+    {
+        config->dsdt_anycpu = dsdt_anycpu_qemu_xen;
+        config->dsdt_anycpu_len = dsdt_anycpu_qemu_xen_len;
+        config->dsdt_15cpu = NULL;
+        config->dsdt_15cpu_len = 0;
+    }
 
     config->lapic_base_address = LAPIC_BASE_ADDRESS;
     config->lapic_id = acpi_lapic_id;
@@ -947,8 +991,14 @@ void hvmloader_acpi_build_tables(struct acpi_config *config,
         config->table_flags |= ACPI_HAS_SSDT_S3;
     if ( !strncmp(xenstore_read("platform/acpi_s4", "1"), "1", 1)  )
         config->table_flags |= ACPI_HAS_SSDT_S4;
+    if ( !strncmp(xenstore_read("platform/acpi_laptop_slate", "0"), "1", 1)  )
+        config->table_flags |= ACPI_HAS_SSDT_LAPTOP_SLATE;
 
-    config->table_flags |= (ACPI_HAS_TCPA | ACPI_HAS_IOAPIC | ACPI_HAS_WAET);
+    config->table_flags |= (ACPI_HAS_TCPA | ACPI_HAS_IOAPIC |
+                            ACPI_HAS_WAET | ACPI_HAS_PMTIMER |
+                            ACPI_HAS_BUTTONS | ACPI_HAS_VGA |
+                            ACPI_HAS_8042 | ACPI_HAS_CMOS_RTC);
+    config->acpi_revision = 4;
 
     config->tis_hdr = (uint16_t *)ACPI_TIS_HDR_ADDRESS;
 

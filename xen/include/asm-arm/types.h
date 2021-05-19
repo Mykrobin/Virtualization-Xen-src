@@ -3,7 +3,6 @@
 
 #ifndef __ASSEMBLY__
 
-#include <xen/config.h>
 
 typedef __signed__ char __s8;
 typedef unsigned char __u8;
@@ -42,7 +41,7 @@ typedef u64 paddr_t;
 #define INVALID_PADDR (~0ULL)
 #define PRIpaddr "016llx"
 typedef u32 register_t;
-#define PRIregister "x"
+#define PRIregister "08x"
 #elif defined (CONFIG_ARM_64)
 typedef signed long s64;
 typedef unsigned long u64;
@@ -52,7 +51,7 @@ typedef u64 paddr_t;
 #define INVALID_PADDR (~0UL)
 #define PRIpaddr "016lx"
 typedef u64 register_t;
-#define PRIregister "lx"
+#define PRIregister "016lx"
 #endif
 
 #if defined(__SIZE_TYPE__)
@@ -61,6 +60,12 @@ typedef __SIZE_TYPE__ size_t;
 typedef unsigned long size_t;
 #endif
 typedef signed long ssize_t;
+
+#if defined(__PTRDIFF_TYPE__)
+typedef __PTRDIFF_TYPE__ ptrdiff_t;
+#else
+typedef signed long ptrdiff_t;
+#endif
 
 #endif /* __ASSEMBLY__ */
 

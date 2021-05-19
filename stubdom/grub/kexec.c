@@ -20,7 +20,7 @@
 #include <sys/mman.h>
 
 #include <xenctrl.h>
-#include <xc_dom.h>
+#include <xenguest.h>
 
 #include <kernel.h>
 #include <console.h>
@@ -87,17 +87,17 @@ static void do_exchange(struct xc_dom_image *dom, xen_pfn_t target_pfn, xen_pfn_
     xen_pfn_t target_mfn;
 
     for (source_pfn = 0; source_pfn < start_info.nr_pages; source_pfn++)
-        if (dom->p2m_host[source_pfn] == source_mfn)
+        if (dom->pv_p2m[source_pfn] == source_mfn)
             break;
     ASSERT(source_pfn < start_info.nr_pages);
 
-    target_mfn = dom->p2m_host[target_pfn];
+    target_mfn = dom->pv_p2m[target_pfn];
 
     /* Put target MFN at source PFN */
-    dom->p2m_host[source_pfn] = target_mfn;
+    dom->pv_p2m[source_pfn] = target_mfn;
 
     /* Put source MFN at target PFN */
-    dom->p2m_host[target_pfn] = source_mfn;
+    dom->pv_p2m[target_pfn] = source_mfn;
 }
 
 int kexec_allocate(struct xc_dom_image *dom)
@@ -110,7 +110,7 @@ int kexec_allocate(struct xc_dom_image *dom)
     pages_moved2pfns = realloc(pages_moved2pfns, new_allocated * sizeof(*pages_moved2pfns));
     for (i = allocated; i < new_allocated; i++) {
         /* Exchange old page of PFN i with a newly allocated page.  */
-        xen_pfn_t old_mfn = dom->p2m_host[i];
+        xen_pfn_t old_mfn = dom->pv_p2m[i];
         xen_pfn_t new_pfn;
         xen_pfn_t new_mfn;
 
@@ -122,7 +122,7 @@ int kexec_allocate(struct xc_dom_image *dom)
 	/*
 	 * If PFN of newly allocated page (new_pfn) is less then currently
 	 * requested PFN (i) then look for relevant PFN/MFN pair. In this
-	 * situation dom->p2m_host[new_pfn] no longer contains proper MFN
+	 * situation dom->pv_p2m[new_pfn] no longer contains proper MFN
 	 * because original page with new_pfn was moved earlier
 	 * to different location.
 	 */
@@ -132,10 +132,10 @@ int kexec_allocate(struct xc_dom_image *dom)
 	pages_moved2pfns[i] = new_pfn;
 
         /* Put old page at new PFN */
-        dom->p2m_host[new_pfn] = old_mfn;
+        dom->pv_p2m[new_pfn] = old_mfn;
 
         /* Put new page at PFN i */
-        dom->p2m_host[i] = new_mfn;
+        dom->pv_p2m[i] = new_mfn;
     }
 
     allocated = new_allocated;
@@ -202,7 +202,7 @@ static void tpm_hash2pcr(struct xc_dom_image *dom, char *cmdline)
 	ASSERT(rv == 0 && resp->status == 0);
 
 	cmd.pcr = bswap_32(5); // PCR #5 for initrd
-	sha1(dom->ramdisk_blob, dom->ramdisk_size, cmd.hash);
+	sha1(dom->modules[0].blob, dom->modules[0].size, cmd.hash);
 	rv = tpmfront_cmd(tpm, (void*)&cmd, sizeof(cmd), (void*)&resp, &resplen);
 	ASSERT(rv == 0 && resp->status == 0);
 
@@ -222,6 +222,7 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
     char features[] = "";
     struct mmu_update *m2p_updates;
     unsigned long nr_m2p_updates;
+    uint64_t virt_base;
 
     DEBUG("booting with cmdline %s\n", cmdline);
     xc_handle = xc_interface_open(0,0,0);
@@ -231,13 +232,12 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
 
     /* We are using guest owned memory, therefore no limits. */
     xc_dom_kernel_max_size(dom, 0);
-    xc_dom_ramdisk_max_size(dom, 0);
+    xc_dom_module_max_size(dom, 0);
 
     dom->kernel_blob = kernel;
     dom->kernel_size = kernel_size;
 
-    dom->ramdisk_blob = module;
-    dom->ramdisk_size = module_size;
+    xc_dom_module_mem(dom, module, module_size, NULL);
 
     dom->flags = flags;
     dom->console_evtchn = start_info.console.domU.evtchn;
@@ -283,11 +283,11 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
     dom->p2m_size = dom->total_pages;
 
     /* setup initial p2m */
-    dom->p2m_host = malloc(sizeof(*dom->p2m_host) * dom->p2m_size);
+    dom->pv_p2m = malloc(sizeof(*dom->pv_p2m) * dom->p2m_size);
 
     /* Start with our current P2M */
     for (i = 0; i < dom->p2m_size; i++)
-        dom->p2m_host[i] = pfn_to_mfn(i);
+        dom->pv_p2m[i] = pfn_to_mfn(i);
 
     if ( (rc = xc_dom_build_image(dom)) != 0 ) {
         printk("xc_dom_build_image returned %d\n", rc);
@@ -295,10 +295,11 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
         goto out;
     }
 
+    virt_base = xc_dom_virt_base(dom);
     /* copy hypercall page */
     /* TODO: domctl instead, but requires privileges */
-    if (dom->parms.virt_hypercall != -1) {
-        pfn = PHYS_PFN(dom->parms.virt_hypercall - dom->parms.virt_base);
+    if (xc_dom_virt_hypercall(dom) != -1) {
+        pfn = PHYS_PFN(xc_dom_virt_hypercall(dom) - virt_base);
         memcpy((void *) pages[pfn], hypercall_page, PAGE_SIZE);
     }
 
@@ -314,20 +315,12 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
     /* Move current console, xenstore and boot MFNs to the allocated place */
     do_exchange(dom, dom->console_pfn, start_info.console.domU.mfn);
     do_exchange(dom, dom->xenstore_pfn, start_info.store_mfn);
-    DEBUG("virt base at %llx\n", dom->parms.virt_base);
+    DEBUG("virt base at %llx\n", virt_base);
     DEBUG("bootstack_pfn %lx\n", dom->bootstack_pfn);
-    _boot_target = dom->parms.virt_base + PFN_PHYS(dom->bootstack_pfn);
+    _boot_target = virt_base + PFN_PHYS(dom->bootstack_pfn);
     DEBUG("_boot_target %lx\n", _boot_target);
-    do_exchange(dom, PHYS_PFN(_boot_target - dom->parms.virt_base),
+    do_exchange(dom, PHYS_PFN(_boot_target - virt_base),
             virt_to_mfn(&_boot_page));
-
-    /* Make sure the bootstrap page table does not RW-map any of our current
-     * page table frames */
-    if ( (rc = xc_dom_update_guest_p2m(dom))) {
-        printk("xc_dom_update_guest_p2m returned %d\n", rc);
-        errnum = ERR_BOOT_FAILURE;
-        goto out;
-    }
 
     if ( dom->arch_hooks->setup_pgtables )
         if ( (rc = dom->arch_hooks->setup_pgtables(dom))) {
@@ -382,24 +375,24 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
     _boot_oldpdmfn = virt_to_mfn(start_info.pt_base);
     DEBUG("boot old pd mfn %lx\n", _boot_oldpdmfn);
     DEBUG("boot pd virt %lx\n", dom->pgtables_seg.vstart);
-    _boot_pdmfn = dom->p2m_host[PHYS_PFN(dom->pgtables_seg.vstart - dom->parms.virt_base)];
+    _boot_pdmfn = dom->pv_p2m[PHYS_PFN(dom->pgtables_seg.vstart - virt_base)];
     DEBUG("boot pd mfn %lx\n", _boot_pdmfn);
     _boot_stack = _boot_target + PAGE_SIZE;
     DEBUG("boot stack %lx\n", _boot_stack);
-    _boot_start_info = dom->parms.virt_base + PFN_PHYS(dom->start_info_pfn);
+    _boot_start_info = virt_base + PFN_PHYS(dom->start_info_pfn);
     DEBUG("boot start info %lx\n", _boot_start_info);
-    _boot_start = dom->parms.virt_entry;
+    _boot_start = xc_dom_virt_entry(dom);
     DEBUG("boot start %lx\n", _boot_start);
 
     /* Keep only useful entries */
     for (nr_m2p_updates = pfn = 0; pfn < start_info.nr_pages; pfn++)
-        if (dom->p2m_host[pfn] != pfn_to_mfn(pfn))
+        if (dom->pv_p2m[pfn] != pfn_to_mfn(pfn))
             nr_m2p_updates++;
 
     m2p_updates = malloc(sizeof(*m2p_updates) * nr_m2p_updates);
     for (i = pfn = 0; pfn < start_info.nr_pages; pfn++)
-        if (dom->p2m_host[pfn] != pfn_to_mfn(pfn)) {
-            m2p_updates[i].ptr = PFN_PHYS(dom->p2m_host[pfn]) | MMU_MACHPHYS_UPDATE;
+        if (dom->pv_p2m[pfn] != pfn_to_mfn(pfn)) {
+            m2p_updates[i].ptr = PFN_PHYS(dom->pv_p2m[pfn]) | MMU_MACHPHYS_UPDATE;
             m2p_updates[i].val = pfn;
             i++;
         }

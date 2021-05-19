@@ -5,14 +5,10 @@
  * We need the APIC definitions automatically as part of 'smp.h'
  */
 #ifndef __ASSEMBLY__
-#include <xen/config.h>
+#include <xen/bitops.h>
 #include <xen/kernel.h>
 #include <xen/cpumask.h>
 #include <asm/current.h>
-#endif
-
-#ifndef __ASSEMBLY__
-#include <xen/bitops.h>
 #include <asm/mpspec.h>
 #endif
 
@@ -25,7 +21,13 @@
  */
 DECLARE_PER_CPU(cpumask_var_t, cpu_sibling_mask);
 DECLARE_PER_CPU(cpumask_var_t, cpu_core_mask);
+DECLARE_PER_CPU(cpumask_var_t, scratch_cpumask);
+DECLARE_PER_CPU(cpumask_var_t, send_ipi_cpumask);
 
+/*
+ * Do we, for platform reasons, need to actually keep CPUs online when we
+ * would otherwise prefer them to be off?
+ */
 extern bool park_offline_cpus;
 
 void smp_send_nmi_allbutself(void);
@@ -51,7 +53,7 @@ int cpu_add(uint32_t apic_id, uint32_t acpi_id, uint32_t pxm);
  * from the initial startup. We map APIC_BASE very early in page_setup(),
  * so this is correct in the x86 case.
  */
-#define raw_smp_processor_id() (get_processor_id())
+#define smp_processor_id() get_processor_id()
 
 void __stop_this_cpu(void);
 
@@ -59,6 +61,7 @@ long cpu_up_helper(void *data);
 long cpu_down_helper(void *data);
 
 long core_parking_helper(void *data);
+bool core_parking_remove(unsigned int cpu);
 uint32_t get_cur_idle_nums(void);
 
 /*
@@ -71,6 +74,16 @@ void set_nr_sockets(void);
 
 /* Representing HT and core siblings in each socket. */
 extern cpumask_t **socket_cpumask;
+
+/*
+ * To be used only while no context switch can occur on the cpu, i.e.
+ * by certain scheduling code only.
+ */
+#define get_cpu_current(cpu) \
+    (get_cpu_info_from_stack((unsigned long)stack_base[cpu])->current_vcpu)
+
+extern unsigned int disabled_cpus;
+extern bool unaccounted_cpus;
 
 #endif /* !__ASSEMBLY__ */
 

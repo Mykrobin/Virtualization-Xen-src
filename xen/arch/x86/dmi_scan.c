@@ -1,4 +1,3 @@
-#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/kernel.h>
@@ -13,8 +12,6 @@
 #include <xen/pci.h>
 #include <xen/pci_regs.h>
 
-#define bt_ioremap(b,l)  ((void *)__acpi_map_table(b,l))
-#define bt_iounmap(b,l)  ((void)0)
 #define memcpy_fromio    memcpy
 #define alloc_bootmem(l) xmalloc_bytes(l)
 
@@ -112,9 +109,32 @@ enum dmi_entry_type {
 #define dmi_printk(x)
 #endif
 
-static char * __init dmi_string(struct dmi_header *dm, u8 s)
+static const void *__init bt_ioremap(paddr_t addr, unsigned int len)
 {
-	char *bp=(char *)dm;
+    mfn_t mfn = _mfn(PFN_DOWN(addr));
+    unsigned int offs = PAGE_OFFSET(addr);
+
+    if ( addr + len <= MB(1) )
+        return __va(addr);
+
+    if ( system_state < SYS_STATE_boot )
+        return __acpi_map_table(addr, len);
+
+    return __vmap(&mfn, PFN_UP(offs + len), 1, 1, PAGE_HYPERVISOR_RO,
+                  VMAP_DEFAULT) + offs;
+}
+
+static void __init bt_iounmap(const void *ptr, unsigned int len)
+{
+    if ( (unsigned long)ptr < DIRECTMAP_VIRT_START &&
+         system_state >= SYS_STATE_boot )
+        vunmap(ptr);
+}
+
+static const char *__init dmi_string(const struct dmi_header *dm, uint8_t s)
+{
+	const char *bp = (const void *)dm;
+
 	bp+=dm->length;
 	if(!s)
 		return "";
@@ -134,11 +154,10 @@ static char * __init dmi_string(struct dmi_header *dm, u8 s)
  */
  
 static int __init dmi_table(paddr_t base, u32 len, int num,
-			    void (*decode)(struct dmi_header *))
+			    void (*decode)(const struct dmi_header *))
 {
-	u8 *buf;
-	struct dmi_header *dm;
-	u8 *data;
+	const uint8_t *buf, *data;
+	const struct dmi_header *dm;
 	int i=0;
 		
 	buf = bt_ioremap(base, len);
@@ -184,8 +203,8 @@ static int __init dmi_table(paddr_t base, u32 len, int num,
 }
 
 
-static inline bool_t __init dmi_checksum(const void __iomem *buf,
-					 unsigned int len)
+static inline bool __init dmi_checksum(const void __iomem *buf,
+                                       unsigned int len)
 {
 	u8 sum = 0;
 	const u8 *p = buf;
@@ -238,7 +257,7 @@ const char *__init dmi_get_table(paddr_t *base, u32 *len)
 {
 	static unsigned int __initdata instance;
 
-	if (efi_enabled) {
+	if (efi_enabled(EFI_BOOT)) {
 		if (efi_smbios3_size && !(instance & 1)) {
 			*base = efi_smbios3_address;
 			*len = efi_smbios3_size;
@@ -302,7 +321,7 @@ typedef union {
 
 static int __init _dmi_iterate(const struct dmi_eps *dmi,
 			       const smbios_eps_u smbios,
-			       void (*decode)(struct dmi_header *))
+			       void (*decode)(const struct dmi_header *))
 {
 	int num;
 	u32 len;
@@ -336,7 +355,7 @@ static int __init _dmi_iterate(const struct dmi_eps *dmi,
 	return dmi_table(base, len, num, decode);
 }
 
-static int __init dmi_iterate(void (*decode)(struct dmi_header *))
+static int __init dmi_iterate(void (*decode)(const struct dmi_header *))
 {
 	struct dmi_eps dmi;
 	struct smbios3_eps smbios3;
@@ -358,7 +377,7 @@ static int __init dmi_iterate(void (*decode)(struct dmi_header *))
 			memcpy_fromio(&smbios3, q, sizeof(smbios3));
 			if (memcmp(smbios3.anchor, "_SM3_", 5) ||
 			    smbios3.length < sizeof(smbios3) ||
-			    q < p + 0x10000 - smbios3.length ||
+			    q > p + 0x10000 - smbios3.length ||
 			    !dmi_checksum(q, smbios3.length))
 				smbios3.length = 0;
 		}
@@ -371,7 +390,7 @@ static int __init dmi_iterate(void (*decode)(struct dmi_header *))
 	return -1;
 }
 
-static int __init dmi_efi_iterate(void (*decode)(struct dmi_header *))
+static int __init dmi_efi_iterate(void (*decode)(const struct dmi_header *))
 {
 	int ret = -1;
 
@@ -434,10 +453,11 @@ static char *__initdata dmi_ident[DMI_STRING_MAX];
  *	Save a DMI string
  */
  
-static void __init dmi_save_ident(struct dmi_header *dm, int slot, int string)
+static void __init dmi_save_ident(const struct dmi_header *dm, int slot, int string)
 {
-	char *d = (char*)dm;
-	char *p = dmi_string(dm, d[string]);
+	const char *d = (const void *)dm;
+	const char *p = dmi_string(dm, d[string]);
+
 	if(p==NULL || *p == 0)
 		return;
 	if (dmi_ident[slot])
@@ -456,29 +476,19 @@ static void __init dmi_save_ident(struct dmi_header *dm, int slot, int string)
 #define NO_MATCH	{ DMI_NONE, NULL}
 #define MATCH		DMI_MATCH
 
-/*
- * Toshiba keyboard likes to repeat keys when they are not repeated.
- */
-
-static __init int broken_toshiba_keyboard(struct dmi_blacklist *d)
-{
-	printk(KERN_WARNING "Toshiba with broken keyboard detected. If your keyboard sometimes generates 3 keypresses instead of one, see http://davyd.ucc.asn.au/projects/toshiba/README\n");
-	return 0;
-}
-
-static int __init ich10_bios_quirk(struct dmi_system_id *d)
+static int __init ich10_bios_quirk(const struct dmi_system_id *d)
 {
     u32 port, smictl;
 
-    if ( pci_conf_read16(0, 0, 0x1f, 0, PCI_VENDOR_ID) != 0x8086 )
+    if ( pci_conf_read16(PCI_SBDF(0, 0, 0x1f, 0), PCI_VENDOR_ID) != 0x8086 )
         return 0;
 
-    switch ( pci_conf_read16(0, 0, 0x1f, 0, PCI_DEVICE_ID) ) {
+    switch ( pci_conf_read16(PCI_SBDF(0, 0, 0x1f, 0), PCI_DEVICE_ID) ) {
     case 0x3a14:
     case 0x3a16:
     case 0x3a18:
     case 0x3a1a:
-        port = (pci_conf_read16(0, 0, 0x1f, 0, 0x40) & 0xff80) + 0x30;
+        port = (pci_conf_read16(PCI_SBDF(0, 0, 0x1f, 0), 0x40) & 0xff80) + 0x30;
         smictl = inl(port);
         /* turn off LEGACY_USB{,2}_EN if enabled */
         if ( smictl & 0x20008 )
@@ -489,16 +499,14 @@ static int __init ich10_bios_quirk(struct dmi_system_id *d)
     return 0;
 }
 
-#ifdef CONFIG_ACPI_SLEEP
-static __init int reset_videomode_after_s3(struct dmi_blacklist *d)
+static __init int reset_videomode_after_s3(const struct dmi_blacklist *d)
 {
-	/* See acpi_wakeup.S */
+	/* See wakeup.S */
 	acpi_video_flags |= 2;
 	return 0;
 }
-#endif
 
-static __init int dmi_disable_acpi(struct dmi_blacklist *d) 
+static __init int dmi_disable_acpi(const struct dmi_blacklist *d)
 { 
 	if (!acpi_force) { 
 		printk(KERN_NOTICE "%s detected: acpi off\n",d->ident);
@@ -513,7 +521,7 @@ static __init int dmi_disable_acpi(struct dmi_blacklist *d)
 /*
  * Limit ACPI to CPU enumeration for HT
  */
-static __init int force_acpi_ht(struct dmi_blacklist *d) 
+static __init int force_acpi_ht(const struct dmi_blacklist *d)
 { 
 	if (!acpi_force) { 
 		printk(KERN_NOTICE "%s detected: force use of acpi=ht\n", d->ident);
@@ -536,18 +544,12 @@ static __init int force_acpi_ht(struct dmi_blacklist *d)
  *	interrupt mask settings according to the laptop
  */
  
-static __initdata struct dmi_blacklist dmi_blacklist[]={
+static const struct dmi_blacklist __initconstrel dmi_blacklist[] = {
 
-	{ broken_toshiba_keyboard, "Toshiba Satellite 4030cdt", { /* Keyboard generates spurious repeats */
-			MATCH(DMI_PRODUCT_NAME, "S4030CDT/4.3"),
-			NO_MATCH, NO_MATCH, NO_MATCH
-			} },
-#ifdef CONFIG_ACPI_SLEEP
 	{ reset_videomode_after_s3, "Toshiba Satellite 4030cdt", { /* Reset video mode after returning from ACPI S3 sleep */
 			MATCH(DMI_PRODUCT_NAME, "S4030CDT/4.3"),
 			NO_MATCH, NO_MATCH, NO_MATCH
 			} },
-#endif
 
 	{ ich10_bios_quirk, "Intel board & BIOS",
 		/*
@@ -648,10 +650,10 @@ static __initdata struct dmi_blacklist dmi_blacklist[]={
  *	out of here.
  */
 
-static void __init dmi_decode(struct dmi_header *dm)
+static void __init dmi_decode(const struct dmi_header *dm)
 {
 #ifdef DMI_DEBUG
-	u8 *data = (u8 *)dm;
+	const uint8_t *data = (const void *)dm;
 #endif
 	
 	switch(dm->type)
@@ -696,7 +698,7 @@ static void __init dmi_decode(struct dmi_header *dm)
 
 void __init dmi_scan_machine(void)
 {
-	if ((!efi_enabled ? dmi_iterate(dmi_decode) :
+	if ((!efi_enabled(EFI_BOOT) ? dmi_iterate(dmi_decode) :
 	                    dmi_efi_iterate(dmi_decode)) == 0)
  		dmi_check_system(dmi_blacklist);
 	else
@@ -712,10 +714,10 @@ void __init dmi_scan_machine(void)
  *	returns non zero or we hit the end. Callback function is called for
  *	each successfull match. Returns the number of matches.
  */
-int __init dmi_check_system(struct dmi_system_id *list)
+int __init dmi_check_system(const struct dmi_system_id *list)
 {
 	int i, count = 0;
-	struct dmi_system_id *d = list;
+	const struct dmi_system_id *d = list;
 
 	while (d->ident) {
 		for (i = 0; i < ARRAY_SIZE(d->matches); i++) {
@@ -754,10 +756,10 @@ fail:		d++;
  *	On return, year, month and day are guaranteed to be in the
  *	range of [0,9999], [0,12] and [0,31] respectively.
  */
-bool_t __init dmi_get_date(int field, int *yearp, int *monthp, int *dayp)
+bool __init dmi_get_date(int field, int *yearp, int *monthp, int *dayp)
 {
 	int year = 0, month = 0, day = 0;
-	bool_t exists;
+	bool exists;
 	const char *s, *e, *y;
 
 	s = field < DMI_STRING_MAX ? dmi_ident[field] : NULL;

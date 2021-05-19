@@ -17,13 +17,13 @@ header = {};
 footer = {};
 
 #arm
-inttypes["arm32"] = {
-    "unsigned long" : "__danger_unsigned_long_on_arm32",
-    "long"          : "__danger_long_on_arm32",
-    "xen_pfn_t"     : "uint64_t",
-    "xen_ulong_t"   : "uint64_t",
-    "uint64_t"      : "__align8__ uint64_t",
-};
+inttypes["arm32"] = [
+    ("unsigned long", "__danger_unsigned_long_on_arm32"),
+    ("long",          "__danger_long_on_arm32"),
+    ("xen_pfn_t",     "uint64_t"),
+    ("xen_ulong_t",   "uint64_t"),
+    ("uint64_t",      "__align8__ uint64_t"),
+]
 header["arm32"] = """
 #define __arm___ARM32 1
 #if defined(__GNUC__) && !defined(__STRICT_ANSI__)
@@ -38,13 +38,13 @@ footer["arm32"] = """
 #undef __DECL_REG
 """
 
-inttypes["arm64"] = {
-    "unsigned long" : "__danger_unsigned_long_on_arm64",
-    "long"          : "__danger_long_on_arm64",
-    "xen_pfn_t"     : "uint64_t",
-    "xen_ulong_t"   : "uint64_t",
-    "uint64_t"      : "__align8__ uint64_t",
-};
+inttypes["arm64"] = [
+    ("unsigned long", "__danger_unsigned_long_on_arm64"),
+    ("long",          "__danger_long_on_arm64"),
+    ("xen_pfn_t",     "uint64_t"),
+    ("xen_ulong_t",   "uint64_t"),
+    ("uint64_t",      "__align8__ uint64_t"),
+]
 header["arm64"] = """
 #define __aarch64___ARM64 1
 #if defined(__GNUC__) && !defined(__STRICT_ANSI__)
@@ -60,27 +60,31 @@ footer["arm64"] = """
 """
 
 # x86_32
-inttypes["x86_32"] = {
-    "unsigned long" : "uint32_t",
-    "long"          : "uint32_t",
-    "xen_pfn_t"     : "uint32_t",
-    "xen_ulong_t"   : "uint32_t",
-};
+inttypes["x86_32"] = [
+    ("unsigned long", "uint32_t"),
+    ("long",          "uint32_t"),
+    ("xen_pfn_t",     "uint32_t"),
+    ("xen_ulong_t",   "uint32_t"),
+]
 header["x86_32"] = """
+#define __DECL_REG_LO8(which) uint32_t e ## which ## x
+#define __DECL_REG_LO16(name) uint32_t e ## name
 #define __i386___X86_32 1
 #pragma pack(4)
 """;
 footer["x86_32"] = """
+#undef __DECL_REG_LO8
+#undef __DECL_REG_LO16
 #pragma pack()
 """;
 
 # x86_64
-inttypes["x86_64"] = {
-    "unsigned long" : "__align8__ uint64_t",
-    "long"          : "__align8__ uint64_t",
-    "xen_pfn_t"     : "__align8__ uint64_t",
-    "xen_ulong_t"   : "__align8__ uint64_t",
-};
+inttypes["x86_64"] = [
+    ("unsigned long", "__align8__ uint64_t"),
+    ("long",          "__align8__ uint64_t"),
+    ("xen_pfn_t",     "__align8__ uint64_t"),
+    ("xen_ulong_t",   "__align8__ uint64_t"),
+]
 header["x86_64"] = """
 #if defined(__GNUC__) && !defined(__STRICT_ANSI__)
 # define __DECL_REG(name) union { uint64_t r ## name, e ## name; }
@@ -89,10 +93,18 @@ header["x86_64"] = """
 # define __DECL_REG(name) uint64_t r ## name
 # define __align8__ FIXME
 #endif
+#define __DECL_REG_LOHI(name) __DECL_REG(name ## x)
+#define __DECL_REG_LO8        __DECL_REG
+#define __DECL_REG_LO16       __DECL_REG
+#define __DECL_REG_HI         __DECL_REG
 #define __x86_64___X86_64 1
 """;
 footer["x86_64"] = """
 #undef __DECL_REG
+#undef __DECL_REG_LOHI
+#undef __DECL_REG_LO8
+#undef __DECL_REG_LO16
+#undef __DECL_REG_HI
 """
 
 ###########################################################################
@@ -193,10 +205,8 @@ for struct in structs:
     output = re.sub("\\b(%s)_t\\b" % struct, "\\1_%s_t" % arch, output);
 
 # replace: integer types
-integers = inttypes[arch].keys();
-integers.sort(lambda a, b: cmp(len(b),len(a)));
-for type in integers:
-    output = re.sub("\\b%s\\b" % type, inttypes[arch][type], output);
+for old, new in inttypes[arch]:
+    output = re.sub("\\b%s\\b" % old, new, output)
 
 # print results
 f = open(outfile, "w");

@@ -7,15 +7,15 @@
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
+#include <xen/param.h>
 #include <xen/version.h>
 #include <xen/sched.h>
 #include <xen/paging.h>
-#include <xen/nmi.h>
 #include <xen/guest_access.h>
 #include <xen/hypercall.h>
+#include <xen/hypfs.h>
 #include <xsm/xsm.h>
 #include <asm/current.h>
-#include <public/nmi.h>
 #include <public/version.h>
 
 #ifndef COMPAT
@@ -23,40 +23,45 @@
 enum system_state system_state = SYS_STATE_early_boot;
 
 xen_commandline_t saved_cmdline;
+static const char __initconst opt_builtin_cmdline[] = CONFIG_CMDLINE;
 
-static void __init assign_integer_param(
-    const struct kernel_param *param, uint64_t val)
+static int assign_integer_param(const struct kernel_param *param, uint64_t val)
 {
     switch ( param->len )
     {
     case sizeof(uint8_t):
-        *(uint8_t *)param->var = val;
+        if ( val > UINT8_MAX && val < (uint64_t)INT8_MIN )
+            return -EOVERFLOW;
+        *(uint8_t *)param->par.var = val;
         break;
     case sizeof(uint16_t):
-        *(uint16_t *)param->var = val;
+        if ( val > UINT16_MAX && val < (uint64_t)INT16_MIN )
+            return -EOVERFLOW;
+        *(uint16_t *)param->par.var = val;
         break;
     case sizeof(uint32_t):
-        *(uint32_t *)param->var = val;
+        if ( val > UINT32_MAX && val < (uint64_t)INT32_MIN )
+            return -EOVERFLOW;
+        *(uint32_t *)param->par.var = val;
         break;
     case sizeof(uint64_t):
-        *(uint64_t *)param->var = val;
+        *(uint64_t *)param->par.var = val;
         break;
     default:
         BUG();
     }
+
+    return 0;
 }
 
-void __init cmdline_parse(const char *cmdline)
+static int parse_params(const char *cmdline, const struct kernel_param *start,
+                        const struct kernel_param *end)
 {
-    char opt[100], *optval, *optkey, *q;
-    const char *p = cmdline;
+    char opt[MAX_PARAM_SIZE], *optval, *optkey, *q;
+    const char *p = cmdline, *key;
     const struct kernel_param *param;
-    int bool_assert;
-
-    if ( cmdline == NULL )
-        return;
-
-    safe_strcpy(saved_cmdline, cmdline);
+    int rc, final_rc = 0;
+    bool bool_assert, found;
 
     for ( ; ; )
     {
@@ -90,46 +95,66 @@ void __init cmdline_parse(const char *cmdline)
         }
 
         /* Boolean parameters can be inverted with 'no-' prefix. */
+        key = optkey;
         bool_assert = !!strncmp("no-", optkey, 3);
         if ( !bool_assert )
             optkey += 3;
 
-        for ( param = __setup_start; param < __setup_end; param++ )
+        rc = 0;
+        found = false;
+        for ( param = start; param < end; param++ )
         {
+            int rctmp;
+            const char *s;
+
             if ( strcmp(param->name, optkey) )
             {
                 if ( param->type == OPT_CUSTOM && q &&
                      strlen(param->name) == q + 1 - opt &&
                      !strncmp(param->name, opt, q + 1 - opt) )
                 {
+                    found = true;
                     optval[-1] = '=';
-                    ((void (*)(const char *))param->var)(q);
+                    rctmp = param->par.func(q);
                     optval[-1] = '\0';
+                    if ( !rc )
+                        rc = rctmp;
                 }
                 continue;
             }
 
+            rctmp = 0;
+            found = true;
             switch ( param->type )
             {
             case OPT_STR:
-                strlcpy(param->var, optval, param->len);
+                strlcpy(param->par.var, optval, param->len);
                 break;
             case OPT_UINT:
-                assign_integer_param(
+                rctmp = assign_integer_param(
                     param,
-                    simple_strtoll(optval, NULL, 0));
+                    simple_strtoll(optval, &s, 0));
+                if ( *s )
+                    rctmp = -EINVAL;
                 break;
             case OPT_BOOL:
-                if ( !parse_bool(optval) )
+                rctmp = *optval ? parse_bool(optval, NULL) : 1;
+                if ( rctmp < 0 )
+                    break;
+                if ( !rctmp )
                     bool_assert = !bool_assert;
+                rctmp = 0;
                 assign_integer_param(param, bool_assert);
                 break;
             case OPT_SIZE:
-                assign_integer_param(
+                rctmp = assign_integer_param(
                     param,
-                    parse_size_and_unit(optval, NULL));
+                    parse_size_and_unit(optval, &s));
+                if ( *s )
+                    rctmp = -EINVAL;
                 break;
             case OPT_CUSTOM:
+                rctmp = -EINVAL;
                 if ( !bool_assert )
                 {
                     if ( *optval )
@@ -137,31 +162,109 @@ void __init cmdline_parse(const char *cmdline)
                     safe_strcpy(opt, "no");
                     optval = opt;
                 }
-                ((void (*)(const char *))param->var)(optval);
+                rctmp = param->par.func(optval);
+                break;
+            case OPT_IGNORE:
                 break;
             default:
                 BUG();
                 break;
             }
+
+            if ( !rc )
+                rc = rctmp;
+        }
+
+        if ( rc )
+        {
+            printk("parameter \"%s\" has invalid value \"%s\", rc=%d!\n",
+                    key, optval, rc);
+            final_rc = rc;
+        }
+        if ( !found )
+        {
+            printk("parameter \"%s\" unknown!\n", key);
+            final_rc = -EINVAL;
         }
     }
+
+    return final_rc;
 }
 
-int __init parse_bool(const char *s)
+static void __init _cmdline_parse(const char *cmdline)
 {
-    if ( !strcmp("no", s) ||
-         !strcmp("off", s) ||
-         !strcmp("false", s) ||
-         !strcmp("disable", s) ||
-         !strcmp("0", s) )
-        return 0;
+    parse_params(cmdline, __setup_start, __setup_end);
+}
 
-    if ( !strcmp("yes", s) ||
-         !strcmp("on", s) ||
-         !strcmp("true", s) ||
-         !strcmp("enable", s) ||
-         !strcmp("1", s) )
-        return 1;
+/**
+ *    cmdline_parse -- parses the xen command line.
+ * If CONFIG_CMDLINE is set, it would be parsed prior to @cmdline.
+ * But if CONFIG_CMDLINE_OVERRIDE is set to y, @cmdline will be ignored.
+ */
+void __init cmdline_parse(const char *cmdline)
+{
+    if ( opt_builtin_cmdline[0] )
+    {
+        printk("Built-in command line: %s\n", opt_builtin_cmdline);
+        _cmdline_parse(opt_builtin_cmdline);
+    }
+
+#ifndef CONFIG_CMDLINE_OVERRIDE
+    if ( cmdline == NULL )
+        return;
+
+    safe_strcpy(saved_cmdline, cmdline);
+    _cmdline_parse(cmdline);
+#endif
+}
+
+int parse_bool(const char *s, const char *e)
+{
+    size_t len = e ? ({ ASSERT(e >= s); e - s; }) : strlen(s);
+
+    switch ( len )
+    {
+    case 1:
+        if ( *s == '1' )
+            return 1;
+        if ( *s == '0' )
+            return 0;
+        break;
+
+    case 2:
+        if ( !strncmp("on", s, 2) )
+            return 1;
+        if ( !strncmp("no", s, 2) )
+            return 0;
+        break;
+
+    case 3:
+        if ( !strncmp("yes", s, 3) )
+            return 1;
+        if ( !strncmp("off", s, 3) )
+            return 0;
+        break;
+
+    case 4:
+        if ( !strncmp("true", s, 4) )
+            return 1;
+        break;
+
+    case 5:
+        if ( !strncmp("false", s, 5) )
+            return 0;
+        break;
+
+    case 6:
+        if ( !strncmp("enable", s, 6) )
+            return 1;
+        break;
+
+    case 7:
+        if ( !strncmp("disable", s, 7) )
+            return 0;
+        break;
+    }
 
     return -1;
 }
@@ -187,20 +290,31 @@ int parse_boolean(const char *name, const char *s, const char *e)
 
     /* =$SOMETHING?  Defer to the regular boolean parsing. */
     if ( s[nlen] == '=' )
-    {
-        char buf[8];
-
-        s += nlen + 1;
-        slen -= nlen + 1;
-        if ( slen >= ARRAY_SIZE(buf) )
-            return -1;
-        memcpy(buf, s, slen);
-        buf[slen] = 0;
-        return parse_bool(buf);
-    }
+        return parse_bool(&s[nlen + 1], e);
 
     /* Unrecognised.  Give up. */
     return -1;
+}
+
+int cmdline_strcmp(const char *frag, const char *name)
+{
+    for ( ; ; frag++, name++ )
+    {
+        unsigned char f = *frag, n = *name;
+        int res = f - n;
+
+        if ( res || n == '\0' )
+        {
+            /*
+             * NUL in 'name' matching a comma, colon, semicolon or equals in
+             * 'frag' implies success.
+             */
+            if ( n == '\0' && (f == ',' || f == ':' || f == ';' || f == '=') )
+                res = 0;
+
+            return res;
+        }
+    }
 }
 
 unsigned int tainted;
@@ -212,6 +326,7 @@ unsigned int tainted;
  *  'E' - An error (e.g. a machine check exceptions) has been injected.
  *  'H' - HVM forced emulation prefix is permitted.
  *  'M' - Machine had a machine check experience.
+ *  'U' - Platform is unsecure (usually due to an errata on the platform).
  *
  *      The string is overwritten by the next call to print_taint().
  */
@@ -219,7 +334,8 @@ char *print_tainted(char *str)
 {
     if ( tainted )
     {
-        snprintf(str, TAINT_STRING_MAX_LEN, "Tainted: %c%c%c%c",
+        snprintf(str, TAINT_STRING_MAX_LEN, "Tainted: %c%c%c%c%c",
+                 tainted & TAINT_MACHINE_UNSECURE ? 'U' : ' ',
                  tainted & TAINT_MACHINE_CHECK ? 'M' : ' ',
                  tainted & TAINT_SYNC_CONSOLE ? 'C' : ' ',
                  tainted & TAINT_ERROR_INJECT ? 'E' : ' ',
@@ -254,6 +370,84 @@ void __init do_initcalls(void)
     for ( call = __presmp_initcall_end; call < __initcall_end; call++ )
         (*call)();
 }
+
+#ifdef CONFIG_HYPFS
+static unsigned int __read_mostly major_version;
+static unsigned int __read_mostly minor_version;
+
+static HYPFS_DIR_INIT(buildinfo, "buildinfo");
+static HYPFS_DIR_INIT(compileinfo, "compileinfo");
+static HYPFS_DIR_INIT(version, "version");
+static HYPFS_UINT_INIT(major, "major", major_version);
+static HYPFS_UINT_INIT(minor, "minor", minor_version);
+static HYPFS_STRING_INIT(changeset, "changeset");
+static HYPFS_STRING_INIT(compiler, "compiler");
+static HYPFS_STRING_INIT(compile_by, "compile_by");
+static HYPFS_STRING_INIT(compile_date, "compile_date");
+static HYPFS_STRING_INIT(compile_domain, "compile_domain");
+static HYPFS_STRING_INIT(extra, "extra");
+
+#ifdef CONFIG_HYPFS_CONFIG
+static HYPFS_STRING_INIT(config, "config");
+#endif
+
+static int __init buildinfo_init(void)
+{
+    hypfs_add_dir(&hypfs_root, &buildinfo, true);
+
+    hypfs_string_set_reference(&changeset, xen_changeset());
+    hypfs_add_leaf(&buildinfo, &changeset, true);
+
+    hypfs_add_dir(&buildinfo, &compileinfo, true);
+    hypfs_string_set_reference(&compiler, xen_compiler());
+    hypfs_string_set_reference(&compile_by, xen_compile_by());
+    hypfs_string_set_reference(&compile_date, xen_compile_date());
+    hypfs_string_set_reference(&compile_domain, xen_compile_domain());
+    hypfs_add_leaf(&compileinfo, &compiler, true);
+    hypfs_add_leaf(&compileinfo, &compile_by, true);
+    hypfs_add_leaf(&compileinfo, &compile_date, true);
+    hypfs_add_leaf(&compileinfo, &compile_domain, true);
+
+    major_version = xen_major_version();
+    minor_version = xen_minor_version();
+    hypfs_add_dir(&buildinfo, &version, true);
+    hypfs_string_set_reference(&extra, xen_extra_version());
+    hypfs_add_leaf(&version, &extra, true);
+    hypfs_add_leaf(&version, &major, true);
+    hypfs_add_leaf(&version, &minor, true);
+
+#ifdef CONFIG_HYPFS_CONFIG
+    config.e.encoding = XEN_HYPFS_ENC_GZIP;
+    config.e.size = xen_config_data_size;
+    config.u.content = xen_config_data;
+    hypfs_add_leaf(&buildinfo, &config, true);
+#endif
+
+    return 0;
+}
+__initcall(buildinfo_init);
+
+static HYPFS_DIR_INIT(params, "params");
+
+static int __init param_init(void)
+{
+    struct param_hypfs *param;
+
+    hypfs_add_dir(&hypfs_root, &params, true);
+
+    for ( param = __paramhypfs_start; param < __paramhypfs_end; param++ )
+    {
+        if ( param->init_leaf )
+            param->init_leaf(param);
+        else if ( param->hypfs.e.type == XEN_HYPFS_TYPE_STRING )
+            param->hypfs.e.size = strlen(param->hypfs.u.content) + 1;
+        hypfs_add_leaf(&params, &param->hypfs, true);
+    }
+
+    return 0;
+}
+__initcall(param_init);
+#endif
 
 # define DO(fn) long do_##fn
 
@@ -353,25 +547,18 @@ DO(xen_version)(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
                     (1U << XENFEAT_auto_translated_physmap);
             if ( is_hardware_domain(d) )
                 fi.submap |= 1U << XENFEAT_dom0;
+#ifdef CONFIG_ARM
+            fi.submap |= (1U << XENFEAT_ARM_SMCCC_supported);
+#endif
 #ifdef CONFIG_X86
-            switch ( d->guest_type )
-            {
-            case guest_type_pv:
+            if ( is_pv_domain(d) )
                 fi.submap |= (1U << XENFEAT_mmu_pt_update_preserve_ad) |
                              (1U << XENFEAT_highmem_assist) |
                              (1U << XENFEAT_gnttab_map_avail_bits);
-                break;
-            case guest_type_pvh:
-                fi.submap |= (1U << XENFEAT_hvm_safe_pvclock) |
-                             (1U << XENFEAT_supervisor_mode_kernel) |
-                             (1U << XENFEAT_hvm_callback_vector);
-                break;
-            case guest_type_hvm:
+            else
                 fi.submap |= (1U << XENFEAT_hvm_safe_pvclock) |
                              (1U << XENFEAT_hvm_callback_vector) |
-                             (1U << XENFEAT_hvm_pirqs);
-                break;
-            }
+                             (has_pirq(d) ? (1U << XENFEAT_hvm_pirqs) : 0);
 #endif
             break;
         default:
@@ -454,37 +641,6 @@ DO(xen_version)(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 
     return -ENOSYS;
 }
-
-DO(nmi_op)(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
-{
-    struct xennmi_callback cb;
-    long rc = 0;
-
-    switch ( cmd )
-    {
-    case XENNMI_register_callback:
-        rc = -EFAULT;
-        if ( copy_from_guest(&cb, arg, 1) )
-            break;
-        rc = register_guest_nmi_callback(cb.handler_address);
-        break;
-    case XENNMI_unregister_callback:
-        rc = unregister_guest_nmi_callback();
-        break;
-    default:
-        rc = -ENOSYS;
-        break;
-    }
-
-    return rc;
-}
-
-#ifdef VM_ASSIST_VALID
-DO(vm_assist)(unsigned int cmd, unsigned int type)
-{
-    return vm_assist(current->domain, cmd, type, VM_ASSIST_VALID);
-}
-#endif
 
 /*
  * Local variables:

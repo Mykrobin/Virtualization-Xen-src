@@ -5,34 +5,46 @@ include $(XEN_ROOT)/tools/Rules.mk
 all: build
 
 PY_CFLAGS = $(CFLAGS) $(PY_NOOPT_CFLAGS)
-PY_LDFLAGS = $(LDFLAGS) $(APPEND_LDFLAGS)
+PY_LDFLAGS = $(SHLIB_LDFLAGS) $(APPEND_LDFLAGS)
+INSTALL_LOG = build/installed_files.txt
+
+setup.py = CC="$(CC)" CFLAGS="$(PY_CFLAGS)" LDSHARED="$(CC)" LDFLAGS="$(PY_LDFLAGS)" \
+           SHLIB_libxenctrl="$(SHLIB_libxenctrl)" \
+           SHLIB_libxenguest="$(SHLIB_libxenguest)" \
+           SHLIB_libxenstore="$(SHLIB_libxenstore)" \
+           $(PYTHON) setup.py
 
 .PHONY: build
 build:
-	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" $(PYTHON) setup.py build
+	$(setup.py) build
 
 .PHONY: install
 install:
 	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC_BIN)
+	$(setup.py) install --record $(INSTALL_LOG) $(PYTHON_PREFIX_ARG) \
+		--root="$(DESTDIR)" --force
+	$(INSTALL_PYTHON_PROG) scripts/convert-legacy-stream $(DESTDIR)$(LIBEXEC_BIN)
+	$(INSTALL_PYTHON_PROG) scripts/verify-stream-v2 $(DESTDIR)$(LIBEXEC_BIN)
 
-	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" LDFLAGS="$(PY_LDFLAGS)" $(PYTHON) \
-		setup.py install $(PYTHON_PREFIX_ARG) --root="$(DESTDIR)"  \
-		--force
-
-	$(INSTALL_PROG) scripts/convert-legacy-stream $(DESTDIR)$(LIBEXEC_BIN)
-	$(INSTALL_PROG) scripts/verify-stream-v2 $(DESTDIR)$(LIBEXEC_BIN)
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(LIBEXEC_BIN)/verify-stream-v2
+	rm -f $(DESTDIR)$(LIBEXEC_BIN)/convert-legacy-stream
+	if [ -e $(INSTALL_LOG) ]; then \
+		cat $(INSTALL_LOG) | xargs -i rm -f $(DESTDIR)/{}; \
+	fi
 
 .PHONY: test
 test:
-	export LD_LIBRARY_PATH=$$(readlink -f ../libxc):$$(readlink -f ../xenstore); $(PYTHON) test.py -b -u
+	LD_LIBRARY_PATH=$$(readlink -f ../libs/ctrl):$$(readlink -f ../xenstore) $(PYTHON) -m unittest discover
 
 .PHONY: clean
 clean:
 	find . \( -name "*.py[ocd]" -o -name "*~" -o -name "_*.[hc]" \) -delete
 	rm -rf build/
-	rm -f $(DEPS)
+	rm -f $(DEPS_RM)
 
 .PHONY: distclean
 distclean: clean
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)

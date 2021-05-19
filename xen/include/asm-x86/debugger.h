@@ -33,6 +33,8 @@
 #include <asm/regs.h>
 #include <asm/processor.h>
 
+void domain_pause_for_debugger(void);
+
 #ifdef CONFIG_CRASH_DEBUG
 
 #include <xen/gdbstub.h>
@@ -46,18 +48,6 @@ static inline bool debugger_trap_fatal(
 
 /* Int3 is a trivial way to gather cpu_user_regs context. */
 #define debugger_trap_immediate() __asm__ __volatile__ ( "int3" );
-
-#else
-
-static inline bool debugger_trap_fatal(
-    unsigned int vector, struct cpu_user_regs *regs)
-{
-    return false;
-}
-
-#define debugger_trap_immediate() ((void)0)
-
-#endif
 
 static inline bool debugger_trap_entry(
     unsigned int vector, struct cpu_user_regs *regs)
@@ -84,8 +74,28 @@ static inline bool debugger_trap_entry(
     return false;
 }
 
-unsigned int dbg_rw_mem(void * __user addr, void * __user buf,
-                        unsigned int len, domid_t domid, bool_t toaddr,
+#else
+
+static inline bool debugger_trap_fatal(
+    unsigned int vector, struct cpu_user_regs *regs)
+{
+    return false;
+}
+
+#define debugger_trap_immediate() ((void)0)
+
+static inline bool debugger_trap_entry(
+    unsigned int vector, struct cpu_user_regs *regs)
+{
+    return false;
+}
+
+#endif
+
+#ifdef CONFIG_GDBSX
+unsigned int dbg_rw_mem(unsigned long gva, XEN_GUEST_HANDLE_PARAM(void) buf,
+                        unsigned int len, domid_t domid, bool toaddr,
                         uint64_t pgd3);
+#endif
 
 #endif /* __X86_DEBUGGER_H__ */

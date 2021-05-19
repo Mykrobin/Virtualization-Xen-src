@@ -41,15 +41,19 @@
 
 /*
  * Fixmap pages to reserve for ACPI boot-time tables (see asm-x86/fixmap.h or
- * asm-arm/config.h)
+ * asm-arm/config.h, 64 pages(256KB) is large enough for most cases.)
  */
-#define NUM_FIXMAP_ACPI_PAGES  4
+#define NUM_FIXMAP_ACPI_PAGES  64
 
 #define BAD_MADT_ENTRY(entry, end) (                                        \
                 (!(entry)) || (unsigned long)(entry) + sizeof(*(entry)) > (end) ||  \
                 (entry)->header.length < sizeof(*(entry)))
 
 #ifdef CONFIG_ACPI
+
+extern acpi_physical_address rsdp_hint;
+
+extern bool opt_acpi_verbose;
 
 enum acpi_interrupt_id {
 	ACPI_INTERRUPT_PMI	= 1,
@@ -66,6 +70,7 @@ typedef int (*acpi_table_entry_handler) (struct acpi_subtable_header *header, co
 
 unsigned int acpi_get_processor_id (unsigned int cpu);
 char * __acpi_map_table (paddr_t phys_addr, unsigned long size);
+bool __acpi_unmap_table(const void *ptr, unsigned long size);
 int acpi_boot_init (void);
 int acpi_boot_table_init (void);
 int acpi_numa_init (void);
@@ -139,13 +144,21 @@ void acpi_unregister_gsi (u32 gsi);
 
 #ifdef	CONFIG_ACPI_CSTATE
 /*
- * Set highest legal C-state
- * 0: C0 okay, but not C1
- * 1: C1 okay, but not C2
- * 2: C2 okay, but not C3 etc.
+ * max_cstate sets the highest legal C-state.
+ * max_cstate = 0: C0 okay, but not C1
+ * max_cstate = 1: C1 okay, but not C2
+ * max_cstate = 2: C2 okay, but not C3 etc.
+
+ * max_csubstate sets the highest legal C-state sub-state. Only applies to the
+ * highest legal C-state.
+ * max_cstate = 1, max_csubstate = 0 ==> C0, C1 okay, but not C1E
+ * max_cstate = 1, max_csubstate = 1 ==> C0, C1 and C1E okay, but not C2
+ * max_cstate = 2, max_csubstate = 0 ==> C0, C1, C1E, C2 okay, but not C3
+ * max_cstate = 2, max_csubstate = 1 ==> C0, C1, C1E, C2 okay, but not C3
  */
 
 extern unsigned int max_cstate;
+extern unsigned int max_csubstate;
 
 static inline unsigned int acpi_get_cstate_limit(void)
 {
@@ -156,13 +169,26 @@ static inline void acpi_set_cstate_limit(unsigned int new_limit)
 	max_cstate = new_limit;
 	return;
 }
+
+static inline unsigned int acpi_get_csubstate_limit(void)
+{
+	return max_csubstate;
+}
+
+static inline void acpi_set_csubstate_limit(unsigned int new_limit)
+{
+	max_csubstate = new_limit;
+}
+
 #else
 static inline unsigned int acpi_get_cstate_limit(void) { return 0; }
 static inline void acpi_set_cstate_limit(unsigned int new_limit) { return; }
+static inline unsigned int acpi_get_csubstate_limit(void) { return 0; }
+static inline void acpi_set_csubstate_limit(unsigned int new_limit) { return; }
 #endif
 
-#ifdef XEN_GUEST_HANDLE_PARAM
-int acpi_set_pdc_bits(u32 acpi_id, XEN_GUEST_HANDLE_PARAM(uint32));
+#ifdef XEN_GUEST_HANDLE
+int acpi_set_pdc_bits(uint32_t acpi_id, XEN_GUEST_HANDLE(uint32));
 #endif
 int arch_acpi_set_pdc_bits(u32 acpi_id, u32 *, u32 mask);
 

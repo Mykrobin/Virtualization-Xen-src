@@ -17,16 +17,18 @@
  * GNU General Public License for more details.
  */
 
-#include <xen/config.h>
 #include <xen/lib.h>
-#include <xen/timer.h>
-#include <xen/sched.h>
 #include <xen/perfc.h>
+#include <xen/sched.h>
+#include <xen/timer.h>
+
+#include <asm/cpregs.h>
 #include <asm/div64.h>
 #include <asm/irq.h>
+#include <asm/regs.h>
 #include <asm/time.h>
-#include <asm/gic.h>
 #include <asm/vgic.h>
+#include <asm/vreg.h>
 #include <asm/regs.h>
 
 /*
@@ -44,7 +46,7 @@ static void phys_timer_expired(void *data)
     if ( !(t->ctl & CNTx_CTL_MASK) )
     {
         perfc_incr(vtimer_phys_inject);
-        vgic_vcpu_inject_irq(t->v, t->irq);
+        vgic_inject_irq(t->v->domain, t->v, t->irq, true);
     }
     else
         perfc_incr(vtimer_phys_masked);
@@ -54,16 +56,15 @@ static void virt_timer_expired(void *data)
 {
     struct vtimer *t = data;
     t->ctl |= CNTx_CTL_MASK;
-    vgic_vcpu_inject_irq(t->v, t->irq);
+    vgic_inject_irq(t->v->domain, t->v, t->irq, true);
     perfc_incr(vtimer_virt_inject);
 }
 
 int domain_vtimer_init(struct domain *d, struct xen_arch_domainconfig *config)
 {
-    d->arch.phys_timer_base.offset = NOW();
-    d->arch.virt_timer_base.offset = READ_SYSREG64(CNTPCT_EL0);
-    d->time_offset_seconds = ticks_to_ns(d->arch.virt_timer_base.offset - boot_count);
-    do_div(d->time_offset_seconds, 1000000000);
+    d->arch.virt_timer_base.offset = get_cycles();
+    d->time_offset.seconds = ticks_to_ns(d->arch.virt_timer_base.offset - boot_count);
+    do_div(d->time_offset.seconds, 1000000000);
 
     config->clock_frequency = timer_dt_clock_frequency;
 
@@ -97,7 +98,7 @@ int domain_vtimer_init(struct domain *d, struct xen_arch_domainconfig *config)
 int vcpu_vtimer_init(struct vcpu *v)
 {
     struct vtimer *t = &v->arch.phys_timer;
-    bool_t d0 = is_hardware_domain(v->domain);
+    bool d0 = is_hardware_domain(v->domain);
 
     /*
      * Hardware domain uses the hardware interrupts, guests get the virtual
@@ -106,7 +107,6 @@ int vcpu_vtimer_init(struct vcpu *v)
 
     init_timer(&t->timer, phys_timer_expired, t, v->processor);
     t->ctl = 0;
-    t->cval = NOW();
     t->irq = d0
         ? timer_get_irq(TIMER_PHYS_NONSECURE_PPI)
         : GUEST_TIMER_PHYS_NS_PPI;
@@ -134,7 +134,7 @@ void vcpu_timer_destroy(struct vcpu *v)
     kill_timer(&v->arch.phys_timer.timer);
 }
 
-int virt_timer_save(struct vcpu *v)
+void virt_timer_save(struct vcpu *v)
 {
     ASSERT(!is_idle_vcpu(v));
 
@@ -147,10 +147,9 @@ int virt_timer_save(struct vcpu *v)
         set_timer(&v->arch.virt_timer.timer, ticks_to_ns(v->arch.virt_timer.cval +
                   v->domain->arch.virt_timer_base.offset - boot_count));
     }
-    return 0;
 }
 
-int virt_timer_restore(struct vcpu *v)
+void virt_timer_restore(struct vcpu *v)
 {
     ASSERT(!is_idle_vcpu(v));
 
@@ -161,15 +160,15 @@ int virt_timer_restore(struct vcpu *v)
     WRITE_SYSREG64(v->domain->arch.virt_timer_base.offset, CNTVOFF_EL2);
     WRITE_SYSREG64(v->arch.virt_timer.cval, CNTV_CVAL_EL0);
     WRITE_SYSREG32(v->arch.virt_timer.ctl, CNTV_CTL_EL0);
-    return 0;
 }
 
-static int vtimer_cntp_ctl(struct cpu_user_regs *regs, uint32_t *r, int read)
+static bool vtimer_cntp_ctl(struct cpu_user_regs *regs, uint32_t *r, bool read)
 {
     struct vcpu *v = current;
+    s_time_t expires;
 
     if ( !ACCESS_ALLOWED(regs, EL0PTEN) )
-        return 0;
+        return false;
 
     if ( read )
     {
@@ -184,114 +183,110 @@ static int vtimer_cntp_ctl(struct cpu_user_regs *regs, uint32_t *r, int read)
 
         if ( v->arch.phys_timer.ctl & CNTx_CTL_ENABLE )
         {
-            set_timer(&v->arch.phys_timer.timer,
-                      v->arch.phys_timer.cval + v->domain->arch.phys_timer_base.offset);
+            /*
+             * If cval is before the point Xen started, expire timer
+             * immediately.
+             */
+            expires = v->arch.phys_timer.cval > boot_count
+                      ? ticks_to_ns(v->arch.phys_timer.cval - boot_count) : 0;
+            set_timer(&v->arch.phys_timer.timer, expires);
         }
         else
             stop_timer(&v->arch.phys_timer.timer);
     }
-    return 1;
+    return true;
 }
 
-static int vtimer_cntp_tval(struct cpu_user_regs *regs, uint32_t *r, int read)
+static bool vtimer_cntp_tval(struct cpu_user_regs *regs, uint32_t *r,
+                             bool read)
 {
     struct vcpu *v = current;
-    s_time_t now;
+    uint64_t cntpct;
+    s_time_t expires;
 
     if ( !ACCESS_ALLOWED(regs, EL0PTEN) )
-        return 0;
+        return false;
 
-    now = NOW() - v->domain->arch.phys_timer_base.offset;
+    cntpct = get_cycles();
 
     if ( read )
     {
-        *r = (uint32_t)(ns_to_ticks(v->arch.phys_timer.cval - now) & 0xffffffffull);
+        *r = (uint32_t)((v->arch.phys_timer.cval - cntpct) & 0xffffffffull);
     }
     else
     {
-        v->arch.phys_timer.cval = now + ticks_to_ns(*r);
+        v->arch.phys_timer.cval = cntpct + (uint64_t)(int32_t)*r;
         if ( v->arch.phys_timer.ctl & CNTx_CTL_ENABLE )
         {
             v->arch.phys_timer.ctl &= ~CNTx_CTL_PENDING;
-            set_timer(&v->arch.phys_timer.timer,
-                      v->arch.phys_timer.cval +
-                      v->domain->arch.phys_timer_base.offset);
+            /*
+             * If cval is before the point Xen started, expire timer
+             * immediately.
+             */
+            expires = v->arch.phys_timer.cval > boot_count
+                      ? ticks_to_ns(v->arch.phys_timer.cval - boot_count) : 0;
+            set_timer(&v->arch.phys_timer.timer, expires);
         }
     }
-    return 1;
+    return true;
 }
 
-static int vtimer_cntp_cval(struct cpu_user_regs *regs, uint64_t *r, int read)
+static bool vtimer_cntp_cval(struct cpu_user_regs *regs, uint64_t *r,
+                             bool read)
 {
     struct vcpu *v = current;
+    s_time_t expires;
 
     if ( !ACCESS_ALLOWED(regs, EL0PTEN) )
-        return 0;
+        return false;
 
     if ( read )
     {
-        *r = ns_to_ticks(v->arch.phys_timer.cval);
+        *r = v->arch.phys_timer.cval;
     }
     else
     {
-        v->arch.phys_timer.cval = ticks_to_ns(*r);
+        v->arch.phys_timer.cval = *r;
         if ( v->arch.phys_timer.ctl & CNTx_CTL_ENABLE )
         {
             v->arch.phys_timer.ctl &= ~CNTx_CTL_PENDING;
-            set_timer(&v->arch.phys_timer.timer,
-                      v->arch.phys_timer.cval +
-                      v->domain->arch.phys_timer_base.offset);
+            /*
+             * If cval is before the point Xen started, expire timer
+             * immediately.
+             */
+            expires = v->arch.phys_timer.cval > boot_count
+                      ? ticks_to_ns(v->arch.phys_timer.cval - boot_count) : 0;
+            set_timer(&v->arch.phys_timer.timer, expires);
         }
     }
-    return 1;
+    return true;
 }
 
-static int vtimer_emulate_cp32(struct cpu_user_regs *regs, union hsr hsr)
+static bool vtimer_emulate_cp32(struct cpu_user_regs *regs, union hsr hsr)
 {
     struct hsr_cp32 cp32 = hsr.cp32;
-    /*
-     * Initialize to zero to avoid leaking data if there is an
-     * implementation error in the emulation (such as not correctly
-     * setting r).
-     */
-    uint32_t r = 0;
-    int res;
-
 
     if ( cp32.read )
         perfc_incr(vtimer_cp32_reads);
     else
         perfc_incr(vtimer_cp32_writes);
 
-    if ( !cp32.read )
-        r = get_user_reg(regs, cp32.reg);
-
     switch ( hsr.bits & HSR_CP32_REGS_MASK )
     {
     case HSR_CPREG32(CNTP_CTL):
-        res = vtimer_cntp_ctl(regs, &r, cp32.read);
-        break;
+        return vreg_emulate_cp32(regs, hsr, vtimer_cntp_ctl);
 
     case HSR_CPREG32(CNTP_TVAL):
-        res = vtimer_cntp_tval(regs, &r, cp32.read);
-        break;
+        return vreg_emulate_cp32(regs, hsr, vtimer_cntp_tval);
 
     default:
-        return 0;
+        return false;
     }
-
-    if ( res && cp32.read )
-        set_user_reg(regs, cp32.reg, r);
-
-    return res;
 }
 
-static int vtimer_emulate_cp64(struct cpu_user_regs *regs, union hsr hsr)
+static bool vtimer_emulate_cp64(struct cpu_user_regs *regs, union hsr hsr)
 {
     struct hsr_cp64 cp64 = hsr.cp64;
-    uint32_t r1 = get_user_reg(regs, cp64.reg1);
-    uint32_t r2 = get_user_reg(regs, cp64.reg2);
-    uint64_t x = (uint64_t)r1 | ((uint64_t)r2 << 32);
 
     if ( cp64.read )
         perfc_incr(vtimer_cp64_reads);
@@ -301,71 +296,15 @@ static int vtimer_emulate_cp64(struct cpu_user_regs *regs, union hsr hsr)
     switch ( hsr.bits & HSR_CP64_REGS_MASK )
     {
     case HSR_CPREG64(CNTP_CVAL):
-        if ( !vtimer_cntp_cval(regs, &x, cp64.read) )
-            return 0;
-        break;
+        return vreg_emulate_cp64(regs, hsr, vtimer_cntp_cval);
 
     default:
-        return 0;
+        return false;
     }
-
-    if ( cp64.read )
-    {
-        set_user_reg(regs, cp64.reg1, x & 0xffffffff);
-        set_user_reg(regs, cp64.reg2, x >> 32);
-    }
-
-    return 1;
 }
 
 #ifdef CONFIG_ARM_64
-typedef int (*vtimer_sysreg32_fn_t)(struct cpu_user_regs *regs, uint32_t *r,
-                                    int read);
-typedef int (*vtimer_sysreg64_fn_t)(struct cpu_user_regs *regs, uint64_t *r,
-                                    int read);
-
-static int vtimer_emulate_sysreg32(struct cpu_user_regs *regs, union hsr hsr,
-                                   vtimer_sysreg32_fn_t fn)
-{
-    struct hsr_sysreg sysreg = hsr.sysreg;
-    uint32_t r = 0;
-    int ret;
-
-    if ( !sysreg.read )
-        r = get_user_reg(regs, sysreg.reg);
-
-    ret = fn(regs, &r, sysreg.read);
-
-    if ( ret && sysreg.read )
-        set_user_reg(regs, sysreg.reg, r);
-
-    return ret;
-}
-
-static int vtimer_emulate_sysreg64(struct cpu_user_regs *regs, union hsr hsr,
-                                   vtimer_sysreg64_fn_t fn)
-{
-    struct hsr_sysreg sysreg = hsr.sysreg;
-    /*
-     * Initialize to zero to avoid leaking data if there is an
-     * implementation error in the emulation (such as not correctly
-     * setting x).
-     */
-    uint64_t x = 0;
-    int ret;
-
-    if ( !sysreg.read )
-        x = get_user_reg(regs, sysreg.reg);
-
-    ret = fn(regs, &x, sysreg.read);
-
-    if ( ret && sysreg.read )
-        set_user_reg(regs, sysreg.reg, x);
-
-    return ret;
-}
-
-static int vtimer_emulate_sysreg(struct cpu_user_regs *regs, union hsr hsr)
+static bool vtimer_emulate_sysreg(struct cpu_user_regs *regs, union hsr hsr)
 {
     struct hsr_sysreg sysreg = hsr.sysreg;
 
@@ -377,20 +316,20 @@ static int vtimer_emulate_sysreg(struct cpu_user_regs *regs, union hsr hsr)
     switch ( hsr.bits & HSR_SYSREG_REGS_MASK )
     {
     case HSR_SYSREG_CNTP_CTL_EL0:
-        return vtimer_emulate_sysreg32(regs, hsr, vtimer_cntp_ctl);
+        return vreg_emulate_sysreg32(regs, hsr, vtimer_cntp_ctl);
     case HSR_SYSREG_CNTP_TVAL_EL0:
-        return vtimer_emulate_sysreg32(regs, hsr, vtimer_cntp_tval);
+        return vreg_emulate_sysreg32(regs, hsr, vtimer_cntp_tval);
     case HSR_SYSREG_CNTP_CVAL_EL0:
-        return vtimer_emulate_sysreg64(regs, hsr, vtimer_cntp_cval);
+        return vreg_emulate_sysreg64(regs, hsr, vtimer_cntp_cval);
 
     default:
-        return 0;
+        return false;
     }
 
 }
 #endif
 
-int vtimer_emulate(struct cpu_user_regs *regs, union hsr hsr)
+bool vtimer_emulate(struct cpu_user_regs *regs, union hsr hsr)
 {
 
     switch (hsr.ec) {
@@ -403,8 +342,57 @@ int vtimer_emulate(struct cpu_user_regs *regs, union hsr hsr)
         return vtimer_emulate_sysreg(regs, hsr);
 #endif
     default:
-        return 0;
+        return false;
     }
+}
+
+static void vtimer_update_irq(struct vcpu *v, struct vtimer *vtimer,
+                              uint32_t vtimer_ctl)
+{
+    bool level;
+
+    /* Filter for the three bits that determine the status of the timer */
+    vtimer_ctl &= (CNTx_CTL_ENABLE | CNTx_CTL_PENDING | CNTx_CTL_MASK);
+
+    /* The level is high if the timer is pending and enabled, but not masked. */
+    level = (vtimer_ctl == (CNTx_CTL_ENABLE | CNTx_CTL_PENDING));
+
+    /*
+     * This is mostly here to *lower* the virtual interrupt line if the timer
+     * is no longer pending.
+     * We would have injected an IRQ already via SOFTIRQ when the timer expired.
+     * Doing it here again is basically a NOP if the line was already high.
+     */
+    vgic_inject_irq(v->domain, v, vtimer->irq, level);
+}
+
+/**
+ * vtimer_update_irqs() - update the virtual timers' IRQ lines after a guest run
+ * @vcpu: The VCPU to sync the timer state
+ *
+ * After returning from a guest, update the state of the timers' virtual
+ * interrupt lines, to model the level triggered interrupts correctly.
+ * If the guest has handled a timer interrupt, the virtual interrupt line
+ * needs to be lowered explicitly. vgic_inject_irq() takes care of that.
+ */
+void vtimer_update_irqs(struct vcpu *v)
+{
+    /*
+     * For the virtual timer we read the current state from the hardware.
+     * Technically we should keep the CNTx_CTL_MASK bit here, to catch if
+     * the timer interrupt is masked. However Xen *always* masks the timer
+     * upon entering the hypervisor, leaving it up to the guest to un-mask it.
+     * So we would always read a "low" level, despite the condition being
+     * actually "high".  Ignoring the mask bit solves this (for now).
+     *
+     * TODO: The proper fix for this is to make vtimer vIRQ hardware mapped,
+     * but this requires reworking the arch timer to implement this.
+     */
+    vtimer_update_irq(v, &v->arch.virt_timer,
+                      READ_SYSREG32(CNTV_CTL_EL0) & ~CNTx_CTL_MASK);
+
+    /* For the physical timer we rely on our emulated state. */
+    vtimer_update_irq(v, &v->arch.phys_timer, v->arch.phys_timer.ctl);
 }
 
 /*

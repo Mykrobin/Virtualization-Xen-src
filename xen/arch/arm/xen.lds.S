@@ -2,10 +2,8 @@
 /* Modified for i386/x86-64 Xen by Keir Fraser */
 /* Modified for ARM Xen by Ian Campbell */
 
-#include <xen/config.h>
 #include <xen/cache.h>
 #include <asm/page.h>
-#include <asm/percpu.h>
 #undef ENTRY
 #undef ALIGN
 
@@ -21,7 +19,7 @@ OUTPUT_ARCH(FORMAT)
 
 PHDRS
 {
-  text PT_LOAD /* XXX should be AT ( XEN_PHYS_START ) */ ;
+  text PT_LOAD ;
 #if defined(BUILD_ID)
   note PT_NOTE ;
 #endif
@@ -30,7 +28,7 @@ SECTIONS
 {
   . = XEN_VIRT_START;
   _start = .;
-  .text : /* XXX should be AT ( XEN_PHYS_START ) */ {
+  .text : {
         _stext = .;            /* Text section */
        *(.text)
        *(.text.cold)
@@ -51,14 +49,22 @@ SECTIONS
        __stop_bug_frames_1 = .;
        *(.bug_frames.2)
        __stop_bug_frames_2 = .;
+       *(.bug_frames.3)
+       __stop_bug_frames_3 = .;
        *(.rodata)
        *(.rodata.*)
+       *(.data.rel.ro)
+       *(.data.rel.ro.*)
 
-#ifdef CONFIG_LOCK_PROFILE
+       __proc_info_start = .;
+       *(.proc.info)
+       __proc_info_end = .;
+
+#if defined(CONFIG_HAS_VPCI) && defined(CONFIG_LATE_HWDOM)
        . = ALIGN(POINTER_ALIGN);
-       __lock_profile_start = .;
-       *(.lockprofile.data)
-       __lock_profile_end = .;
+       __start_vpci_array = .;
+       *(SORT(.data.vpci.*))
+       __end_vpci_array = .;
 #endif
   } :text
 
@@ -80,6 +86,14 @@ SECTIONS
        __start_schedulers_array = .;
        *(.data.schedulers)
        __end_schedulers_array = .;
+
+#ifdef CONFIG_HYPFS
+       . = ALIGN(8);
+       __paramhypfs_start = .;
+       *(.data.paramhypfs)
+       __paramhypfs_end = .;
+#endif
+
        *(.data.rel)
        *(.data.rel.*)
        CONSTRUCTORS
@@ -98,8 +112,6 @@ SECTIONS
        __stop___pre_ex_table = .;
 
        *(.data.read_mostly)
-       *(.data.rel.ro)
-       *(.data.rel.ro.*)
   } :text
 
   . = ALIGN(8);
@@ -123,6 +135,13 @@ SECTIONS
       _aedevice = .;
   } :text
 
+  . = ALIGN(8);
+  .teemediator.info : {
+      _steemediator = .;
+      *(.teemediator.info)
+      _eteemediator = .;
+  } :text
+
   . = ALIGN(PAGE_SIZE);             /* Init code and data */
   __init_begin = .;
   .init.text : {
@@ -133,17 +152,12 @@ SECTIONS
   . = ALIGN(PAGE_SIZE);
   .init.data : {
        *(.init.rodata)
-       *(.init.rodata.rel)
-       *(.init.rodata.str*)
+       *(.init.rodata.*)
 
        . = ALIGN(POINTER_ALIGN);
        __setup_start = .;
        *(.init.setup)
        __setup_end = .;
-
-       __proc_info_start = .;
-       *(.init.proc.info)
-       __proc_info_end = .;
 
        __initcall_start = .;
        *(.initcallpresmp.init)
@@ -151,13 +165,18 @@ SECTIONS
        *(.initcall1.init)
        __initcall_end = .;
 
-#ifdef CONFIG_HAS_ALTERNATIVE
        . = ALIGN(4);
        __alt_instructions = .;
        *(.altinstructions)
        __alt_instructions_end = .;
        . = ALIGN(4);
        *(.altinstr_replacement)
+
+#ifdef CONFIG_DEBUG_LOCK_PROFILE
+       . = ALIGN(POINTER_ALIGN);
+       __lock_profile_start = .;
+       *(.lockprofile.data)
+       __lock_profile_end = .;
 #endif
 
        *(.init.data)
@@ -170,6 +189,13 @@ SECTIONS
        *(.init_array)
        *(SORT(.init_array.*))
        __ctors_end = .;
+
+#if defined(CONFIG_HAS_VPCI) && !defined(CONFIG_LATE_HWDOM)
+       . = ALIGN(POINTER_ALIGN);
+       __start_vpci_array = .;
+       *(SORT(.data.vpci.*))
+       __end_vpci_array = .;
+#endif
   } :text
   __init_end_efi = .;
   . = ALIGN(STACK_SIZE);
@@ -180,14 +206,16 @@ SECTIONS
        *(.bss.stack_aligned)
        . = ALIGN(PAGE_SIZE);
        *(.bss.page_aligned)
-       *(.bss)
-       . = ALIGN(SMP_CACHE_BYTES);
+       . = ALIGN(PAGE_SIZE);
        __per_cpu_start = .;
+       *(.bss.percpu.page_aligned)
        *(.bss.percpu)
        . = ALIGN(SMP_CACHE_BYTES);
        *(.bss.percpu.read_mostly)
        . = ALIGN(SMP_CACHE_BYTES);
        __per_cpu_data_end = .;
+       *(.bss)
+       . = ALIGN(POINTER_ALIGN);
        __bss_end = .;
   } :text
   _end = . ;

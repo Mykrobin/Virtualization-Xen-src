@@ -27,11 +27,10 @@
  *  can have side effects.
  */
 
-#include <xen/config.h>
+#include <xen/ioreq.h>
 #include <xen/types.h>
 #include <xen/sched.h>
 #include <xen/domain_page.h>
-#include <asm/hvm/ioreq.h>
 #include <asm/hvm/support.h>
 #include <xen/numa.h>
 #include <xen/paging.h>
@@ -135,7 +134,7 @@ static bool_t stdvga_cache_is_enabled(const struct hvm_hw_stdvga *s)
 
 static int stdvga_outb(uint64_t addr, uint8_t val)
 {
-    struct hvm_hw_stdvga *s = &current->domain->arch.hvm_domain.stdvga;
+    struct hvm_hw_stdvga *s = &current->domain->arch.hvm.stdvga;
     int rc = 1, prev_stdvga = s->stdvga;
 
     switch ( addr )
@@ -203,7 +202,7 @@ static void stdvga_out(uint32_t port, uint32_t bytes, uint32_t val)
 static int stdvga_intercept_pio(
     int dir, unsigned int port, unsigned int bytes, uint32_t *val)
 {
-    struct hvm_hw_stdvga *s = &current->domain->arch.hvm_domain.stdvga;
+    struct hvm_hw_stdvga *s = &current->domain->arch.hvm.stdvga;
 
     if ( dir == IOREQ_WRITE )
     {
@@ -253,7 +252,7 @@ static unsigned int stdvga_mem_offset(
 
 static uint8_t stdvga_mem_readb(uint64_t addr)
 {
-    struct hvm_hw_stdvga *s = &current->domain->arch.hvm_domain.stdvga;
+    struct hvm_hw_stdvga *s = &current->domain->arch.hvm.stdvga;
     int plane;
     uint32_t ret, *vram_l;
     uint8_t *vram_b;
@@ -323,7 +322,7 @@ static int stdvga_mem_read(const struct hvm_io_handler *handler,
         data = stdvga_mem_readb(addr);
         data |= stdvga_mem_readb(addr + 1) << 8;
         data |= stdvga_mem_readb(addr + 2) << 16;
-        data |= stdvga_mem_readb(addr + 3) << 24;
+        data |= (uint32_t)stdvga_mem_readb(addr + 3) << 24;
         break;
 
     case 8:
@@ -348,7 +347,7 @@ static int stdvga_mem_read(const struct hvm_io_handler *handler,
 
 static void stdvga_mem_writeb(uint64_t addr, uint32_t val)
 {
-    struct hvm_hw_stdvga *s = &current->domain->arch.hvm_domain.stdvga;
+    struct hvm_hw_stdvga *s = &current->domain->arch.hvm.stdvga;
     int plane, write_mode, b, func_select, mask;
     uint32_t write_mask, bit_mask, set_mask, *vram_l;
     uint8_t *vram_b;
@@ -458,7 +457,7 @@ static int stdvga_mem_write(const struct hvm_io_handler *handler,
                             uint64_t addr, uint32_t size,
                             uint64_t data)
 {
-    struct hvm_hw_stdvga *s = &current->domain->arch.hvm_domain.stdvga;
+    struct hvm_hw_stdvga *s = &current->domain->arch.hvm.stdvga;
     ioreq_t p = {
         .type = IOREQ_TYPE_COPY,
         .addr = addr,
@@ -467,7 +466,7 @@ static int stdvga_mem_write(const struct hvm_io_handler *handler,
         .dir = IOREQ_WRITE,
         .data = data,
     };
-    struct hvm_ioreq_server *srv;
+    struct ioreq_server *srv;
 
     if ( !stdvga_cache_is_enabled(s) || !s->stdvga )
         goto done;
@@ -508,25 +507,25 @@ static int stdvga_mem_write(const struct hvm_io_handler *handler,
     }
 
  done:
-    srv = hvm_select_ioreq_server(current->domain, &p);
+    srv = ioreq_server_select(current->domain, &p);
     if ( !srv )
         return X86EMUL_UNHANDLEABLE;
 
-    return hvm_send_ioreq(srv, &p, 1);
+    return ioreq_send(srv, &p, 1);
 }
 
 static bool_t stdvga_mem_accept(const struct hvm_io_handler *handler,
                                 const ioreq_t *p)
 {
-    struct hvm_hw_stdvga *s = &current->domain->arch.hvm_domain.stdvga;
+    struct hvm_hw_stdvga *s = &current->domain->arch.hvm.stdvga;
 
     /*
      * The range check must be done without taking the lock, to avoid
      * deadlock when hvm_mmio_internal() is called from
      * hvm_copy_to/from_guest_phys() in hvm_process_io_intercept().
      */
-    if ( (hvm_mmio_first_byte(p) < VGA_MEM_BASE) ||
-         (hvm_mmio_last_byte(p) >= (VGA_MEM_BASE + VGA_MEM_SIZE)) )
+    if ( (ioreq_mmio_first_byte(p) < VGA_MEM_BASE) ||
+         (ioreq_mmio_last_byte(p) >= (VGA_MEM_BASE + VGA_MEM_SIZE)) )
         return 0;
 
     spin_lock(&s->lock);
@@ -561,7 +560,7 @@ static bool_t stdvga_mem_accept(const struct hvm_io_handler *handler,
 
 static void stdvga_mem_complete(const struct hvm_io_handler *handler)
 {
-    struct hvm_hw_stdvga *s = &current->domain->arch.hvm_domain.stdvga;
+    struct hvm_hw_stdvga *s = &current->domain->arch.hvm.stdvga;
 
     spin_unlock(&s->lock);
 }
@@ -575,7 +574,7 @@ static const struct hvm_io_ops stdvga_mem_ops = {
 
 void stdvga_init(struct domain *d)
 {
-    struct hvm_hw_stdvga *s = &d->arch.hvm_domain.stdvga;
+    struct hvm_hw_stdvga *s = &d->arch.hvm.stdvga;
     struct page_info *pg;
     unsigned int i;
 
@@ -591,7 +590,7 @@ void stdvga_init(struct domain *d)
         if ( pg == NULL )
             break;
         s->vram_page[i] = pg;
-        clear_domain_page(_mfn(page_to_mfn(pg)));
+        clear_domain_page(page_to_mfn(pg));
     }
 
     if ( i == ARRAY_SIZE(s->vram_page) )
@@ -616,7 +615,7 @@ void stdvga_init(struct domain *d)
 
 void stdvga_deinit(struct domain *d)
 {
-    struct hvm_hw_stdvga *s = &d->arch.hvm_domain.stdvga;
+    struct hvm_hw_stdvga *s = &d->arch.hvm.stdvga;
     int i;
 
     if ( !has_vvga(d) )

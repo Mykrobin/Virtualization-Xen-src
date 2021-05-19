@@ -17,7 +17,7 @@ extern void smp_send_state_dump(unsigned int cpu);
 /*
  * Prepare machine for booting other CPUs.
  */
-extern void smp_prepare_cpus(unsigned int max_cpus);
+extern void smp_prepare_cpus(void);
 
 /*
  * Final polishing of CPUs
@@ -64,8 +64,6 @@ static inline void on_each_cpu(
 void smp_call_function_interrupt(void);
 
 void smp_send_call_function_mask(const cpumask_t *mask);
-
-#define smp_processor_id() raw_smp_processor_id()
 
 int alloc_cpu_id(void);
 

@@ -48,6 +48,9 @@ void __bug(char *file, int line) __attribute__((noreturn));
 #define max_t(type,x,y) \
         ({ type __x = (x); type __y = (y); __x > __y ? __x: __y; })
 
+#define MB(mb) (mb##ULL << 20)
+#define GB(gb) (gb##ULL << 30)
+
 static inline int test_bit(unsigned int b, const void *p)
 {
     return !!(((const uint8_t *)p)[b>>3] & (1u<<(b&7)));
@@ -130,7 +133,7 @@ static inline void cpu_relax(void)
 #define barrier() asm volatile ( "" : : : "memory" )
 #define rmb()     barrier()
 #define wmb()     barrier()
-#define mb()      asm volatile ( "lock; addl $0,0(%%esp)" : : : "memory" )
+#define mb()      asm volatile ( "lock addl $0, -4(%%esp)" ::: "memory" )
 
 /*
  * Divide a 64-bit dividend by a 32-bit divisor.
@@ -275,6 +278,11 @@ int get_mem_mapping_layout(struct e820entry entries[],
 extern struct e820map memory_map;
 bool check_overlap(uint64_t start, uint64_t size,
                    uint64_t reserved_start, uint64_t reserved_size);
+
+extern const unsigned char dsdt_anycpu_qemu_xen[], dsdt_anycpu[], dsdt_15cpu[];
+extern const int dsdt_anycpu_qemu_xen_len, dsdt_anycpu_len, dsdt_15cpu_len;
+
+unsigned long acpi_pages_allocated(void);
 
 struct acpi_config;
 void hvmloader_acpi_build_tables(struct acpi_config *config,

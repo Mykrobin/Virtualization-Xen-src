@@ -16,19 +16,20 @@
 #include <asm/current.h>
 #include <asm/flushtlb.h>
 #include <asm/hardirq.h>
+#include <asm/setup.h>
 
-static struct vcpu *__read_mostly override;
+static DEFINE_PER_CPU(struct vcpu *, override);
 
 static inline struct vcpu *mapcache_current_vcpu(void)
 {
     /* In the common case we use the mapcache of the running VCPU. */
-    struct vcpu *v = override ?: current;
+    struct vcpu *v = this_cpu(override) ?: current;
 
     /*
      * When current isn't properly set up yet, this is equivalent to
      * running in an idle vCPU (callers must check for NULL).
      */
-    if ( v == (struct vcpu *)0xfffff000 )
+    if ( !v )
         return NULL;
 
     /*
@@ -36,7 +37,7 @@ static inline struct vcpu *mapcache_current_vcpu(void)
      * domain's page tables but current may point at another domain's VCPU.
      * Return NULL as though current is not properly set up yet.
      */
-    if ( efi_enabled && efi_rs_using_pgtables() )
+    if ( efi_rs_using_pgtables() )
         return NULL;
 
     /*
@@ -58,7 +59,7 @@ static inline struct vcpu *mapcache_current_vcpu(void)
 
 void __init mapcache_override_current(struct vcpu *v)
 {
-    override = v;
+    this_cpu(override) = v;
 }
 
 #define mapcache_l2_entry(e) ((e) >> PAGETABLE_ORDER)
@@ -84,8 +85,8 @@ void *map_domain_page(mfn_t mfn)
     if ( !v || !is_pv_vcpu(v) )
         return mfn_to_virt(mfn_x(mfn));
 
-    dcache = &v->domain->arch.pv_domain.mapcache;
-    vcache = &v->arch.pv_vcpu.mapcache;
+    dcache = &v->domain->arch.pv.mapcache;
+    vcache = &v->arch.pv.mapcache;
     if ( !dcache->inuse )
         return mfn_to_virt(mfn_x(mfn));
 
@@ -100,7 +101,7 @@ void *map_domain_page(mfn_t mfn)
         ASSERT(idx < dcache->entries);
         hashent->refcnt++;
         ASSERT(hashent->refcnt);
-        ASSERT(l1e_get_pfn(MAPCACHE_L1ENT(idx)) == mfn_x(mfn));
+        ASSERT(mfn_eq(l1e_get_mfn(MAPCACHE_L1ENT(idx)), mfn));
         goto out;
     }
 
@@ -165,7 +166,7 @@ void *map_domain_page(mfn_t mfn)
 
     spin_unlock(&dcache->lock);
 
-    l1e_write(&MAPCACHE_L1ENT(idx), l1e_from_pfn(mfn_x(mfn), __PAGE_HYPERVISOR_RW));
+    l1e_write(&MAPCACHE_L1ENT(idx), l1e_from_mfn(mfn, __PAGE_HYPERVISOR_RW));
 
  out:
     local_irq_restore(flags);
@@ -180,7 +181,7 @@ void unmap_domain_page(const void *ptr)
     unsigned long va = (unsigned long)ptr, mfn, flags;
     struct vcpu_maphash_entry *hashent;
 
-    if ( va >= DIRECTMAP_VIRT_START )
+    if ( !va || va >= DIRECTMAP_VIRT_START )
         return;
 
     ASSERT(va >= MAPCACHE_VIRT_START && va < MAPCACHE_VIRT_END);
@@ -188,12 +189,12 @@ void unmap_domain_page(const void *ptr)
     v = mapcache_current_vcpu();
     ASSERT(v && is_pv_vcpu(v));
 
-    dcache = &v->domain->arch.pv_domain.mapcache;
+    dcache = &v->domain->arch.pv.mapcache;
     ASSERT(dcache->inuse);
 
     idx = PFN_DOWN(va - MAPCACHE_VIRT_START);
     mfn = l1e_get_pfn(MAPCACHE_L1ENT(idx));
-    hashent = &v->arch.pv_vcpu.mapcache.hash[MAPHASH_HASHFN(mfn)];
+    hashent = &v->arch.pv.mapcache.hash[MAPHASH_HASHFN(mfn)];
 
     local_irq_save(flags);
 
@@ -232,11 +233,10 @@ void unmap_domain_page(const void *ptr)
 
 int mapcache_domain_init(struct domain *d)
 {
-    struct mapcache_domain *dcache = &d->arch.pv_domain.mapcache;
+    struct mapcache_domain *dcache = &d->arch.pv.mapcache;
     unsigned int bitmap_pages;
 
-    if ( !is_pv_domain(d) || is_idle_domain(d) )
-        return 0;
+    ASSERT(is_pv_domain(d));
 
 #ifdef NDEBUG
     if ( !mem_hotplug && max_page <= PFN_DOWN(__pa(HYPERVISOR_VIRT_END - 1)) )
@@ -261,7 +261,7 @@ int mapcache_domain_init(struct domain *d)
 int mapcache_vcpu_init(struct vcpu *v)
 {
     struct domain *d = v->domain;
-    struct mapcache_domain *dcache = &d->arch.pv_domain.mapcache;
+    struct mapcache_domain *dcache = &d->arch.pv.mapcache;
     unsigned long i;
     unsigned int ents = d->max_vcpus * MAPCACHE_VCPU_ENTRIES;
     unsigned int nr = PFN_UP(BITS_TO_LONGS(ents) * sizeof(long));
@@ -293,7 +293,7 @@ int mapcache_vcpu_init(struct vcpu *v)
     BUILD_BUG_ON(MAPHASHENT_NOTINUSE < MAPCACHE_ENTRIES);
     for ( i = 0; i < MAPHASH_ENTRIES; i++ )
     {
-        struct vcpu_maphash_entry *hashent = &v->arch.pv_vcpu.mapcache.hash[i];
+        struct vcpu_maphash_entry *hashent = &v->arch.pv.mapcache.hash[i];
 
         hashent->mfn = ~0UL; /* never valid to map */
         hashent->idx = MAPHASHENT_NOTINUSE;
@@ -304,7 +304,10 @@ int mapcache_vcpu_init(struct vcpu *v)
 
 void *map_domain_page_global(mfn_t mfn)
 {
-    ASSERT(!in_irq() && local_irq_is_enabled());
+    ASSERT(!in_irq() &&
+           ((system_state >= SYS_STATE_boot &&
+             system_state < SYS_STATE_active) ||
+            local_irq_is_enabled()));
 
 #ifdef NDEBUG
     if ( mfn_x(mfn) <= PFN_DOWN(__pa(HYPERVISOR_VIRT_END - 1)) )
@@ -327,24 +330,17 @@ void unmap_domain_page_global(const void *ptr)
 }
 
 /* Translate a map-domain-page'd address to the underlying MFN */
-unsigned long domain_page_map_to_mfn(const void *ptr)
+mfn_t domain_page_map_to_mfn(const void *ptr)
 {
     unsigned long va = (unsigned long)ptr;
-    const l1_pgentry_t *pl1e;
 
     if ( va >= DIRECTMAP_VIRT_START )
-        return virt_to_mfn(ptr);
+        return _mfn(virt_to_mfn(ptr));
 
     if ( va >= VMAP_VIRT_START && va < VMAP_VIRT_END )
-    {
-        pl1e = virt_to_xen_l1e(va);
-        BUG_ON(!pl1e);
-    }
-    else
-    {
-        ASSERT(va >= MAPCACHE_VIRT_START && va < MAPCACHE_VIRT_END);
-        pl1e = &__linear_l1_table[l1_linear_offset(va)];
-    }
+        return vmap_to_mfn(va);
 
-    return l1e_get_pfn(*pl1e);
+    ASSERT(va >= MAPCACHE_VIRT_START && va < MAPCACHE_VIRT_END);
+
+    return l1e_get_mfn(__linear_l1_table[l1_linear_offset(va)]);
 }

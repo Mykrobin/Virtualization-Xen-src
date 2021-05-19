@@ -28,6 +28,64 @@ type vcpuinfo =
 	cpumap: int32;
 }
 
+type xen_arm_arch_domainconfig =
+{
+	gic_version: int;
+	nr_spis: int;
+	clock_frequency: int32;
+}
+
+type x86_arch_emulation_flags =
+	| X86_EMU_LAPIC
+	| X86_EMU_HPET
+	| X86_EMU_PM
+	| X86_EMU_RTC
+	| X86_EMU_IOAPIC
+	| X86_EMU_PIC
+	| X86_EMU_VGA
+	| X86_EMU_IOMMU
+	| X86_EMU_PIT
+	| X86_EMU_USE_PIRQ
+	| X86_EMU_VPCI
+
+type x86_arch_misc_flags =
+	| X86_MSR_RELAXED
+
+type xen_x86_arch_domainconfig =
+{
+	emulation_flags: x86_arch_emulation_flags list;
+	misc_flags: x86_arch_misc_flags list;
+}
+
+type arch_domainconfig =
+	| ARM of xen_arm_arch_domainconfig
+	| X86 of xen_x86_arch_domainconfig
+
+type domain_create_flag =
+	| CDF_HVM
+	| CDF_HAP
+	| CDF_S3_INTEGRITY
+	| CDF_OOS_OFF
+	| CDF_XS_DOMAIN
+	| CDF_IOMMU
+	| CDF_NESTED_VIRT
+
+type domain_create_iommu_opts =
+	| IOMMU_NO_SHAREPT
+
+type domctl_create_config =
+{
+	ssidref: int32;
+	handle: string;
+	flags: domain_create_flag list;
+	iommu_opts: domain_create_iommu_opts list;
+	max_vcpus: int;
+	max_evtchn_port: int;
+	max_grant_frames: int;
+	max_maptrack_frames: int;
+	arch: arch_domainconfig;
+}
+
 type domaininfo =
 {
 	domid             : domid;
@@ -46,6 +104,7 @@ type domaininfo =
 	max_vcpu_id       : int;
 	ssidref           : int32;
 	handle            : int array;
+	arch_config       : arch_domainconfig;
 }
 
 type sched_control =
@@ -56,7 +115,12 @@ type sched_control =
 
 type physinfo_cap_flag =
 	| CAP_HVM
+	| CAP_PV
 	| CAP_DirectIO
+	| CAP_HAP
+	| CAP_Shadow
+	| CAP_IOMMU_HAP_PT_SHARE
+	| CAP_Vmtrace
 
 type physinfo =
 {
@@ -91,49 +155,43 @@ type compile_info =
 
 type shutdown_reason = Poweroff | Reboot | Suspend | Crash | Watchdog | Soft_reset
 
-type domain_create_flag = CDF_HVM | CDF_HAP
-
 exception Error of string
 
 type handle
 
-(* this is only use by coredumping *)
-external sizeof_core_header: unit -> int
-       = "stub_sizeof_core_header"
-external sizeof_vcpu_guest_context: unit -> int
-       = "stub_sizeof_vcpu_guest_context"
-external sizeof_xen_pfn: unit -> int = "stub_sizeof_xen_pfn"
-(* end of use *)
-
 external interface_open: unit -> handle = "stub_xc_interface_open"
 external interface_close: handle -> unit = "stub_xc_interface_close"
 
-let with_intf f =
-	let xc = interface_open () in
-	let r = try f xc with exn -> interface_close xc; raise exn in
-	interface_close xc;
-	r
+let handle = ref None
 
-external _domain_create: handle -> int32 -> domain_create_flag list -> int array -> domid
+let get_handle () = !handle
+
+let close_handle () =
+	match !handle with
+	| Some h -> handle := None; interface_close h
+	| None -> ()
+
+let with_intf f =
+	match !handle with
+	| Some h -> f h
+	| None ->
+		let h =
+			try interface_open () with
+			| e ->
+				let msg = Printexc.to_string e in
+				failwith ("failed to open xenctrl: "^msg)
+		in
+		handle := Some h;
+		f h
+
+external domain_create_stub: handle -> domid -> domctl_create_config -> domid
        = "stub_xc_domain_create"
 
-let int_array_of_uuid_string s =
-	try
-		Scanf.sscanf s
-			"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x"
-			(fun a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 ->
-				[| a0; a1; a2; a3; a4; a5; a6; a7;
-				   a8; a9; a10; a11; a12; a13; a14; a15 |])
-	with _ -> invalid_arg ("Xc.int_array_of_uuid_string: " ^ s)
+let domain_create handle ?(domid=0) config =
+	domain_create_stub handle domid config
 
-let domain_create handle n flags uuid =
-	_domain_create handle n flags (int_array_of_uuid_string uuid)
-
-external _domain_sethandle: handle -> domid -> int array -> unit
-                          = "stub_xc_domain_sethandle"
-
-let domain_sethandle handle n uuid =
-	_domain_sethandle handle n (int_array_of_uuid_string uuid)
+external domain_sethandle: handle -> domid -> string -> unit
+       = "stub_xc_domain_sethandle"
 
 external domain_max_vcpus: handle -> domid -> int -> unit
        = "stub_xc_domain_max_vcpus"
@@ -207,26 +265,9 @@ external domain_set_memmap_limit: handle -> domid -> int64 -> unit
 external domain_memory_increase_reservation: handle -> domid -> int64 -> unit
        = "stub_xc_domain_memory_increase_reservation"
 
-external domain_set_machine_address_size: handle -> domid -> int -> unit
-       = "stub_xc_domain_set_machine_address_size"
-external domain_get_machine_address_size: handle -> domid -> int
-       = "stub_xc_domain_get_machine_address_size"
-
-external domain_cpuid_set: handle -> domid -> (int64 * (int64 option))
-                        -> string option array
-                        -> string option array
-       = "stub_xc_domain_cpuid_set"
-external domain_cpuid_apply_policy: handle -> domid -> unit
-       = "stub_xc_domain_cpuid_apply_policy"
-external cpuid_check: handle -> (int64 * (int64 option)) -> string option array -> (bool * string option array)
-       = "stub_xc_cpuid_check"
-
 external map_foreign_range: handle -> domid -> int
                          -> nativeint -> Xenmmap.mmap_interface
        = "stub_map_foreign_range"
-
-external domain_get_pfn_list: handle -> domid -> nativeint -> nativeint array
-       = "stub_xc_domain_get_pfn_list"
 
 external domain_assign_device: handle -> domid -> (int * int * int * int) -> unit
        = "stub_xc_domain_assign_device"
@@ -247,84 +288,6 @@ external get_cpu_featureset : handle -> featureset_index -> int64 array = "stub_
 
 external watchdog : handle -> int -> int32 -> int
   = "stub_xc_watchdog"
-
-(* core dump structure *)
-type core_magic = Magic_hvm | Magic_pv
-
-type core_header = {
-	xch_magic: core_magic;
-	xch_nr_vcpus: int;
-	xch_nr_pages: nativeint;
-	xch_index_offset: int64;
-	xch_ctxt_offset: int64;
-	xch_pages_offset: int64;
-}
-
-external marshall_core_header: core_header -> string = "stub_marshall_core_header"
-
-(* coredump *)
-let coredump xch domid fd =
-	let dump s =
-		let wd = Unix.write fd s 0 (String.length s) in
-		if wd <> String.length s then
-			failwith "error while writing";
-		in
-
-	let info = domain_getinfo xch domid in
-
-	let nrpages = info.total_memory_pages in
-	let ctxt = Array.make info.max_vcpu_id None in
-	let nr_vcpus = ref 0 in
-	for i = 0 to info.max_vcpu_id - 1
-	do
-		ctxt.(i) <- try
-			let v = vcpu_context_get xch domid i in
-			incr nr_vcpus;
-			Some v
-			with _ -> None
-	done;
-
-	(* FIXME page offset if not rounded to sup *)
-	let page_offset =
-		Int64.add
-			(Int64.of_int (sizeof_core_header () +
-			 (sizeof_vcpu_guest_context () * !nr_vcpus)))
-			(Int64.of_nativeint (
-				Nativeint.mul
-					(Nativeint.of_int (sizeof_xen_pfn ()))
-					nrpages)
-				)
-		in
-
-	let header = {
-		xch_magic = if info.hvm_guest then Magic_hvm else Magic_pv;
-		xch_nr_vcpus = !nr_vcpus;
-		xch_nr_pages = nrpages;
-		xch_ctxt_offset = Int64.of_int (sizeof_core_header ());
-		xch_index_offset = Int64.of_int (sizeof_core_header ()
-					+ sizeof_vcpu_guest_context ());
-		xch_pages_offset = page_offset;
-	} in
-
-	dump (marshall_core_header header);
-	for i = 0 to info.max_vcpu_id - 1
-	do
-		match ctxt.(i) with
-		| None -> ()
-		| Some ctxt_i -> dump ctxt_i
-	done;
-	let pfns = domain_get_pfn_list xch domid nrpages in
-	if Array.length pfns <> Nativeint.to_int nrpages then
-		failwith "could not get the page frame list";
-
-	let page_size = Xenmmap.getpagesize () in
-	for i = 0 to Nativeint.to_int nrpages - 1
-	do
-		let page = map_foreign_range xch domid page_size pfns.(i) in
-		let data = Xenmmap.read page 0 page_size in
-		Xenmmap.unmap page;
-		dump data
-	done
 
 (* ** Misc ** *)
 

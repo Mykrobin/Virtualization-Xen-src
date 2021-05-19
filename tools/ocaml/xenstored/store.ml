@@ -16,17 +16,19 @@
  *)
 open Stdext
 
+module SymbolMap = Map.Make(Symbol)
+
 module Node = struct
 
 type t = {
 	name: Symbol.t;
 	perms: Perms.Node.t;
 	value: string;
-	children: t list;
+	children: t SymbolMap.t;
 }
 
 let create _name _perms _value =
-	{ name = Symbol.of_string _name; perms = _perms; value = _value; children = []; }
+	{ name = Symbol.of_string _name; perms = _perms; value = _value; children = SymbolMap.empty; }
 
 let get_owner node = Perms.Node.get_owner node.perms
 let get_children node = node.children
@@ -34,7 +36,7 @@ let get_value node = node.value
 let get_perms node = node.perms
 let get_name node = Symbol.to_string node.name
 
-let set_value node nvalue = 
+let set_value node nvalue =
 	if node.value = nvalue
 	then node
 	else { node with value = nvalue }
@@ -42,38 +44,34 @@ let set_value node nvalue =
 let set_perms node nperms = { node with perms = nperms }
 
 let add_child node child =
-	{ node with children = child :: node.children }
+	let children = SymbolMap.add child.name child node.children in
+	{ node with children }
 
 let exists node childname =
 	let childname = Symbol.of_string childname in
-	List.exists (fun n -> n.name = childname) node.children
+	SymbolMap.mem childname node.children
 
 let find node childname =
 	let childname = Symbol.of_string childname in
-	List.find (fun n -> n.name = childname) node.children
+	SymbolMap.find childname node.children
 
 let replace_child node child nchild =
-	(* this is the on-steroid version of the filter one-replace one *)
-	let rec replace_one_in_list l =
-		match l with
-		| []                               -> []
-		| h :: tl when h.name = child.name -> nchild :: tl
-		| h :: tl                          -> h :: replace_one_in_list tl
-		in
-	{ node with children = (replace_one_in_list node.children) }
+	{ node with
+	  children = SymbolMap.update child.name
+			(function None -> None | Some _ -> Some nchild)
+			node.children
+	}
 
 let del_childname node childname =
 	let sym = Symbol.of_string childname in
-	let rec delete_one_in_list l =
-		match l with
-		| []                        -> raise Not_found
-		| h :: tl when h.name = sym -> tl
-		| h :: tl                   -> h :: delete_one_in_list tl
-		in
-	{ node with children = (delete_one_in_list node.children) }
+	{ node with children =
+		SymbolMap.update sym
+			(function None -> raise Not_found | Some _ -> None)
+			node.children
+	}
 
 let del_all_children node =
-	{ node with children = [] }
+	{ node with children = SymbolMap.empty }
 
 (* check if the current node can be accessed by the current connection with rperm permissions *)
 let check_perm node connection request =
@@ -87,7 +85,14 @@ let check_owner node connection =
 		raise Define.Permission_denied;
 	end
 
-let rec recurse fct node = fct node; List.iter (recurse fct) node.children
+let rec recurse fct node = fct node; SymbolMap.iter (fun _ -> recurse fct) node.children
+
+(** [recurse_map f tree] applies [f] on each node in the tree recursively *)
+let recurse_map f =
+	let rec walk node =
+		f { node with children = SymbolMap.map walk node.children }
+	in
+	walk
 
 let unpack node = (Symbol.to_string node.name, node.perms, node.value)
 
@@ -121,6 +126,11 @@ let of_string s =
 	else match String.split '/' s with
 		| "" :: path when is_valid path -> path
 		| _ -> raise Define.Invalid_path
+
+let of_path_and_name path name =
+	match path, name with
+	| [], "" -> []
+	| _ -> path @ [name]
 
 let create path connection_path =
 	of_string (Utils.path_validate path connection_path)
@@ -184,7 +194,7 @@ let get_node rnode path =
 let rec get_deepest_existing_node node = function
 	| [] -> node, true
 	| h :: t ->
-		try get_deepest_existing_node (Node.find node h) t 
+		try get_deepest_existing_node (Node.find node h) t
 		with Not_found -> node, false
 
 let set_node rnode path nnode =
@@ -209,6 +219,11 @@ let rec lookup node path fct =
 
 let apply rnode path fct =
 	lookup rnode path fct
+
+let introduce_domain = "@introduceDomain"
+let release_domain = "@releaseDomain"
+let specials = List.map of_string [ introduce_domain; release_domain ]
+
 end
 
 (* The Store.t type *)
@@ -268,15 +283,17 @@ let path_rm store perm path =
 			Node.del_childname node name
 		with Not_found ->
 			raise Define.Doesnt_exist in
-	if path = [] then
+	if path = [] then (
+		Node.check_perm store.root perm Perms.WRITE;
 		Node.del_all_children store.root
-	else
+	) else
 		Path.apply_modify store.root path do_rm
 
 let path_setperms store perm path perms =
-	if path = [] then
+	if path = [] then (
+		Node.check_perm store.root perm Perms.WRITE;
 		Node.set_perms store.root perms
-	else
+	) else
 		let do_setperms node name =
 			let c = Node.find node name in
 			Node.check_owner c perm;
@@ -308,20 +325,22 @@ let read store perm path =
 
 let ls store perm path =
 	let children =
-		if path = [] then
-			(Node.get_children store.root)
-		else
+		if path = [] then (
+			Node.check_perm store.root perm Perms.READ;
+			Node.get_children store.root
+		) else
 			let do_ls node name =
 				let cnode = Node.find node name in
 				Node.check_perm cnode perm Perms.READ;
 				cnode.Node.children in
 			Path.apply store.root path do_ls in
-	List.rev (List.map (fun n -> Symbol.to_string n.Node.name) children)
+	SymbolMap.fold (fun k _ accu -> Symbol.to_string k :: accu) children []
 
 let getperms store perm path =
-	if path = [] then
-		(Node.get_perms store.root)
-	else
+	if path = [] then (
+		Node.check_perm store.root perm Perms.READ;
+		Node.get_perms store.root
+	) else
 		let fct n name =
 			let c = Node.find n name in
 			Node.check_perm c perm Perms.READ;
@@ -344,7 +363,8 @@ let path_exists store path =
 let traversal root_node f =
 	let rec _traversal path node =
 		f path node;
-		List.iter (_traversal (path @ [ Symbol.to_string node.Node.name ])) node.Node.children
+		let node_path = Path.of_path_and_name path (Symbol.to_string node.Node.name) in
+		SymbolMap.iter (fun _ -> _traversal node_path) node.Node.children
 		in
 	_traversal [] root_node
 
@@ -399,6 +419,7 @@ let mkdir store perm path =
 	(* It's upt to the mkdir logic to decide what to do with existing path *)
 	if not (existing || (Perms.Connection.is_dom0 perm)) then Quota.check store.quota owner 0;
 	store.root <- path_mkdir store perm path;
+	if not existing then
 	Quota.add_entry store.quota owner
 
 let rm store perm path =
@@ -415,10 +436,20 @@ let setperms store perm path nperms =
 	| Some node ->
 		let old_owner = Node.get_owner node in
 		let new_owner = Perms.Node.get_owner nperms in
-		if not ((old_owner = new_owner) || (Perms.Connection.is_dom0 perm)) then Quota.check store.quota new_owner 0;
+		if not ((old_owner = new_owner) || (Perms.Connection.is_dom0 perm)) then
+			raise Define.Permission_denied;
 		store.root <- path_setperms store perm path nperms;
 		Quota.del_entry store.quota old_owner;
 		Quota.add_entry store.quota new_owner
+
+let reset_permissions store domid =
+	Logging.info "store|node" "Cleaning up xenstore ACLs for domid %d" domid;
+	store.root <- Node.recurse_map (fun node ->
+		let perms = Perms.Node.remove_domid ~domid node.perms in
+		if perms <> node.perms then
+			Logging.debug "store|node" "Changed permissions for node %s" (Node.get_name node);
+		{ node with perms }
+	) store.root
 
 type ops = {
 	store: t;
@@ -457,9 +488,6 @@ let copy store = {
 	quota = Quota.copy store.quota;
 }
 
-let mark_symbols store =
-	Node.recurse (fun node -> Symbol.mark_as_used node.Node.name) store.root
-
 let incr_transaction_coalesce store =
 	store.stat_transaction_coalesce <- store.stat_transaction_coalesce + 1
 let incr_transaction_abort store =
@@ -467,7 +495,7 @@ let incr_transaction_abort store =
 
 let stats store =
 	let nb_nodes = ref 0 in
-	traversal store.root (fun path node ->
+	traversal store.root (fun _path _node ->
 		incr nb_nodes
 	);
 	!nb_nodes, store.stat_transaction_abort, store.stat_transaction_coalesce

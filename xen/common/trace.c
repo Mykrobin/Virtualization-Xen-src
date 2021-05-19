@@ -16,10 +16,10 @@
  * it's possible to reconstruct a chronological record of trace events.
  */
 
-#include <xen/config.h>
 #include <asm/types.h>
 #include <asm/io.h>
 #include <xen/lib.h>
+#include <xen/param.h>
 #include <xen/sched.h>
 #include <xen/smp.h>
 #include <xen/trace.h>
@@ -114,7 +114,7 @@ static int calculate_tbuf_size(unsigned int pages, uint16_t t_info_first_offset)
     struct t_info dummy_pages;
     typeof(dummy_pages.tbuf_size) max_pages;
     typeof(dummy_pages.mfn_offset[0]) max_mfn_offset;
-    unsigned int max_cpus = num_online_cpus();
+    unsigned int max_cpus = nr_cpu_ids;
     unsigned int t_info_words;
 
     /* force maximum value for an unsigned type */
@@ -150,13 +150,13 @@ static int calculate_tbuf_size(unsigned int pages, uint16_t t_info_first_offset)
 
     /* 
      * NB this calculation is correct, because t_info_first_offset is
-     * in words, not bytes, not bytes
+     * in words, not bytes
      */
-    t_info_words = num_online_cpus() * pages + t_info_first_offset;
+    t_info_words = nr_cpu_ids * pages + t_info_first_offset;
     t_info_pages = PFN_UP(t_info_words * sizeof(uint32_t));
     printk(XENLOG_INFO "xentrace: requesting %u t_info pages "
            "for %u trace pages on %u cpus\n",
-           t_info_pages, pages, num_online_cpus());
+           t_info_pages, pages, nr_cpu_ids);
     return pages;
 }
 
@@ -228,7 +228,6 @@ static int alloc_trace_bufs(unsigned int pages)
     for_each_online_cpu(cpu)
     {
         struct t_buf *buf;
-        struct page_info *pg;
 
         spin_lock_init(&per_cpu(t_lock, cpu));
 
@@ -243,16 +242,14 @@ static int alloc_trace_bufs(unsigned int pages)
 
         /* Now share the trace pages */
         for ( i = 0; i < pages; i++ )
-        {
-            pg = mfn_to_page(t_info_mfn_list[offset + i]);
-            share_xen_page_with_privileged_guests(pg, XENSHARE_writable);
-        }
+            share_xen_page_with_privileged_guests(
+                mfn_to_page(_mfn(t_info_mfn_list[offset + i])), SHARE_rw);
     }
 
     /* Finally, share the t_info page */
     for(i = 0; i < t_info_pages; i++)
         share_xen_page_with_privileged_guests(
-            virt_to_page(t_info) + i, XENSHARE_readonly);
+            virt_to_page(t_info) + i, SHARE_ro);
 
     data_size  = (pages * PAGE_SIZE - sizeof(struct t_buf));
     t_buf_highwater = data_size >> 1; /* 50% high water */
@@ -275,7 +272,7 @@ out_dealloc:
             uint32_t mfn = t_info_mfn_list[offset + i];
             if ( !mfn )
                 break;
-            ASSERT(!(mfn_to_page(mfn)->count_info & PGC_allocated));
+            ASSERT(!(mfn_to_page(_mfn(mfn))->count_info & PGC_allocated));
             free_xenheap_pages(mfn_to_virt(mfn), 0);
         }
     }
@@ -368,9 +365,9 @@ void __init init_trace_bufs(void)
 
 /**
  * tb_control - sysctl operations on trace buffers.
- * @tbc: a pointer to a xen_sysctl_tbuf_op_t to be filled out
+ * @tbc: a pointer to a struct xen_sysctl_tbuf_op to be filled out
  */
-int tb_control(xen_sysctl_tbuf_op_t *tbc)
+int tb_control(struct xen_sysctl_tbuf_op *tbc)
 {
     static DEFINE_SPINLOCK(lock);
     int rc = 0;
@@ -666,12 +663,12 @@ static inline void insert_lost_records(struct t_buf *buf)
  * Notification is performed in qtasklet to avoid deadlocks with contexts
  * which __trace_var() may be called from (e.g., scheduler critical regions).
  */
-static void trace_notify_dom0(unsigned long unused)
+static void trace_notify_dom0(void *unused)
 {
     send_global_virq(VIRQ_TBUF);
 }
 static DECLARE_SOFTIRQ_TASKLET(trace_notify_dom0_tasklet,
-                               trace_notify_dom0, 0);
+                               trace_notify_dom0, NULL);
 
 /**
  * __trace_var - Enters a trace tuple into the trace buffer for the current CPU.
@@ -823,11 +820,17 @@ unlock:
 void __trace_hypercall(uint32_t event, unsigned long op,
                        const xen_ulong_t *args)
 {
-    struct __packed {
+    struct {
         uint32_t op;
         uint32_t args[6];
     } d;
     uint32_t *a = d.args;
+
+    /*
+     * In lieu of using __packed above, which gcc9 legitimately doesn't
+     * like in combination with the address of d.args[] taken.
+     */
+    BUILD_BUG_ON(offsetof(typeof(d), args) != sizeof(d.op));
 
 #define APPEND_ARG32(i)                         \
     do {                                        \

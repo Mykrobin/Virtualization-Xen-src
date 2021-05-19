@@ -5,7 +5,6 @@
  */
 #define COMPILE_OFFSETS
 
-#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/sched.h>
 #include <xen/bitops.h>
@@ -59,7 +58,6 @@ void __dummy__(void)
    OFFSET(UREGS_R12_fiq, struct cpu_user_regs, r12_fiq);
 
    OFFSET(UREGS_kernel_sizeof, struct cpu_user_regs, cpsr);
-   DEFINE(UREGS_user_sizeof, sizeof(struct cpu_user_regs));
    BLANK();
 
    DEFINE(CPUINFO_sizeof, sizeof(struct cpu_info));

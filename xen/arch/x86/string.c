@@ -1,15 +1,13 @@
 /******************************************************************************
  * string.c
- * 
+ *
  * These provide something for compiler-emitted string operations to link
  * against.
  */
 
-#include <xen/config.h>
 #include <xen/lib.h>
 
-#undef memcpy
-void *memcpy(void *dest, const void *src, size_t n)
+void *(memcpy)(void *dest, const void *src, size_t n)
 {
     long d0, d1, d2;
 
@@ -24,8 +22,7 @@ void *memcpy(void *dest, const void *src, size_t n)
     return dest;
 }
 
-#undef memset
-void *memset(void *s, int c, size_t n)
+void *(memset)(void *s, int c, size_t n)
 {
     long d0, d1;
 
@@ -38,13 +35,16 @@ void *memset(void *s, int c, size_t n)
     return s;
 }
 
-#undef memmove
-void *memmove(void *dest, const void *src, size_t n)
+void *(memmove)(void *dest, const void *src, size_t n)
 {
     long d0, d1, d2;
 
+    if ( unlikely(!n) )
+        return dest;
+
     if ( dest < src )
-        return memcpy(dest, src, n);
+        /* Depends on Xen's implementation operating forwards. */
+        return (memcpy)(dest, src, n);
 
     asm volatile (
         "   std         ; "

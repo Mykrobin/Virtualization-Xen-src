@@ -19,40 +19,10 @@
 #ifndef __ASM_X86_HVM_IOREQ_H__
 #define __ASM_X86_HVM_IOREQ_H__
 
-bool_t hvm_io_pending(struct vcpu *v);
-bool_t handle_hvm_io_completion(struct vcpu *v);
-bool_t is_ioreq_server_page(struct domain *d, const struct page_info *page);
-
-int hvm_create_ioreq_server(struct domain *d, domid_t domid,
-                            bool_t is_default, int bufioreq_handling,
-                            ioservid_t *id);
-int hvm_destroy_ioreq_server(struct domain *d, ioservid_t id);
-int hvm_get_ioreq_server_info(struct domain *d, ioservid_t id,
-                              unsigned long *ioreq_pfn,
-                              unsigned long *bufioreq_pfn,
-                              evtchn_port_t *bufioreq_port);
-int hvm_map_io_range_to_ioreq_server(struct domain *d, ioservid_t id,
-                                     uint32_t type, uint64_t start,
-                                     uint64_t end);
-int hvm_unmap_io_range_from_ioreq_server(struct domain *d, ioservid_t id,
-                                         uint32_t type, uint64_t start,
-                                         uint64_t end);
-int hvm_set_ioreq_server_state(struct domain *d, ioservid_t id,
-                               bool_t enabled);
-
-int hvm_all_ioreq_servers_add_vcpu(struct domain *d, struct vcpu *v);
-void hvm_all_ioreq_servers_remove_vcpu(struct domain *d, struct vcpu *v);
-void hvm_destroy_all_ioreq_servers(struct domain *d);
-
-int hvm_set_dm_domain(struct domain *d, domid_t domid);
-
-struct hvm_ioreq_server *hvm_select_ioreq_server(struct domain *d,
-                                                 ioreq_t *p);
-int hvm_send_ioreq(struct hvm_ioreq_server *s, ioreq_t *proto_p,
-                   bool_t buffered);
-unsigned int hvm_broadcast_ioreq(ioreq_t *p, bool_t buffered);
-
-void hvm_ioreq_init(struct domain *d);
+/* This correlation must not be altered */
+#define IOREQ_STATUS_HANDLED     X86EMUL_OKAY
+#define IOREQ_STATUS_UNHANDLED   X86EMUL_UNHANDLEABLE
+#define IOREQ_STATUS_RETRY       X86EMUL_RETRY
 
 #endif /* __ASM_X86_HVM_IOREQ_H__ */
 

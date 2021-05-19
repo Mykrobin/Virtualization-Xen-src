@@ -9,8 +9,7 @@ LDLIBS += $(LDLIBS_libxenevtchn)
 LDLIBS += $(LDLIBS_libxenctrl)
 LDLIBS += $(ARGP_LDFLAGS)
 
-BIN-$(CONFIG_X86) = xenalyze
-BIN      = $(BIN-y)
+BIN      = xenalyze
 SBIN     = xentrace xentrace_setsize
 LIBBIN   = xenctx
 SCRIPTS  = xentrace_format
@@ -33,9 +32,18 @@ endif
 	$(INSTALL_PYTHON_PROG) $(SCRIPTS) $(DESTDIR)$(bindir)
 	[ -z "$(LIBBIN)" ] || $(INSTALL_PROG) $(LIBBIN) $(DESTDIR)$(LIBEXEC_BIN)
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(addprefix $(DESTDIR)$(LIBEXEC_BIN)/, $(LIBBIN))
+	rm -f $(addprefix $(DESTDIR)$(bindir)/, $(SCRIPTS))
+	rm -f $(addprefix $(DESTDIR)$(sbindir)/, $(SBIN))
+ifneq ($(BIN),)
+	rm -f $(addprefix $(DESTDIR)$(bindir)/, $(BIN))
+endif
+
 .PHONY: clean
 clean:
-	$(RM) *.a *.so *.o *.rpm $(BIN) $(SBIN) $(LIBBIN) $(DEPS)
+	$(RM) *.a *.so *.o *.rpm $(BIN) $(SBIN) $(LIBBIN) $(DEPS_RM)
 
 .PHONY: distclean
 distclean: clean
@@ -52,5 +60,5 @@ xentrace_setsize: setsize.o
 xenalyze: xenalyze.o mread.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(ARGP_LDFLAGS) $(APPEND_LDFLAGS)
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)
 

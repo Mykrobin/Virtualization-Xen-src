@@ -152,6 +152,15 @@ DIRECTORY		<path>|			<child-leaf-name>|*
 	leafnames.  The resulting children are each named
 	<path>/<child-leaf-name>.
 
+DIRECTORY_PART		<path>|<offset>		<gencnt>|<child-leaf-name>|*
+	Same as DIRECTORY, but to be used for children lists longer than
+	XENSTORE_PAYLOAD_MAX. Input are <path> and the byte offset into
+	the list of children to return. Return values are the generation
+	count <gencnt> of the node (to be used to ensure the node hasn't
+	changed between two reads: <gencnt> being the same for multiple
+	reads guarantees the node hasn't changed) and the list of children
+	starting at the specified <offset> of the complete list.
+
 GET_PERMS	 	<path>|			<perm-as-string>|+
 SET_PERMS		<path>|<perm-as-string>|+?
 	<perm-as-string> is one of the following
@@ -159,8 +168,11 @@ SET_PERMS		<path>|<perm-as-string>|+?
 		r<domid>	read only
 		b<domid>	both read and write
 		n<domid>	no access
-	See http://wiki.xen.org/wiki/XenBus section
+	See https://wiki.xen.org/wiki/XenBus section
 	`Permissions' for details of the permissions system.
+	It is possible to set permissions for the special watch paths
+	"@introduceDomain" and "@releaseDomain" to enable receiving those
+	watches in unprivileged domains.
 
 ---------- Watches ----------
 
@@ -185,6 +197,8 @@ WATCH			<wpath>|<token>|?
 	    @releaseDomain 	occurs on any domain crash or
 				shutdown, and also on RELEASE
 				and domain destruction
+	<wspecial> events are sent to privileged callers or explicitly
+	via SET_PERMS enabled domains only.
 
 	When a watch is first set up it is triggered once straight
 	away, with <path> equal to <wpath>.  Watches may be triggered
@@ -245,7 +259,7 @@ TRANSACTION_END		F|
 
 ---------- Domain management and xenstored communications ----------
 
-INTRODUCE		<domid>|<mfn>|<evtchn>|?
+INTRODUCE		<domid>|<gfn>|<evtchn>|?
 	Notifies xenstored to communicate with this domain.
 
 	INTRODUCE is currently only used by xend (during domain
@@ -253,12 +267,12 @@ INTRODUCE		<domid>|<mfn>|<evtchn>|?
 	xenstored prevents its use other than by dom0.
 
 	<domid> must be a real domain id (not 0 and not a special
-	DOMID_... value).  <mfn> must be a machine page in that domain
+	DOMID_... value).  <gfn> must be a page in that domain
 	represented in signed decimal (!).  <evtchn> must be event
 	channel is an unbound event channel in <domid> (likewise in
 	decimal), on which xenstored will call bind_interdomain.
 	Violations of these rules may result in undefined behaviour;
-	for example passing a high-bit-set 32-bit mfn as an unsigned
+	for example passing a high-bit-set 32-bit gfn as an unsigned
 	decimal will attempt to use 0x7fffffff instead (!).
 
 RELEASE			<domid>|
@@ -290,12 +304,11 @@ RESUME			<domid>|
 	further watch event notifications if the domain were to be
 	shut down again.
 
-	It is not clear whether this is possible since one would
-	normally expect a domain not to be restarted after being shut
-	down without being destroyed in the meantime.  There are
-	currently no users of this request in xen-unstable.
+	This command will be issued in place such as resume because
+	Xen will "shutdown" the domain on suspend.
 
 	xenstored prevents the use of RESUME other than by dom0.
+
 
 SET_TARGET		<domid>|<tdomid>|
 	Notifies xenstored that domain <domid> is targeting domain
@@ -309,12 +322,53 @@ SET_TARGET		<domid>|<tdomid>|
 
 ---------- Miscellaneous ----------
 
-DEBUG			print|<string>|??	    sends <string> to debug log
-DEBUG			print|<thing-with-no-nul>   EINVAL
-DEBUG			check|??		    checks xenstored innards
-DEBUG			<anything-else|>	    no-op (future extension)
+CONTROL			<command>|[<parameters>|]
+	Send a control command <command> with optional parameters
+	(<parameters>) to Xenstore daemon.
 
-	These requests should not generally be used and may be
-	withdrawn in the future.
+	The set of commands and their semantics is implementation
+	specific and is likely to change from one Xen version to the
+	next.  Out-of-tree users will encounter compatibility issues.
 
+	Current commands are:
+	check
+		checks xenstored innards
+	live-update|<params>|+
+		perform a live-update of the Xenstore daemon, only to
+		be used via xenstore-control command.
+		<params> are implementation specific and are used for
+		different steps of the live-update processing. Currently
+		supported <params> are:
+		-f <file>  specify new daemon binary
+		-b <size>  specify size of new stubdom binary
+		-d <chunk-size> <binary-chunk>  transfer chunk of new
+			stubdom binary
+		-c <pars>  specify new command line to use
+		-s [-t <sec>] [-F]  start live update process (-t specifies
+			timeout in seconds to wait for active transactions
+			to finish, default is 60 seconds; -F will force
+			live update to happen even with running transactions
+			after timeout elapsed)
+		-a  abort live update handling
+		All sub-options will return "OK" in case of success or an
+		error string in case of failure. -s can return "BUSY" in case
+		of an active transaction, a retry of -s can be done in that
+		case.
+	log|on
+		turn xenstore logging on
+	log|off
+		turn xenstore logging off
+	logfile|<file-name>
+		log to specified file
+	memreport|[<file-name>]
+		print memory statistics to logfile (no <file-name>
+		specified) or to specific file
+	print|<string>
+		print <string> to syslog (xenstore runs as daemon) or
+		to console (xenstore runs as stubdom)
+	help			<supported-commands>
+		return list of supported commands for CONTROL
+
+DEBUG
+	Deprecated, now named CONTROL
 

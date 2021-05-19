@@ -12,9 +12,9 @@
  * Author: Allen Kay <allen.m.kay@intel.com> -  adapted to xen from Linux
  */
 
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/mm.h>
+#include <xen/param.h>
 #include <xen/acpi.h>
 #include <xen/xmalloc.h>
 #include <xen/pci.h>
@@ -29,29 +29,43 @@
 
 unsigned int pci_probe = PCI_PROBE_CONF1 | PCI_PROBE_MMCONF;
 
-static void __init parse_mmcfg(char *s)
+static int __init parse_mmcfg(const char *s)
 {
-    char *ss;
+    const char *ss;
+    int rc = 0;
 
     do {
         ss = strchr(s, ',');
-        if ( ss )
-            *ss = '\0';
+        if ( !ss )
+            ss = strchr(s, '\0');
 
-        if ( !parse_bool(s) )
+        switch ( parse_bool(s, ss) )
+        {
+        case 0:
             pci_probe &= ~PCI_PROBE_MMCONF;
-        else if ( !strcmp(s, "amd_fam10") || !strcmp(s, "amd-fam10") )
-            pci_probe |= PCI_CHECK_ENABLE_AMD_MMCONF;
+            break;
+        case 1:
+            break;
+        default:
+            if ( !cmdline_strcmp(s, "amd_fam10") ||
+                 !cmdline_strcmp(s, "amd-fam10") )
+                pci_probe |= PCI_CHECK_ENABLE_AMD_MMCONF;
+            else
+                rc = -EINVAL;
+            break;
+        }
 
         s = ss + 1;
-    } while ( ss );
+    } while ( *ss );
+
+    return rc;
 }
 custom_param("mmcfg", parse_mmcfg);
 
 static const char __init *pci_mmcfg_e7520(void)
 {
     u32 win;
-    win = pci_conf_read16(0, 0, 0, 0, 0xce);
+    win = pci_conf_read16(PCI_SBDF(0, 0, 0, 0), 0xce);
 
     win = win & 0xf000;
     if(win == 0x0000 || win == 0xf000)
@@ -76,7 +90,7 @@ static const char __init *pci_mmcfg_intel_945(void)
 
     pci_mmcfg_config_num = 1;
 
-    pciexbar = pci_conf_read32(0, 0, 0, 0, 0x48);
+    pciexbar = pci_conf_read32(PCI_SBDF(0, 0, 0, 0), 0x48);
 
     /* Enable bit */
     if (!(pciexbar & 1))
@@ -200,14 +214,14 @@ static const char __init *pci_mmcfg_nvidia_mcp55(void)
         u32 l, extcfg;
         u16 vendor, device;
 
-        l = pci_conf_read32(0, bus, 0, 0, 0);
+        l = pci_conf_read32(PCI_SBDF(0, bus, 0, 0), 0);
         vendor = l & 0xffff;
         device = (l >> 16) & 0xffff;
 
         if (PCI_VENDOR_ID_NVIDIA != vendor || 0x0369 != device)
             continue;
 
-        extcfg = pci_conf_read32(0, bus, 0, 0, extcfg_regnum);
+        extcfg = pci_conf_read32(PCI_SBDF(0, bus, 0, 0), extcfg_regnum);
 
         if (extcfg & extcfg_enable_mask)
             i++;
@@ -226,14 +240,14 @@ static const char __init *pci_mmcfg_nvidia_mcp55(void)
         u16 vendor, device;
         int size_index;
 
-        l = pci_conf_read32(0, bus, 0, 0, 0);
+        l = pci_conf_read32(PCI_SBDF(0, bus, 0, 0), 0);
         vendor = l & 0xffff;
         device = (l >> 16) & 0xffff;
 
         if (PCI_VENDOR_ID_NVIDIA != vendor || 0x0369 != device)
             continue;
 
-        extcfg = pci_conf_read32(0, bus, 0, 0, extcfg_regnum);
+        extcfg = pci_conf_read32(PCI_SBDF(0, bus, 0, 0), extcfg_regnum);
 
         if (!(extcfg & extcfg_enable_mask))
             continue;
@@ -299,7 +313,7 @@ static int __init pci_mmcfg_check_hostbridge(void)
     for (i = 0; !name && i < ARRAY_SIZE(pci_mmcfg_probes); i++) {
         bus =  pci_mmcfg_probes[i].bus;
         devfn = pci_mmcfg_probes[i].devfn;
-        l = pci_conf_read32(0, bus, PCI_SLOT(devfn), PCI_FUNC(devfn), 0);
+        l = pci_conf_read32(PCI_SBDF3(0, bus, devfn), 0);
         vendor = l & 0xffff;
         device = (l >> 16) & 0xffff;
 
@@ -323,7 +337,7 @@ static int __init is_mmconf_reserved(
     u64 old_size = size;
     int valid = 0;
 
-    while (!e820_all_mapped(addr, addr + size - 1, E820_RESERVED)) {
+    while (!e820_all_mapped(addr, addr + size, E820_RESERVED)) {
         size >>= 1;
         if (size < (16UL<<20))
             break;
@@ -358,8 +372,6 @@ static bool_t __init pci_mmcfg_reject_broken(void)
         (pci_mmcfg_config[0].address == 0))
         return 0;
 
-    cfg = &pci_mmcfg_config[0];
-
     for (i = 0; i < pci_mmcfg_config_num; i++) {
         u64 addr, size;
 
@@ -388,6 +400,8 @@ static bool_t __init pci_mmcfg_reject_broken(void)
 void __init acpi_mmcfg_init(void)
 {
     bool_t valid = 1;
+
+    pci_segments_init();
 
     /* MMCONFIG disabled */
     if ((pci_probe & PCI_PROBE_MMCONF) == 0)

@@ -9,12 +9,12 @@
  *    Keir Fraser <keir@xen.org>
  */
 
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
 #include <xen/paging.h>
 #include <xen/softirq.h>
+#include <asm/debugger.h>
 #include <asm/event.h>
 #include <asm/hvm/emulate.h>
 #include <asm/hvm/hvm.h>
@@ -41,7 +41,7 @@ static void realmode_deliver_exception(
     last_byte = (vector * 4) + 3;
     if ( idtr->limit < last_byte ||
          hvm_copy_from_guest_phys(&cs_eip, idtr->base + vector * 4, 4) !=
-         HVMCOPY_okay )
+         HVMTRANS_okay )
     {
         /* Software interrupt? */
         if ( insn_len != 0 )
@@ -66,29 +66,22 @@ static void realmode_deliver_exception(
         }
     }
 
-    frame[0] = regs->eip + insn_len;
+    frame[0] = regs->ip + insn_len;
     frame[1] = csr->sel;
-    frame[2] = regs->eflags & ~X86_EFLAGS_RF;
+    frame[2] = regs->flags & ~X86_EFLAGS_RF;
 
     /* We can't test hvmemul_ctxt->ctxt.sp_size: it may not be initialised. */
-    if ( hvmemul_ctxt->seg_reg[x86_seg_ss].attr.fields.db )
-    {
-        regs->esp -= 6;
-        pstk = regs->esp;
-    }
+    if ( hvmemul_ctxt->seg_reg[x86_seg_ss].db )
+        pstk = regs->esp -= 6;
     else
-    {
-        pstk = (uint16_t)(regs->esp - 6);
-        regs->esp &= ~0xffff;
-        regs->esp |= pstk;
-    }
+        pstk = regs->sp -= 6;
 
     pstk += hvmemul_get_seg_reg(x86_seg_ss, hvmemul_ctxt)->base;
-    (void)hvm_copy_to_guest_phys(pstk, frame, sizeof(frame));
+    (void)hvm_copy_to_guest_phys(pstk, frame, sizeof(frame), current);
 
     csr->sel  = cs_eip >> 16;
     csr->base = (uint32_t)csr->sel << 4;
-    regs->eip = (uint16_t)cs_eip;
+    regs->ip = (uint16_t)cs_eip;
     regs->eflags &= ~(X86_EFLAGS_TF | X86_EFLAGS_IF | X86_EFLAGS_RF);
 
     /* Exception delivery clears STI and MOV-SS blocking. */
@@ -104,15 +97,11 @@ static void realmode_deliver_exception(
 void vmx_realmode_emulate_one(struct hvm_emulate_ctxt *hvmemul_ctxt)
 {
     struct vcpu *curr = current;
-    struct hvm_vcpu_io *vio = &curr->arch.hvm_vcpu.hvm_io;
     int rc;
 
     perfc_incr(realmode_emulations);
 
-    rc = hvm_emulate_one(hvmemul_ctxt);
-
-    if ( hvm_vcpu_io_need_completion(vio) )
-        vio->io_completion = HVMIO_realmode_completion;
+    rc = hvm_emulate_one(hvmemul_ctxt, VIO_realmode_completion);
 
     if ( rc == X86EMUL_UNHANDLEABLE )
     {
@@ -120,40 +109,34 @@ void vmx_realmode_emulate_one(struct hvm_emulate_ctxt *hvmemul_ctxt)
         goto fail;
     }
 
+    if ( rc == X86EMUL_UNRECOGNIZED )
+    {
+        gdprintk(XENLOG_ERR, "Unrecognized insn.\n");
+        if ( curr->arch.hvm.guest_cr[0] & X86_CR0_PE )
+            goto fail;
+
+        realmode_deliver_exception(TRAP_invalid_op, 0, hvmemul_ctxt);
+    }
+
     if ( rc == X86EMUL_EXCEPTION )
     {
-        if ( !hvmemul_ctxt->exn_pending )
-        {
-            unsigned long intr_info;
-
-            __vmread(VM_ENTRY_INTR_INFO, &intr_info);
-            __vmwrite(VM_ENTRY_INTR_INFO, 0);
-            if ( !(intr_info & INTR_INFO_VALID_MASK) )
-            {
-                gdprintk(XENLOG_ERR, "Exception pending but no info.\n");
-                goto fail;
-            }
-            hvmemul_ctxt->trap.vector = (uint8_t)intr_info;
-            hvmemul_ctxt->trap.insn_len = 0;
-        }
-
         if ( unlikely(curr->domain->debugger_attached) &&
-             ((hvmemul_ctxt->trap.vector == TRAP_debug) ||
-              (hvmemul_ctxt->trap.vector == TRAP_int3)) )
+             ((hvmemul_ctxt->ctxt.event.vector == TRAP_debug) ||
+              (hvmemul_ctxt->ctxt.event.vector == TRAP_int3)) )
         {
             domain_pause_for_debugger();
         }
-        else if ( curr->arch.hvm_vcpu.guest_cr[0] & X86_CR0_PE )
+        else if ( curr->arch.hvm.guest_cr[0] & X86_CR0_PE )
         {
             gdprintk(XENLOG_ERR, "Exception %02x in protected mode.\n",
-                     hvmemul_ctxt->trap.vector);
+                     hvmemul_ctxt->ctxt.event.vector);
             goto fail;
         }
         else
         {
             realmode_deliver_exception(
-                hvmemul_ctxt->trap.vector,
-                hvmemul_ctxt->trap.insn_len,
+                hvmemul_ctxt->ctxt.event.vector,
+                hvmemul_ctxt->ctxt.event.insn_len,
                 hvmemul_ctxt);
         }
     }
@@ -161,7 +144,7 @@ void vmx_realmode_emulate_one(struct hvm_emulate_ctxt *hvmemul_ctxt)
     return;
 
  fail:
-    hvm_dump_emulation_state(XENLOG_G_ERR "Real-mode", hvmemul_ctxt);
+    hvm_dump_emulation_state(XENLOG_G_ERR, "Real-mode", hvmemul_ctxt, rc);
     domain_crash(curr->domain);
 }
 
@@ -170,7 +153,7 @@ void vmx_realmode(struct cpu_user_regs *regs)
     struct vcpu *curr = current;
     struct hvm_emulate_ctxt hvmemul_ctxt;
     struct segment_register *sreg;
-    struct hvm_vcpu_io *vio = &curr->arch.hvm_vcpu.hvm_io;
+    struct hvm_vcpu_io *hvio = &curr->arch.hvm.hvm_io;
     unsigned long intr_info;
     unsigned int emulations = 0;
 
@@ -179,18 +162,18 @@ void vmx_realmode(struct cpu_user_regs *regs)
     if ( intr_info & INTR_INFO_VALID_MASK )
         __vmwrite(VM_ENTRY_INTR_INFO, 0);
 
-    hvm_emulate_init_once(&hvmemul_ctxt, regs);
+    hvm_emulate_init_once(&hvmemul_ctxt, NULL, regs);
 
     /* Only deliver interrupts into emulated real mode. */
-    if ( !(curr->arch.hvm_vcpu.guest_cr[0] & X86_CR0_PE) &&
+    if ( !(curr->arch.hvm.guest_cr[0] & X86_CR0_PE) &&
          (intr_info & INTR_INFO_VALID_MASK) )
     {
         realmode_deliver_exception((uint8_t)intr_info, 0, &hvmemul_ctxt);
         intr_info = 0;
     }
 
-    curr->arch.hvm_vmx.vmx_emulate = 1;
-    while ( curr->arch.hvm_vmx.vmx_emulate &&
+    curr->arch.hvm.vmx.vmx_emulate = 1;
+    while ( curr->arch.hvm.vmx.vmx_emulate &&
             !softirq_pending(smp_processor_id()) )
     {
         /*
@@ -199,30 +182,30 @@ void vmx_realmode(struct cpu_user_regs *regs)
          * in real mode, because we don't emulate protected-mode IDT vectoring.
          */
         if ( unlikely(!(++emulations & 15)) &&
-             curr->arch.hvm_vmx.vmx_realmode && 
+             curr->arch.hvm.vmx.vmx_realmode &&
              hvm_local_events_need_delivery(curr) )
             break;
 
         vmx_realmode_emulate_one(&hvmemul_ctxt);
 
-        if ( vio->io_req.state != STATE_IOREQ_NONE || vio->mmio_retry )
+        if ( curr->io.req.state != STATE_IOREQ_NONE || hvio->mmio_retry )
             break;
 
         /* Stop emulating unless our segment state is not safe */
-        if ( curr->arch.hvm_vmx.vmx_realmode )
-            curr->arch.hvm_vmx.vmx_emulate = 
-                (curr->arch.hvm_vmx.vm86_segment_mask != 0);
+        if ( curr->arch.hvm.vmx.vmx_realmode )
+            curr->arch.hvm.vmx.vmx_emulate =
+                (curr->arch.hvm.vmx.vm86_segment_mask != 0);
         else
-            curr->arch.hvm_vmx.vmx_emulate = 
+            curr->arch.hvm.vmx.vmx_emulate =
                  ((hvmemul_ctxt.seg_reg[x86_seg_cs].sel & 3)
                   || (hvmemul_ctxt.seg_reg[x86_seg_ss].sel & 3));
     }
 
     /* Need to emulate next time if we've started an IO operation */
-    if ( vio->io_req.state != STATE_IOREQ_NONE )
-        curr->arch.hvm_vmx.vmx_emulate = 1;
+    if ( curr->io.req.state != STATE_IOREQ_NONE )
+        curr->arch.hvm.vmx.vmx_emulate = 1;
 
-    if ( !curr->arch.hvm_vmx.vmx_emulate && !curr->arch.hvm_vmx.vmx_realmode )
+    if ( !curr->arch.hvm.vmx.vmx_emulate && !curr->arch.hvm.vmx.vmx_realmode )
     {
         /*
          * Cannot enter protected mode with bogus selector RPLs and DPLs.
@@ -230,13 +213,13 @@ void vmx_realmode(struct cpu_user_regs *regs)
          * DS, ES, FS and GS the most uninvasive trick is to set DPL == RPL.
          */
         sreg = hvmemul_get_seg_reg(x86_seg_ds, &hvmemul_ctxt);
-        sreg->attr.fields.dpl = sreg->sel & 3;
+        sreg->dpl = sreg->sel & 3;
         sreg = hvmemul_get_seg_reg(x86_seg_es, &hvmemul_ctxt);
-        sreg->attr.fields.dpl = sreg->sel & 3;
+        sreg->dpl = sreg->sel & 3;
         sreg = hvmemul_get_seg_reg(x86_seg_fs, &hvmemul_ctxt);
-        sreg->attr.fields.dpl = sreg->sel & 3;
+        sreg->dpl = sreg->sel & 3;
         sreg = hvmemul_get_seg_reg(x86_seg_gs, &hvmemul_ctxt);
-        sreg->attr.fields.dpl = sreg->sel & 3;
+        sreg->dpl = sreg->sel & 3;
         hvmemul_ctxt.seg_reg_dirty |=
             (1ul << x86_seg_ds) | (1ul << x86_seg_es) |
             (1ul << x86_seg_fs) | (1ul << x86_seg_gs);

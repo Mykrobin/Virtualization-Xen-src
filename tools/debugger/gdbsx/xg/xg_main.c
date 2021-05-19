@@ -79,7 +79,6 @@ int xgtrc_on = 0;
 struct xen_domctl domctl;         /* just use a global domctl */
 
 static int     _hvm_guest;        /* hvm guest? 32bit HVMs have 64bit context */
-static int     _pvh_guest;        /* PV guest in HVM container */
 static domid_t _dom_id;           /* guest domid */
 static int     _max_vcpu_id;      /* thus max_vcpu_id+1 VCPUs */
 static int     _dom0_fd;          /* fd of /dev/privcmd */
@@ -127,8 +126,10 @@ xg_init()
     int flags, saved_errno;
 
     XGTRC("E\n");
-    if ((_dom0_fd=open("/proc/xen/privcmd", O_RDWR)) == -1) {
-        perror("Failed to open /proc/xen/privcmd\n");
+    if ((_dom0_fd=open("/dev/xen/privcmd", O_RDWR)) == -1 &&
+        (_dom0_fd=open("/proc/xen/privcmd", O_RDWR)) == -1 &&
+        (_dom0_fd=open("/kern/xen/privcmd", O_RDWR)) == -1) {
+        perror("Failed to open privcmd\n");
         return -1;
     }
     /* Although we return the file handle as the 'xc handle' the API
@@ -308,7 +309,6 @@ xg_attach(int domid, int guest_bitness)
 
     _max_vcpu_id = domctl.u.getdomaininfo.max_vcpu_id;
     _hvm_guest = (domctl.u.getdomaininfo.flags & XEN_DOMINF_hvm_guest);
-    _pvh_guest = (domctl.u.getdomaininfo.flags & XEN_DOMINF_pvh_guest);
     return _max_vcpu_id;
 }
 
@@ -369,7 +369,7 @@ _change_TF(vcpuid_t which_vcpu, int guest_bitness, int setit)
     int sz = sizeof(anyc);
 
     /* first try the MTF for hvm guest. otherwise do manually */
-    if (_hvm_guest || _pvh_guest) {
+    if (_hvm_guest) {
         domctl.u.debug_op.vcpu = which_vcpu;
         domctl.u.debug_op.op = setit ? XEN_DOMCTL_DEBUG_OP_SINGLE_STEP_ON :
                                        XEN_DOMCTL_DEBUG_OP_SINGLE_STEP_OFF;
@@ -580,14 +580,14 @@ _cp_64ctxt_to_64gdb(struct cpu_user_regs_x86_64 *cp, struct xg_gdb_regs64 *rp)
     rp->rax = cp->rax;
     rp->rip = cp->rip;         
     rp->rsp = cp->rsp;      
-    rp->rflags = cp->rflags;
+    rp->eflags = cp->rflags;
 
-    rp->cs = (uint64_t)cp->cs;            
-    rp->ss = (uint64_t)cp->ss;
-    rp->es = (uint64_t)cp->es;            
-    rp->ds = (uint64_t)cp->ds;
-    rp->fs = (uint64_t)cp->fs;            
-    rp->gs = (uint64_t)cp->gs;
+    rp->cs = cp->cs;
+    rp->ss = cp->ss;
+    rp->es = cp->es;
+    rp->ds = cp->ds;
+    rp->fs = cp->fs;
+    rp->gs = cp->gs;
 #if 0
     printf("cp:%llx bp:%llx rip:%llx\n", rp->rsp, rp->rbp, rp->rip);
     printf("rax:%llx rbx:%llx\n", rp->rax, rp->rbx);
@@ -635,7 +635,7 @@ _cp_32gdb_to_64ctxt(struct xg_gdb_regs32 *rp, struct cpu_user_regs_x86_64 *cp)
     cp->ds = rp->ds;       
     cp->fs = rp->fs;       
     cp->gs = rp->gs;
-    cp->rflags = rp->eflags;
+    cp->eflags = rp->eflags;
 }
 
 static void
@@ -658,7 +658,7 @@ _cp_64gdb_to_64ctxt(struct xg_gdb_regs64 *rp, struct cpu_user_regs_x86_64 *cp)
     cp->rax = rp->rax;
     cp->rip = rp->rip;
     cp->rsp = rp->rsp;
-    cp->rflags = rp->rflags;
+    cp->rflags = rp->eflags;
 
     cp->cs = (uint16_t)rp->cs;
     cp->ss = (uint16_t)rp->ss;

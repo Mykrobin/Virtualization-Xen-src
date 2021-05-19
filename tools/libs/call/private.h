@@ -2,6 +2,7 @@
 #define XENCALL_PRIVATE_H
 
 #include <xentoollog.h>
+#include <xentoolcore_internal.h>
 
 #include <xencall.h>
 
@@ -11,15 +12,23 @@
 #ifndef PAGE_SHIFT /* Mini-os, Yukk */
 #define PAGE_SHIFT           12
 #endif
-#ifndef __MINIOS__ /* Yukk */
+#ifndef PAGE_SIZE
 #define PAGE_SIZE            (1UL << PAGE_SHIFT)
+#endif
+#ifndef PAGE_MASK
 #define PAGE_MASK            (~(PAGE_SIZE-1))
 #endif
 
 struct xencall_handle {
     xentoollog_logger *logger, *logger_tofree;
     unsigned flags;
-    int fd;
+
+                     /* partially     with /dev/     no /dev/      */
+                     /* initialised   xen/hypercall  xen/hypercall */
+    int fd;          /*    any           >= 0           >= 0       */
+    int buf_fd;      /*    any           >= 0           -1         */
+
+    Xentoolcore__Active_Handle tc_ah;
 
     /*
      * A simple cache of unused, single page, hypercall buffers

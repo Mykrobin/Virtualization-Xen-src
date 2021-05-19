@@ -9,47 +9,37 @@
 #ifndef __ASM_X86_HVM_VIRIDIAN_H__
 #define __ASM_X86_HVM_VIRIDIAN_H__
 
-union viridian_apic_assist
-{   uint64_t raw;
-    struct
-    {
-        uint64_t enabled:1;
-        uint64_t reserved_preserved:11;
-        uint64_t pfn:48;
-    } fields;
+#include <asm/guest/hyperv-tlfs.h>
+
+struct viridian_page
+{
+    union hv_vp_assist_page_msr msr;
+    void *ptr;
+};
+
+struct viridian_stimer {
+    struct vcpu *v;
+    struct timer timer;
+    union hv_stimer_config config;
+    uint64_t count;
+    uint64_t expiration;
+    bool started;
 };
 
 struct viridian_vcpu
 {
-    struct {
-        union viridian_apic_assist msr;
-        void *va;
-        int vector;
-    } apic_assist;
-};
-
-union viridian_guest_os_id
-{
-    uint64_t raw;
-    struct
-    {
-        uint64_t build_number:16;
-        uint64_t service_pack:8;
-        uint64_t minor:8;
-        uint64_t major:8;
-        uint64_t os:8;
-        uint64_t vendor:16;
-    } fields;
-};
-
-union viridian_hypercall_gpa
-{   uint64_t raw;
-    struct
-    {
-        uint64_t enabled:1;
-        uint64_t reserved_preserved:11;
-        uint64_t pfn:48;
-    } fields;
+    struct viridian_page vp_assist;
+    bool apic_assist_pending;
+    bool polled;
+    uint64_t scontrol;
+    uint64_t siefp;
+    struct viridian_page simp;
+    union hv_synic_sint sint[16];
+    uint8_t vector_to_sintx[256];
+    struct viridian_stimer stimer[4];
+    unsigned int stimer_enabled;
+    unsigned int stimer_pending;
+    uint64_t crash_param[5];
 };
 
 struct viridian_time_ref_count
@@ -65,68 +55,49 @@ struct viridian_time_ref_count
     int64_t off;
 };
 
-union viridian_reference_tsc
-{
-    uint64_t raw;
-    struct
-    {
-        uint64_t enabled:1;
-        uint64_t reserved_preserved:11;
-        uint64_t pfn:48;
-    } fields;
+enum {
+    _HCALL_spin_wait,
+    _HCALL_flush,
+    _HCALL_flush_ex,
+    _HCALL_ipi,
+    _HCALL_ipi_ex,
+    _HCALL_nr /* must be last */
 };
-
-/*
- * Type defintion as in Microsoft Hypervisor Top-Level Functional
- * Specification v4.0a, section 15.4.2.
- */
-typedef struct _HV_REFERENCE_TSC_PAGE
-{
-    uint32_t TscSequence;
-    uint32_t Reserved1;
-    uint64_t TscScale;
-    int64_t  TscOffset;
-    uint64_t Reserved2[509];
-} HV_REFERENCE_TSC_PAGE, *PHV_REFERENCE_TSC_PAGE;
 
 struct viridian_domain
 {
-    union viridian_guest_os_id guest_os_id;
-    union viridian_hypercall_gpa hypercall_gpa;
+    union hv_guest_os_id guest_os_id;
+    union hv_vp_assist_page_msr hypercall_gpa;
+    DECLARE_BITMAP(hypercall_flags, _HCALL_nr);
     struct viridian_time_ref_count time_ref_count;
-    union viridian_reference_tsc reference_tsc;
+    struct viridian_page reference_tsc;
 };
 
-int
-cpuid_viridian_leaves(
-    unsigned int leaf,
-    unsigned int *eax,
-    unsigned int *ebx,
-    unsigned int *ecx,
-    unsigned int *edx);
+void cpuid_viridian_leaves(const struct vcpu *v, uint32_t leaf,
+                           uint32_t subleaf, struct cpuid_leaf *res);
 
-int
-wrmsr_viridian_regs(
-    uint32_t idx,
-    uint64_t val);
-
-int
-rdmsr_viridian_regs(
-    uint32_t idx,
-    uint64_t *val);
+int guest_wrmsr_viridian(struct vcpu *v, uint32_t idx, uint64_t val);
+int guest_rdmsr_viridian(const struct vcpu *v, uint32_t idx, uint64_t *val);
 
 int
 viridian_hypercall(struct cpu_user_regs *regs);
 
-void viridian_time_ref_count_freeze(struct domain *d);
-void viridian_time_ref_count_thaw(struct domain *d);
+void viridian_time_domain_freeze(const struct domain *d);
+void viridian_time_domain_thaw(const struct domain *d);
+
+int viridian_vcpu_init(struct vcpu *v);
+int viridian_domain_init(struct domain *d);
 
 void viridian_vcpu_deinit(struct vcpu *v);
 void viridian_domain_deinit(struct domain *d);
 
-void viridian_start_apic_assist(struct vcpu *v, int vector);
-int viridian_complete_apic_assist(struct vcpu *v);
-void viridian_abort_apic_assist(struct vcpu *v);
+void viridian_apic_assist_set(const struct vcpu *v);
+bool viridian_apic_assist_completed(const struct vcpu *v);
+void viridian_apic_assist_clear(const struct vcpu *v);
+
+void viridian_synic_poll(struct vcpu *v);
+bool viridian_synic_is_auto_eoi_sint(const struct vcpu *v,
+                                     unsigned int vector);
 
 #endif /* __ASM_X86_HVM_VIRIDIAN_H__ */
 

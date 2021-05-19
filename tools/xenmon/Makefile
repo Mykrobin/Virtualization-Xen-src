@@ -32,11 +32,17 @@ install: build
 	$(INSTALL_DIR) $(DESTDIR)$(sbindir)
 	$(INSTALL_PROG) xenbaked $(DESTDIR)$(sbindir)/xenbaked
 	$(INSTALL_PROG) xentrace_setmask  $(DESTDIR)$(sbindir)/xentrace_setmask
-	$(INSTALL_PROG) xenmon.py  $(DESTDIR)$(sbindir)/xenmon.py
+	$(INSTALL_PYTHON_PROG) xenmon.py  $(DESTDIR)$(sbindir)/xenmon
+
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(sbindir)/xenbaked
+	rm -f $(DESTDIR)$(sbindir)/xentrace_setmask
+	rm -f $(DESTDIR)$(sbindir)/xenmon
 
 .PHONY: clean
 clean:
-	$(RM) -f $(DEPS)
+	$(RM) -f $(DEPS_RM)
 	$(RM) -f xenbaked xenbaked.o
 	$(RM) -f xentrace_setmask setmask.o
 
@@ -49,4 +55,4 @@ xenbaked: xenbaked.o Makefile
 xentrace_setmask: setmask.o Makefile
 	$(CC) $(LDFLAGS) $< -o $@ $(LDLIBS) $(APPEND_LDFLAGS)
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)

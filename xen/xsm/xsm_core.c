@@ -13,11 +13,16 @@
 #include <xen/init.h>
 #include <xen/errno.h>
 #include <xen/lib.h>
+#include <xen/param.h>
 
 #include <xen/hypercall.h>
 #include <xsm/xsm.h>
 
 #ifdef CONFIG_XSM
+
+#ifdef CONFIG_MULTIBOOT
+#include <asm/setup.h>
+#endif
 
 #ifdef CONFIG_HAS_DEVICE_TREE
 #include <asm/setup.h>
@@ -34,9 +39,9 @@ enum xsm_bootparam {
 };
 
 static enum xsm_bootparam __initdata xsm_bootparam =
-#if defined(CONFIG_XSM_FLASK_DEFAULT)
+#ifdef CONFIG_XSM_FLASK_DEFAULT
     XSM_BOOTPARAM_FLASK;
-#elif defined(CONFIG_XSM_SILO_DEFAULT)
+#elif CONFIG_XSM_SILO_DEFAULT
     XSM_BOOTPARAM_SILO;
 #else
     XSM_BOOTPARAM_DUMMY;
@@ -48,11 +53,11 @@ static int __init parse_xsm_param(const char *s)
 
     if ( !strcmp(s, "dummy") )
         xsm_bootparam = XSM_BOOTPARAM_DUMMY;
-#ifdef CONFIG_FLASK
+#ifdef CONFIG_XSM_FLASK
     else if ( !strcmp(s, "flask") )
         xsm_bootparam = XSM_BOOTPARAM_FLASK;
 #endif
-#ifdef CONFIG_SILO
+#ifdef CONFIG_XSM_SILO
     else if ( !strcmp(s, "silo") )
         xsm_bootparam = XSM_BOOTPARAM_SILO;
 #endif
@@ -74,11 +79,11 @@ static inline int verify(struct xsm_operations *ops)
 
 static int __init xsm_core_init(const void *policy_buffer, size_t policy_size)
 {
-#ifdef CONFIG_XSM_POLICY
+#ifdef CONFIG_XSM_FLASK_POLICY
     if ( policy_size == 0 )
     {
-        policy_buffer = xsm_init_policy;
-        policy_size = xsm_init_policy_size;
+        policy_buffer = xsm_flask_init_policy;
+        policy_size = xsm_flask_init_policy_size;
     }
 #endif
 
@@ -113,8 +118,7 @@ static int __init xsm_core_init(const void *policy_buffer, size_t policy_size)
 
 #ifdef CONFIG_MULTIBOOT
 int __init xsm_multiboot_init(unsigned long *module_map,
-                              const multiboot_info_t *mbi,
-                              void *(*bootstrap_map)(const module_t *))
+                              const multiboot_info_t *mbi)
 {
     int ret = 0;
     void *policy_buffer = NULL;
@@ -124,7 +128,7 @@ int __init xsm_multiboot_init(unsigned long *module_map,
 
     if ( XSM_MAGIC )
     {
-        ret = xsm_multiboot_policy_init(module_map, mbi, bootstrap_map,
+        ret = xsm_multiboot_policy_init(module_map, mbi,
                                         &policy_buffer, &policy_size);
         if ( ret )
         {

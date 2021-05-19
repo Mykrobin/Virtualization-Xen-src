@@ -13,7 +13,6 @@
  *    Keir Fraser <keir@xen.org>
  */
 
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/sched.h>
 #include <xen/softirq.h>
@@ -112,11 +111,15 @@ void do_tasklet(void)
     struct list_head *list = &per_cpu(tasklet_list, cpu);
 
     /*
-     * Work must be enqueued *and* scheduled. Otherwise there is no work to
-     * do, and/or scheduler needs to run to update idle vcpu priority.
+     * We want to be sure any caller has checked that a tasklet is both
+     * enqueued and scheduled, before calling this. And, if the caller has
+     * actually checked, it's not an issue that we are outside of the
+     * critical region, in fact:
+     * - TASKLET_enqueued is cleared only here,
+     * - TASKLET_scheduled is only cleared when schedule() find it set,
+     *   without TASKLET_enqueued being set as well.
      */
-    if ( likely(*work_to_do != (TASKLET_enqueued|TASKLET_scheduled)) )
-        return;
+    ASSERT(tasklet_work_to_do(cpu));
 
     spin_lock_irq(&tasklet_lock);
 
@@ -196,8 +199,7 @@ static void migrate_tasklets_from_cpu(unsigned int cpu, struct list_head *list)
     spin_unlock_irqrestore(&tasklet_lock, flags);
 }
 
-void tasklet_init(
-    struct tasklet *t, void (*func)(unsigned long), unsigned long data)
+void tasklet_init(struct tasklet *t, void (*func)(void *), void *data)
 {
     memset(t, 0, sizeof(*t));
     INIT_LIST_HEAD(&t->list);
@@ -206,8 +208,7 @@ void tasklet_init(
     t->data = data;
 }
 
-void softirq_tasklet_init(
-    struct tasklet *t, void (*func)(unsigned long), unsigned long data)
+void softirq_tasklet_init(struct tasklet *t, void (*func)(void *), void *data)
 {
     tasklet_init(t, func, data);
     t->is_softirq = 1;

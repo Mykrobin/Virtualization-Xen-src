@@ -17,11 +17,7 @@
 let xenstored_major = 1
 let xenstored_minor = 0
 
-let xenstored_proc_kva = "/proc/xen/xsd_kva"
-let xenstored_proc_port = "/proc/xen/xsd_port"
-
 let xs_daemon_socket = Paths.xen_run_stored ^ "/socket"
-let xs_daemon_socket_ro = Paths.xen_run_stored ^ "/socket_ro"
 
 let default_config_dir = Paths.xen_config_dir
 
@@ -34,6 +30,8 @@ let conflict_max_history_seconds = ref 0.05
 let conflict_rate_limit_is_aggregate = ref true
 
 let domid_self = 0x7FF0
+
+let path_max = ref Xenbus.Partial.xenstore_rel_path_max
 
 exception Not_a_directory of string
 exception Not_a_value of string

@@ -10,6 +10,7 @@ all: dist
 SUBSYSTEMS?=xen tools stubdom docs
 TARGS_DIST=$(patsubst %, dist-%, $(SUBSYSTEMS))
 TARGS_INSTALL=$(patsubst %, install-%, $(SUBSYSTEMS))
+TARGS_UNINSTALL=$(patsubst %, uninstall-%, $(SUBSYSTEMS))
 TARGS_BUILD=$(patsubst %, build-%, $(SUBSYSTEMS))
 TARGS_CLEAN=$(patsubst %, clean-%, $(SUBSYSTEMS))
 TARGS_DISTCLEAN=$(patsubst %, distclean-%, $(SUBSYSTEMS))
@@ -38,6 +39,10 @@ mini-os-dir-force-update: mini-os-dir
 export XEN_TARGET_ARCH
 export DESTDIR
 
+.PHONY: %-tools-public-headers
+%-tools-public-headers:
+	$(MAKE) -C tools/include $*
+
 # build and install everything into the standard system directories
 .PHONY: install
 install: $(TARGS_INSTALL)
@@ -49,12 +54,22 @@ build: $(TARGS_BUILD)
 build-xen:
 	$(MAKE) -C xen build
 
+.PHONY: %_defconfig
+%_defconfig:
+	$(MAKE) -C xen $@
+
 .PHONY: build-tools
-build-tools:
+build-tools: build-tools-public-headers
 	$(MAKE) -C tools build
 
+.PHONY: build-tools-oxenstored
+build-tools-oxenstored: build-tools-public-headers
+	$(MAKE) -s -C tools/ocaml clean
+	$(MAKE) -s -C tools/libs
+	$(MAKE) -C tools/ocaml build-tools-oxenstored
+
 .PHONY: build-stubdom
-build-stubdom: mini-os-dir
+build-stubdom: mini-os-dir build-tools-public-headers
 	$(MAKE) -C stubdom build
 ifeq (x86_64,$(XEN_TARGET_ARCH))
 	XEN_TARGET_ARCH=x86_32 $(MAKE) -C stubdom pv-grub
@@ -71,7 +86,30 @@ build-docs:
 test:
 	$(MAKE) -C tools/python test
 
-# build and install everything into local dist directory
+run-tests-%: build-tools-public-headers tools/tests/%/
+	$(MAKE) -C tools/tests/$* run
+
+# For most targets here,
+#   make COMPONENT-TARGET
+# is implemented, more or less, by
+#   make -C COMPONENT TARGET
+#
+# Each rule that does this needs to have dependencies on any
+# other COMPONENTs that have to be processed first.  See
+# The install-tools target here for an example.
+#
+# dist* targets are special: these do not occur in lower-level
+# Makefiles.  Instead, these are all implemented only here.
+# They run the appropriate install targets with DESTDIR set.
+#
+# Also, we have a number of targets COMPONENT which run
+# dist-COMPONENT, for convenience.
+#
+# The Makefiles invoked with -C from the toplevel should
+# generally have the following targets:
+#       all  build  install  clean  distclean
+
+
 .PHONY: dist
 dist: DESTDIR=$(DISTDIR)/install
 dist: $(TARGS_DIST) dist-misc
@@ -81,11 +119,12 @@ dist-misc:
 	$(INSTALL_DATA) ./COPYING $(DISTDIR)
 	$(INSTALL_DATA) ./README $(DISTDIR)
 	$(INSTALL_PROG) ./install.sh $(DISTDIR)
+
+
 dist-%: DESTDIR=$(DISTDIR)/install
 dist-%: install-%
 	@: # do nothing
 
-# Legacy dist targets
 .PHONY: xen tools stubdom docs
 xen: dist-xen
 tools: dist-tools
@@ -97,11 +136,11 @@ install-xen:
 	$(MAKE) -C xen install
 
 .PHONY: install-tools
-install-tools:
+install-tools: install-tools-public-headers
 	$(MAKE) -C tools install
 
 .PHONY: install-stubdom
-install-stubdom: install-tools mini-os-dir
+install-stubdom: mini-os-dir install-tools
 	$(MAKE) -C stubdom install
 ifeq (x86_64,$(XEN_TARGET_ARCH))
 	XEN_TARGET_ARCH=x86_32 $(MAKE) -C stubdom install-grub
@@ -122,13 +161,11 @@ install-docs:
 # We only have build-tests install-tests, not uninstall-tests etc.
 .PHONY: build-tests
 build-tests: build-xen
-	export BASEDIR=$(XEN_ROOT)/xen; \
-	$(MAKE) -f $$BASEDIR/Rules.mk -C xen/test build
+	$(MAKE) -C xen tests
 
 .PHONY: install-tests
 install-tests: install-xen
-	export BASEDIR=$(XEN_ROOT)/xen; \
-	$(MAKE) -f $$BASEDIR/Rules.mk -C xen/test install
+	$(MAKE) -C xen $@
 
 # build xen and the tools and place them in the install
 # directory. 'make install' should then copy them to the normal system
@@ -185,11 +222,11 @@ clean-xen:
 	$(MAKE) -C xen clean
 
 .PHONY: clean-tools
-clean-tools:
+clean-tools: clean-tools-public-headers
 	$(MAKE) -C tools clean
 
 .PHONY: clean-stubdom
-clean-stubdom:
+clean-stubdom: clean-tools-public-headers
 	$(MAKE) -C stubdom crossclean
 ifeq (x86_64,$(XEN_TARGET_ARCH))
 	XEN_TARGET_ARCH=x86_32 $(MAKE) -C stubdom crossclean
@@ -202,6 +239,7 @@ clean-docs:
 # clean, but blow away tarballs
 .PHONY: distclean
 distclean: $(TARGS_DISTCLEAN)
+	$(MAKE) -C tools/include distclean
 	rm -f config/Toplevel.mk
 	rm -rf dist
 	rm -rf config.log config.status config.cache autom4te.cache
@@ -264,11 +302,6 @@ help:
 	@echo '  uninstall             - attempt to remove installed Xen tools'
 	@echo '                          (use with extreme care!)'
 	@echo
-	@echo 'Trusted Boot (tboot) targets:'
-	@echo '  build-tboot           - download and build the tboot module'
-	@echo '  install-tboot         - download, build, and install the tboot module'
-	@echo '  clean-tboot           - clean the tboot module if it exists'
-	@echo
 	@echo 'Package targets:'
 	@echo '  src-tarball-release   - make a source tarball with xen and qemu tagged with a release'
 	@echo '  src-tarball           - make a source tarball with xen and qemu tagged with git describe'
@@ -277,51 +310,27 @@ help:
 	@echo '  [ this documentation is sadly not complete ]'
 
 # Use this target with extreme care!
+
+.PHONY: uninstall-xen
+uninstall-xen:
+	$(MAKE) -C xen uninstall
+
+.PHONY: uninstall-tools
+uninstall-tools:
+	$(MAKE) -C tools uninstall
+
+.PHONY: uninstall-stubdom
+uninstall-stubdom:
+	$(MAKE) -C stubdom uninstall
+
+.PHONY: uninstall-docs
+uninstall-docs:
+	$(MAKE) -C docs uninstall
+
 .PHONY: uninstall
 uninstall: D=$(DESTDIR)
-uninstall:
-	$(MAKE) -C xen uninstall
-	make -C tools uninstall
-	rm -rf $(D)/boot/tboot*
+uninstall: uninstall-tools-public-headers $(TARGS_UNINSTALL)
 
 .PHONY: xenversion
 xenversion:
 	@$(MAKE) --no-print-directory -C xen xenversion
-
-#
-# tboot targets
-#
-
-TBOOT_TARFILE = tboot-20090330.tar.gz
-#TBOOT_BASE_URL = http://downloads.sourceforge.net/tboot
-TBOOT_BASE_URL = $(XEN_EXTFILES_URL)
-
-.PHONY: build-tboot
-build-tboot: download_tboot
-	$(MAKE) -C tboot build
-
-.PHONY: install-tboot
-install-tboot: download_tboot
-	$(MAKE) -C tboot install
-
-.PHONY: dist-tboot
-dist-tboot: download_tboot
-	$(MAKE) DESTDIR=$(DISTDIR)/install -C tboot dist
-
-.PHONY: clean-tboot
-clean-tboot:
-	[ ! -d tboot ] || $(MAKE) -C tboot clean
-
-.PHONY: distclean-tboot
-distclean-tboot:
-	[ ! -d tboot ] || $(MAKE) -C tboot distclean
-
-.PHONY: download_tboot
-download_tboot: tboot/Makefile
-
-tboot/Makefile: tboot/$(TBOOT_TARFILE)
-	[ -e tboot/Makefile ] || tar -xzf tboot/$(TBOOT_TARFILE) -C tboot/ --strip-components 1
-
-tboot/$(TBOOT_TARFILE):
-	mkdir -p tboot
-	wget -O tboot/$(TBOOT_TARFILE) $(TBOOT_BASE_URL)/$(TBOOT_TARFILE)

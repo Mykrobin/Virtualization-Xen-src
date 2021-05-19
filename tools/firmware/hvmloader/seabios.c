@@ -29,9 +29,6 @@
 #include <acpi2_0.h>
 #include <libacpi.h>
 
-extern unsigned char dsdt_anycpu_qemu_xen[];
-extern int dsdt_anycpu_qemu_xen_len;
-
 struct seabios_info {
     char signature[14]; /* XenHVMSeaBIOS\0 */
     uint8_t length;     /* Length of this struct */
@@ -134,7 +131,8 @@ static void seabios_setup_e820(void)
 }
 
 static void seabios_load(const struct bios_config *bios,
-                         void *bios_addr, uint32_t bios_length)
+                         void *bios_addr, uint32_t bios_length,
+                         void *unused_addr)
 {
     unsigned int bios_dest = 0x100000 - bios_length;
 

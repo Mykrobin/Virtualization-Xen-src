@@ -125,23 +125,12 @@ static always_inline unsigned long __cmpxchg(volatile void *ptr,
 					     unsigned long new,
 					     int size)
 {
+	smp_mb();
 	if (!__int_cmpxchg(ptr, &old, new, size, false, 0))
 		ASSERT_UNREACHABLE();
+	smp_mb();
 
 	return old;
-}
-
-static always_inline unsigned long __cmpxchg_mb(volatile void *ptr,
-						unsigned long old,
-						unsigned long new, int size)
-{
-	unsigned long ret;
-
-	smp_mb();
-	ret = __cmpxchg(ptr, old, new, size);
-	smp_mb();
-
-	return ret;
 }
 
 /*
@@ -154,32 +143,34 @@ static always_inline unsigned long __cmpxchg_mb(volatile void *ptr,
  * The helper will return true when the update has succeeded (i.e no
  * timeout) and false if the update has failed.
  */
-static always_inline bool __cmpxchg_mb_timeout(volatile void *ptr,
-					       unsigned long *old,
-					       unsigned long new,
-					       int size,
-					       unsigned int max_try)
+static always_inline bool __cmpxchg_timeout(volatile void *ptr,
+					    unsigned long *old,
+					    unsigned long new,
+					    int size,
+					    unsigned int max_try)
 {
-	return __int_cmpxchg(ptr, old, new, size, true, max_try);
+	bool ret;
+
+	smp_mb();
+	ret = __int_cmpxchg(ptr, old, new, size, true, max_try);
+	smp_mb();
+
+	return ret;
 }
 
 #define cmpxchg(ptr, o, n) \
 ({ \
 	__typeof__(*(ptr)) __ret; \
 	__ret = (__typeof__(*(ptr))) \
-		__cmpxchg_mb((ptr), (unsigned long)(o), (unsigned long)(n), \
-			     sizeof(*(ptr))); \
+		__cmpxchg((ptr), (unsigned long)(o), (unsigned long)(n), \
+			  sizeof(*(ptr))); \
 	__ret; \
 })
 
-#define cmpxchg_local(ptr, o, n) \
-({ \
-	__typeof__(*(ptr)) __ret; \
-	__ret = (__typeof__(*(ptr))) \
-		__cmpxchg((ptr), (unsigned long)(o), \
-			  (unsigned long)(n), sizeof(*(ptr))); \
-	__ret; \
-})
+#define cmpxchg64(ptr, o, n) cmpxchg(ptr, o, n)
+
+#define __cmpxchg64_timeout(ptr, old, new, max_try)	\
+	__cmpxchg_timeout(ptr, old, new, 8, max_try)
 
 #endif
 /*

@@ -10,7 +10,6 @@
  * published by the Free Software Foundation.
  */
 
-#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/init.h>
 #include <xen/guest_access.h>
@@ -113,11 +112,11 @@ void dt_set_range(__be32 **cellp, const struct dt_device_node *np,
     dt_set_cell(cellp, dt_n_size_cells(np), size);
 }
 
-void dt_child_set_range(__be32 **cellp, const struct dt_device_node *parent,
+void dt_child_set_range(__be32 **cellp, int addrcells, int sizecells,
                         u64 address, u64 size)
 {
-    dt_set_cell(cellp, dt_child_n_addr_cells(parent), address);
-    dt_set_cell(cellp, dt_child_n_size_cells(parent), size);
+    dt_set_cell(cellp, addrcells, address);
+    dt_set_cell(cellp, sizecells, size);
 }
 
 static void __init *unflatten_dt_alloc(unsigned long *mem, unsigned long size,
@@ -207,6 +206,33 @@ int dt_property_read_string(const struct dt_device_node *np,
     *out_string = pp->value;
 
     return 0;
+}
+
+int dt_property_match_string(const struct dt_device_node *np,
+                             const char *propname, const char *string)
+{
+    const struct dt_property *dtprop = dt_find_property(np, propname, NULL);
+    size_t l;
+    int i;
+    const char *p, *end;
+
+    if ( !dtprop )
+        return -EINVAL;
+    if ( !dtprop->value )
+        return -ENODATA;
+
+    p = dtprop->value;
+    end = p + dtprop->length;
+
+    for ( i = 0; p < end; i++, p += l )
+    {
+        l = strnlen(p, end - p) + 1;
+        if ( p + l > end )
+            return -EILSEQ;
+        if ( strcmp(string, p) == 0 )
+            return i; /* Found it; return index */
+    }
+    return -ENODATA;
 }
 
 bool_t dt_device_is_compatible(const struct dt_device_node *device,
@@ -537,14 +563,28 @@ static unsigned int dt_bus_default_get_flags(const __be32 *addr)
  * PCI bus specific translator
  */
 
+static bool dt_node_is_pci(const struct dt_device_node *np)
+{
+    bool is_pci = !strcmp(np->name, "pcie") || !strcmp(np->name, "pci");
+
+    if ( is_pci )
+        printk(XENLOG_WARNING "%s: Missing device_type\n", np->full_name);
+
+    return is_pci;
+}
+
 static bool_t dt_bus_pci_match(const struct dt_device_node *np)
 {
     /*
      * "pciex" is PCI Express "vci" is for the /chaos bridge on 1st-gen PCI
      * powermacs "ht" is hypertransport
+     *
+     * If none of the device_type match, and that the node name is
+     * "pcie" or "pci", accept the device as PCI (with a warning).
      */
     return !strcmp(np->type, "pci") || !strcmp(np->type, "pciex") ||
-        !strcmp(np->type, "vci") || !strcmp(np->type, "ht");
+        !strcmp(np->type, "vci") || !strcmp(np->type, "ht") ||
+        dt_node_is_pci(np);
 }
 
 static void dt_bus_pci_count_cells(const struct dt_device_node *np,
@@ -988,8 +1028,19 @@ unsigned int dt_number_of_irq(const struct dt_device_node *device)
     const struct dt_device_node *p;
     const __be32 *intspec, *tmp;
     u32 intsize, intlen;
+    int intnum;
 
     dt_dprintk("dt_irq_number: dev=%s\n", device->full_name);
+
+    /* Try the new-style interrupts-extended first */
+    intnum = dt_count_phandle_with_args(device, "interrupts-extended",
+                                        "#interrupt-cells");
+    if ( intnum >= 0 )
+    {
+        dt_dprintk(" using 'interrupts-extended' property\n");
+        dt_dprintk(" intnum=%d\n", intnum);
+        return intnum;
+    }
 
     /* Get the interrupts property */
     intspec = dt_get_property(device, "interrupts", &intlen);
@@ -997,6 +1048,7 @@ unsigned int dt_number_of_irq(const struct dt_device_node *device)
         return 0;
     intlen /= sizeof(*intspec);
 
+    dt_dprintk(" using 'interrupts' property\n");
     dt_dprintk(" intspec=%d intlen=%d\n", be32_to_cpup(intspec), intlen);
 
     /* Look for the interrupt parent. */
@@ -1421,9 +1473,29 @@ int dt_device_get_raw_irq(const struct dt_device_node *device,
     const __be32 *intspec, *tmp, *addr;
     u32 intsize, intlen;
     int res = -EINVAL;
+    struct dt_phandle_args args;
+    int i;
 
     dt_dprintk("dt_device_get_raw_irq: dev=%s, index=%u\n",
                device->full_name, index);
+
+    /* Get the reg property (if any) */
+    addr = dt_get_property(device, "reg", NULL);
+
+    /* Try the new-style interrupts-extended first */
+    res = dt_parse_phandle_with_args(device, "interrupts-extended",
+                                     "#interrupt-cells", index, &args);
+    if ( !res )
+    {
+        dt_dprintk(" using 'interrupts-extended' property\n");
+        dt_dprintk(" intspec=%d intsize=%d\n", args.args[0], args.args_count);
+
+        for ( i = 0; i < args.args_count; i++ )
+            args.args[i] = cpu_to_be32(args.args[i]);
+
+        return dt_irq_map_raw(args.np, args.args, args.args_count,
+                              addr, out_irq);
+    }
 
     /* Get the interrupts property */
     intspec = dt_get_property(device, "interrupts", &intlen);
@@ -1431,10 +1503,8 @@ int dt_device_get_raw_irq(const struct dt_device_node *device,
         return -EINVAL;
     intlen /= sizeof(*intspec);
 
+    dt_dprintk(" using 'interrupts' property\n");
     dt_dprintk(" intspec=%d intlen=%d\n", be32_to_cpup(intspec), intlen);
-
-    /* Get the reg property (if any) */
-    addr = dt_get_property(device, "reg", NULL);
 
     /* Look for the interrupt parent. */
     p = dt_irq_find_parent(device);
@@ -1662,6 +1732,13 @@ int dt_parse_phandle_with_args(const struct dt_device_node *np,
         return -EINVAL;
     return __dt_parse_phandle_with_args(np, list_name, cells_name, 0,
                                         index, out_args);
+}
+
+int dt_count_phandle_with_args(const struct dt_device_node *np,
+                               const char *list_name,
+                               const char *cells_name)
+{
+    return __dt_parse_phandle_with_args(np, list_name, cells_name, 0, -1, NULL);
 }
 
 /**

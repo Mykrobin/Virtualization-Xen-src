@@ -5,10 +5,10 @@
  * Linux; see the Linux source for authorship and copyrights.
  */
 
-#include <xen/config.h>
 #include <xen/console.h>
 #include <xen/delay.h>
 #include <xen/errno.h>
+#include <xen/param.h>
 #include <xen/pci.h>
 #include <xen/serial.h>
 #include <asm/byteorder.h>
@@ -683,7 +683,8 @@ static int dbgp_control_msg(struct ehci_dbgp *dbgp, unsigned int devnum,
 
 static unsigned int __init __find_dbgp(u8 bus, u8 slot, u8 func)
 {
-    u32 class = pci_conf_read32(0, bus, slot, func, PCI_CLASS_REVISION);
+    uint32_t class = pci_conf_read32(PCI_SBDF(0, bus, slot, func),
+                                     PCI_CLASS_REVISION);
 
     if ( (class >> 8) != PCI_CLASS_SERIAL_USB_EHCI )
         return 0;
@@ -714,7 +715,7 @@ static unsigned int __init find_dbgp(struct ehci_dbgp *dbgp,
                 cap = __find_dbgp(bus, slot, func);
                 if ( !cap || ehci_num-- )
                 {
-                    if ( !func && !(pci_conf_read8(0, bus, slot, func,
+                    if ( !func && !(pci_conf_read8(PCI_SBDF(0, bus, slot, func),
                                                    PCI_HEADER_TYPE) & 0x80) )
                         break;
                     continue;
@@ -1007,17 +1008,19 @@ static set_debug_port_t __read_mostly set_debug_port = default_set_debug_port;
 
 static void nvidia_set_debug_port(struct ehci_dbgp *dbgp, unsigned int port)
 {
-    u32 dword = pci_conf_read32(0, dbgp->bus, dbgp->slot, dbgp->func, 0x74);
+    uint32_t dword = pci_conf_read32(PCI_SBDF(0, dbgp->bus, dbgp->slot,
+                                              dbgp->func), 0x74);
 
     dword &= ~(0x0f << 12);
     dword |= (port & 0x0f) << 12;
-    pci_conf_write32(0, dbgp->bus, dbgp->slot, dbgp->func, 0x74, dword);
+    pci_conf_write32(PCI_SBDF(0, dbgp->bus, dbgp->slot, dbgp->func), 0x74,
+                     dword);
     dbgp_printk("set debug port to %u\n", port);
 }
 
 static void __init detect_set_debug_port(struct ehci_dbgp *dbgp)
 {
-    if ( pci_conf_read16(0, dbgp->bus, dbgp->slot, dbgp->func,
+    if ( pci_conf_read16(PCI_SBDF(0, dbgp->bus, dbgp->slot, dbgp->func),
                          PCI_VENDOR_ID) == 0x10de )
     {
         dbgp_printk("using nvidia set_debug_port\n");
@@ -1040,13 +1043,15 @@ static void ehci_dbgp_bios_handoff(struct ehci_dbgp *dbgp, u32 hcc_params)
     if ( !offset )
         return;
 
-    cap = pci_conf_read32(0, dbgp->bus, dbgp->slot, dbgp->func, offset);
+    cap = pci_conf_read32(PCI_SBDF(0, dbgp->bus, dbgp->slot, dbgp->func),
+                          offset);
     dbgp_printk("dbgp: EHCI BIOS state %08x\n", cap);
 
     if ( (cap & 0xff) == 1 && (cap & EHCI_USBLEGSUP_BIOS) )
     {
         dbgp_printk("dbgp: BIOS handoff\n");
-        pci_conf_write8(0, dbgp->bus, dbgp->slot, dbgp->func, offset + 3, 1);
+        pci_conf_write8(PCI_SBDF(0, dbgp->bus, dbgp->slot, dbgp->func),
+                        offset + 3, 1);
     }
 
     /* if boot firmware now owns EHCI, spin till it hands it over. */
@@ -1055,7 +1060,8 @@ static void ehci_dbgp_bios_handoff(struct ehci_dbgp *dbgp, u32 hcc_params)
     {
         mdelay(10);
         msec -= 10;
-        cap = pci_conf_read32(0, dbgp->bus, dbgp->slot, dbgp->func, offset);
+        cap = pci_conf_read32(PCI_SBDF(0, dbgp->bus, dbgp->slot, dbgp->func),
+                              offset);
     }
 
     if ( cap & EHCI_USBLEGSUP_BIOS )
@@ -1063,11 +1069,12 @@ static void ehci_dbgp_bios_handoff(struct ehci_dbgp *dbgp, u32 hcc_params)
         /* well, possibly buggy BIOS... try to shut it down,
          * and hope nothing goes too wrong */
         dbgp_printk("dbgp: BIOS handoff failed: %08x\n", cap);
-        pci_conf_write8(0, dbgp->bus, dbgp->slot, dbgp->func, offset + 2, 0);
+        pci_conf_write8(PCI_SBDF(0, dbgp->bus, dbgp->slot, dbgp->func),
+                        offset + 2, 0);
     }
 
     /* just in case, always disable EHCI SMIs */
-    pci_conf_write8(0, dbgp->bus, dbgp->slot, dbgp->func,
+    pci_conf_write8(PCI_SBDF(0, dbgp->bus, dbgp->slot, dbgp->func),
                     offset + EHCI_USBLEGCTLSTS, 0);
 }
 
@@ -1308,18 +1315,19 @@ static void __init ehci_dbgp_init_preirq(struct serial_port *port)
     u32 debug_port, offset;
     void __iomem *ehci_bar;
 
-    debug_port = pci_conf_read32(0, dbgp->bus, dbgp->slot, dbgp->func,
+    debug_port = pci_conf_read32(PCI_SBDF(0, dbgp->bus, dbgp->slot, dbgp->func),
                                  dbgp->cap);
     offset = (debug_port >> 16) & 0xfff;
 
     /* double check if the mem space is enabled */
-    dbgp->pci_cr = pci_conf_read8(0, dbgp->bus, dbgp->slot, dbgp->func,
+    dbgp->pci_cr = pci_conf_read8(PCI_SBDF(0, dbgp->bus, dbgp->slot,
+                                           dbgp->func),
                                   PCI_COMMAND);
     if ( !(dbgp->pci_cr & PCI_COMMAND_MEMORY) )
     {
         dbgp->pci_cr |= PCI_COMMAND_MEMORY;
-        pci_conf_write16(0, dbgp->bus, dbgp->slot, dbgp->func, PCI_COMMAND,
-                         dbgp->pci_cr);
+        pci_conf_write16(PCI_SBDF(0, dbgp->bus, dbgp->slot, dbgp->func),
+                         PCI_COMMAND, dbgp->pci_cr);
         dbgp_printk("MMIO for EHCI enabled\n");
     }
 
@@ -1328,7 +1336,7 @@ static void __init ehci_dbgp_init_preirq(struct serial_port *port)
      * than enough.  1k is the biggest that was seen.
      */
     set_fixmap_nocache(FIX_EHCI_DBGP, dbgp->bar_val);
-    ehci_bar = (void __iomem *)fix_to_virt(FIX_EHCI_DBGP);
+    ehci_bar = fix_to_virt(FIX_EHCI_DBGP);
     ehci_bar += dbgp->bar_val & ~PAGE_MASK;
     dbgp_printk("ehci_bar: %p\n", ehci_bar);
 
@@ -1363,7 +1371,7 @@ static void __init ehci_dbgp_init_postirq(struct serial_port *port)
 
     ehci_dbgp_setup_postirq(dbgp);
 
-    pci_hide_device(dbgp->bus, PCI_DEVFN(dbgp->slot, dbgp->func));
+    pci_hide_device(0, dbgp->bus, PCI_DEVFN(dbgp->slot, dbgp->func));
 }
 
 static int ehci_dbgp_check_release(struct ehci_dbgp *dbgp)
@@ -1416,7 +1424,8 @@ static void ehci_dbgp_suspend(struct serial_port *port)
     stop_timer(&dbgp->timer);
     dbgp->timer.expires = 0;
 
-    dbgp->pci_cr = pci_conf_read16(0, dbgp->bus, dbgp->slot, dbgp->func,
+    dbgp->pci_cr = pci_conf_read16(PCI_SBDF(0, dbgp->bus, dbgp->slot,
+                                            dbgp->func),
                                    PCI_COMMAND);
 
     dbgp->state = dbgp_unsafe;
@@ -1429,9 +1438,9 @@ static void ehci_dbgp_resume(struct serial_port *port)
     if ( !dbgp->ehci_debug )
         return;
 
-    pci_conf_write32(0, dbgp->bus, dbgp->slot, dbgp->func, dbgp->bar,
+    pci_conf_write32(PCI_SBDF(0, dbgp->bus, dbgp->slot, dbgp->func), dbgp->bar,
                      dbgp->bar_val);
-    pci_conf_write16(0, dbgp->bus, dbgp->slot, dbgp->func,
+    pci_conf_write16(PCI_SBDF(0, dbgp->bus, dbgp->slot, dbgp->func),
                      PCI_COMMAND, dbgp->pci_cr);
 
     ehci_dbgp_setup_preirq(dbgp);
@@ -1503,7 +1512,7 @@ void __init ehci_dbgp_init(void)
     else
         return;
 
-    debug_port = pci_conf_read32(0, dbgp->bus, dbgp->slot, dbgp->func,
+    debug_port = pci_conf_read32(PCI_SBDF(0, dbgp->bus, dbgp->slot, dbgp->func),
                                  dbgp->cap);
     dbgp->bar = (debug_port >> 29) & 0x7;
     dbgp->bar = ((dbgp->bar - 1) * 4) + PCI_BASE_ADDRESS_0;
@@ -1515,8 +1524,8 @@ void __init ehci_dbgp_init(void)
         return;
     }
 
-    dbgp->bar_val = bar_val = pci_conf_read32(0, dbgp->bus, dbgp->slot,
-                                              dbgp->func, dbgp->bar);
+    dbgp->bar_val = bar_val = pci_conf_read32(PCI_SBDF(0, dbgp->bus, dbgp->slot,
+                                                       dbgp->func), dbgp->bar);
     dbgp_printk("bar_val: %08x\n", bar_val);
     if ( bar_val & ~PCI_BASE_ADDRESS_MEM_MASK )
     {

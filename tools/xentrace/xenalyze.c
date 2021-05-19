@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <argp.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
@@ -357,7 +358,7 @@ char * find_symbol(unsigned long long addr) {
     int i;
     char * lastname="ZERO";
     unsigned long long offset=addr;
-    static char name[128];
+    static char name[144];
 
     if(!p) {
         name[0]=0;
@@ -378,7 +379,7 @@ char * find_symbol(unsigned long long addr) {
         p=p->next;
     }
  finish:
-    snprintf(name, 128, "(%s +%llx)",
+    snprintf(name, 144, "(%s +%llx)",
              lastname, offset);
     return name;
 }
@@ -7528,6 +7529,23 @@ void sched_process(struct pcpu_info *p)
                 printf("\n");
             }
             break;
+        case TRC_SCHED_SWITCH_INFCONT:
+            if(opt.dump_all)
+            {
+                struct {
+                    unsigned int domid, vcpuid, rsince;
+                    int slice;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s sched_switch continue d%uv%u, run for %u.%uus",
+                       ri->dump_header, r->domid, r->vcpuid,
+                       r->rsince / 1000, r->rsince % 1000);
+                if ( r->slice > 0 )
+                    printf(", next slice %u.%uus", r->slice / 1000,
+                           r->slice % 1000);
+                printf("\n");
+            }
+            break;
         case TRC_SCHED_CTL:
         case TRC_SCHED_S_TIMER_FN:
         case TRC_SCHED_T_TIMER_FN:
@@ -7616,7 +7634,7 @@ void sched_process(struct pcpu_info *p)
                     unsigned int cpu:16, tasklet:8, idle:8;
                 } *r = (typeof(r))ri->d;
 
-                printf(" %s csched:schedule cpu %u, %s%s\n",
+                printf(" %s csched:schedule cpu %u%s%s\n",
                        ri->dump_header, r->cpu,
                        r->tasklet ? ", tasklet scheduled" : "",
                        r->idle ? ", idle" : ", busy");
@@ -7632,6 +7650,17 @@ void sched_process(struct pcpu_info *p)
                 printf(" %s csched:ratelimit, d%uv%u run only %u.%uus\n",
                        ri->dump_header, r->domid, r->vcpuid,
                        r->runtime / 1000, r->runtime % 1000);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(CSCHED, 11): /* STEAL_CHECK   */
+            if(opt.dump_all) {
+                struct {
+                    unsigned int peer_cpu, check;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s csched:load_balance %s %u\n",
+                       ri->dump_header, r->check ? "checking" : "skipping",
+                       r->peer_cpu);
             }
             break;
         /* CREDIT 2 (TRC_CSCHED2_xxx) */
@@ -7651,24 +7680,27 @@ void sched_process(struct pcpu_info *p)
         case TRC_SCHED_CLASS_EVT(CSCHED2, 3): /* CREDIT_BURN       */
             if(opt.dump_all) {
                 struct {
-                    unsigned int vcpuid:16, domid:16, credit;
-                    int delta;
+                    unsigned int vcpuid:16, domid:16;
+                    int credit, budget, delta;
                 } *r = (typeof(r))ri->d;
 
-                printf(" %s csched2:burn_credits d%uv%u, credit = %u, delta = %d\n",
-                       ri->dump_header, r->domid, r->vcpuid,
-                       r->credit, r->delta);
+                printf(" %s csched2:burn_credits d%uv%u, credit = %d, ",
+                       ri->dump_header, r->domid, r->vcpuid, r->credit);
+                if ( r->budget != INT_MIN )
+                    printf("budget = %d, ", r->budget);
+                printf("delta = %d\n", r->delta);
             }
             break;
         case TRC_SCHED_CLASS_EVT(CSCHED2, 5): /* TICKLE_CHECK      */
             if(opt.dump_all) {
                 struct {
                     unsigned int vcpuid:16, domid:16;
-                    unsigned int credit;
+                    int credit, score;
                 } *r = (typeof(r))ri->d;
 
-                printf(" %s csched2:tickle_check d%uv%u, credit = %u\n",
-                       ri->dump_header, r->domid, r->vcpuid, r->credit);
+                printf(" %s csched2:tickle_check d%uv%u, credit = %d, score = %d\n\n",
+                       ri->dump_header, r->domid, r->vcpuid,
+                       r->credit, r->score);
             }
             break;
         case TRC_SCHED_CLASS_EVT(CSCHED2, 6): /* TICKLE            */
@@ -7685,14 +7717,13 @@ void sched_process(struct pcpu_info *p)
             if(opt.dump_all) {
                 struct {
                     unsigned int vcpuid:16, domid:16;
-                    unsigned int credit_start, credit_end;
-                    unsigned int multiplier;
+                    int credit_start, credit_end;
                 } *r = (typeof(r))ri->d;
 
                 printf(" %s csched2:reset_credits d%uv%u, "
-                       "credit_start = %u, credit_end = %u, mult = %u\n",
+                       "credit_start = %d, credit_end = %d\n",
                        ri->dump_header, r->domid, r->vcpuid,
-                       r->credit_start, r->credit_end, r->multiplier);
+                       r->credit_start, r->credit_end);
             }
             break;
         case TRC_SCHED_CLASS_EVT(CSCHED2, 8):  /* SCHED_TASKLET    */
@@ -7752,12 +7783,12 @@ void sched_process(struct pcpu_info *p)
         case TRC_SCHED_CLASS_EVT(CSCHED2, 13): /* TICKLE_NEW       */
             if (opt.dump_all) {
                 struct {
-                    unsigned vcpuid:16, domid:16;
-                    unsigned processor, credit;
+                    unsigned int vcpuid:16, domid:16, processor;
+                    int credit;
                 } *r = (typeof(r))ri->d;
 
                 printf(" %s csched2:runq_tickle_new d%uv%u, "
-                       "processor = %u, credit = %u\n",
+                       "processor = %u, credit = %d\n",
                        ri->dump_header, r->domid, r->vcpuid,
                        r->processor, r->credit);
             }
@@ -7824,13 +7855,12 @@ void sched_process(struct pcpu_info *p)
             if (opt.dump_all) {
                 struct {
                     unsigned vcpuid:16, domid:16;
-                    unsigned tickled_cpu, skipped;
+                    unsigned tickled_cpu;
+                    int credit;
                 } *r = (typeof(r))ri->d;
 
-                printf(" %s csched2:runq_candidate d%uv%u, "
-                       "%u vcpus skipped, ",
-                       ri->dump_header, r->domid, r->vcpuid,
-                       r->skipped);
+                printf(" %s csched2:runq_candidate d%uv%u, credit = %d, ",
+                       ri->dump_header, r->domid, r->vcpuid, r->credit);
                 if (r->tickled_cpu == (unsigned)-1)
                     printf("no cpu was tickled\n");
                 else
@@ -7862,6 +7892,16 @@ void sched_process(struct pcpu_info *p)
                 printf(" %s csched2:ratelimit, d%uv%u run only %u.%uus\n",
                        ri->dump_header, r->domid, r->vcpuid,
                        r->runtime / 1000, r->runtime % 1000);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(CSCHED2, 23): /* RUNQ_CAND_CHECK  */
+            if(opt.dump_all) {
+                struct {
+                    unsigned int vcpuid:16, domid:16;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s csched2:runq_cand_check d%uv%u\n",
+                       ri->dump_header, r->domid, r->vcpuid);
             }
             break;
         /* RTDS (TRC_RTDS_xxx) */
@@ -7928,6 +7968,71 @@ void sched_process(struct pcpu_info *p)
                        r->idle ? ", idle" : ", busy",
                        r->tickled ? ", tickled" : ", not tickled");
             }
+            break;
+        case TRC_SCHED_CLASS_EVT(SNULL, 1): /* PICKED_CPU */
+            if (opt.dump_all) {
+                struct {
+                    uint16_t vcpuid, domid;
+                    uint32_t new_cpu;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s null:picked_cpu d%uv%u, cpu %u\n",
+                       ri->dump_header, r->domid, r->vcpuid, r->new_cpu);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(SNULL, 2): /* VCPU_ASSIGN */
+            if (opt.dump_all) {
+                struct {
+                    uint16_t vcpuid, domid;
+                    uint32_t cpu;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s null:vcpu_assign d%uv%u to cpu %u\n",
+                       ri->dump_header, r->domid, r->vcpuid, r->cpu);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(SNULL, 3): /* VCPU_DEASSIGN */
+            if (opt.dump_all) {
+                struct {
+                    uint16_t vcpuid, domid;
+                    uint32_t cpu;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s null:vcpu_deassign d%uv%u from cpu %u\n",
+                       ri->dump_header, r->domid, r->vcpuid, r->cpu);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(SNULL, 4): /* MIGRATE */
+            if (opt.dump_all) {
+                struct {
+                    uint16_t vcpuid, domid;
+                    uint16_t cpu, new_cpu;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s null:migrate d%uv%u, cpu %u, new_cpu %u\n",
+                       ri->dump_header, r->domid, r->vcpuid,
+                       r->cpu, r->new_cpu);
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(SNULL, 5): /* SCHEDULE */
+            if (opt.dump_all) {
+                struct {
+                    uint16_t tasklet, cpu;
+                    int16_t vcpuid, domid;
+                } *r = (typeof(r))ri->d;
+
+                printf(" %s null:schedule cpu %u%s",
+                       ri->dump_header, r->cpu,
+                       r->tasklet ? ", tasklet scheduled" : "");
+                if (r->vcpuid != -1)
+                    printf(", vcpu d%uv%d\n", r->domid, r->vcpuid);
+                else
+                    printf(", no vcpu\n");
+            }
+            break;
+        case TRC_SCHED_CLASS_EVT(SNULL, 6): /* TASKLET */
+            if (opt.dump_all)
+                printf(" %s null:sched_tasklet\n", ri->dump_header);
             break;
         default:
             process_generic(ri);
@@ -9116,7 +9221,7 @@ void process_cpu_change(struct pcpu_info *p) {
 
     /* File sanity check */
     if(p->file_offset != p->next_cpu_change_offset) {
-        fprintf(warn, "Strange, pcpu %d expected offet %llx, actual %llx!\n",
+        fprintf(warn, "Strange, pcpu %d expected offset %llx, actual %llx!\n",
                 p->pid, (unsigned long long)p->next_cpu_change_offset,
                 (unsigned long long)p->file_offset);
     }
@@ -9565,7 +9670,7 @@ ssize_t read_record(struct pcpu_info * p) {
 }
 
 /*
- * This funciton gets called for every record when doing dump.  Try to
+ * This function gets called for every record when doing dump.  Try to
  * make it efficient by changing the minimum amount from the last
  * call.  Do this by:
  * - Keeping track of the last pcpu called, so we can just set that to -
@@ -10521,7 +10626,7 @@ const struct argp_option cmd_opts[] =  {
       .key = OPT_SCATTERPLOT_EXTINT_CYCLES,
       .arg = "vector",
       .group = OPT_GROUP_EXTRA,
-      .doc = "Output a scatterplot of vmexit cycles for external interrupts of the given vector as a funciton of time.", },
+      .doc = "Output a scatterplot of vmexit cycles for external interrupts of the given vector as a function of time.", },
 
     { .name = "scatterplot-unpin-promote",
       .key = OPT_SCATTERPLOT_UNPIN_PROMOTE,
@@ -10648,7 +10753,7 @@ const struct argp_option cmd_opts[] =  {
       .key = OPT_MMIO_ENUMERATION_SKIP_VGA,
       .arg = "[0|1]",
       .group = OPT_GROUP_SUMMARY,
-      .doc = "Control whether we enumerate MMIO accesses to the VGA area, which can be extremly high during boot.  Default: 0", },
+      .doc = "Control whether we enumerate MMIO accesses to the VGA area, which can be extremely high during boot.  Default: 0", },
 
     { .name = "sample-size",
       .key = OPT_SAMPLE_SIZE,

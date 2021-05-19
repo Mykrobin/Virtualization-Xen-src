@@ -17,10 +17,11 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/config.h>
+#include <xen/ioreq.h>
 #include <xen/types.h>
 #include <xen/sched.h>
 #include <asm/regs.h>
+#include <asm/hvm/emulate.h>
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/support.h>
 #include <asm/hvm/domain.h>
@@ -34,7 +35,7 @@
 static bool_t hvm_mmio_accept(const struct hvm_io_handler *handler,
                               const ioreq_t *p)
 {
-    paddr_t first = hvm_mmio_first_byte(p), last;
+    paddr_t first = ioreq_mmio_first_byte(p), last;
 
     BUG_ON(handler->type != IOREQ_TYPE_COPY);
 
@@ -42,7 +43,7 @@ static bool_t hvm_mmio_accept(const struct hvm_io_handler *handler,
         return 0;
 
     /* Make sure the handler will accept the whole access. */
-    last = hvm_mmio_last_byte(p);
+    last = ioreq_mmio_last_byte(p);
     if ( last != first &&
          !handler->mmio.ops->check(current, last) )
         domain_crash(current->domain);
@@ -136,16 +137,17 @@ int hvm_process_io_intercept(const struct hvm_io_handler *handler,
             if ( p->data_is_ptr )
             {
                 switch ( hvm_copy_to_guest_phys(p->data + step * i,
-                                                &data, p->size) )
+                                                &data, p->size, current) )
                 {
-                case HVMCOPY_okay:
+                case HVMTRANS_okay:
                     break;
-                case HVMCOPY_bad_gfn_to_mfn:
+                case HVMTRANS_bad_gfn_to_mfn:
                     /* Drop the write as real hardware would. */
                     continue;
-                case HVMCOPY_bad_gva_to_gfn:
-                case HVMCOPY_gfn_paged_out:
-                case HVMCOPY_gfn_shared:
+                case HVMTRANS_bad_linear_to_gfn:
+                case HVMTRANS_gfn_paged_out:
+                case HVMTRANS_gfn_shared:
+                case HVMTRANS_need_retry:
                     ASSERT_UNREACHABLE();
                     /* fall through */
                 default:
@@ -163,24 +165,30 @@ int hvm_process_io_intercept(const struct hvm_io_handler *handler,
         {
             if ( p->data_is_ptr )
             {
+                struct vcpu *curr = current;
+                unsigned int token = hvmemul_cache_disable(curr);
+
                 data = 0;
                 switch ( hvm_copy_from_guest_phys(&data, p->data + step * i,
                                                   p->size) )
                 {
-                case HVMCOPY_okay:
+                case HVMTRANS_okay:
                     break;
-                case HVMCOPY_bad_gfn_to_mfn:
+                case HVMTRANS_bad_gfn_to_mfn:
                     data = ~0;
                     break;
-                case HVMCOPY_bad_gva_to_gfn:
-                case HVMCOPY_gfn_paged_out:
-                case HVMCOPY_gfn_shared:
+                case HVMTRANS_bad_linear_to_gfn:
+                case HVMTRANS_gfn_paged_out:
+                case HVMTRANS_gfn_shared:
+                case HVMTRANS_need_retry:
                     ASSERT_UNREACHABLE();
                     /* fall through */
                 default:
-                    domain_crash(current->domain);
+                    domain_crash(curr->domain);
                     return X86EMUL_UNHANDLEABLE;
                 }
+
+                hvmemul_cache_restore(curr, token);
             }
             else
                 data = p->data;
@@ -212,7 +220,7 @@ int hvm_process_io_intercept(const struct hvm_io_handler *handler,
     return rc;
 }
 
-const struct hvm_io_handler *hvm_find_io_handler(ioreq_t *p)
+static const struct hvm_io_handler *hvm_find_io_handler(const ioreq_t *p)
 {
     struct domain *curr_d = current->domain;
     unsigned int i;
@@ -220,10 +228,10 @@ const struct hvm_io_handler *hvm_find_io_handler(ioreq_t *p)
     BUG_ON((p->type != IOREQ_TYPE_PIO) &&
            (p->type != IOREQ_TYPE_COPY));
 
-    for ( i = 0; i < curr_d->arch.hvm_domain.io_handler_count; i++ )
+    for ( i = 0; i < curr_d->arch.hvm.io_handler_count; i++ )
     {
         const struct hvm_io_handler *handler =
-            &curr_d->arch.hvm_domain.io_handler[i];
+            &curr_d->arch.hvm.io_handler[i];
         const struct hvm_io_ops *ops = handler->ops;
 
         if ( handler->type != p->type )
@@ -258,9 +266,9 @@ int hvm_io_intercept(ioreq_t *p)
 
 struct hvm_io_handler *hvm_next_io_handler(struct domain *d)
 {
-    unsigned int i = d->arch.hvm_domain.io_handler_count++;
+    unsigned int i = d->arch.hvm.io_handler_count++;
 
-    ASSERT(d->arch.hvm_domain.io_handler);
+    ASSERT(d->arch.hvm.io_handler);
 
     if ( i == NR_IO_HANDLERS )
     {
@@ -268,7 +276,7 @@ struct hvm_io_handler *hvm_next_io_handler(struct domain *d)
         return NULL;
     }
 
-    return &d->arch.hvm_domain.io_handler[i];
+    return &d->arch.hvm.io_handler[i];
 }
 
 void register_mmio_handler(struct domain *d,
@@ -299,15 +307,15 @@ void register_portio_handler(struct domain *d, unsigned int port,
     handler->portio.action = action;
 }
 
-void relocate_portio_handler(struct domain *d, unsigned int old_port,
+bool relocate_portio_handler(struct domain *d, unsigned int old_port,
                              unsigned int new_port, unsigned int size)
 {
     unsigned int i;
 
-    for ( i = 0; i < d->arch.hvm_domain.io_handler_count; i++ )
+    for ( i = 0; i < d->arch.hvm.io_handler_count; i++ )
     {
         struct hvm_io_handler *handler =
-            &d->arch.hvm_domain.io_handler[i];
+            &d->arch.hvm.io_handler[i];
 
         if ( handler->type != IOREQ_TYPE_PIO )
             continue;
@@ -316,9 +324,11 @@ void relocate_portio_handler(struct domain *d, unsigned int old_port,
              (handler->portio.size = size) )
         {
             handler->portio.port = new_port;
-            break;
+            return true;
         }
     }
+
+    return false;
 }
 
 bool_t hvm_mmio_internal(paddr_t gpa)

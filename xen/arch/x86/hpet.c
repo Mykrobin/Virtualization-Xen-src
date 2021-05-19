@@ -4,7 +4,6 @@
  * HPET management.
  */
 
-#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/time.h>
 #include <xen/timer.h>
@@ -12,6 +11,8 @@
 #include <xen/softirq.h>
 #include <xen/irq.h>
 #include <xen/numa.h>
+#include <xen/param.h>
+#include <xen/sched.h>
 #include <asm/fixmap.h>
 #include <asm/div64.h>
 #include <asm/hpet.h>
@@ -51,6 +52,8 @@ static unsigned int __read_mostly num_hpets_used;
 DEFINE_PER_CPU(struct hpet_event_channel *, cpu_bc_channel);
 
 unsigned long __initdata hpet_address;
+int8_t __initdata opt_hpet_legacy_replacement = -1;
+static bool __initdata opt_hpet = true;
 u8 __initdata hpet_blockid;
 u8 __initdata hpet_flags;
 
@@ -59,8 +62,34 @@ u8 __initdata hpet_flags;
  * if RTC interrupts are enabled. Enable this option if want to always enable
  * legacy hpet broadcast for deep C state
  */
-static bool_t __initdata force_hpet_broadcast;
+static bool __initdata force_hpet_broadcast;
 boolean_param("hpetbroadcast", force_hpet_broadcast);
+
+static int __init parse_hpet_param(const char *s)
+{
+    const char *ss;
+    int val, rc = 0;
+
+    do {
+        ss = strchr(s, ',');
+        if ( !ss )
+            ss = strchr(s, '\0');
+
+        if ( (val = parse_bool(s, ss)) >= 0 )
+            opt_hpet = val;
+        else if ( (val = parse_boolean("broadcast", s, ss)) >= 0 )
+            force_hpet_broadcast = val;
+        else if ( (val = parse_boolean("legacy-replacement", s, ss)) >= 0 )
+            opt_hpet_legacy_replacement = val;
+        else
+            rc = -EINVAL;
+
+        s = ss + 1;
+    } while ( *ss );
+
+    return rc;
+}
+custom_param("hpet", parse_hpet_param);
 
 /*
  * Calculate a multiplication factor for scaled math, which is used to convert
@@ -188,13 +217,7 @@ again:
     /* find all expired events */
     for_each_cpu(cpu, ch->cpumask)
     {
-        s_time_t deadline;
-
-        rmb();
-        deadline = per_cpu(timer_deadline, cpu);
-        rmb();
-        if ( !cpumask_test_cpu(cpu, ch->cpumask) )
-            continue;
+        s_time_t deadline = ACCESS_ONCE(per_cpu(timer_deadline, cpu));
 
         if ( deadline <= now )
             __cpumask_set_cpu(cpu, &mask);
@@ -220,7 +243,7 @@ again:
 static void hpet_interrupt_handler(int irq, void *data,
         struct cpu_user_regs *regs)
 {
-    struct hpet_event_channel *ch = (struct hpet_event_channel *)data;
+    struct hpet_event_channel *ch = data;
 
     this_cpu(irq_count)--;
 
@@ -271,16 +294,6 @@ static int hpet_msi_write(struct hpet_event_channel *ch, struct msi_msg *msg)
     hpet_write32(msg->address_lo, HPET_Tn_ROUTE(ch->idx) + 4);
 
     return 0;
-}
-
-static void __maybe_unused
-hpet_msi_read(struct hpet_event_channel *ch, struct msi_msg *msg)
-{
-    msg->data = hpet_read32(HPET_Tn_ROUTE(ch->idx));
-    msg->address_lo = hpet_read32(HPET_Tn_ROUTE(ch->idx) + 4);
-    msg->address_hi = MSI_ADDR_BASE_HI;
-    if ( iommu_intremap )
-        iommu_read_msi_from_ire(&ch->msi, msg);
 }
 
 static unsigned int hpet_msi_startup(struct irq_desc *desc)
@@ -375,7 +388,7 @@ static int __init hpet_assign_irq(struct hpet_event_channel *ch)
 {
     int irq;
 
-    if ( (irq = create_irq(NUMA_NO_NODE)) < 0 )
+    if ( (irq = create_irq(NUMA_NO_NODE, false)) < 0 )
         return irq;
 
     ch->msi.irq = irq;
@@ -548,7 +561,7 @@ static void handle_rtc_once(uint8_t index, uint8_t value)
     if ( value & (RTC_PIE | RTC_AIE | RTC_UIE ) )
     {
         cpuidle_disable_deep_cstate();
-        pv_rtc_handler = NULL;
+        ACCESS_ONCE(pv_rtc_handler) = NULL;
     }
 }
 
@@ -612,7 +625,7 @@ void __init hpet_broadcast_init(void)
         hpet_events[i].shift = 32;
         hpet_events[i].next_event = STIME_MAX;
         spin_lock_init(&hpet_events[i].lock);
-        wmb();
+        smp_wmb();
         hpet_events[i].event_handler = handle_hpet_broadcast;
 
         hpet_events[i].msi.msi_attrib.maskbit = 1;
@@ -700,8 +713,9 @@ void hpet_broadcast_enter(void)
 {
     unsigned int cpu = smp_processor_id();
     struct hpet_event_channel *ch = per_cpu(cpu_bc_channel, cpu);
+    s_time_t deadline = per_cpu(timer_deadline, cpu);
 
-    if ( per_cpu(timer_deadline, cpu) == 0 )
+    if ( deadline == 0 )
         return;
 
     if ( !ch )
@@ -717,9 +731,12 @@ void hpet_broadcast_enter(void)
     cpumask_set_cpu(cpu, ch->cpumask);
 
     spin_lock(&ch->lock);
-    /* reprogram if current cpu expire time is nearer */
-    if ( per_cpu(timer_deadline, cpu) < ch->next_event )
-        reprogram_hpet_evt_channel(ch, per_cpu(timer_deadline, cpu), NOW(), 1);
+    /*
+     * Reprogram if current cpu expire time is nearer.  deadline is never
+     * written by a remote cpu, so the value read earlier is still valid.
+     */
+    if ( deadline < ch->next_event )
+        reprogram_hpet_evt_channel(ch, deadline, NOW(), 1);
     spin_unlock(&ch->lock);
 }
 
@@ -727,8 +744,9 @@ void hpet_broadcast_exit(void)
 {
     unsigned int cpu = smp_processor_id();
     struct hpet_event_channel *ch = per_cpu(cpu_bc_channel, cpu);
+    s_time_t deadline = per_cpu(timer_deadline, cpu);
 
-    if ( per_cpu(timer_deadline, cpu) == 0 )
+    if ( deadline == 0 )
         return;
 
     if ( !ch )
@@ -736,7 +754,7 @@ void hpet_broadcast_exit(void)
 
     /* Reprogram the deadline; trigger timer work now if it has passed. */
     enable_APIC_timer();
-    if ( !reprogram_timer(per_cpu(timer_deadline, cpu)) )
+    if ( !reprogram_timer(deadline) )
         raise_softirq(TIMER_SOFTIRQ);
 
     cpumask_clear_cpu(cpu, ch->cpumask);
@@ -764,18 +782,99 @@ int hpet_legacy_irq_tick(void)
 }
 
 static u32 *hpet_boot_cfg;
+static uint64_t __initdata hpet_rate;
+static __initdata struct {
+    uint32_t cmp, cfg;
+} pre_legacy_c0;
+
+bool __init hpet_enable_legacy_replacement_mode(void)
+{
+    unsigned int cfg, c0_cfg, ticks, count;
+
+    if ( !hpet_rate ||
+         !(hpet_read32(HPET_ID) & HPET_ID_LEGSUP) ||
+         ((cfg = hpet_read32(HPET_CFG)) & HPET_CFG_LEGACY) )
+        return false;
+
+    /* Stop the main counter. */
+    hpet_write32(cfg & ~HPET_CFG_ENABLE, HPET_CFG);
+
+    /* Stash channel 0's old CFG/CMP incase we need to undo. */
+    pre_legacy_c0.cfg = c0_cfg = hpet_read32(HPET_Tn_CFG(0));
+    pre_legacy_c0.cmp = hpet_read32(HPET_Tn_CMP(0));
+
+    /* Reconfigure channel 0 to be 32bit periodic. */
+    c0_cfg |= (HPET_TN_ENABLE | HPET_TN_PERIODIC | HPET_TN_SETVAL |
+               HPET_TN_32BIT);
+    hpet_write32(c0_cfg, HPET_Tn_CFG(0));
+
+    /*
+     * The exact period doesn't have to match a legacy PIT.  All we need
+     * is an interrupt queued up via the IO-APIC to check routing.
+     *
+     * Use HZ as the frequency.
+     */
+    ticks = ((SECONDS(1) / HZ) * div_sc(hpet_rate, SECONDS(1), 32)) >> 32;
+
+    count = hpet_read32(HPET_COUNTER);
+
+    /*
+     * HPET_TN_SETVAL above is atrociously documented in the spec.
+     *
+     * Periodic HPET channels have a main comparator register, and
+     * separate "accumulator" register.  Despite being named accumulator
+     * in the spec, this is not an accurate description of its behaviour
+     * or purpose.
+     *
+     * Each time an interrupt is generated, the "accumulator" register is
+     * re-added to the comparator set up the new period.
+     *
+     * Normally, writes to the CMP register update both registers.
+     * However, under these semantics, it is impossible to set up a
+     * periodic timer correctly without the main HPET counter being at 0.
+     *
+     * Instead, HPET_TN_SETVAL is a self-clearing control bit which we can
+     * use for periodic timers to mean that the second write to CMP
+     * updates the accumulator only, and not the absolute comparator
+     * value.
+     *
+     * This lets us set a period when the main counter isn't at 0.
+     */
+    hpet_write32(count + ticks, HPET_Tn_CMP(0));
+    hpet_write32(ticks,         HPET_Tn_CMP(0));
+
+    /* Restart the main counter, and legacy mode. */
+    hpet_write32(cfg | HPET_CFG_ENABLE | HPET_CFG_LEGACY, HPET_CFG);
+
+    return true;
+}
+
+void __init hpet_disable_legacy_replacement_mode(void)
+{
+    unsigned int cfg = hpet_read32(HPET_CFG);
+
+    ASSERT(hpet_rate);
+
+    cfg &= ~(HPET_CFG_LEGACY | HPET_CFG_ENABLE);
+
+    /* Stop the main counter and disable legacy mode. */
+    hpet_write32(cfg, HPET_CFG);
+
+    /* Restore pre-Legacy Replacement Mode settings. */
+    hpet_write32(pre_legacy_c0.cfg, HPET_Tn_CFG(0));
+    hpet_write32(pre_legacy_c0.cmp, HPET_Tn_CMP(0));
+
+    /* Restart the main counter. */
+    hpet_write32(cfg | HPET_CFG_ENABLE, HPET_CFG);
+}
 
 u64 __init hpet_setup(void)
 {
-    static u64 __initdata hpet_rate;
-    u32 hpet_id, hpet_period;
-    unsigned int last;
+    unsigned int hpet_id, hpet_period;
+    unsigned int last, rem;
 
-    if ( hpet_rate )
+    if ( hpet_rate || !hpet_address || !opt_hpet )
         return hpet_rate;
-
-    if ( hpet_address == 0 )
-        return 0;
 
     set_fixmap_nocache(FIX_HPET_BASE, hpet_address);
 
@@ -799,7 +898,12 @@ u64 __init hpet_setup(void)
     hpet_resume(hpet_boot_cfg);
 
     hpet_rate = 1000000000000000ULL; /* 10^15 */
-    (void)do_div(hpet_rate, hpet_period);
+    rem = do_div(hpet_rate, hpet_period);
+    if ( (rem * 2) > hpet_period )
+        hpet_rate++;
+
+    if ( opt_hpet_legacy_replacement > 0 )
+        hpet_enable_legacy_replacement_mode();
 
     return hpet_rate;
 }

@@ -1,8 +1,8 @@
 /******************************************************************************
  * version.h
- * 
+ *
  * Xen version, type, and compile information.
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to
  * deal in the Software without restriction, including without limitation the
@@ -95,11 +95,8 @@ typedef char xen_commandline_t[1024];
 #define XENVER_build_id 10
 struct xen_build_id {
         uint32_t        len; /* IN: size of buf[]. */
-#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
-        unsigned char   buf[];
-#elif defined(__GNUC__)
-        unsigned char   buf[1]; /* OUT: Variable length buffer with build_id. */
-#endif
+        unsigned char   buf[XEN_FLEX_ARRAY_DIM];
+                             /* OUT: Variable length buffer with build_id. */
 };
 typedef struct xen_build_id xen_build_id_t;
 

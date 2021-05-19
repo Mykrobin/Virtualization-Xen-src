@@ -16,13 +16,12 @@
 #include <errno.h>
 #include <string.h>
 #include <pthread.h>
+#include <xen-tools/libs.h>
 
 #include "private.h"
 
 #define DBGPRINTF(_m...) \
     xtl_log(xcall->logger, XTL_DEBUG, -1, "xencall:buffer", _m)
-
-#define ROUNDUP(_x,_w) (((unsigned long)(_x)+(1UL<<(_w))-1) & ~((1UL<<(_w))-1))
 
 pthread_mutex_t cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -151,6 +150,7 @@ void xencall_free_buffer_pages(xencall_handle *xcall, void *p, size_t nr_pages)
 
 struct allocation_header {
     int nr_pages;
+    int pad[3];
 };
 
 void *xencall_alloc_buffer(xencall_handle *xcall, size_t size)

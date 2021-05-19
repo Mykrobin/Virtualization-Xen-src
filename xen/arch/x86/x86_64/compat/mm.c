@@ -6,44 +6,7 @@
 #include <asm/mem_paging.h>
 #include <asm/mem_sharing.h>
 
-int compat_set_gdt(XEN_GUEST_HANDLE_PARAM(uint) frame_list, unsigned int entries)
-{
-    unsigned int i, nr_pages = (entries + 511) / 512;
-    unsigned long frames[16];
-    long ret;
-
-    /* Rechecked in set_gdt, but ensures a sane limit for copy_from_user(). */
-    if ( entries > FIRST_RESERVED_GDT_ENTRY )
-        return -EINVAL;
-
-    if ( !guest_handle_okay(frame_list, nr_pages) )
-        return -EFAULT;
-
-    for ( i = 0; i < nr_pages; ++i )
-    {
-        unsigned int frame;
-
-        if ( __copy_from_guest(&frame, frame_list, 1) )
-            return -EFAULT;
-        frames[i] = frame;
-        guest_handle_add_offset(frame_list, 1);
-    }
-
-    domain_lock(current->domain);
-
-    if ( (ret = set_gdt(current, frames, entries)) == 0 )
-        flush_tlb_local();
-
-    domain_unlock(current->domain);
-
-    return ret;
-}
-
-int compat_update_descriptor(u32 pa_lo, u32 pa_hi, u32 desc_lo, u32 desc_hi)
-{
-    return do_update_descriptor(pa_lo | ((u64)pa_hi << 32),
-                                desc_lo | ((u64)desc_hi << 32));
-}
+#include <asm/pv/mm.h>
 
 int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 {
@@ -124,7 +87,7 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         if ( __copy_to_guest(arg, &cmp, 1) )
         {
             if ( rc == __HYPERVISOR_memory_op )
-                hypercall_cancel_continuation();
+                hypercall_cancel_continuation(current);
             rc = -EFAULT;
         }
 
@@ -140,6 +103,9 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
             .max_mfn = MACH2PHYS_COMPAT_NR_ENTRIES(d) - 1
         };
 
+        if ( !opt_pv32 )
+            return -EOPNOTSUPP;
+
         if ( copy_to_guest(arg, &mapping, 1) )
             rc = -EFAULT;
 
@@ -151,6 +117,9 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     {
         unsigned long limit;
         compat_pfn_t last_mfn;
+
+        if ( !opt_pv32 )
+            return -EOPNOTSUPP;
 
         if ( copy_from_guest(&xmml, arg, 1) )
             return -EFAULT;
@@ -189,8 +158,10 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     case XENMEM_paging_op:
         return mem_paging_memop(guest_handle_cast(arg, xen_mem_paging_op_t));
 
+#ifdef CONFIG_MEM_SHARING
     case XENMEM_sharing_op:
         return mem_sharing_memop(guest_handle_cast(arg, xen_mem_sharing_op_t));
+#endif
 
     default:
         rc = -ENOSYS;
@@ -200,6 +171,7 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     return rc;
 }
 
+#ifdef CONFIG_PV
 DEFINE_XEN_GUEST_HANDLE(mmuext_op_compat_t);
 
 int compat_mmuext_op(XEN_GUEST_HANDLE_PARAM(void) arg,
@@ -328,7 +300,7 @@ int compat_mmuext_op(XEN_GUEST_HANDLE_PARAM(void) arg,
                     BUG_ON(!hypercall_xlat_continuation(&left, 4, 0x01, nat_ops,
                                                         cmp_uops));
                     if ( !(mcs->flags & MCSF_in_multicall) )
-                        regs->_ecx += count - i;
+                        regs->ecx += count - i;
                     else
                         mcs->compat_call.args[1] += count - i;
                 }
@@ -350,6 +322,7 @@ int compat_mmuext_op(XEN_GUEST_HANDLE_PARAM(void) arg,
 
     return rc;
 }
+#endif /* CONFIG_PV */
 
 /*
  * Local variables:

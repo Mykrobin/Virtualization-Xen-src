@@ -56,36 +56,38 @@
 /* Dispatch SCIs based on the PM1a_STS and PM1a_EN registers */
 static void pmt_update_sci(PMTState *s)
 {
+    struct hvm_hw_acpi *acpi = &s->vcpu->domain->arch.hvm.acpi;
+
     ASSERT(spin_is_locked(&s->lock));
 
-    if ( s->pm.pm1a_en & s->pm.pm1a_sts & SCI_MASK )
-        hvm_isa_irq_assert(s->vcpu->domain, SCI_IRQ);
+    if ( acpi->pm1a_en & acpi->pm1a_sts & SCI_MASK )
+        hvm_isa_irq_assert(s->vcpu->domain, SCI_IRQ, NULL);
     else
         hvm_isa_irq_deassert(s->vcpu->domain, SCI_IRQ);
 }
 
 void hvm_acpi_power_button(struct domain *d)
 {
-    PMTState *s = &d->arch.hvm_domain.pl_time->vpmt;
+    PMTState *s = &d->arch.hvm.pl_time->vpmt;
 
     if ( !has_vpm(d) )
         return;
 
     spin_lock(&s->lock);
-    s->pm.pm1a_sts |= PWRBTN_STS;
+    d->arch.hvm.acpi.pm1a_sts |= PWRBTN_STS;
     pmt_update_sci(s);
     spin_unlock(&s->lock);
 }
 
 void hvm_acpi_sleep_button(struct domain *d)
 {
-    PMTState *s = &d->arch.hvm_domain.pl_time->vpmt;
+    PMTState *s = &d->arch.hvm.pl_time->vpmt;
 
     if ( !has_vpm(d) )
         return;
 
     spin_lock(&s->lock);
-    s->pm.pm1a_sts |= SLPBTN_STS;
+    d->arch.hvm.acpi.pm1a_sts |= SLPBTN_STS;
     pmt_update_sci(s);
     spin_unlock(&s->lock);
 }
@@ -95,7 +97,8 @@ void hvm_acpi_sleep_button(struct domain *d)
 static void pmt_update_time(PMTState *s)
 {
     uint64_t curr_gtime, tmp;
-    uint32_t tmr_val = s->pm.tmr_val, msb = tmr_val & TMR_VAL_MSB;
+    struct hvm_hw_acpi *acpi = &s->vcpu->domain->arch.hvm.acpi;
+    uint32_t tmr_val = acpi->tmr_val, msb = tmr_val & TMR_VAL_MSB;
     
     ASSERT(spin_is_locked(&s->lock));
 
@@ -108,12 +111,12 @@ static void pmt_update_time(PMTState *s)
     s->last_gtime = curr_gtime;
 
     /* Update timer value atomically wrt lock-free reads in handle_pmt_io(). */
-    *(volatile uint32_t *)&s->pm.tmr_val = tmr_val;
+    write_atomic(&acpi->tmr_val, tmr_val);
 
     /* If the counter's MSB has changed, set the status bit */
     if ( (tmr_val & TMR_VAL_MSB) != msb )
     {
-        s->pm.pm1a_sts |= TMR_STS;
+        acpi->pm1a_sts |= TMR_STS;
         pmt_update_sci(s);
     }
 }
@@ -133,7 +136,8 @@ static void pmt_timer_callback(void *opaque)
     pmt_update_time(s);
 
     /* How close are we to the next MSB flip? */
-    pmt_cycles_until_flip = TMR_VAL_MSB - (s->pm.tmr_val & (TMR_VAL_MSB - 1));
+    pmt_cycles_until_flip = TMR_VAL_MSB -
+        (s->vcpu->domain->arch.hvm.acpi.tmr_val & (TMR_VAL_MSB - 1));
 
     /* Overall time between MSB flips */
     time_until_flip = (1000000000ULL << 23) / FREQUENCE_PMTIMER;
@@ -152,12 +156,13 @@ static int handle_evt_io(
     int dir, unsigned int port, unsigned int bytes, uint32_t *val)
 {
     struct vcpu *v = current;
-    PMTState *s = &v->domain->arch.hvm_domain.pl_time->vpmt;
+    struct hvm_hw_acpi *acpi = &v->domain->arch.hvm.acpi;
+    PMTState *s = &v->domain->arch.hvm.pl_time->vpmt;
     uint32_t addr, data, byte;
     int i;
 
     addr = port -
-        ((v->domain->arch.hvm_domain.params[
+        ((v->domain->arch.hvm.params[
             HVM_PARAM_ACPI_IOPORTS_LOCATION] == 0) ?
          PM1a_STS_ADDR_V0 : PM1a_STS_ADDR_V1);
 
@@ -175,16 +180,16 @@ static int handle_evt_io(
             {
                 /* PM1a_STS register bits are write-to-clear */
             case 0 /* PM1a_STS_ADDR */:
-                s->pm.pm1a_sts &= ~byte;
+                acpi->pm1a_sts &= ~byte;
                 break;
             case 1 /* PM1a_STS_ADDR + 1 */:
-                s->pm.pm1a_sts &= ~(byte << 8);
+                acpi->pm1a_sts &= ~(byte << 8);
                 break;
             case 2 /* PM1a_EN_ADDR */:
-                s->pm.pm1a_en = (s->pm.pm1a_en & 0xff00) | byte;
+                acpi->pm1a_en = (acpi->pm1a_en & 0xff00) | byte;
                 break;
             case 3 /* PM1a_EN_ADDR + 1 */:
-                s->pm.pm1a_en = (s->pm.pm1a_en & 0xff) | (byte << 8);
+                acpi->pm1a_en = (acpi->pm1a_en & 0xff) | (byte << 8);
                 break;
             default:
                 gdprintk(XENLOG_WARNING, 
@@ -197,7 +202,7 @@ static int handle_evt_io(
     }
     else /* p->dir == IOREQ_READ */
     {
-        data = s->pm.pm1a_sts | (((uint32_t) s->pm.pm1a_en) << 16);
+        data = acpi->pm1a_sts | ((uint32_t)acpi->pm1a_en << 16);
         data >>= 8 * addr;
         if ( bytes == 1 ) data &= 0xff;
         else if ( bytes == 2 ) data &= 0xffff;
@@ -215,7 +220,8 @@ static int handle_pmt_io(
     int dir, unsigned int port, unsigned int bytes, uint32_t *val)
 {
     struct vcpu *v = current;
-    PMTState *s = &v->domain->arch.hvm_domain.pl_time->vpmt;
+    struct hvm_hw_acpi *acpi = &v->domain->arch.hvm.acpi;
+    PMTState *s = &v->domain->arch.hvm.pl_time->vpmt;
 
     if ( bytes != 4 || dir != IOREQ_READ )
     {
@@ -226,7 +232,7 @@ static int handle_pmt_io(
     {
         /* We hold the lock: update timer value and return it. */
         pmt_update_time(s);
-        *val = s->pm.tmr_val;
+        *val = acpi->tmr_val;
         spin_unlock(&s->lock);
     }
     else
@@ -237,16 +243,18 @@ static int handle_pmt_io(
          * updated value with a lock-free atomic read.
          */
         spin_barrier(&s->lock);
-        *val = read_atomic(&s->pm.tmr_val);
+        *val = read_atomic(&acpi->tmr_val);
     }
 
     return X86EMUL_OKAY;
 }
 
-static int pmtimer_save(struct domain *d, hvm_domain_context_t *h)
+static int acpi_save(struct vcpu *v, hvm_domain_context_t *h)
 {
-    PMTState *s = &d->arch.hvm_domain.pl_time->vpmt;
-    uint32_t x, msb = s->pm.tmr_val & TMR_VAL_MSB;
+    struct domain *d = v->domain;
+    struct hvm_hw_acpi *acpi = &d->arch.hvm.acpi;
+    PMTState *s = &d->arch.hvm.pl_time->vpmt;
+    uint32_t x, msb = acpi->tmr_val & TMR_VAL_MSB;
     int rc;
 
     if ( !has_vpm(d) )
@@ -258,25 +266,25 @@ static int pmtimer_save(struct domain *d, hvm_domain_context_t *h)
      * Update the counter to the guest's current time.  Make sure it only
      * goes forwards.
      */
-    x = (((s->vcpu->arch.hvm_vcpu.guest_time ?: hvm_get_guest_time(s->vcpu)) -
+    x = (((s->vcpu->arch.hvm.guest_time ?: hvm_get_guest_time(s->vcpu)) -
           s->last_gtime) * s->scale) >> 32;
     if ( x < 1UL<<31 )
-        s->pm.tmr_val += x;
-    if ( (s->pm.tmr_val & TMR_VAL_MSB) != msb )
-        s->pm.pm1a_sts |= TMR_STS;
+        acpi->tmr_val += x;
+    if ( (acpi->tmr_val & TMR_VAL_MSB) != msb )
+        acpi->pm1a_sts |= TMR_STS;
     /* No point in setting the SCI here because we'll already have saved the 
      * IRQ and *PIC state; we'll fix it up when we restore the domain */
-
-    rc = hvm_save_entry(PMTIMER, 0, h, &s->pm);
+    rc = hvm_save_entry(PMTIMER, 0, h, acpi);
 
     spin_unlock(&s->lock);
 
     return rc;
 }
 
-static int pmtimer_load(struct domain *d, hvm_domain_context_t *h)
+static int acpi_load(struct domain *d, hvm_domain_context_t *h)
 {
-    PMTState *s = &d->arch.hvm_domain.pl_time->vpmt;
+    struct hvm_hw_acpi *acpi = &d->arch.hvm.acpi;
+    PMTState *s = &d->arch.hvm.pl_time->vpmt;
 
     if ( !has_vpm(d) )
         return -ENODEV;
@@ -284,7 +292,7 @@ static int pmtimer_load(struct domain *d, hvm_domain_context_t *h)
     spin_lock(&s->lock);
 
     /* Reload the registers */
-    if ( hvm_load_entry(PMTIMER, h, &s->pm) )
+    if ( hvm_load_entry(PMTIMER, h, acpi) )
     {
         spin_unlock(&s->lock);
         return -EINVAL;
@@ -302,18 +310,18 @@ static int pmtimer_load(struct domain *d, hvm_domain_context_t *h)
     return 0;
 }
 
-HVM_REGISTER_SAVE_RESTORE(PMTIMER, pmtimer_save, pmtimer_load, 
+HVM_REGISTER_SAVE_RESTORE(PMTIMER, acpi_save, acpi_load,
                           1, HVMSR_PER_DOM);
 
-int pmtimer_change_ioport(struct domain *d, unsigned int version)
+int pmtimer_change_ioport(struct domain *d, uint64_t version)
 {
-    unsigned int old_version;
+    uint64_t old_version;
 
     if ( !has_vpm(d) )
         return -ENODEV;
 
     /* Check that version is changing. */
-    old_version = d->arch.hvm_domain.params[HVM_PARAM_ACPI_IOPORTS_LOCATION];
+    old_version = d->arch.hvm.params[HVM_PARAM_ACPI_IOPORTS_LOCATION];
     if ( version == old_version )
         return 0;
 
@@ -339,7 +347,7 @@ int pmtimer_change_ioport(struct domain *d, unsigned int version)
 
 void pmtimer_init(struct vcpu *v)
 {
-    PMTState *s = &v->domain->arch.hvm_domain.pl_time->vpmt;
+    PMTState *s = &v->domain->arch.hvm.pl_time->vpmt;
 
     if ( !has_vpm(v->domain) )
         return;
@@ -363,9 +371,9 @@ void pmtimer_init(struct vcpu *v)
 
 void pmtimer_deinit(struct domain *d)
 {
-    PMTState *s = &d->arch.hvm_domain.pl_time->vpmt;
+    PMTState *s = &d->arch.hvm.pl_time->vpmt;
 
-    if ( !has_vpm(d) )
+    if ( !has_vpm(d) || !d->arch.hvm.pl_time || !s->vcpu )
         return;
 
     kill_timer(&s->timer);
@@ -377,5 +385,15 @@ void pmtimer_reset(struct domain *d)
         return;
 
     /* Reset the counter. */
-    d->arch.hvm_domain.pl_time->vpmt.pm.tmr_val = 0;
+    d->arch.hvm.acpi.tmr_val = 0;
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-file-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

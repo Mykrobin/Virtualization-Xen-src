@@ -50,7 +50,6 @@
  * http://www.amd.com/us-en/assets/content_type/white_papers_and_tech_docs/32559.pdf
  */
 
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/kernel.h>
@@ -107,7 +106,7 @@ static void mce_amd_checkregs(void *info)
 		} else {
 			mctelem_dismiss(mctc);
 		}
-		
+
 	} else if (mctc != NULL) {
 		mctelem_dismiss(mctc);
 	}
@@ -152,7 +151,7 @@ static void mce_amd_work_fn(void *data)
 
 		/* HW does not count *all* kinds of correctable errors.
 		 * Thus it is possible, that the polling routine finds an
-		 * correctable error even if the HW reports nothing. */ 
+		 * correctable error even if the HW reports nothing. */
 		if (counter > 0) {
 			/* HW reported correctable errors,
 			 * the polling routine did not find...
@@ -165,8 +164,8 @@ static void mce_amd_work_fn(void *data)
 					(counter == 1 ? "" : "s"),
 					(counter == 1 ? "was" : "were"));
 			}
-			/* subtract 1 to not double count the error 
-			 * from the polling service routine */ 
+			/* subtract 1 to not double count the error
+			 * from the polling service routine */
 			adjust += (counter - 1);
 
 			/* Restart counter */
@@ -175,7 +174,6 @@ static void mce_amd_work_fn(void *data)
 			/* Counter enable */
 			value |= (1ULL << 51);
 			mca_wrmsr(MSR_IA32_MCx_MISC(4), value);
-			wmb();
 		}
 	}
 
@@ -203,12 +201,12 @@ static void mce_amd_work_fn(void *data)
 	adjust = 0;
 }
 
-void amd_nonfatal_mcheck_init(struct cpuinfo_x86 *c)
+void __init amd_nonfatal_mcheck_init(struct cpuinfo_x86 *c)
 {
-	if (c->x86_vendor != X86_VENDOR_AMD)
+	if (!(c->x86_vendor & (X86_VENDOR_AMD | X86_VENDOR_HYGON)))
 		return;
 
-	/* Assume we are on K8 or newer AMD CPU here */
+	/* Assume we are on K8 or newer AMD or Hygon CPU here */
 
 	/* The threshold bitfields in MSR_IA32_MC4_MISC has
 	 * been introduced along with the SVME feature bit. */
@@ -239,14 +237,10 @@ void amd_nonfatal_mcheck_init(struct cpuinfo_x86 *c)
 			/* Counter enable */
 			value |= (1ULL << 51);
 			wrmsrl(MSR_IA32_MCx_MISC(4), value);
-			/* serialize */
-			wmb();
 			printk(XENLOG_INFO "MCA: Use hw thresholding to adjust polling frequency\n");
 		}
 	}
 
 	init_timer(&mce_timer, mce_amd_work_fn, NULL, 0);
 	set_timer(&mce_timer, NOW() + period);
-
-	return;
 }

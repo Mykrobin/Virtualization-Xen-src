@@ -6,7 +6,10 @@ endif
 
 # Convenient variables
 comma   := ,
+open    := (
+close   := )
 squote  := '
+#' Balancing squote, to help syntax highlighting
 empty   :=
 space   := $(empty) $(empty)
 
@@ -15,11 +18,6 @@ realpath = $(wildcard $(foreach file,$(1),$(shell cd -P $(dir $(file)) && echo "
 or       = $(if $(strip $(1)),$(1),$(if $(strip $(2)),$(2),$(if $(strip $(3)),$(3),$(if $(strip $(4)),$(4)))))
 
 -include $(XEN_ROOT)/.config
-
-# A debug build of tools?
-# Hypervisor debug build is controlled by Kconfig.
-debug ?= n
-debug_symbols ?= $(debug)
 
 XEN_COMPILE_ARCH    ?= $(shell uname -m | sed -e s/i.86/x86_32/ \
                          -e s/i86pc/x86_32/ -e s/amd64/x86_64/ \
@@ -61,20 +59,14 @@ HOSTCC ?= clang
 HOSTCXX ?= clang++
 endif
 
+DEPS_INCLUDE = $(addsuffix .d2, $(basename $(wildcard $(DEPS))))
+DEPS_RM = $(DEPS) $(DEPS_INCLUDE)
+
+%.d2: %.d
+	sed "s!\(^\| \)$$PWD/! !" $^ >$@.tmp && mv -f $@.tmp $@
 
 include $(XEN_ROOT)/config/$(XEN_OS).mk
 include $(XEN_ROOT)/config/$(XEN_TARGET_ARCH).mk
-
-# arguments: variable, common path part, path to test, if yes, if no
-define setvar_dir
-  ifndef $(1)
-    ifneq (,$(wildcard $(2)$(3)))
-      $(1) ?= $(2)$(4)
-    else
-      $(1) ?= $(2)$(5)
-    endif
-  endif
-endef
 
 ifneq ($(EXTRA_PREFIX),)
 EXTRA_INCLUDES += $(EXTRA_PREFIX)/include
@@ -113,17 +105,17 @@ endef
 
 cc-options-add = $(foreach o,$(3),$(call cc-option-add,$(1),$(2),$(o)))
 
-# cc-ver: Check compiler is at least specified version. Return boolean 'y'/'n'.
-# Usage: ifeq ($(call cc-ver,$(CC),0x030400),y)
+# cc-ver: Check compiler against the version requirement. Return boolean 'y'/'n'.
+# Usage: ifeq ($(call cc-ver,$(CC),ge,0x030400),y)
 cc-ver = $(shell if [ $$((`$(1) -dumpversion | awk -F. \
-           '{ printf "0x%02x%02x%02x", $$1, $$2, $$3}'`)) -ge $$(($(2))) ]; \
+           '{ printf "0x%02x%02x%02x", $$1, $$2, $$3}'`)) -$(2) $$(($(3))) ]; \
            then echo y; else echo n; fi ;)
 
 # cc-ver-check: Check compiler is at least specified version, else fail.
 # Usage: $(call cc-ver-check,CC,0x030400,"Require at least gcc-3.4")
 cc-ver-check = $(eval $(call cc-ver-check-closure,$(1),$(2),$(3)))
 define cc-ver-check-closure
-    ifeq ($$(call cc-ver,$$($(1)),$(2)),n)
+    ifeq ($$(call cc-ver,$$($(1)),ge,$(2)),n)
         override $(1) = echo "*** FATAL BUILD ERROR: "$(3) >&2; exit 1;
         cc-option := n
     endif
@@ -150,22 +142,6 @@ ifndef XEN_HAS_CHECKPOLICY
     XEN_HAS_CHECKPOLICY := $(shell $(CHECKPOLICY) -h 2>&1 | grep -q xen && echo y || echo n)
     export XEN_HAS_CHECKPOLICY
 endif
-
-# as-insn: Check whether assembler supports an instruction.
-# Usage: cflags-y += $(call as-insn "insn",option-yes,option-no)
-as-insn = $(if $(shell echo 'void _(void) { asm volatile ( $(2) ); }' \
-                       | $(1) $(filter-out -M% %.d -include %/include/xen/config.h,$(AFLAGS)) \
-                              -c -x c -o /dev/null - 2>&1),$(4),$(3))
-
-# as-insn-check: Add an option to compilation flags, but only if insn is
-#                supported by assembler.
-# Usage: $(call as-insn-check CFLAGS,CC,"nop",-DHAVE_GAS_NOP)
-as-insn-check = $(eval $(call as-insn-check-closure,$(1),$(2),$(3),$(4)))
-define as-insn-check-closure
-    ifeq ($$(call as-insn,$$($(2)),$(3),y,n),y)
-        $(1) += $(4)
-    endif
-endef
 
 define buildmakevars2shellvars
     export PREFIX="$(prefix)";                                            \
@@ -206,20 +182,11 @@ define buildmakevars2header-closure
 	$(call move-if-changed,$(1).tmp,$(1))
 endef
 
-ifeq ($(debug_symbols),y)
-CFLAGS += -g
-endif
-
 CFLAGS += -fno-strict-aliasing
 
 CFLAGS += -std=gnu99
 
 CFLAGS += -Wall -Wstrict-prototypes
-
-# Clang complains about macros that expand to 'if ( ( foo == bar ) ) ...'
-# and is over-zealous with the printf format lint
-# and is a bit too fierce about unused return values
-CFLAGS-$(clang) += -Wno-parentheses -Wno-format -Wno-unused-value
 
 $(call cc-option-add,HOSTCFLAGS,HOSTCC,-Wdeclaration-after-statement)
 $(call cc-option-add,CFLAGS,CC,-Wdeclaration-after-statement)
@@ -237,7 +204,8 @@ APPEND_LDFLAGS += $(foreach i, $(APPEND_LIB), -L$(i))
 APPEND_CFLAGS += $(foreach i, $(APPEND_INCLUDES), -I$(i))
 
 EMBEDDED_EXTRA_CFLAGS := -nopie -fno-stack-protector -fno-stack-protector-all
-EMBEDDED_EXTRA_CFLAGS += -fno-exceptions
+EMBEDDED_EXTRA_CFLAGS += -fno-exceptions -fno-asynchronous-unwind-tables
+EMBEDDED_EXTRA_CFLAGS += -fcf-protection=none
 
 XEN_EXTFILES_URL ?= http://xenbits.xen.org/xen-extfiles
 # All the files at that location were downloaded from elsewhere on
@@ -276,20 +244,18 @@ QEMU_TRADITIONAL_URL ?= git://xenbits.xen.org/qemu-xen-traditional.git
 SEABIOS_UPSTREAM_URL ?= git://xenbits.xen.org/seabios.git
 MINIOS_UPSTREAM_URL ?= git://xenbits.xen.org/mini-os.git
 endif
-OVMF_UPSTREAM_REVISION ?= bc54e50e0fe03c570014f363b547426913e92449
-QEMU_UPSTREAM_REVISION ?= qemu-xen-4.8.5
-MINIOS_UPSTREAM_REVISION ?= xen-RELEASE-4.8.5
-# Wed Sep 28 11:50:04 2016 +0200
-# minios: fix build issue with xen_*mb defines
+OVMF_UPSTREAM_REVISION ?= a3741780fe3535e19e02efa869a7cac481891129
+QEMU_UPSTREAM_REVISION ?= qemu-xen-4.15.0
+MINIOS_UPSTREAM_REVISION ?= xen-RELEASE-4.15.0
 
-SEABIOS_UPSTREAM_REVISION ?= rel-1.10.0
-# Wed Jun 22 14:53:24 2016 +0800
-# fw/msr_feature_control: add support to set MSR_IA32_FEATURE_CONTROL
+SEABIOS_UPSTREAM_REVISION ?= rel-1.14.0
 
 ETHERBOOT_NICS ?= rtl8139 8086100e
 
 
-QEMU_TRADITIONAL_REVISION ?= xen-4.8.5
+QEMU_TRADITIONAL_REVISION ?= xen-4.15.0
+# Wed Jul 15 10:01:40 2020 +0100
+# qemu-trad: remove Xen path dependencies
 
 # Specify which qemu-dm to use. This may be `ioemu' to use the old
 # Mercurial in-tree version, or a local directory, or a git URL.
@@ -301,8 +267,5 @@ QEMU_TRADITIONAL_LOC ?= $(call or,$(wildcard $(QEMU_TRADITIONAL_INTREE)),\
 
 QEMU_UPSTREAM_LOC ?= $(call or,$(wildcard $(QEMU_UPSTREAM_INTREE)),\
                                $(QEMU_UPSTREAM_URL))
-
-# Short answer -- do not enable this unless you know what you are
-# doing and are prepared for some pain.
 
 CONFIG_TESTS       ?= y

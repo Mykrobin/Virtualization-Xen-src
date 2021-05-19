@@ -1,16 +1,14 @@
-#include <xen/config.h>
 #include <xen/mm.h>
 #include <asm/system.h>
 #include <asm/smp.h>
-#include <asm/cpregs.h>
 #include <asm/page.h>
 #include <asm/gic.h>
 #include <asm/flushtlb.h>
 
-void flush_tlb_mask(const cpumask_t *mask)
+void arch_flush_tlb_mask(const cpumask_t *mask)
 {
     /* No need to IPI other processors on ARM, the processor takes care of it. */
-    flush_tlb_all();
+    flush_all_guests_tlb();
 }
 
 void smp_send_event_check_mask(const cpumask_t *mask)

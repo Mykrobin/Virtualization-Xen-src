@@ -2,7 +2,7 @@
  * compat.c
  */
 
-asm(".file \"" __FILE__ "\"");
+EMIT_FILE;
 
 #include <xen/hypercall.h>
 #include <compat/xen.h>
@@ -15,6 +15,7 @@ asm(".file \"" __FILE__ "\"");
 
 #define COMPAT
 #define _XEN_GUEST_HANDLE(t) XEN_GUEST_HANDLE(t)
+#define _XEN_GUEST_HANDLE_PARAM(t) XEN_GUEST_HANDLE_PARAM(t)
 typedef int ret_t;
 
 #include "../compat.c"

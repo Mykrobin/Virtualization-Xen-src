@@ -1,6 +1,20 @@
 #ifndef __LIB_H__
 #define __LIB_H__
 
+#define ROUNDUP(x, a) (((x) + (a) - 1) & ~((a) - 1))
+
+#define DIV_ROUND(n, d) (((n) + (d) / 2) / (d))
+#define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
+
+#define MASK_EXTR(v, m) (((v) & (m)) / ((m) & -(m)))
+#define MASK_INSR(v, m) (((v) * ((m) & -(m))) & (m))
+
+#define count_args_(dot, a1, a2, a3, a4, a5, a6, a7, a8, x, ...) x
+#define count_args(args...) \
+    count_args_(., ## args, 8, 7, 6, 5, 4, 3, 2, 1, 0)
+
+#ifndef __ASSEMBLY__
+
 #include <xen/inttypes.h>
 #include <xen/stdarg.h>
 #include <xen/types.h>
@@ -9,9 +23,17 @@
 #include <asm/bug.h>
 
 #define BUG_ON(p)  do { if (unlikely(p)) BUG();  } while (0)
-#define WARN_ON(p) do { if (unlikely(p)) WARN(); } while (0)
+#define WARN_ON(p)  ({                  \
+    bool ret_warn_on_ = (p);            \
+                                        \
+    if ( unlikely(ret_warn_on_) )       \
+        WARN();                         \
+    unlikely(ret_warn_on_);             \
+})
 
-#if __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6)
+/* All clang versions supported by Xen have _Static_assert. */
+#if defined(__clang__) || \
+    (__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
 /* Force a compilation error if condition is true */
 #define BUILD_BUG_ON(cond) ({ _Static_assert(!(cond), "!(" #cond ")"); })
 
@@ -26,21 +48,13 @@
 #define BUILD_BUG_ON(cond) ((void)BUILD_BUG_ON_ZERO(cond))
 #endif
 
-#ifdef CONFIG_GCOV
-#define gcov_string "gcov=y"
-#else
-#define gcov_string ""
-#endif
-
 #ifndef NDEBUG
 #define ASSERT(p) \
     do { if ( unlikely(!(p)) ) assert_failed(#p); } while (0)
 #define ASSERT_UNREACHABLE() assert_failed("unreachable")
-#define debug_build() 1
 #else
 #define ASSERT(p) do { if ( 0 && (p) ) {} } while (0)
 #define ASSERT_UNREACHABLE() do { } while (0)
-#define debug_build() 0
 #endif
 
 #define ABS(_x) ({                              \
@@ -51,22 +65,17 @@
 #define SWAP(_a, _b) \
    do { typeof(_a) _t = (_a); (_a) = (_b); (_b) = _t; } while ( 0 )
 
-#define DIV_ROUND(n, d) (((n) + (d) / 2) / (d))
-#define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
-
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]) + __must_be_array(x))
 
-#define MASK_EXTR(v, m) (((v) & (m)) / ((m) & -(m)))
-#define MASK_INSR(v, m) (((v) * ((m) & -(m))) & (m))
-
-#define ROUNDUP(x, a) (((x) + (a) - 1) & ~((a) - 1))
-
-#define reserve_bootmem(_p,_l) ((void)0)
+#define __ACCESS_ONCE(x) ({                             \
+            (void)(typeof(x))0; /* Scalar typecheck. */ \
+            (volatile typeof(x) *)&(x); })
+#define ACCESS_ONCE(x) (*__ACCESS_ONCE(x))
 
 struct domain;
 
 void cmdline_parse(const char *cmdline);
-int parse_bool(const char *s);
+int parse_bool(const char *s, const char *e);
 
 /**
  * Given a specific name, parses a string of the form:
@@ -75,8 +84,14 @@ int parse_bool(const char *s);
  */
 int parse_boolean(const char *name, const char *s, const char *e);
 
-/*#define DEBUG_TRACE_DUMP*/
-#ifdef DEBUG_TRACE_DUMP
+/**
+ * Very similar to strcmp(), but will declare a match if the NUL in 'name'
+ * lines up with comma, colon, semicolon or equals in 'frag'.  Designed for
+ * picking exact string matches out of a delimited command line list.
+ */
+int cmdline_strcmp(const char *frag, const char *name);
+
+#ifdef CONFIG_DEBUG_TRACE
 extern void debugtrace_dump(void);
 extern void debugtrace_printk(const char *fmt, ...)
     __attribute__ ((format (printf, 1, 2)));
@@ -91,17 +106,6 @@ debugtrace_printk(const char *fmt, ...) {}
 #define _p(_x) ((void *)(unsigned long)(_x))
 extern void printk(const char *format, ...)
     __attribute__ ((format (printf, 1, 2)));
-extern void guest_printk(const struct domain *d, const char *format, ...)
-    __attribute__ ((format (printf, 2, 3)));
-extern void noreturn panic(const char *format, ...)
-    __attribute__ ((format (printf, 1, 2)));
-extern long vm_assist(struct domain *, unsigned int cmd, unsigned int type,
-                      unsigned long valid);
-extern int __printk_ratelimit(int ratelimit_ms, int ratelimit_burst);
-extern int printk_ratelimit(void);
-
-#define gprintk(lvl, fmt, args...) \
-    printk(XENLOG_GUEST lvl "%pv " fmt, current, ## args)
 
 #define printk_once(fmt, args...)               \
 ({                                              \
@@ -112,6 +116,16 @@ extern int printk_ratelimit(void);
         printk(fmt, ## args);                   \
     }                                           \
 })
+
+extern void guest_printk(const struct domain *d, const char *format, ...)
+    __attribute__ ((format (printf, 2, 3)));
+extern void noreturn panic(const char *format, ...)
+    __attribute__ ((format (printf, 1, 2)));
+extern int __printk_ratelimit(int ratelimit_ms, int ratelimit_burst);
+extern int printk_ratelimit(void);
+
+#define gprintk(lvl, fmt, args...) \
+    printk(XENLOG_GUEST lvl "%pv " fmt, current, ## args)
 
 #ifdef NDEBUG
 
@@ -162,10 +176,22 @@ unsigned long long parse_size_and_unit(const char *s, const char **ps);
 
 uint64_t muldiv64(uint64_t a, uint32_t b, uint32_t c);
 
+/*
+ * A slightly more typesafe variant of cmpxchg() when the entities dealt with
+ * are pointers.
+ */
+#define cmpxchgptr(ptr, o, n) ({                                        \
+    __typeof__(**(ptr)) *const o_ = (o);                                \
+    __typeof__(**(ptr)) *n_ = (n);                                      \
+    ((__typeof__(*(ptr)))__cmpxchg(ptr, (unsigned long)o_,              \
+                                   (unsigned long)n_, sizeof(*(ptr)))); \
+})
+
 #define TAINT_SYNC_CONSOLE              (1u << 0)
 #define TAINT_MACHINE_CHECK             (1u << 1)
 #define TAINT_ERROR_INJECT              (1u << 2)
 #define TAINT_HVM_FEP                   (1u << 3)
+#define TAINT_MACHINE_UNSECURE          (1u << 4)
 extern unsigned int tainted;
 #define TAINT_STRING_MAX_LEN            20
 extern char *print_tainted(char *str);
@@ -176,7 +202,49 @@ void dump_execstate(struct cpu_user_regs *);
 
 void init_constructors(void);
 
+/*
+ * bsearch - binary search an array of elements
+ * @key: pointer to item being searched for
+ * @base: pointer to first element to search
+ * @num: number of elements
+ * @size: size of each element
+ * @cmp: pointer to comparison function
+ *
+ * This function does a binary search on the given array.  The
+ * contents of the array should already be in ascending sorted order
+ * under the provided comparison function.
+ *
+ * Note that the key need not have the same type as the elements in
+ * the array, e.g. key could be a string and the comparison function
+ * could compare the string with the struct's name field.  However, if
+ * the key and elements in the array are of the same type, you can use
+ * the same comparison function for both sort() and bsearch().
+ */
+#ifndef BSEARCH_IMPLEMENTATION
+extern gnu_inline
+#endif
 void *bsearch(const void *key, const void *base, size_t num, size_t size,
-              int (*cmp)(const void *key, const void *elt));
+              int (*cmp)(const void *key, const void *elt))
+{
+    size_t start = 0, end = num;
+    int result;
+
+    while ( start < end )
+    {
+        size_t mid = start + (end - start) / 2;
+
+        result = cmp(key, base + mid * size);
+        if ( result < 0 )
+            end = mid;
+        else if ( result > 0 )
+            start = mid + 1;
+        else
+            return (void *)base + mid * size;
+    }
+
+    return NULL;
+}
+
+#endif /* __ASSEMBLY__ */
 
 #endif /* __LIB_H__ */

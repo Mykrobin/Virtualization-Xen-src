@@ -26,6 +26,11 @@
  *   A linear idea of a guest physical address space. For an auto-translated
  *   guest, pfn == gfn while for a non-translated guest, pfn != gfn.
  *
+ * dfn: Device DMA Frame Number (definitions in include/xen/iommu.h)
+ *   The linear frame numbers of device DMA address space. All initiators for
+ *   (i.e. all devices assigned to) a guest share a single DMA address space
+ *   and, by default, Xen will ensure dfn == pfn.
+ *
  * WARNING: Some of these terms have changed over time while others have been
  * used inconsistently, meaning that a lot of existing code does not match the
  * definitions above.  New code should use these terms as described here, and
@@ -46,91 +51,22 @@
 #define __XEN_MM_H__
 
 #include <xen/compiler.h>
+#include <xen/mm-frame.h>
 #include <xen/types.h>
 #include <xen/list.h>
 #include <xen/spinlock.h>
-#include <xen/typesafe.h>
-#include <xen/kernel.h>
 #include <xen/perfc.h>
 #include <public/memory.h>
-
-TYPE_SAFE(unsigned long, mfn);
-#define PRI_mfn          "05lx"
-#define INVALID_MFN      _mfn(~0UL)
-
-#ifndef mfn_t
-#define mfn_t /* Grep fodder: mfn_t, _mfn() and mfn_x() are defined above */
-#undef mfn_t
-#endif
-
-static inline mfn_t mfn_add(mfn_t mfn, unsigned long i)
-{
-    return _mfn(mfn_x(mfn) + i);
-}
-
-static inline mfn_t mfn_max(mfn_t x, mfn_t y)
-{
-    return _mfn(max(mfn_x(x), mfn_x(y)));
-}
-
-static inline mfn_t mfn_min(mfn_t x, mfn_t y)
-{
-    return _mfn(min(mfn_x(x), mfn_x(y)));
-}
-
-static inline bool_t mfn_eq(mfn_t x, mfn_t y)
-{
-    return mfn_x(x) == mfn_x(y);
-}
-
-TYPE_SAFE(unsigned long, gfn);
-#define PRI_gfn          "05lx"
-#define INVALID_GFN      _gfn(~0UL)
-
-#ifndef gfn_t
-#define gfn_t /* Grep fodder: gfn_t, _gfn() and gfn_x() are defined above */
-#undef gfn_t
-#endif
-
-static inline gfn_t gfn_add(gfn_t gfn, unsigned long i)
-{
-    return _gfn(gfn_x(gfn) + i);
-}
-
-static inline gfn_t gfn_max(gfn_t x, gfn_t y)
-{
-    return _gfn(max(gfn_x(x), gfn_x(y)));
-}
-
-static inline gfn_t gfn_min(gfn_t x, gfn_t y)
-{
-    return _gfn(min(gfn_x(x), gfn_x(y)));
-}
-
-static inline bool_t gfn_eq(gfn_t x, gfn_t y)
-{
-    return gfn_x(x) == gfn_x(y);
-}
-
-TYPE_SAFE(unsigned long, pfn);
-#define PRI_pfn          "05lx"
-#define INVALID_PFN      (~0UL)
-
-#ifndef pfn_t
-#define pfn_t /* Grep fodder: pfn_t, _pfn() and pfn_x() are defined above */
-#undef pfn_t
-#endif
 
 struct page_info;
 
 void put_page(struct page_info *);
-int get_page(struct page_info *, struct domain *);
+bool get_page(struct page_info *, const struct domain *);
 struct domain *__must_check page_get_owner_and_reference(struct page_info *);
 
 /* Boot-time allocator. Turns into generic allocator after bootstrap. */
 void init_boot_pages(paddr_t ps, paddr_t pe);
-unsigned long alloc_boot_pages(
-    unsigned long nr_pfns, unsigned long pfn_align);
+mfn_t alloc_boot_pages(unsigned long nr_pfns, unsigned long pfn_align);
 void end_boot_allocator(void);
 
 /* Xen suballocator. These functions are interrupt-safe. */
@@ -138,6 +74,7 @@ void init_xenheap_pages(paddr_t ps, paddr_t pe);
 void xenheap_max_mfn(unsigned long mfn);
 void *alloc_xenheap_pages(unsigned int order, unsigned int memflags);
 void free_xenheap_pages(void *v, unsigned int order);
+bool scrub_free_pages(void);
 #define alloc_xenheap_page() (alloc_xenheap_pages(0,0))
 #define free_xenheap_page(v) (free_xenheap_pages(v,0))
 
@@ -151,20 +88,23 @@ void free_xenheap_pages(void *v, unsigned int order);
 /* Map machine page range in Xen virtual address space. */
 int map_pages_to_xen(
     unsigned long virt,
-    unsigned long mfn,
+    mfn_t mfn,
     unsigned long nr_mfns,
     unsigned int flags);
 /* Alter the permissions of a range of Xen virtual address space. */
 int modify_xen_mappings(unsigned long s, unsigned long e, unsigned int flags);
 int destroy_xen_mappings(unsigned long v, unsigned long e);
+/* Retrieve the MFN mapped by VA in Xen virtual address space. */
+mfn_t xen_map_to_mfn(unsigned long va);
+
 /*
  * Create only non-leaf page table entries for the
  * page range in Xen virtual address space.
  */
-int populate_pt_range(unsigned long virt, unsigned long mfn,
-                      unsigned long nr_mfns);
+int populate_pt_range(unsigned long virt, unsigned long nr_mfns);
 /* Claim handling */
-unsigned long domain_adjust_tot_pages(struct domain *d, long pages);
+unsigned long __must_check domain_adjust_tot_pages(struct domain *d,
+    long pages);
 int domain_set_outstanding_pages(struct domain *d, unsigned long pages);
 void get_outstanding_claims(uint64_t *free_pages, uint64_t *outstanding_pages);
 
@@ -179,12 +119,11 @@ unsigned long avail_domheap_pages(void);
 unsigned long avail_node_heap_pages(unsigned int);
 #define alloc_domheap_page(d,f) (alloc_domheap_pages(d,0,f))
 #define free_domheap_page(p)  (free_domheap_pages(p,0))
-unsigned int online_page(unsigned long mfn, uint32_t *status);
-int offline_page(unsigned long mfn, int broken, uint32_t *status);
-int query_page_offline(unsigned long mfn, uint32_t *status);
-unsigned long total_free_pages(void);
+unsigned int online_page(mfn_t mfn, uint32_t *status);
+int offline_page(mfn_t mfn, int broken, uint32_t *status);
+int query_page_offline(mfn_t mfn, uint32_t *status);
 
-void scrub_heap_pages(void);
+void heap_init_late(void);
 
 int assign_pages(
     struct domain *d,
@@ -222,8 +161,6 @@ struct npfec {
 #define  MEMF_no_refcount (1U<<_MEMF_no_refcount)
 #define _MEMF_populate_on_demand 1
 #define  MEMF_populate_on_demand (1U<<_MEMF_populate_on_demand)
-#define _MEMF_tmem        2
-#define  MEMF_tmem        (1U<<_MEMF_tmem)
 #define _MEMF_no_dma      3
 #define  MEMF_no_dma      (1U<<_MEMF_no_dma)
 #define _MEMF_exact_node  4
@@ -232,7 +169,11 @@ struct npfec {
 #define  MEMF_no_owner    (1U<<_MEMF_no_owner)
 #define _MEMF_no_tlbflush 6
 #define  MEMF_no_tlbflush (1U<<_MEMF_no_tlbflush)
-#define _MEMF_node        8
+#define _MEMF_no_icache_flush 7
+#define  MEMF_no_icache_flush (1U<<_MEMF_no_icache_flush)
+#define _MEMF_no_scrub    8
+#define  MEMF_no_scrub    (1U<<_MEMF_no_scrub)
+#define _MEMF_node        16
 #define  MEMF_node_mask   ((1U << (8 * sizeof(nodeid_t))) - 1)
 #define  MEMF_node(n)     ((((n) + 1) & MEMF_node_mask) << _MEMF_node)
 #define  MEMF_get_node(f) ((((f) >> _MEMF_node) - 1) & MEMF_node_mask)
@@ -245,9 +186,22 @@ struct npfec {
 #define MAX_ORDER 20 /* 2^20 contiguous pages */
 #endif
 
+/* Private domain structs for DOMID_XEN, DOMID_IO, etc. */
+extern struct domain *dom_xen, *dom_io;
+#ifdef CONFIG_MEM_SHARING
+extern struct domain *dom_cow;
+#else
+# define dom_cow NULL
+#endif
+
 #define page_list_entry list_head
 
 #include <asm/mm.h>
+
+static inline bool is_special_page(const struct page_info *page)
+{
+    return is_xen_heap_page(page) || (page->count_info & PGC_extra);
+}
 
 #ifndef page_list_entry
 struct page_list_head
@@ -260,13 +214,8 @@ struct page_list_head
 # define PAGE_LIST_NULL ((typeof(((struct page_info){}).list.next))~0)
 
 # if !defined(pdx_to_page) && !defined(page_to_pdx)
-#  if defined(__page_to_mfn) || defined(__mfn_to_page)
-#   define page_to_pdx __page_to_mfn
-#   define pdx_to_page __mfn_to_page
-#  else
 #   define page_to_pdx page_to_mfn
 #   define pdx_to_page mfn_to_page
-#  endif
 # endif
 
 # define PAGE_LIST_HEAD_INIT(name) { NULL, NULL }
@@ -552,24 +501,45 @@ static inline unsigned int get_order_from_pages(unsigned long nr_pages)
 void scrub_one_page(struct page_info *);
 
 #ifndef arch_free_heap_page
-#define arch_free_heap_page(d, pg)                      \
-    page_list_del(pg, is_xen_heap_page(pg) ?            \
-                      &(d)->xenpage_list : &(d)->page_list)
+#define arch_free_heap_page(d, pg) \
+    page_list_del(pg, page_to_list(d, pg))
 #endif
 
+union add_to_physmap_extra {
+    /*
+     * XENMAPSPACE_gmfn: When deferring TLB flushes, a page reference needs
+     * to be kept until after the flush, so the page can't get removed from
+     * the domain (and re-used for another purpose) beforehand. By passing
+     * non-NULL, the caller of xenmem_add_to_physmap_one() indicates it wants
+     * to have ownership of such a reference transferred in the success case.
+     */
+    struct page_info **ppage;
+
+    /* XENMAPSPACE_gmfn_foreign */
+    domid_t foreign_domid;
+};
+
 int xenmem_add_to_physmap_one(struct domain *d, unsigned int space,
-                              union xen_add_to_physmap_batch_extra extra,
+                              union add_to_physmap_extra extra,
                               unsigned long idx, gfn_t gfn);
 
-/* Returns 0 on success, or negative on error. */
+int xenmem_add_to_physmap(struct domain *d, struct xen_add_to_physmap *xatp,
+                          unsigned int start);
+
+/* Return 0 on success, or negative on error. */
 int __must_check guest_remove_page(struct domain *d, unsigned long gmfn);
+int __must_check steal_page(struct domain *d, struct page_info *page,
+                            unsigned int memflags);
 
 #define RAM_TYPE_CONVENTIONAL 0x00000001
 #define RAM_TYPE_RESERVED     0x00000002
 #define RAM_TYPE_UNUSABLE     0x00000004
 #define RAM_TYPE_ACPI         0x00000008
+#define RAM_TYPE_UNKNOWN      0x00000010
 /* TRUE if the whole page at @mfn is of the requested RAM type(s) above. */
 int page_is_ram_type(unsigned long mfn, unsigned long mem_type);
+/* Returns the page type(s). */
+unsigned int page_get_ram_type(mfn_t mfn);
 
 /* Prepare/destroy a ring for a dom0 helper. Helper with talk
  * with Xen on behalf of this domain. */
@@ -598,13 +568,47 @@ static inline void accumulate_tlbflush(bool *need_tlbflush,
 
 static inline void filtered_flush_tlb_mask(uint32_t tlbflush_timestamp)
 {
-    cpumask_t mask = cpu_online_map;
+    cpumask_t mask;
 
-    tlbflush_filter(mask, tlbflush_timestamp);
+    cpumask_copy(&mask, &cpu_online_map);
+    tlbflush_filter(&mask, tlbflush_timestamp);
     if ( !cpumask_empty(&mask) )
     {
         perfc_incr(need_flush_tlb_flush);
-        flush_tlb_mask(&mask);
+        arch_flush_tlb_mask(&mask);
+    }
+}
+
+enum XENSHARE_flags {
+    SHARE_rw,
+    SHARE_ro,
+};
+void share_xen_page_with_guest(struct page_info *page, struct domain *d,
+                               enum XENSHARE_flags flags);
+
+static inline void share_xen_page_with_privileged_guests(
+    struct page_info *page, enum XENSHARE_flags flags)
+{
+    share_xen_page_with_guest(page, dom_xen, flags);
+}
+
+static inline void put_page_alloc_ref(struct page_info *page)
+{
+    /*
+     * Whenever a page is assigned to a domain then the _PGC_allocated
+     * bit is set and the reference count is set to at least 1. This
+     * function clears that 'allocation reference' but it is unsafe to
+     * do so to domheap pages without the caller holding an additional
+     * reference. I.e. the allocation reference must never be the last
+     * reference held.
+     *
+     * (It's safe for xenheap pages, because put_page() will not cause
+     * them to be freed.)
+     */
+    if ( test_and_clear_bit(_PGC_allocated, &page->count_info) )
+    {
+        BUG_ON((page->count_info & (PGC_xen_heap | PGC_count_mask)) <= 1);
+        put_page(page);
     }
 }
 

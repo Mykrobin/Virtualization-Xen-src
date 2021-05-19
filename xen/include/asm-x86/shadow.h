@@ -22,7 +22,6 @@
 #ifndef _XEN_SHADOW_H
 #define _XEN_SHADOW_H
 
-#include <public/domctl.h>
 #include <xen/sched.h>
 #include <xen/perfc.h>
 #include <xen/domain_page.h>
@@ -30,6 +29,8 @@
 #include <asm/paging.h>
 #include <asm/p2m.h>
 #include <asm/spec_ctrl.h>
+
+#include <public/domctl.h>
 
 /*****************************************************************************
  * Macros to tell which shadow paging mode a domain is in*/
@@ -49,7 +50,7 @@
 
 /* Set up the shadow-specific parts of a domain struct at start of day.
  * Called from paging_domain_init(). */
-int shadow_domain_init(struct domain *d, unsigned int domcr_flags);
+int shadow_domain_init(struct domain *d);
 
 /* Setup the shadow-specific parts of a vcpu struct. It is called by
  * paging_vcpu_init() in paging.c */
@@ -63,18 +64,19 @@ int shadow_enable(struct domain *d, u32 mode);
 /* Enable VRAM dirty bit tracking. */
 int shadow_track_dirty_vram(struct domain *d,
                             unsigned long first_pfn,
-                            unsigned long nr,
-                            XEN_GUEST_HANDLE_64(uint8) dirty_bitmap);
+                            unsigned int nr_frames,
+                            XEN_GUEST_HANDLE(void) dirty_bitmap);
 
 /* Handler for shadow control ops: operations from user-space to enable
  * and disable ephemeral shadow modes (test mode and log-dirty mode) and
  * manipulate the log-dirty bitmap. */
 int shadow_domctl(struct domain *d, 
-                  xen_domctl_shadow_op_t *sc,
-                  XEN_GUEST_HANDLE_PARAM(void) u_domctl);
+                  struct xen_domctl_shadow_op *sc,
+                  XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl);
 
-/* Call when destroying a domain */
-void shadow_teardown(struct domain *d, int *preempted);
+/* Call when destroying a vcpu/domain */
+void shadow_vcpu_teardown(struct vcpu *v);
+void shadow_teardown(struct domain *d, bool *preempted);
 
 /* Call once all of the references to the domain have gone away */
 void shadow_final_teardown(struct domain *d);
@@ -88,17 +90,27 @@ void shadow_prepare_page_type_change(struct domain *d, struct page_info *page,
 /* Discard _all_ mappings from the domain's shadows. */
 void shadow_blow_tables_per_domain(struct domain *d);
 
+/* Set the pool of shadow pages to the required number of pages.
+ * Input will be rounded up to at least shadow_min_acceptable_pages(),
+ * plus space for the p2m table.
+ * Returns 0 for success, non-zero for failure. */
+int shadow_set_allocation(struct domain *d, unsigned int pages,
+                          bool *preempted);
+
 #else /* !CONFIG_SHADOW_PAGING */
 
+#define shadow_vcpu_teardown(v) ASSERT(is_pv_vcpu(v))
 #define shadow_teardown(d, p) ASSERT(is_pv_domain(d))
 #define shadow_final_teardown(d) ASSERT(is_pv_domain(d))
 #define shadow_enable(d, mode) \
     ({ ASSERT(is_pv_domain(d)); -EOPNOTSUPP; })
 #define shadow_track_dirty_vram(d, begin_pfn, nr, bitmap) \
     ({ ASSERT_UNREACHABLE(); -EOPNOTSUPP; })
+#define shadow_set_allocation(d, pages, preempted) \
+    ({ ASSERT_UNREACHABLE(); -EOPNOTSUPP; })
 
 static inline void sh_remove_shadows(struct domain *d, mfn_t gmfn,
-                                     bool_t fast, bool_t all) {}
+                                     int fast, int all) {}
 
 static inline void shadow_prepare_page_type_change(struct domain *d,
                                                    struct page_info *page,
@@ -106,8 +118,9 @@ static inline void shadow_prepare_page_type_change(struct domain *d,
 
 static inline void shadow_blow_tables_per_domain(struct domain *d) {}
 
-static inline int shadow_domctl(struct domain *d, xen_domctl_shadow_op_t *sc,
-                                XEN_GUEST_HANDLE_PARAM(void) u_domctl)
+static inline int shadow_domctl(struct domain *d,
+                                struct xen_domctl_shadow_op *sc,
+                                XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 {
     return -EINVAL;
 }
@@ -161,13 +174,15 @@ static inline bool is_l1tf_safe_maddr(intpte_t pte)
     return maddr == 0 || maddr >= l1tf_safe_maddr;
 }
 
+#ifdef CONFIG_PV
+
 static inline bool pv_l1tf_check_pte(struct domain *d, unsigned int level,
                                      intpte_t pte)
 {
     ASSERT(is_pv_domain(d));
     ASSERT(!(pte & _PAGE_PRESENT));
 
-    if ( d->arch.pv_domain.check_l1tf && !paging_mode_sh_forced(d) &&
+    if ( d->arch.pv.check_l1tf && !paging_mode_sh_forced(d) &&
          (((level > 1) && (pte & _PAGE_PSE)) || !is_l1tf_safe_maddr(pte)) )
     {
 #ifdef CONFIG_SHADOW_PAGING
@@ -218,16 +233,15 @@ static inline bool pv_l1tf_check_l4e(struct domain *d, l4_pgentry_t l4e)
     return pv_l1tf_check_pte(d, 4, l4e.l4);
 }
 
-void pv_l1tf_tasklet(unsigned long data);
+void pv_l1tf_tasklet(void *data);
 
 static inline void pv_l1tf_domain_init(struct domain *d)
 {
-    d->arch.pv_domain.check_l1tf = is_hardware_domain(d) ? opt_pv_l1tf_hwdom
-                                                         : opt_pv_l1tf_domu;
+    d->arch.pv.check_l1tf = is_hardware_domain(d) ? opt_pv_l1tf_hwdom
+                                                  : opt_pv_l1tf_domu;
 
 #ifdef CONFIG_SHADOW_PAGING
-    tasklet_init(&d->arch.paging.shadow.pv_l1tf_tasklet,
-                 pv_l1tf_tasklet, (unsigned long)d);
+    tasklet_init(&d->arch.paging.shadow.pv_l1tf_tasklet, pv_l1tf_tasklet, d);
 #endif
 }
 
@@ -237,6 +251,8 @@ static inline void pv_l1tf_domain_destroy(struct domain *d)
     tasklet_kill(&d->arch.paging.shadow.pv_l1tf_tasklet);
 #endif
 }
+
+#endif /* CONFIG_PV */
 
 /* Remove all shadows of the guest mfn. */
 static inline void shadow_remove_all_shadows(struct domain *d, mfn_t gmfn)

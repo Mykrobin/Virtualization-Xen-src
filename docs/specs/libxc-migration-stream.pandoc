@@ -1,9 +1,9 @@
-% LibXenCtrl Domain Image Format
+% libxenctrl (libxc) Domain Image Format
 % David Vrabel <<david.vrabel@citrix.com>>
   Andrew Cooper <<andrew.cooper3@citrix.com>>
   Wen Congyang <<wency@cn.fujitsu.com>>
   Yang Hongyang <<hongyang.yang@easystack.cn>>
-% Revision 1
+% Revision 3
 
 Introduction
 ============
@@ -127,7 +127,7 @@ marker      0xFFFFFFFFFFFFFFFF.
 
 id          0x58454E46 ("XENF" in ASCII).
 
-version     0x00000002.  The version of this specification.
+version     0x00000003.  The version of this specification.
 
 options     bit 0: Endianness.  0 = little-endian, 1 = big-endian.
 
@@ -160,11 +160,7 @@ type        0x0000: Reserved.
 
             0x0002: x86 HVM.
 
-            0x0003: x86 PVH.
-
-            0x0004: ARM.
-
-            0x0005 - 0xFFFFFFFF: Reserved.
+            0x0003 - 0xFFFFFFFF: Reserved.
 
 page_shift  Size of a guest page as a power of two.
 
@@ -215,7 +211,7 @@ type         0x00000000: END
 
              0x00000007: SHARED_INFO
 
-             0x00000008: TSC_INFO
+             0x00000008: X86_TSC_INFO
 
              0x00000009: HVM_CONTEXT
 
@@ -231,7 +227,13 @@ type         0x00000000: END
 
              0x0000000F: CHECKPOINT_DIRTY_PFN_LIST (Secondary -> Primary)
 
-             0x00000010 - 0x7FFFFFFF: Reserved for future _mandatory_
+             0x00000010: STATIC_DATA_END
+
+             0x00000011: X86_CPUID_POLICY
+
+             0x00000012: X86_MSR_POLICY
+
+             0x00000013 - 0x7FFFFFFF: Reserved for future _mandatory_
              records.
 
              0x80000000 - 0xFFFFFFFF: Reserved for future _optional_
@@ -298,14 +300,14 @@ count       Number of pages described in this record.
 
 pfn         An array of count PFNs and their types.
 
-            Bit 63-60: XEN\_DOMCTL\_PFINFO\_* type (from
+            Bit 63-60: XEN_DOMCTL_PFINFO_* type (from
             `public/domctl.h` but shifted by 32 bits)
 
             Bit 59-52: Reserved.
 
             Bit 51-0: PFN.
 
-page\_data  page\_size octets of uncompressed page contents for each
+page_data   page_size octets of uncompressed page contents for each
             page set as present in the pfn array.
 --------------------------------------------------------------------
 
@@ -342,7 +344,7 @@ XALLOC         0xE        Allocate only.
 XTAB           0xF        Invalid page.
 --------------------------------------------------------------------
 
-Table: XEN\_DOMCTL\_PFINFO\_* Page Types.
+Table: XEN_DOMCTL_PFINFO_* Page Types.
 
 PFNs with type `BROKEN`, `XALLOC`, or `XTAB` do not have any
 corresponding `page_data`.
@@ -429,13 +431,13 @@ context          Binary data for this VCPU.
 ---------------------------------------------------------------------
 Record type                  Accessor hypercalls
 -----------------------      ----------------------------------------
-X86\_PV\_VCPU\_BASIC         XEN\_DOMCTL\_{get,set}vcpucontext
+X86_PV_VCPU_BASIC            XEN_DOMCTL_{get,set}vcpucontext
 
-X86\_PV\_VCPU\_EXTENDED      XEN\_DOMCTL\_{get,set}\_ext\_vcpucontext
+X86_PV_VCPU_EXTENDED         XEN_DOMCTL_{get,set}\_ext_vcpucontext
 
-X86\_PV\_VCPU\_XSAVE         XEN\_DOMCTL\_{get,set}vcpuextstate
+X86_PV_VCPU_XSAVE            XEN_DOMCTL_{get,set}vcpuextstate
 
-X86\_PV\_VCPU\_MSRS          XEN\_DOMCTL\_{get,set}\_vcpu\_msrs
+X86_PV_VCPU_MSRS             XEN_DOMCTL_{get,set}\_vcpu_msrs
 ---------------------------------------------------------------------
 
 \clearpage
@@ -460,11 +462,11 @@ shared_info      Contents of the shared info page.  This record
 
 \clearpage
 
-TSC_INFO
---------
+X86_TSC_INFO
+------------
 
 Domain TSC information, as accessed by the
-XEN\_DOMCTL\_{get,set}tscinfo hypercall sub-ops.
+XEN_DOMCTL_{get,set}tscinfo hypercall sub-ops.
 
      0     1     2     3     4     5     6     7 octet
     +------------------------+------------------------+
@@ -478,7 +480,7 @@ XEN\_DOMCTL\_{get,set}tscinfo hypercall sub-ops.
 --------------------------------------------------------------------
 Field            Description
 -----------      ---------------------------------------------------
-mode             TSC mode, TSC\_MODE\_* constant.
+mode             TSC mode, TSC_MODE_* constant.
 
 khz              TSC frequency, in kHz.
 
@@ -493,7 +495,7 @@ HVM_CONTEXT
 -----------
 
 HVM Domain context, as accessed by the
-XEN\_DOMCTL\_{get,set}hvmcontext hypercall sub-ops.
+XEN_DOMCTL_{get,set}hvmcontext hypercall sub-ops.
 
      0     1     2     3     4     5     6     7 octet
     +-------------------------------------------------+
@@ -513,7 +515,7 @@ HVM_PARAMS
 ----------
 
 HVM Domain parameters, as accessed by the
-HVMOP\_{get,set}\_param hypercall sub-ops.
+HVMOP_{get,set}\_param hypercall sub-ops.
 
      0     1     2     3     4     5     6     7 octet
     +------------------------+------------------------+
@@ -624,6 +626,61 @@ The count of pfns is: record->length/sizeof(uint64_t).
 
 \clearpage
 
+STATIC_DATA_END
+---------------
+
+A static data end record marks the end of the static state.  I.e. state which
+is invariant of guest execution.
+
+
+     0     1     2     3     4     5     6     7 octet
+    +-------------------------------------------------+
+
+The end record contains no fields; its body_length is 0.
+
+\clearpage
+
+X86_CPUID_POLICY
+----------------
+
+CPUID policy content, as accessed by the XEN_DOMCTL_{get,set}_cpu_policy
+hypercall sub-ops.
+
+     0     1     2     3     4     5     6     7 octet
+    +-------------------------------------------------+
+    | CPUID_policy                                    |
+    ...
+    +-------------------------------------------------+
+
+--------------------------------------------------------------------
+Field            Description
+------------     ---------------------------------------------------
+CPUID_policy     Array of xen_cpuid_leaf_t[]'s
+--------------------------------------------------------------------
+
+\clearpage
+
+X86_MSR_POLICY
+--------------
+
+MSR policy content, as accessed by the XEN_DOMCTL_{get,set}_cpu_policy
+hypercall sub-ops.
+
+     0     1     2     3     4     5     6     7 octet
+    +-------------------------------------------------+
+    | MSR_policy                                      |
+    ...
+    +-------------------------------------------------+
+
+--------------------------------------------------------------------
+Field            Description
+----------       ---------------------------------------------------
+MSR_policy       Array of xen_msr_entry_t[]'s
+--------------------------------------------------------------------
+
+\clearpage
+
+
 Layout
 ======
 
@@ -631,52 +688,78 @@ The set of valid records depends on the guest architecture and type.  No
 assumptions should be made about the ordering or interleaving of
 independent records.  Record dependencies are noted below.
 
+Some records are used for signalling, and explicitly have zero length.  All
+other records contain data relevant to the migration.  Data records with no
+content should be elided on the source side, as their presence serves no
+purpose, but results in extra work for the restore side.
+
 x86 PV Guest
 ------------
 
 A typical save record for an x86 PV guest image would look like:
 
-1. Image header
-2. Domain header
-3. X86\_PV\_INFO record
-4. X86\_PV\_P2M\_FRAMES record
-5. Many PAGE\_DATA records
-6. TSC\_INFO
-7. SHARED\_INFO record
-8. VCPU context records for each online VCPU
-    a. X86\_PV\_VCPU\_BASIC record
-    b. X86\_PV\_VCPU\_EXTENDED record
-    c. X86\_PV\_VCPU\_XSAVE record
-    d. X86\_PV\_VCPU\_MSRS record
-9. END record
+* Image header
+* Domain header
+* Static data records:
+    * X86_PV_INFO record
+    * X86_{CPUID,MSR}_POLICY
+    * STATIC_DATA_END
+* X86_PV_P2M_FRAMES record
+* Many PAGE_DATA records
+* X86_TSC_INFO
+* SHARED_INFO record
+* VCPU context records for each online VCPU
+    * X86_PV_VCPU_BASIC record
+    * X86_PV_VCPU_EXTENDED record
+    * X86_PV_VCPU_XSAVE record
+    * X86_PV_VCPU_MSRS record
+* END record
 
 There are some strict ordering requirements.  The following records must
 be present in the following order as each of them depends on information
 present in the preceding ones.
 
-1. X86\_PV\_INFO record
-2. X86\_PV\_P2M\_FRAMES record
-3. PAGE\_DATA records
-4. VCPU records
+* X86_PV_INFO record
+* X86_PV_P2M_FRAMES record
+* PAGE_DATA records
+* VCPU records
 
 x86 HVM Guest
 -------------
 
 A typical save record for an x86 HVM guest image would look like:
 
-1. Image header
-2. Domain header
-3. Many PAGE\_DATA records
-4. TSC\_INFO
-5. HVM\_PARAMS
-6. HVM\_CONTEXT
+* Image header
+* Domain header
+* Static data records:
+    * X86_{CPUID,MSR}_POLICY
+    * STATIC_DATA_END
+* Many PAGE_DATA records
+* X86_TSC_INFO
+* HVM_PARAMS
+* HVM_CONTEXT
+* END record
 
-HVM\_PARAMS must precede HVM\_CONTEXT, as certain parameters can affect
+HVM_PARAMS must precede HVM_CONTEXT, as certain parameters can affect
 the validity of architectural state in the context.
 
+Compatibility with older versions
+=================================
+
+v3 compat with v2
+-----------------
+
+A v3 stream is compatible with a v2 stream, but mandates the presense of a
+STATIC_DATA_END record ahead of any memory/register content.  This is to ease
+the introduction of new static configuration records over time.
+
+A v3-compatible reciever interpreting a v2 stream should infer the position of
+STATIC_DATA_END based on finding the first X86_PV_P2M_FRAMES record (for PV
+guests), or PAGE_DATA record (for HVM guests) and behave as if STATIC_DATA_END
+had been sent.
 
 Legacy Images (x86 only)
-========================
+------------------------
 
 Restoring legacy images from older tools shall be handled by
 translating the legacy format image into this new format.
@@ -719,3 +802,12 @@ restored.
 The image header may only be extended by _appending_ additional
 fields.  In particular, the `marker`, `id` and `version` fields must
 never change size or location.
+
+
+Errata
+======
+
+1. For compatibility with older code, the receving side of a stream should
+   tolerate and ignore variable sized records with zero content.  Xen releases
+   between 4.6 and 4.8 could end up generating valid HVM_PARAMS or
+   X86_PV_VCPU_{EXTENDED,XSAVE,MSRS} records with zero-length content.

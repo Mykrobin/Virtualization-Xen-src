@@ -7,22 +7,21 @@
 #ifndef __X86_CURRENT_H__
 #define __X86_CURRENT_H__
 
-#include <xen/config.h>
 #include <xen/percpu.h>
+#include <xen/page-size.h>
 #include <public/xen.h>
-#include <asm/page.h>
 
 /*
  * Xen's cpu stacks are 8 pages (8-page aligned), arranged as:
  *
  * 7 - Primary stack (with a struct cpu_info at the top)
  * 6 - Primary stack
- * 5 - Optionally not preset (MEMORY_GUARD)
- * 4 - unused
- * 3 - Syscall trampolines
- * 2 - MCE IST stack
- * 1 - NMI IST stack
- * 0 - Double Fault IST stack
+ * 5 - Primay Shadow Stack (read-only)
+ * 4 - #DF IST stack
+ * 3 - #DB IST stack
+ * 2 - NMI IST stack
+ * 1 - #MC IST stack
+ * 0 - IST Shadow Stacks (4x 1k, read-only)
  */
 
 /*
@@ -78,6 +77,11 @@ struct cpu_info {
     /* get_stack_bottom() must be 16-byte aligned */
 };
 
+static inline struct cpu_info *get_cpu_info_from_stack(unsigned long sp)
+{
+    return (struct cpu_info *)((sp | (STACK_SIZE - 1)) + 1) - 1;
+}
+
 static inline struct cpu_info *get_cpu_info(void)
 {
 #ifdef __clang__
@@ -88,7 +92,7 @@ static inline struct cpu_info *get_cpu_info(void)
     register unsigned long sp asm("rsp");
 #endif
 
-    return (struct cpu_info *)((sp | (STACK_SIZE - 1)) + 1) - 1;
+    return get_cpu_info_from_stack(sp);
 }
 
 #define get_current()         (get_cpu_info()->current_vcpu)
@@ -96,11 +100,6 @@ static inline struct cpu_info *get_cpu_info(void)
 #define current               (get_current())
 
 #define get_processor_id()    (get_cpu_info()->processor_id)
-#define set_processor_id(id)  do {                                      \
-    struct cpu_info *ci__ = get_cpu_info();                             \
-    ci__->per_cpu_offset = __per_cpu_offset[ci__->processor_id = (id)]; \
-} while (0)
-
 #define guest_cpu_user_regs() (&get_cpu_info()->guest_cpu_user_regs)
 
 /*
@@ -121,29 +120,85 @@ unsigned long get_stack_dump_bottom (unsigned long sp);
 
 #ifdef CONFIG_LIVEPATCH
 # define CHECK_FOR_LIVEPATCH_WORK "call check_for_livepatch_work;"
+#elif defined(CONFIG_DEBUG)
+/* Mimic the clobbering effect a call has on registers. */
+# define CHECK_FOR_LIVEPATCH_WORK \
+    "mov $0x1234567890abcdef, %%rax\n\t" \
+    "mov %%rax, %%rcx; mov %%rax, %%rdx\n\t" \
+    "mov %%rax, %%rsi; mov %%rax, %%rdi\n\t" \
+    "mov %%rax, %%r8; mov %%rax, %%r9\n\t" \
+    "mov %%rax, %%r10; mov %%rax, %%r11\n\t"
 #else
 # define CHECK_FOR_LIVEPATCH_WORK ""
 #endif
 
-#define reset_stack_and_jump(__fn)                                      \
+#ifdef CONFIG_XEN_SHSTK
+/*
+ * We need to unwind the primary shadow stack to its supervisor token, located
+ * in the last word of the primary shadow stack.
+ *
+ * Read the shadow stack pointer, subtract it from supervisor token position,
+ * and divide by 8 to get the number of slots needing popping.
+ *
+ * INCSSPQ can't pop more than 255 entries.  We shouldn't ever need to pop
+ * that many entries, and getting this wrong will cause us to #DF later.  Turn
+ * it into a BUG() now for fractionally easier debugging.
+ */
+# define SHADOW_STACK_WORK                                      \
+    "mov $1, %[ssp];"                                           \
+    "rdsspd %[ssp];"                                            \
+    "cmp $1, %[ssp];"                                           \
+    "je .L_shstk_done.%=;" /* CET not active?  Skip. */         \
+    "mov $%c[skstk_base], %[val];"                              \
+    "and $%c[stack_mask], %[ssp];"                              \
+    "sub %[ssp], %[val];"                                       \
+    "shr $3, %[val];"                                           \
+    "cmp $255, %[val];" /* More than 255 entries?  Crash. */    \
+    UNLIKELY_START(a, shstk_adjust)                             \
+    _ASM_BUGFRAME_TEXT(0)                                       \
+    UNLIKELY_END_SECTION ";"                                    \
+    "incsspq %q[val];"                                          \
+    ".L_shstk_done.%=:"
+#else
+# define SHADOW_STACK_WORK ""
+#endif
+
+#if __GNUC__ >= 9
+# define ssaj_has_attr_noreturn(fn) __builtin_has_attribute(fn, __noreturn__)
+#else
+/* Simply can't check the property with older gcc. */
+# define ssaj_has_attr_noreturn(fn) true
+#endif
+
+#define switch_stack_and_jump(fn, instr, constr)                        \
     ({                                                                  \
+        unsigned int tmp;                                               \
+        (void)((fn) == (void (*)(void))NULL);                           \
+        BUILD_BUG_ON(!ssaj_has_attr_noreturn(fn));                      \
         __asm__ __volatile__ (                                          \
-            "mov %0,%%"__OP"sp;"                                        \
-            CHECK_FOR_LIVEPATCH_WORK                                      \
-             "jmp %c1"                                                  \
-            : : "r" (guest_cpu_user_regs()), "i" (__fn) : "memory" );   \
+            SHADOW_STACK_WORK                                           \
+            "mov %[stk], %%rsp;"                                        \
+            CHECK_FOR_LIVEPATCH_WORK                                    \
+            instr "[fun]"                                               \
+            : [val] "=&r" (tmp),                                        \
+              [ssp] "=&r" (tmp)                                         \
+            : [stk] "r" (guest_cpu_user_regs()),                        \
+              [fun] constr (fn),                                        \
+              [skstk_base] "i"                                          \
+              ((PRIMARY_SHSTK_SLOT + 1) * PAGE_SIZE - 8),               \
+              [stack_mask] "i" (STACK_SIZE - 1),                        \
+              _ASM_BUGFRAME_INFO(BUGFRAME_bug, __LINE__,                \
+                                 __FILE__, NULL)                        \
+            : "memory" );                                               \
         unreachable();                                                  \
     })
 
-/*
- * Schedule tail *should* be a terminal function pointer, but leave a bugframe
- * around just incase it returns, to save going back into the context
- * switching code and leaving a far more subtle crash to diagnose.
- */
-#define schedule_tail(vcpu) do {                \
-        (((vcpu)->arch.schedule_tail)(vcpu));   \
-        BUG();                                  \
-    } while (0)
+#define reset_stack_and_jump(fn)                                        \
+    switch_stack_and_jump(fn, "jmp %c", "i")
+
+/* The constraint may only specify non-call-clobbered registers. */
+#define reset_stack_and_jump_ind(fn)                                    \
+    switch_stack_and_jump(fn, "INDIRECT_JMP %", "b")
 
 /*
  * Which VCPU's state is currently running on each CPU?

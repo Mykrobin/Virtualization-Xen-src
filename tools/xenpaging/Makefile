@@ -1,8 +1,7 @@
 XEN_ROOT=$(CURDIR)/../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-# xenpaging.c and file_ops.c incorrectly use libxc internals
-CFLAGS += $(CFLAGS_libxentoollog) $(CFLAGS_libxenevtchn) $(CFLAGS_libxenctrl) $(CFLAGS_libxenstore) $(PTHREAD_CFLAGS) -I$(XEN_ROOT)/tools/libxc $(CFLAGS_libxencall)
+CFLAGS += $(CFLAGS_libxentoollog) $(CFLAGS_libxenevtchn) $(CFLAGS_libxenctrl) $(CFLAGS_libxenstore) $(PTHREAD_CFLAGS) $(CFLAGS_libxencall)
 LDLIBS += $(LDLIBS_libxentoollog) $(LDLIBS_libxenevtchn) $(LDLIBS_libxenctrl) $(LDLIBS_libxenstore) $(PTHREAD_LIBS)
 LDFLAGS += $(PTHREAD_LDFLAGS)
 
@@ -28,15 +27,18 @@ install: all
 	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC_BIN)
 	$(INSTALL_PROG) $(IBINS) $(DESTDIR)$(LIBEXEC_BIN)
 
+uninstall:
+	rm -f $(addprefix $(DESTDIR)$(LIBEXEC_BIN)/, $(IBINS))
+
 clean:
-	rm -f *.o *~ $(DEPS) xen TAGS $(IBINS) $(LIB)
+	rm -f *.o *~ $(DEPS_RM) xen TAGS $(IBINS) $(LIB)
 
 distclean: clean
 
-.PHONY: clean install distclean
+.PHONY: clean install distclean uninstall
 
 .PHONY: TAGS
 TAGS:
 	etags -t $(SRCS) *.h
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)

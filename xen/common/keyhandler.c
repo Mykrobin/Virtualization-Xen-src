@@ -3,7 +3,9 @@
  */
 
 #include <asm/regs.h>
+#include <xen/delay.h>
 #include <xen/keyhandler.h>
+#include <xen/param.h>
 #include <xen/shutdown.h>
 #include <xen/event.h>
 #include <xen/console.h>
@@ -28,8 +30,6 @@ static keyhandler_fn_t show_handlers, dump_hwdom_registers,
     dump_domains, read_clocks;
 static irq_keyhandler_fn_t do_toggle_alt_key, dump_registers,
     reboot_machine, run_all_keyhandlers, do_debug_key;
-
-char keyhandler_scratch[1024];
 
 static struct keyhandler {
     union {
@@ -64,7 +64,7 @@ static struct keyhandler {
     KEYHANDLER('P', perfc_reset, "reset performance counters", 0),
 #endif
 
-#ifdef CONFIG_LOCK_PROFILE
+#ifdef CONFIG_DEBUG_LOCK_PROFILE
     KEYHANDLER('l', spinlock_profile_printall, "print lock profile info", 1),
     KEYHANDLER('L', spinlock_profile_reset, "reset lock profile info", 0),
 #endif
@@ -73,12 +73,12 @@ static struct keyhandler {
 #undef KEYHANDLER
 };
 
-static void keypress_action(unsigned long unused)
+static void keypress_action(void *unused)
 {
     handle_keypress(keypress_key, NULL);
 }
 
-static DECLARE_TASKLET(keypress_tasklet, keypress_action, 0);
+static DECLARE_TASKLET(keypress_tasklet, keypress_action, NULL);
 
 void handle_keypress(unsigned char key, struct cpu_user_regs *regs)
 {
@@ -183,7 +183,10 @@ static void dump_registers(unsigned char key, struct cpu_user_regs *regs)
     cpumask_copy(&dump_execstate_mask, &cpu_online_map);
 
     /* Get local execution state out immediately, in case we get stuck. */
-    dump_execstate(regs);
+    if ( regs )
+        dump_execstate(regs);
+    else
+        run_in_exception_handler(dump_execstate);
 
     /* Alt. handling: remaining CPUs are dumped asynchronously one-by-one. */
     if ( alt_key_handling )
@@ -201,11 +204,11 @@ static void dump_registers(unsigned char key, struct cpu_user_regs *regs)
     watchdog_enable();
 }
 
-static DECLARE_TASKLET(dump_hwdom_tasklet, NULL, 0);
+static DECLARE_TASKLET(dump_hwdom_tasklet, NULL, NULL);
 
-static void dump_hwdom_action(unsigned long arg)
+static void dump_hwdom_action(void *data)
 {
-    struct vcpu *v = (void *)arg;
+    struct vcpu *v = data;
 
     for ( ; ; )
     {
@@ -214,7 +217,7 @@ static void dump_hwdom_action(unsigned long arg)
             break;
         if ( softirq_pending(smp_processor_id()) )
         {
-            dump_hwdom_tasklet.data = (unsigned long)v;
+            dump_hwdom_tasklet.data = v;
             tasklet_schedule_on_cpu(&dump_hwdom_tasklet, v->processor);
             break;
         }
@@ -235,8 +238,7 @@ static void dump_hwdom_registers(unsigned char key)
         if ( alt_key_handling && softirq_pending(smp_processor_id()) )
         {
             tasklet_kill(&dump_hwdom_tasklet);
-            tasklet_init(&dump_hwdom_tasklet, dump_hwdom_action,
-                         (unsigned long)v);
+            tasklet_init(&dump_hwdom_tasklet, dump_hwdom_action, v);
             tasklet_schedule_on_cpu(&dump_hwdom_tasklet, v->processor);
             return;
         }
@@ -250,44 +252,15 @@ static void reboot_machine(unsigned char key, struct cpu_user_regs *regs)
     machine_restart(0);
 }
 
-static void cpuset_print(char *set, int size, const cpumask_t *mask)
-{
-    *set++ = '{';
-    set += cpulist_scnprintf(set, size-2, mask);
-    *set++ = '}';
-    *set++ = '\0';
-}
-
-static void nodeset_print(char *set, int size, const nodemask_t *mask)
-{
-    *set++ = '[';
-    set += nodelist_scnprintf(set, size-2, mask);
-    *set++ = ']';
-    *set++ = '\0';
-}
-
-static void periodic_timer_print(char *str, int size, uint64_t period)
-{
-    if ( period == 0 )
-    {
-        strlcpy(str, "No periodic timer", size);
-        return;
-    }
-
-    snprintf(str, size,
-             "%u Hz periodic timer (period %u ms)",
-             1000000000/(int)period, (int)period/1000000);
-}
-
 static void dump_domains(unsigned char key)
 {
     struct domain *d;
+    const struct sched_unit *unit;
     struct vcpu   *v;
     s_time_t       now = NOW();
-#define tmpstr keyhandler_scratch
 
-    printk("'%c' pressed -> dumping domain info (now=0x%X:%08X)\n", key,
-           (u32)(now>>32), (u32)now);
+    printk("'%c' pressed -> dumping domain info (now = %"PRI_stime")\n",
+           key, now);
 
     rcu_read_lock(&domlist_read_lock);
 
@@ -298,14 +271,14 @@ static void dump_domains(unsigned char key)
         process_pending_softirqs();
 
         printk("General information for domain %u:\n", d->domain_id);
-        cpuset_print(tmpstr, sizeof(tmpstr), d->domain_dirty_cpumask);
         printk("    refcnt=%d dying=%d pause_count=%d\n",
                atomic_read(&d->refcnt), d->is_dying,
                atomic_read(&d->pause_count));
         printk("    nr_pages=%d xenheap_pages=%d shared_pages=%u paged_pages=%u "
-               "dirty_cpus=%s max_pages=%u\n", d->tot_pages, d->xenheap_pages,
-                atomic_read(&d->shr_pages), atomic_read(&d->paged_pages),
-                tmpstr, d->max_pages);
+               "dirty_cpus={%*pbl} max_pages=%u\n",
+               domain_tot_pages(d), d->xenheap_pages, atomic_read(&d->shr_pages),
+               atomic_read(&d->paged_pages), CPUMASK_PR(d->dirty_cpumask),
+               d->max_pages);
         printk("    handle=%02x%02x%02x%02x-%02x%02x-%02x%02x-"
                "%02x%02x-%02x%02x%02x%02x%02x%02x vm_assist=%08lx\n",
                d->handle[ 0], d->handle[ 1], d->handle[ 2], d->handle[ 3],
@@ -324,33 +297,43 @@ static void dump_domains(unsigned char key)
 
         dump_pageframe_info(d);
 
-        nodeset_print(tmpstr, sizeof(tmpstr), &d->node_affinity);
-        printk("NODE affinity for domain %d: %s\n", d->domain_id, tmpstr);
+        printk("NODE affinity for domain %d: [%*pbl]\n",
+               d->domain_id, NODEMASK_PR(&d->node_affinity));
 
         printk("VCPU information and callbacks for domain %u:\n",
                d->domain_id);
-        for_each_vcpu ( d, v )
-        {
-            if ( !(v->vcpu_id & 0x3f) )
-                process_pending_softirqs();
 
-            printk("    VCPU%d: CPU%d [has=%c] poll=%d "
-                   "upcall_pend=%02x upcall_mask=%02x ",
-                   v->vcpu_id, v->processor,
-                   v->is_running ? 'T':'F', v->poll_evtchn,
-                   vcpu_info(v, evtchn_upcall_pending),
-                   !vcpu_event_delivery_is_enabled(v));
-            cpuset_print(tmpstr, sizeof(tmpstr), v->vcpu_dirty_cpumask);
-            printk("dirty_cpus=%s\n", tmpstr);
-            cpuset_print(tmpstr, sizeof(tmpstr), v->cpu_hard_affinity);
-            printk("    cpu_hard_affinity=%s ", tmpstr);
-            cpuset_print(tmpstr, sizeof(tmpstr), v->cpu_soft_affinity);
-            printk("cpu_soft_affinity=%s\n", tmpstr);
-            printk("    pause_count=%d pause_flags=%lx\n",
-                   atomic_read(&v->pause_count), v->pause_flags);
-            arch_dump_vcpu_info(v);
-            periodic_timer_print(tmpstr, sizeof(tmpstr), v->periodic_period);
-            printk("    %s\n", tmpstr);
+        for_each_sched_unit ( d, unit )
+        {
+            printk("  UNIT%d affinities: hard={%*pbl} soft={%*pbl}\n",
+                   unit->unit_id, CPUMASK_PR(unit->cpu_hard_affinity),
+                   CPUMASK_PR(unit->cpu_soft_affinity));
+
+            for_each_sched_unit_vcpu ( unit, v )
+            {
+                if ( !(v->vcpu_id & 0x3f) )
+                    process_pending_softirqs();
+
+                printk("    VCPU%d: CPU%d [has=%c] poll=%d "
+                       "upcall_pend=%02x upcall_mask=%02x ",
+                       v->vcpu_id, v->processor,
+                       v->is_running ? 'T':'F', v->poll_evtchn,
+                       vcpu_info(v, evtchn_upcall_pending),
+                       !vcpu_event_delivery_is_enabled(v));
+                if ( vcpu_cpu_dirty(v) )
+                    printk("dirty_cpu=%u", read_atomic(&v->dirty_cpu));
+                printk("\n");
+                printk("    pause_count=%d pause_flags=%lx\n",
+                       atomic_read(&v->pause_count), v->pause_flags);
+                arch_dump_vcpu_info(v);
+
+                if ( v->periodic_period == 0 )
+                    printk("No periodic timer\n");
+                else
+                    printk("%"PRI_stime" Hz periodic timer (period %"PRI_stime" ms)\n",
+                           1000000000 / v->periodic_period,
+                           v->periodic_period / 1000000);
+            }
         }
     }
 
@@ -371,7 +354,6 @@ static void dump_domains(unsigned char key)
     arch_dump_shared_mem_info();
 
     rcu_read_unlock(&domlist_read_lock);
-#undef tmpstr
 }
 
 static cpumask_t read_clocks_cpumask;
@@ -455,7 +437,7 @@ static void read_clocks(unsigned char key)
            maxdif_cycles, sumdif_cycles/count, count, dif_cycles);
 }
 
-static void run_all_nonirq_keyhandlers(unsigned long unused)
+static void run_all_nonirq_keyhandlers(void *unused)
 {
     /* Fire all the non-IRQ-context diagnostic keyhandlers */
     struct keyhandler *h;
@@ -477,7 +459,7 @@ static void run_all_nonirq_keyhandlers(unsigned long unused)
 }
 
 static DECLARE_TASKLET(run_all_keyhandlers_tasklet,
-                       run_all_nonirq_keyhandlers, 0);
+                       run_all_nonirq_keyhandlers, NULL);
 
 static void run_all_keyhandlers(unsigned char key, struct cpu_user_regs *regs)
 {
@@ -504,13 +486,21 @@ static void run_all_keyhandlers(unsigned char key, struct cpu_user_regs *regs)
     tasklet_schedule(&run_all_keyhandlers_tasklet);
 }
 
+static void do_debugger_trap_fatal(struct cpu_user_regs *regs)
+{
+    (void)debugger_trap_fatal(0xf001, regs);
+
+    /* Prevent tail call optimisation, which confuses xendbg. */
+    barrier();
+}
+
 static void do_debug_key(unsigned char key, struct cpu_user_regs *regs)
 {
     printk("'%c' pressed -> trapping into debugger\n", key);
-    (void)debugger_trap_fatal(0xf001, regs);
-    nop(); /* Prevent the compiler doing tail call
-                             optimisation, as that confuses xendbg a
-                             bit. */
+    if ( regs )
+        do_debugger_trap_fatal(regs);
+    else
+        run_in_exception_handler(do_debugger_trap_fatal);
 }
 
 static void do_toggle_alt_key(unsigned char key, struct cpu_user_regs *regs)
@@ -527,6 +517,59 @@ void __init initialize_keytable(void)
         alt_key_handling = 1;
         printk(XENLOG_INFO "Defaulting to alternative key handling; "
                "send 'A' to switch to normal mode.\n");
+    }
+}
+
+#define CRASHACTION_SIZE  32
+static char crash_debug_panic[CRASHACTION_SIZE];
+string_runtime_param("crash-debug-panic", crash_debug_panic);
+static char crash_debug_hwdom[CRASHACTION_SIZE];
+string_runtime_param("crash-debug-hwdom", crash_debug_hwdom);
+static char crash_debug_watchdog[CRASHACTION_SIZE];
+string_runtime_param("crash-debug-watchdog", crash_debug_watchdog);
+#ifdef CONFIG_KEXEC
+static char crash_debug_kexeccmd[CRASHACTION_SIZE];
+string_runtime_param("crash-debug-kexeccmd", crash_debug_kexeccmd);
+#else
+#define crash_debug_kexeccmd NULL
+#endif
+static char crash_debug_debugkey[CRASHACTION_SIZE];
+string_runtime_param("crash-debug-debugkey", crash_debug_debugkey);
+
+void keyhandler_crash_action(enum crash_reason reason)
+{
+    static const char *const crash_action[] = {
+        [CRASHREASON_PANIC] = crash_debug_panic,
+        [CRASHREASON_HWDOM] = crash_debug_hwdom,
+        [CRASHREASON_WATCHDOG] = crash_debug_watchdog,
+        [CRASHREASON_KEXECCMD] = crash_debug_kexeccmd,
+        [CRASHREASON_DEBUGKEY] = crash_debug_debugkey,
+    };
+    static bool ignore;
+    const char *action;
+
+    /* Some handlers are not functional too early. */
+    if ( system_state < SYS_STATE_smp_boot )
+        return;
+
+    if ( (unsigned int)reason >= ARRAY_SIZE(crash_action) )
+        return;
+    action = crash_action[reason];
+    if ( !action )
+        return;
+
+    /* Avoid recursion. */
+    if ( ignore )
+        return;
+    ignore = true;
+
+    while ( *action )
+    {
+        if ( *action == '+' )
+            mdelay(10);
+        else
+            handle_keypress(*action, NULL);
+        action++;
     }
 }
 

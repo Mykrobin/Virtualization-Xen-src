@@ -20,6 +20,7 @@
 #include "ssdt_s4.h"
 #include "ssdt_tpm.h"
 #include "ssdt_pm.h"
+#include "ssdt_laptop_slate.h"
 #include <xen/hvm/hvm_info_table.h>
 #include <xen/hvm/hvm_xs_strings.h>
 #include <xen/hvm/params.h>
@@ -33,7 +34,7 @@
 extern struct acpi_20_rsdp Rsdp;
 extern struct acpi_20_rsdt Rsdt;
 extern struct acpi_20_xsdt Xsdt;
-extern struct acpi_20_fadt Fadt;
+extern struct acpi_fadt Fadt;
 extern struct acpi_20_facs Facs;
 extern struct acpi_20_waet Waet;
 
@@ -350,7 +351,6 @@ static int construct_secondary_tables(struct acpi_ctxt *ctxt,
     struct acpi_20_waet *waet;
     struct acpi_20_tcpa *tcpa;
     unsigned char *ssdt;
-    static const uint16_t tis_signature[] = {0x0001, 0x0001, 0x0001};
     void *lasa;
 
     /* MADT. */
@@ -392,8 +392,6 @@ static int construct_secondary_tables(struct acpi_ctxt *ctxt,
         if (!ssdt) return -1;
         memcpy(ssdt, ssdt_s3, sizeof(ssdt_s3));
         table_ptrs[nr_tables++] = ctxt->mem_ops.v2p(ctxt, ssdt);
-    } else {
-        printf("S3 disabled\n");
     }
 
     if ( config->table_flags & ACPI_HAS_SSDT_S4 )
@@ -402,15 +400,20 @@ static int construct_secondary_tables(struct acpi_ctxt *ctxt,
         if (!ssdt) return -1;
         memcpy(ssdt, ssdt_s4, sizeof(ssdt_s4));
         table_ptrs[nr_tables++] = ctxt->mem_ops.v2p(ctxt, ssdt);
-    } else {
-        printf("S4 disabled\n");
+    }
+
+    if ( config->table_flags & ACPI_HAS_SSDT_LAPTOP_SLATE )
+    {
+        ssdt = ctxt->mem_ops.alloc(ctxt, sizeof(ssdt_laptop_slate), 16);
+        if (!ssdt) return -1;
+        memcpy(ssdt, ssdt_laptop_slate, sizeof(ssdt_laptop_slate));
+        table_ptrs[nr_tables++] = ctxt->mem_ops.v2p(ctxt, ssdt);
     }
 
     /* TPM TCPA and SSDT. */
     if ( (config->table_flags & ACPI_HAS_TCPA) &&
-         (config->tis_hdr[0] == tis_signature[0]) &&
-         (config->tis_hdr[1] == tis_signature[1]) &&
-         (config->tis_hdr[2] == tis_signature[2]) )
+         (config->tis_hdr[0] != 0 && config->tis_hdr[0] != 0xffff) &&
+         (config->tis_hdr[1] != 0 && config->tis_hdr[1] != 0xffff) )
     {
         ssdt = ctxt->mem_ops.alloc(ctxt, sizeof(ssdt_tpm), 16);
         if (!ssdt) return -1;
@@ -503,12 +506,13 @@ int acpi_build_tables(struct acpi_ctxt *ctxt, struct acpi_config *config)
     struct acpi_20_rsdp *rsdp;
     struct acpi_20_rsdt *rsdt;
     struct acpi_20_xsdt *xsdt;
-    struct acpi_20_fadt *fadt;
+    struct acpi_fadt    *fadt;
     struct acpi_10_fadt *fadt_10;
     struct acpi_20_facs *facs;
     unsigned char       *dsdt;
     unsigned long        secondary_tables[ACPI_MAX_SECONDARY_TABLES];
     int                  nr_secondaries, i;
+    unsigned int         fadt_size;
 
     acpi_info = (struct acpi_info *)config->infop;
     memset(acpi_info, 0, sizeof(*acpi_info));
@@ -572,16 +576,56 @@ int acpi_build_tables(struct acpi_ctxt *ctxt, struct acpi_config *config)
                  offsetof(struct acpi_header, checksum),
                  sizeof(struct acpi_10_fadt));
 
-    fadt = ctxt->mem_ops.alloc(ctxt, sizeof(struct acpi_20_fadt), 16);
+    switch ( config->acpi_revision )
+    {
+    case 4:
+        /*
+         * NB: we can use offsetof because there's no padding between
+         * x_gpe1_blk and sleep_control.
+         */
+        fadt_size = offsetof(struct acpi_fadt, sleep_control);
+        break;
+    case 5:
+        fadt_size = sizeof(*fadt);
+        break;
+    default:
+        printf("ACPI revision %u not supported\n", config->acpi_revision);
+        return -1;
+    }
+    fadt = ctxt->mem_ops.alloc(ctxt, fadt_size, 16);
     if (!fadt) goto oom;
-    memcpy(fadt, &Fadt, sizeof(struct acpi_20_fadt));
+    if ( !(config->table_flags & ACPI_HAS_PMTIMER) )
+    {
+        Fadt.pm_tmr_blk = Fadt.pm_tmr_len = 0;
+        memset(&Fadt.x_pm_tmr_blk, 0, sizeof(Fadt.x_pm_tmr_blk));
+    }
+    if ( !(config->table_flags & ACPI_HAS_BUTTONS) )
+        Fadt.flags |= (ACPI_PWR_BUTTON | ACPI_SLP_BUTTON);
+    memcpy(fadt, &Fadt, fadt_size);
+    /*
+     * For both ACPI 4 and 5 the revision of the FADT matches the ACPI
+     * revision.
+     */
+    fadt->header.revision = config->acpi_revision;
+    fadt->header.length = fadt_size;
     fadt->dsdt   = ctxt->mem_ops.v2p(ctxt, dsdt);
     fadt->x_dsdt = ctxt->mem_ops.v2p(ctxt, dsdt);
     fadt->firmware_ctrl   = ctxt->mem_ops.v2p(ctxt, facs);
     fadt->x_firmware_ctrl = ctxt->mem_ops.v2p(ctxt, facs);
-    set_checksum(fadt,
-                 offsetof(struct acpi_header, checksum),
-                 sizeof(struct acpi_20_fadt));
+    if ( !(config->table_flags & ACPI_HAS_VGA) )
+        fadt->iapc_boot_arch |= ACPI_FADT_NO_VGA;
+    if ( config->table_flags & ACPI_HAS_8042 )
+        fadt->iapc_boot_arch |= ACPI_FADT_8042;
+    if ( !(config->table_flags & ACPI_HAS_CMOS_RTC) )
+    {
+        if ( fadt->header.revision < 5 )
+        {
+            printf("ACPI_FADT_NO_CMOS_RTC requires FADT revision 5\n");
+            return -1;
+        }
+        fadt->iapc_boot_arch |= ACPI_FADT_NO_CMOS_RTC;
+    }
+    set_checksum(fadt, offsetof(struct acpi_header, checksum), fadt_size);
 
     nr_secondaries = construct_secondary_tables(ctxt, secondary_tables,
                  config, acpi_info);

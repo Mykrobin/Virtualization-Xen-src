@@ -79,8 +79,6 @@ DECLARE_PER_CPU(struct cpufreq_policy *, cpufreq_cpu_policy);
 extern int __cpufreq_set_policy(struct cpufreq_policy *data,
                                 struct cpufreq_policy *policy);
 
-void cpufreq_cmdline_parse(char *);
-
 #define CPUFREQ_SHARED_TYPE_NONE (0) /* None */
 #define CPUFREQ_SHARED_TYPE_HW   (1) /* HW does needed coordination */
 #define CPUFREQ_SHARED_TYPE_ALL  (2) /* All dependent CPUs should set freq */
@@ -155,7 +153,7 @@ __cpufreq_governor(struct cpufreq_policy *policy, unsigned int event)
 #define CPUFREQ_RELATION_H 1  /* highest frequency below or at target */
 
 struct cpufreq_driver {
-    char   name[CPUFREQ_NAME_LEN];
+    const char *name;
     int    (*init)(struct cpufreq_policy *policy);
     int    (*verify)(struct cpufreq_policy *policy);
     int    (*setpolicy)(struct cpufreq_policy *policy);
@@ -168,9 +166,9 @@ struct cpufreq_driver {
     int    (*exit)(struct cpufreq_policy *policy);
 };
 
-extern struct cpufreq_driver *cpufreq_driver;
+extern struct cpufreq_driver cpufreq_driver;
 
-int cpufreq_register_driver(struct cpufreq_driver *);
+int cpufreq_register_driver(const struct cpufreq_driver *);
 
 static __inline__
 void cpufreq_verify_within_limits(struct cpufreq_policy *policy,

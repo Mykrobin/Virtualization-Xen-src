@@ -15,15 +15,12 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/config.h>
-#include <xen/init.h>
-#include <xen/lib.h>
-#include <xen/perfc.h>
-#include <asm/hvm/svm/asid.h>
 #include <asm/amd.h>
 #include <asm/hvm/nestedhvm.h>
+#include <asm/hvm/svm/asid.h>
+#include <asm/hvm/svm/svm.h>
 
-void svm_asid_init(struct cpuinfo_x86 *c)
+void svm_asid_init(const struct cpuinfo_x86 *c)
 {
     int nasids = 0;
 
@@ -41,23 +38,27 @@ void svm_asid_init(struct cpuinfo_x86 *c)
 void svm_asid_handle_vmrun(void)
 {
     struct vcpu *curr = current;
-    struct vmcb_struct *vmcb = curr->arch.hvm_svm.vmcb;
+    struct vmcb_struct *vmcb = curr->arch.hvm.svm.vmcb;
     struct hvm_vcpu_asid *p_asid =
         nestedhvm_vcpu_in_guestmode(curr)
-        ? &vcpu_nestedhvm(curr).nv_n2asid : &curr->arch.hvm_vcpu.n1asid;
-    bool_t need_flush = hvm_asid_handle_vmenter(p_asid);
+        ? &vcpu_nestedhvm(curr).nv_n2asid : &curr->arch.hvm.n1asid;
+    bool need_flush = hvm_asid_handle_vmenter(p_asid);
 
     /* ASID 0 indicates that ASIDs are disabled. */
     if ( p_asid->asid == 0 )
     {
         vmcb_set_guest_asid(vmcb, 1);
-        vmcb->tlb_control = 1;
+        vmcb->tlb_control =
+            cpu_has_svm_flushbyasid ? TLB_CTRL_FLUSH_ASID : TLB_CTRL_FLUSH_ALL;
         return;
     }
 
-    if (vmcb_get_guest_asid(vmcb) != p_asid->asid)
+    if ( vmcb_get_guest_asid(vmcb) != p_asid->asid )
         vmcb_set_guest_asid(vmcb, p_asid->asid);
-    vmcb->tlb_control = need_flush;
+
+    vmcb->tlb_control =
+        !need_flush ? TLB_CTRL_NO_FLUSH :
+        cpu_has_svm_flushbyasid ? TLB_CTRL_FLUSH_ASID : TLB_CTRL_FLUSH_ALL;
 }
 
 /*

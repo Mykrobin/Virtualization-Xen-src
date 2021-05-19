@@ -21,13 +21,12 @@
  *
  */
 
-#include <xen/config.h>
 #include <xen/xenoprof.h>
-#include <xen/hvm/save.h>
 #include <xen/sched.h>
 #include <xen/irq.h>
 #include <asm/apic.h>
 #include <asm/vpmu.h>
+#include <asm/hvm/save.h>
 #include <asm/hvm/vlapic.h>
 #include <public/pmu.h>
 
@@ -44,9 +43,6 @@ static unsigned int __read_mostly num_counters;
 static const u32 __read_mostly *counters;
 static const u32 __read_mostly *ctrls;
 static bool_t __read_mostly k7_counters_mirrored;
-
-/* Total size of PMU registers block (copied to/from PV(H) guest) */
-static unsigned int __read_mostly regs_sz;
 
 #define F10H_NUM_COUNTERS   4
 #define F15H_NUM_COUNTERS   6
@@ -157,12 +153,9 @@ static inline u32 get_fam15h_addr(u32 addr)
 
 static void amd_vpmu_init_regs(struct xen_pmu_amd_ctxt *ctxt)
 {
-    unsigned i;
-    uint64_t *ctrl_regs = vpmu_reg_pointer(ctxt, ctrls);
-
-    memset(&ctxt->regs[0], 0, regs_sz);
-    for ( i = 0; i < num_counters; i++ )
-        ctrl_regs[i] = ctrl_rsvd[i];
+    memset(&ctxt->regs[0], 0, num_counters * sizeof(ctxt->regs[0]));
+    memcpy(&ctxt->regs[num_counters], &ctrl_rsvd[0],
+           num_counters * sizeof(ctxt->regs[0]));
 }
 
 static void amd_vpmu_set_msr_bitmap(struct vcpu *v)
@@ -243,7 +236,8 @@ static int amd_vpmu_load(struct vcpu *v, bool_t from_guest)
         ctxt = vpmu->context;
         ctrl_regs = vpmu_reg_pointer(ctxt, ctrls);
 
-        memcpy(&ctxt->regs[0], &guest_ctxt->regs[0], regs_sz);
+        memcpy(&ctxt->regs[0], &guest_ctxt->regs[0],
+               2 * num_counters * sizeof(ctxt->regs[0]));
 
         for ( i = 0; i < num_counters; i++ )
         {
@@ -306,8 +300,8 @@ static int amd_vpmu_save(struct vcpu *v,  bool_t to_guest)
 
     context_save(v);
 
-    if ( !vpmu_is_set(vpmu, VPMU_RUNNING) &&
-         has_hvm_container_vcpu(v) && is_msr_bitmap_on(vpmu) )
+    if ( !vpmu_is_set(vpmu, VPMU_RUNNING) && is_hvm_vcpu(v) &&
+         is_msr_bitmap_on(vpmu) )
         amd_vpmu_unset_msr_bitmap(v);
 
     if ( to_guest )
@@ -317,7 +311,8 @@ static int amd_vpmu_save(struct vcpu *v,  bool_t to_guest)
         ASSERT(!has_vlapic(v->domain));
         ctxt = vpmu->context;
         guest_ctxt = &vpmu->xenpmu_data->pmu.c.amd;
-        memcpy(&guest_ctxt->regs[0], &ctxt->regs[0], regs_sz);
+        memcpy(&guest_ctxt->regs[0], &ctxt->regs[0],
+               2 * num_counters * sizeof(ctxt->regs[0]));
     }
 
     return 1;
@@ -368,7 +363,7 @@ static int amd_vpmu_do_wrmsr(unsigned int msr, uint64_t msr_content,
         return -EINVAL;
 
     /* For all counters, enable guest only mode for HVM guest */
-    if ( has_hvm_container_vcpu(v) && (type == MSR_TYPE_CTRL) &&
+    if ( is_hvm_vcpu(v) && (type == MSR_TYPE_CTRL) &&
          !is_guest_mode(msr_content) )
     {
         set_guest_mode(msr_content);
@@ -382,7 +377,7 @@ static int amd_vpmu_do_wrmsr(unsigned int msr, uint64_t msr_content,
             return 0;
         vpmu_set(vpmu, VPMU_RUNNING);
 
-        if ( has_hvm_container_vcpu(v) && is_msr_bitmap_on(vpmu) )
+        if ( is_hvm_vcpu(v) && is_msr_bitmap_on(vpmu) )
              amd_vpmu_set_msr_bitmap(v);
     }
 
@@ -391,7 +386,7 @@ static int amd_vpmu_do_wrmsr(unsigned int msr, uint64_t msr_content,
         (is_pmu_enabled(msr_content) == 0) && vpmu_is_set(vpmu, VPMU_RUNNING) )
     {
         vpmu_reset(vpmu, VPMU_RUNNING);
-        if ( has_hvm_container_vcpu(v) && is_msr_bitmap_on(vpmu) )
+        if ( is_hvm_vcpu(v) && is_msr_bitmap_on(vpmu) )
              amd_vpmu_unset_msr_bitmap(v);
         release_pmu_ownership(PMU_OWNER_HVM);
     }
@@ -434,7 +429,7 @@ static void amd_vpmu_destroy(struct vcpu *v)
 {
     struct vpmu_struct *vpmu = vcpu_vpmu(v);
 
-    if ( has_hvm_container_vcpu(v) && is_msr_bitmap_on(vpmu) )
+    if ( is_hvm_vcpu(v) && is_msr_bitmap_on(vpmu) )
         amd_vpmu_unset_msr_bitmap(v);
 
     xfree(vpmu->context);
@@ -488,7 +483,7 @@ static void amd_vpmu_dump(const struct vcpu *v)
     }
 }
 
-struct arch_vpmu_ops amd_vpmu_ops = {
+static const struct arch_vpmu_ops amd_vpmu_ops = {
     .do_wrmsr = amd_vpmu_do_wrmsr,
     .do_rdmsr = amd_vpmu_do_rdmsr,
     .do_interrupt = amd_vpmu_do_interrupt,
@@ -509,7 +504,8 @@ int svm_vpmu_initialise(struct vcpu *v)
     if ( !counters )
         return -EINVAL;
 
-    ctxt = xmalloc_bytes(sizeof(*ctxt) + regs_sz);
+    ctxt = xmalloc_flex_struct(struct xen_pmu_amd_ctxt, regs,
+                               2 * num_counters);
     if ( !ctxt )
     {
         printk(XENLOG_G_WARNING "Insufficient memory for PMU, "
@@ -539,28 +535,12 @@ int svm_vpmu_initialise(struct vcpu *v)
     return 0;
 }
 
-int __init amd_vpmu_init(void)
+static int __init common_init(void)
 {
     unsigned int i;
 
-    switch ( current_cpu_data.x86 )
+    if ( !num_counters )
     {
-    case 0x15:
-        num_counters = F15H_NUM_COUNTERS;
-        counters = AMD_F15H_COUNTERS;
-        ctrls = AMD_F15H_CTRLS;
-        k7_counters_mirrored = 1;
-        break;
-    case 0x10:
-    case 0x12:
-    case 0x14:
-    case 0x16:
-        num_counters = F10H_NUM_COUNTERS;
-        counters = AMD_F10H_COUNTERS;
-        ctrls = AMD_F10H_CTRLS;
-        k7_counters_mirrored = 0;
-        break;
-    default:
         printk(XENLOG_WARNING "VPMU: Unsupported CPU family %#x\n",
                current_cpu_data.x86);
         return -EINVAL;
@@ -582,8 +562,47 @@ int __init amd_vpmu_init(void)
         ctrl_rsvd[i] &= CTRL_RSVD_MASK;
     }
 
-    regs_sz = 2 * sizeof(uint64_t) * num_counters;
-
     return 0;
 }
 
+int __init amd_vpmu_init(void)
+{
+    switch ( current_cpu_data.x86 )
+    {
+    case 0x15:
+    case 0x17:
+    case 0x19:
+        num_counters = F15H_NUM_COUNTERS;
+        counters = AMD_F15H_COUNTERS;
+        ctrls = AMD_F15H_CTRLS;
+        k7_counters_mirrored = 1;
+        break;
+
+    case 0x10:
+    case 0x12:
+    case 0x14:
+    case 0x16:
+        num_counters = F10H_NUM_COUNTERS;
+        counters = AMD_F10H_COUNTERS;
+        ctrls = AMD_F10H_CTRLS;
+        k7_counters_mirrored = 0;
+        break;
+    }
+
+    return common_init();
+}
+
+int __init hygon_vpmu_init(void)
+{
+    switch ( current_cpu_data.x86 )
+    {
+    case 0x18:
+        num_counters = F15H_NUM_COUNTERS;
+        counters = AMD_F15H_COUNTERS;
+        ctrls = AMD_F15H_CTRLS;
+        k7_counters_mirrored = 1;
+        break;
+    }
+
+    return common_init();
+}

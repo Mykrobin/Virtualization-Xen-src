@@ -1,4 +1,3 @@
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/kernel.h>
 #include <xen/string.h>
@@ -12,54 +11,37 @@
 #include <asm/i387.h>
 #include <mach_apic.h>
 #include <asm/hvm/support.h>
-#include <asm/setup.h>
 
 #include "cpu.h"
 
-#define select_idle_routine(x) ((void)0)
-
-static bool __init probe_intel_cpuid_faulting(void)
+/*
+ * Processors which have self-snooping capability can handle conflicting
+ * memory type across CPUs by snooping its own cache. However, there exists
+ * CPU models in which having conflicting memory types still leads to
+ * unpredictable behavior, machine check errors, or hangs. Clear this
+ * feature to prevent its use on machines with known erratas.
+ */
+static void __init check_memory_type_self_snoop_errata(void)
 {
-	uint64_t x;
-
-	if (rdmsr_safe(MSR_INTEL_PLATFORM_INFO, x))
-		return 0;
-
-	setup_force_cpu_cap(X86_FEATURE_MSR_PLATFORM_INFO);
-
-	if (!(x & MSR_PLATFORM_INFO_CPUID_FAULTING)) {
-		if (!rdmsr_safe(MSR_INTEL_MISC_FEATURES_ENABLES, x))
-			setup_force_cpu_cap(X86_FEATURE_MSR_MISC_FEATURES);
-		return 0;
-	}
-
-	setup_force_cpu_cap(X86_FEATURE_MSR_MISC_FEATURES);
-
-	expected_levelling_cap |= LCAP_faulting;
-	levelling_caps |=  LCAP_faulting;
-	setup_force_cpu_cap(X86_FEATURE_CPUID_FAULTING);
-	return 1;
-}
-
-DEFINE_PER_CPU(bool, cpuid_faulting_enabled);
-
-static void set_cpuid_faulting(bool enable)
-{
-	bool *this_enabled = &this_cpu(cpuid_faulting_enabled);
-	uint32_t hi, lo;
-
-	ASSERT(cpu_has_cpuid_faulting);
-
-	if (*this_enabled == enable)
+	if (!boot_cpu_has(X86_FEATURE_SS))
 		return;
 
-	rdmsr(MSR_INTEL_MISC_FEATURES_ENABLES, lo, hi);
-	lo &= ~MSR_MISC_FEATURES_CPUID_FAULTING;
-	if (enable)
-		lo |= MSR_MISC_FEATURES_CPUID_FAULTING;
-	wrmsr(MSR_INTEL_MISC_FEATURES_ENABLES, lo, hi);
+	switch (boot_cpu_data.x86_model) {
+	case 0x0f: /* Merom */
+	case 0x16: /* Merom L */
+	case 0x17: /* Penryn */
+	case 0x1d: /* Dunnington */
+	case 0x1e: /* Nehalem */
+	case 0x1f: /* Auburndale / Havendale */
+	case 0x1a: /* Nehalem EP */
+	case 0x2e: /* Nehalem EX */
+	case 0x25: /* Westmere */
+	case 0x2c: /* Westmere EP */
+	case 0x2a: /* SandyBridge */
+		return;
+	}
 
-	*this_enabled = enable;
+	setup_force_cpu_cap(X86_FEATURE_XEN_SELFSNOOP);
 }
 
 /*
@@ -157,40 +139,18 @@ static void __init probe_masking_msrs(void)
 }
 
 /*
- * Context switch levelling state to the next domain.  A parameter of NULL is
- * used to context switch to the default host state (by the cpu bringup-code,
- * crash path, etc).
+ * Context switch CPUID masking state to the next domain.  Only called if
+ * CPUID Faulting isn't available, but masking MSRs have been detected.  A
+ * parameter of NULL is used to context switch to the default host state (by
+ * the cpu bringup-code, crash path, etc).
  */
-static void intel_ctxt_switch_levelling(const struct vcpu *next)
+static void intel_ctxt_switch_masking(const struct vcpu *next)
 {
 	struct cpuidmasks *these_masks = &this_cpu(cpuidmasks);
 	const struct domain *nextd = next ? next->domain : NULL;
-	const struct cpuidmasks *masks;
-
-	if (cpu_has_cpuid_faulting) {
-		/*
-		 * We *should* be enabling faulting for the control domain.
-		 *
-		 * Unfortunately, the domain builder (having only ever been a
-		 * PV guest) expects to be able to see host cpuid state in a
-		 * native CPUID instruction, to correctly build a CPUID policy
-		 * for HVM guests (notably the xstate leaves).
-		 *
-		 * This logic is fundimentally broken for HVM toolstack
-		 * domains, and faulting causes PV guests to behave like HVM
-		 * guests from their point of view.
-		 *
-		 * Future development plans will move responsibility for
-		 * generating the maximum full cpuid policy into Xen, at which
-		 * this problem will disappear.
-		 */
-		set_cpuid_faulting(nextd && is_pv_domain(nextd) &&
-				   !is_control_domain(nextd));
-		return;
-	}
-
-	masks = (nextd && is_pv_domain(nextd) && nextd->arch.pv_domain.cpuidmasks)
-		? nextd->arch.pv_domain.cpuidmasks : &cpuidmask_defaults;
+	const struct cpuidmasks *masks =
+		(nextd && is_pv_domain(nextd) && nextd->arch.pv.cpuidmasks)
+		? nextd->arch.pv.cpuidmasks : &cpuidmask_defaults;
 
         if (msr_basic) {
 		uint64_t val = masks->_1cd;
@@ -201,7 +161,7 @@ static void intel_ctxt_switch_levelling(const struct vcpu *next)
 		 * kernel.
 		 */
 		if (next && is_pv_vcpu(next) && !is_idle_vcpu(next) &&
-		    !(next->arch.pv_vcpu.ctrlreg[4] & X86_CR4_OSXSAVE))
+		    !(next->arch.pv.ctrlreg[4] & X86_CR4_OSXSAVE))
 			val &= ~(uint64_t)cpufeat_mask(X86_FEATURE_OSXSAVE);
 
 		if (unlikely(these_masks->_1cd != val)) {
@@ -234,8 +194,10 @@ static void intel_ctxt_switch_levelling(const struct vcpu *next)
  */
 static void __init noinline intel_init_levelling(void)
 {
-	if (!probe_intel_cpuid_faulting())
-		probe_masking_msrs();
+	if (probe_cpuid_faulting())
+		return;
+
+	probe_masking_msrs();
 
 	if (msr_basic) {
 		uint32_t ecx, edx, tmp;
@@ -289,36 +251,35 @@ static void __init noinline intel_init_levelling(void)
 	}
 
 	if (levelling_caps)
-		ctxt_switch_levelling = intel_ctxt_switch_levelling;
+		ctxt_switch_masking = intel_ctxt_switch_masking;
 }
 
 static void early_init_intel(struct cpuinfo_x86 *c)
 {
+	u64 misc_enable, disable;
+
 	/* Netburst reports 64 bytes clflush size, but does IO in 128 bytes */
 	if (c->x86 == 15 && c->x86_cache_alignment == 64)
 		c->x86_cache_alignment = 128;
 
 	/* Unmask CPUID levels and NX if masked: */
-	if (c->x86 > 6 || (c->x86 == 6 && c->x86_model >= 0xd)) {
-		u64 misc_enable, disable;
+	rdmsrl(MSR_IA32_MISC_ENABLE, misc_enable);
 
-		rdmsrl(MSR_IA32_MISC_ENABLE, misc_enable);
+	disable = misc_enable & (MSR_IA32_MISC_ENABLE_LIMIT_CPUID |
+				 MSR_IA32_MISC_ENABLE_XD_DISABLE);
+	if (disable) {
+		wrmsrl(MSR_IA32_MISC_ENABLE, misc_enable & ~disable);
+		bootsym(trampoline_misc_enable_off) |= disable;
+		bootsym(trampoline_efer) |= EFER_NX;
+	}
 
-		disable = misc_enable & (MSR_IA32_MISC_ENABLE_LIMIT_CPUID |
-					 MSR_IA32_MISC_ENABLE_XD_DISABLE);
-		if (disable) {
-			wrmsrl(MSR_IA32_MISC_ENABLE, misc_enable & ~disable);
-			bootsym(trampoline_misc_enable_off) |= disable;
-		}
-
-		if (disable & MSR_IA32_MISC_ENABLE_LIMIT_CPUID)
-			printk(KERN_INFO "revised cpuid level: %d\n",
-			       cpuid_eax(0));
-		if (disable & MSR_IA32_MISC_ENABLE_XD_DISABLE) {
-			write_efer(read_efer() | EFER_NX);
-			printk(KERN_INFO
-			       "re-enabled NX (Execute Disable) protection\n");
-		}
+	if (disable & MSR_IA32_MISC_ENABLE_LIMIT_CPUID)
+		printk(KERN_INFO "revised cpuid level: %d\n",
+		       cpuid_eax(0));
+	if (disable & MSR_IA32_MISC_ENABLE_XD_DISABLE) {
+		write_efer(read_efer() | EFER_NX);
+		printk(KERN_INFO
+		       "re-enabled NX (Execute Disable) protection\n");
 	}
 
 	/* CPUID workaround for Intel 0F33/0F34 CPU */
@@ -326,10 +287,48 @@ static void early_init_intel(struct cpuinfo_x86 *c)
 	    (boot_cpu_data.x86_mask == 3 || boot_cpu_data.x86_mask == 4))
 		paddr_bits = 36;
 
-	if (c == &boot_cpu_data)
-		intel_init_levelling();
+	if (c == &boot_cpu_data) {
+		check_memory_type_self_snoop_errata();
 
-	intel_ctxt_switch_levelling(NULL);
+		intel_init_levelling();
+	}
+
+	ctxt_switch_levelling(NULL);
+}
+
+/*
+ * Errata BA80, AAK120, AAM108, AAO67, BD59, AAY54: Rapid Core C3/C6 Transition
+ * May Cause Unpredictable System Behavior
+ *
+ * Under a complex set of internal conditions, cores rapidly performing C3/C6
+ * transitions in a system with Intel Hyper-Threading Technology enabled may
+ * cause a machine check error (IA32_MCi_STATUS.MCACOD = 0x0106), system hang
+ * or unpredictable system behavior.
+ */
+static void probe_c3_errata(const struct cpuinfo_x86 *c)
+{
+#define INTEL_FAM6_MODEL(m) { X86_VENDOR_INTEL, 6, m, X86_FEATURE_ALWAYS }
+    static const struct x86_cpu_id models[] = {
+        /* Nehalem */
+        INTEL_FAM6_MODEL(0x1a),
+        INTEL_FAM6_MODEL(0x1e),
+        INTEL_FAM6_MODEL(0x1f),
+        INTEL_FAM6_MODEL(0x2e),
+        /* Westmere (note Westmere-EX is not affected) */
+        INTEL_FAM6_MODEL(0x2c),
+        INTEL_FAM6_MODEL(0x25),
+        { }
+    };
+#undef INTEL_FAM6_MODEL
+
+    /* Serialized by the AP bringup code. */
+    if ( max_cstate > 1 && (c->apicid & (c->x86_num_siblings - 1)) &&
+         x86_match_cpu(models) )
+    {
+        printk(XENLOG_WARNING
+	       "Disabling C-states C3 and C6 due to CPU errata\n");
+        max_cstate = 1;
+    }
 }
 
 /*
@@ -359,6 +358,8 @@ static void Intel_errata_workarounds(struct cpuinfo_x86 *c)
 
 	if (cpu_has_tsx_force_abort && opt_rtm_abort)
 		wrmsrl(MSR_TSX_FORCE_ABORT, TSX_FORCE_ABORT_RTM);
+
+	probe_c3_errata(c);
 }
 
 
@@ -380,15 +381,82 @@ static int num_cpu_cores(struct cpuinfo_x86 *c)
 		return 1;
 }
 
+static void intel_log_freq(const struct cpuinfo_x86 *c)
+{
+    unsigned int eax, ebx, ecx, edx;
+    uint64_t msrval;
+    uint8_t max_ratio;
+
+    if ( c->cpuid_level >= 0x15 )
+    {
+        cpuid(0x15, &eax, &ebx, &ecx, &edx);
+        if ( ecx && ebx && eax )
+        {
+            unsigned long long val = ecx;
+
+            val *= ebx;
+            do_div(val, eax);
+            printk("CPU%u: TSC: %u Hz * %u / %u = %Lu Hz\n",
+                   smp_processor_id(), ecx, ebx, eax, val);
+        }
+        else if ( ecx | eax | ebx )
+        {
+            printk("CPU%u: TSC:", smp_processor_id());
+            if ( ecx )
+                printk(" core: %u Hz", ecx);
+            if ( ebx && eax )
+                printk(" ratio: %u / %u", ebx, eax);
+            printk("\n");
+        }
+    }
+
+    if ( c->cpuid_level >= 0x16 )
+    {
+        cpuid(0x16, &eax, &ebx, &ecx, &edx);
+        if ( ecx | eax | ebx )
+        {
+            printk("CPU%u:", smp_processor_id());
+            if ( ecx )
+                printk(" bus: %u MHz", ecx);
+            if ( eax )
+                printk(" base: %u MHz", eax);
+            if ( ebx )
+                printk(" max: %u MHz", ebx);
+            printk("\n");
+        }
+    }
+
+    if ( rdmsr_safe(MSR_INTEL_PLATFORM_INFO, msrval) )
+        return;
+    max_ratio = msrval >> 8;
+
+    if ( max_ratio )
+    {
+        unsigned int factor = 10000;
+        uint8_t min_ratio = msrval >> 40;
+
+        if ( c->x86 == 6 )
+            switch ( c->x86_model )
+            {
+            case 0x1a: case 0x1e: case 0x1f: case 0x2e: /* Nehalem */
+            case 0x25: case 0x2c: case 0x2f: /* Westmere */
+                factor = 13333;
+                break;
+            }
+
+        printk("CPU%u: ", smp_processor_id());
+        if ( min_ratio )
+            printk("%u ... ", (factor * min_ratio + 50) / 100);
+        printk("%u MHz\n", (factor * max_ratio + 50) / 100);
+    }
+}
+
 static void init_intel(struct cpuinfo_x86 *c)
 {
-	unsigned int l2 = 0;
-
 	/* Detect the extended topology information if available */
 	detect_extended_topology(c);
 
-	select_idle_routine(c);
-	l2 = init_intel_cacheinfo(c);
+	init_intel_cacheinfo(c);
 	if (c->cpuid_level > 9) {
 		unsigned eax = cpuid_eax(10);
 		/* Check for version and the number of counters */
@@ -417,20 +485,13 @@ static void init_intel(struct cpuinfo_x86 *c)
 	     ( c->cpuid_level >= 0x00000006 ) &&
 	     ( cpuid_eax(0x00000006) & (1u<<2) ) )
 		__set_bit(X86_FEATURE_ARAT, c->x86_capability);
+
+	if ((opt_cpu_info && !(c->apicid & (c->x86_num_siblings - 1))) ||
+	    c == &boot_cpu_data )
+		intel_log_freq(c);
 }
 
-static const struct cpu_dev intel_cpu_dev = {
-	.c_vendor	= "Intel",
-	.c_ident 	= { "GenuineIntel" },
+const struct cpu_dev intel_cpu_dev = {
 	.c_early_init	= early_init_intel,
 	.c_init		= init_intel,
 };
-
-int __init intel_cpu_init(void)
-{
-	cpu_devs[X86_VENDOR_INTEL] = &intel_cpu_dev;
-	return 0;
-}
-
-// arch_initcall(intel_cpu_init);
-

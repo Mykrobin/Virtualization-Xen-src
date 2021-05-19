@@ -3,6 +3,16 @@
 
 #if !defined(__GNUC__) || (__GNUC__ < 4)
 #error Sorry, your compiler is too old/not recognized.
+#elif CONFIG_CC_IS_GCC
+# if defined(CONFIG_ARM_32) && CONFIG_GCC_VERSION < 40900
+#  error Sorry, your version of GCC is too old - please use 4.9 or newer.
+# elif defined(CONFIG_ARM_64) && CONFIG_GCC_VERSION < 50100
+/*
+ * https://gcc.gnu.org/bugzilla/show_bug.cgi?id=63293
+ * https://lore.kernel.org/r/20210107111841.GN1551@shell.armlinux.org.uk
+ */
+#  error Sorry, your version of GCC is too old - please use 5.1 or newer.
+# endif
 #endif
 
 #define barrier()     __asm__ __volatile__("": : :"memory")
@@ -12,16 +22,41 @@
 
 #define inline        __inline__
 #define always_inline __inline__ __attribute__ ((__always_inline__))
+#define gnu_inline    __inline__ __attribute__ ((__gnu_inline__))
 #define noinline      __attribute__((__noinline__))
 
 #define noreturn      __attribute__((__noreturn__))
 
 #define __packed      __attribute__((__packed__))
 
+#define __weak        __attribute__((__weak__))
+
+#if !defined(__clang__)
+# define nocall       __attribute__((__error__("Nonstandard ABI")))
+#else
+# define nocall
+#endif
+
 #if (!defined(__clang__) && (__GNUC__ == 4) && (__GNUC_MINOR__ < 5))
 #define unreachable() do {} while (1)
 #else
 #define unreachable() __builtin_unreachable()
+#endif
+
+/*
+ * Add the pseudo keyword 'fallthrough' so case statement blocks
+ * must end with any of these keywords:
+ *   break;
+ *   fallthrough;
+ *   goto <label>;
+ *   return [expression];
+ *
+ *  gcc: https://gcc.gnu.org/onlinedocs/gcc/Statement-Attributes.html#Statement-Attributes
+ */
+#if (!defined(__clang__) && (__GNUC__ >= 7))
+# define fallthrough        __attribute__((__fallthrough__))
+#else
+# define fallthrough        do {} while (0)  /* fallthrough */
 #endif
 
 #ifdef __clang__
@@ -47,6 +82,7 @@
 
 #define __attribute_pure__  __attribute__((__pure__))
 #define __attribute_const__ __attribute__((__const__))
+#define __transparent__     __attribute__((__transparent_union__))
 
 /*
  * The difference between the following two attributes is that __used is
@@ -67,6 +103,14 @@
 
 #define offsetof(a,b) __builtin_offsetof(a,b)
 
+/**
+ * sizeof_field(TYPE, MEMBER)
+ *
+ * @TYPE: The structure containing the field of interest
+ * @MEMBER: The field to return the size of
+ */
+#define sizeof_field(TYPE, MEMBER) sizeof((((TYPE *)0)->MEMBER))
+
 #if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 201112L
 #define alignof __alignof__
 #endif
@@ -75,7 +119,7 @@
 #define __must_be_array(a) \
   BUILD_BUG_ON_ZERO(__builtin_types_compatible_p(typeof(a), typeof(&a[0])))
 
-#ifdef GCC_HAS_VISIBILITY_ATTRIBUTE
+#ifdef CONFIG_CC_HAS_VISIBILITY_ATTRIBUTE
 /* Results in more efficient PIC code (no indirections through GOT or PLT). */
 #pragma GCC visibility push(hidden)
 #endif
@@ -95,5 +139,38 @@
   ({ unsigned long __ptr;                       \
     __asm__ ("" : "=r"(__ptr) : "0"(ptr));      \
     (typeof(ptr)) (__ptr + (off)); })
+
+#ifdef __GCC_ASM_FLAG_OUTPUTS__
+# define ASM_FLAG_OUT(yes, no) yes
+#else
+# define ASM_FLAG_OUT(yes, no) no
+#endif
+
+/*
+ * NB: we need to disable the gcc-compat warnings for clang in some places or
+ * else it will complain with: "'break' is bound to loop, GCC binds it to
+ * switch" when a switch is used inside of a while expression inside of a
+ * switch statement, ie:
+ *
+ * switch ( ... )
+ * {
+ * case ...:
+ *      while ( ({ int x; switch ( foo ) { case 1: x = 1; break; } x }) )
+ *      {
+ *              ...
+ *
+ * This has already been reported upstream:
+ * http://bugs.llvm.org/show_bug.cgi?id=32595 
+ */
+#ifdef __clang__
+# define CLANG_DISABLE_WARN_GCC_COMPAT_START                    \
+    _Pragma("clang diagnostic push")                            \
+    _Pragma("clang diagnostic ignored \"-Wgcc-compat\"")
+# define CLANG_DISABLE_WARN_GCC_COMPAT_END                      \
+    _Pragma("clang diagnostic pop")
+#else
+# define CLANG_DISABLE_WARN_GCC_COMPAT_START
+# define CLANG_DISABLE_WARN_GCC_COMPAT_END
+#endif
 
 #endif /* __LINUX_COMPILER_H */

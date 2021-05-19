@@ -10,6 +10,9 @@
 #define GENMASK(h, l) \
     (((~0UL) << (l)) & (~0UL >> (BITS_PER_LONG - 1 - (h))))
 
+#define GENMASK_ULL(h, l) \
+    (((~0ULL) << (l)) & (~0ULL >> (BITS_PER_LLONG - 1 - (h))))
+
 /*
  * ffs: find first bit set. This is defined the same way as
  * the libc and compiler builtin ffs routines, therefore
@@ -150,42 +153,51 @@ static __inline__ int get_count_order(unsigned int count)
 
 static inline unsigned int generic_hweight32(unsigned int w)
 {
-    unsigned int res = (w & 0x55555555) + ((w >> 1) & 0x55555555);
-    res = (res & 0x33333333) + ((res >> 2) & 0x33333333);
-    res = (res & 0x0F0F0F0F) + ((res >> 4) & 0x0F0F0F0F);
-    res = (res & 0x00FF00FF) + ((res >> 8) & 0x00FF00FF);
-    return (res & 0x0000FFFF) + ((res >> 16) & 0x0000FFFF);
+    w -= (w >> 1) & 0x55555555;
+    w =  (w & 0x33333333) + ((w >> 2) & 0x33333333);
+    w =  (w + (w >> 4)) & 0x0f0f0f0f;
+
+    if ( IS_ENABLED(CONFIG_HAS_FAST_MULTIPLY) )
+        return (w * 0x01010101) >> 24;
+
+    w += w >> 8;
+
+    return (w + (w >> 16)) & 0xff;
 }
 
 static inline unsigned int generic_hweight16(unsigned int w)
 {
-    unsigned int res = (w & 0x5555) + ((w >> 1) & 0x5555);
-    res = (res & 0x3333) + ((res >> 2) & 0x3333);
-    res = (res & 0x0F0F) + ((res >> 4) & 0x0F0F);
-    return (res & 0x00FF) + ((res >> 8) & 0x00FF);
+    w -= ((w >> 1) & 0x5555);
+    w =  (w & 0x3333) + ((w >> 2) & 0x3333);
+    w =  (w + (w >> 4)) & 0x0f0f;
+
+    return (w + (w >> 8)) & 0xff;
 }
 
 static inline unsigned int generic_hweight8(unsigned int w)
 {
-    unsigned int res = (w & 0x55) + ((w >> 1) & 0x55);
-    res = (res & 0x33) + ((res >> 2) & 0x33);
-    return (res & 0x0F) + ((res >> 4) & 0x0F);
+    w -= ((w >> 1) & 0x55);
+    w =  (w & 0x33) + ((w >> 2) & 0x33);
+
+    return (w + (w >> 4)) & 0x0f;
 }
 
-static inline unsigned long generic_hweight64(__u64 w)
+static inline unsigned int generic_hweight64(uint64_t w)
 {
-#if BITS_PER_LONG < 64
-    return generic_hweight32((unsigned int)(w >> 32)) +
-        generic_hweight32((unsigned int)w);
-#else
-    u64 res;
-    res = (w & 0x5555555555555555ul) + ((w >> 1) & 0x5555555555555555ul);
-    res = (res & 0x3333333333333333ul) + ((res >> 2) & 0x3333333333333333ul);
-    res = (res & 0x0F0F0F0F0F0F0F0Ful) + ((res >> 4) & 0x0F0F0F0F0F0F0F0Ful);
-    res = (res & 0x00FF00FF00FF00FFul) + ((res >> 8) & 0x00FF00FF00FF00FFul);
-    res = (res & 0x0000FFFF0000FFFFul) + ((res >> 16) & 0x0000FFFF0000FFFFul);
-    return (res & 0x00000000FFFFFFFFul) + ((res >> 32) & 0x00000000FFFFFFFFul);
-#endif
+    if ( BITS_PER_LONG < 64 )
+        return generic_hweight32(w >> 32) + generic_hweight32(w);
+
+    w -= (w >> 1) & 0x5555555555555555ul;
+    w =  (w & 0x3333333333333333ul) + ((w >> 2) & 0x3333333333333333ul);
+    w =  (w + (w >> 4)) & 0x0f0f0f0f0f0f0f0ful;
+
+    if ( IS_ENABLED(CONFIG_HAS_FAST_MULTIPLY) )
+        return (w * 0x0101010101010101ul) >> 56;
+
+    w += w >> 8;
+    w += w >> 16;
+
+    return (w + (w >> 32)) & 0xFF;
 }
 
 static inline unsigned long hweight_long(unsigned long w)
@@ -220,7 +232,7 @@ static inline __u32 ror32(__u32 word, unsigned int shift)
 #define __L4(_x)  (((_x) & 0x0000000c) ? ( 2 + __L2( (_x)>> 2)) : __L2( _x))
 #define __L8(_x)  (((_x) & 0x000000f0) ? ( 4 + __L4( (_x)>> 4)) : __L4( _x))
 #define __L16(_x) (((_x) & 0x0000ff00) ? ( 8 + __L8( (_x)>> 8)) : __L8( _x))
-#define LOG_2(_x) (((_x) & 0xffff0000) ? (16 + __L16((_x)>>16)) : __L16(_x))
+#define ilog2(_x) (((_x) & 0xffff0000) ? (16 + __L16((_x)>>16)) : __L16(_x))
 
 /**
  * for_each_set_bit - iterate over every set bit in a memory region
@@ -232,5 +244,7 @@ static inline __u32 ror32(__u32 word, unsigned int shift)
     for ( (bit) = find_first_bit(addr, size);           \
           (bit) < (size);                               \
           (bit) = find_next_bit(addr, size, (bit) + 1) )
+
+#define BIT_WORD(nr) ((nr) / BITS_PER_LONG)
 
 #endif

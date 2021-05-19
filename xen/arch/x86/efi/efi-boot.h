@@ -6,8 +6,9 @@
 #include <xen/vga.h>
 #include <asm/e820.h>
 #include <asm/edd.h>
+#include <asm/microcode.h>
 #include <asm/msr.h>
-#include <asm/processor.h>
+#include <asm/setup.h>
 
 static struct file __initdata ucode;
 static multiboot_info_t __initdata mbi = {
@@ -59,7 +60,7 @@ static void __init efi_arch_relocate_image(unsigned long delta)
         /*
          * Relevant l{2,3}_bootmap entries get initialized explicitly in
          * efi_arch_memory_setup(), so we must not apply relocations there.
-         * l2_identmap's first slot, otoh, should be handled normally, as
+         * l2_directmap's first slot, otoh, should be handled normally, as
          * efi_arch_memory_setup() won't touch it (xen_phys_start should
          * never be zero).
          */
@@ -106,6 +107,10 @@ static void __init relocate_trampoline(unsigned long phys)
     const s32 *trampoline_ptr;
 
     trampoline_phys = phys;
+
+    if ( !efi_enabled(EFI_LOADER) )
+        return;
+
     /* Apply relocations to trampoline. */
     for ( trampoline_ptr = __trampoline_rel_start;
           trampoline_ptr < __trampoline_rel_stop;
@@ -119,7 +124,7 @@ static void __init relocate_trampoline(unsigned long phys)
 
 static void __init place_string(u32 *addr, const char *s)
 {
-    static char *__initdata alloc = start;
+    char *alloc = NULL;
 
     if ( s && *s )
     {
@@ -127,7 +132,7 @@ static void __init place_string(u32 *addr, const char *s)
         const char *old = (char *)(long)*addr;
         size_t len2 = *addr ? strlen(old) + 1 : 0;
 
-        alloc -= len1 + len2;
+        alloc = ebmalloc(len1 + len2);
         /*
          * Insert new string before already existing one. This is needed
          * for options passed on the command line to override options from
@@ -153,8 +158,8 @@ static void __init efi_arch_process_memory_map(EFI_SYSTEM_TABLE *SystemTable,
     unsigned int i;
 
     /* Populate E820 table and check trampoline area availability. */
-    e = e820map - 1;
-    for ( e820nr = i = 0; i < map_size; i += desc_size )
+    e = e820_raw.map - 1;
+    for ( e820_raw.nr_map = i = 0; i < map_size; i += desc_size )
     {
         EFI_MEMORY_DESCRIPTOR *desc = map + i;
         u64 len = desc->NumberOfPages << EFI_PAGE_SHIFT;
@@ -191,10 +196,10 @@ static void __init efi_arch_process_memory_map(EFI_SYSTEM_TABLE *SystemTable,
             type = E820_NVS;
             break;
         }
-        if ( e820nr && type == e->type &&
+        if ( e820_raw.nr_map && type == e->type &&
              desc->PhysicalStart == e->addr + e->size )
             e->size += len;
-        else if ( !len || e820nr >= E820MAX )
+        else if ( !len || e820_raw.nr_map >= ARRAY_SIZE(e820_raw.map) )
             continue;
         else
         {
@@ -202,7 +207,7 @@ static void __init efi_arch_process_memory_map(EFI_SYSTEM_TABLE *SystemTable,
             e->addr = desc->PhysicalStart;
             e->size = len;
             e->type = type;
-            ++e820nr;
+            ++e820_raw.nr_map;
         }
     }
 
@@ -210,12 +215,7 @@ static void __init efi_arch_process_memory_map(EFI_SYSTEM_TABLE *SystemTable,
 
 static void *__init efi_arch_allocate_mmap_buffer(UINTN map_size)
 {
-    place_string(&mbi.mem_upper, NULL);
-    mbi.mem_upper -= map_size;
-    mbi.mem_upper &= -__alignof__(EFI_MEMORY_DESCRIPTOR);
-    if ( mbi.mem_upper < xen_phys_start )
-        return NULL;
-    return (void *)(long)mbi.mem_upper;
+    return ebmalloc(map_size);
 }
 
 static void __init efi_arch_pre_exit_boot(void)
@@ -238,10 +238,9 @@ static void __init noreturn efi_arch_post_exit_boot(void)
     /* Set system registers and transfer control. */
     asm volatile("pushq $0\n\tpopfq");
     rdmsrl(MSR_EFER, efer);
-    efer |= EFER_SCE;
-    if ( cpuid_ext_features & cpufeat_mask(X86_FEATURE_NX) )
-        efer |= EFER_NX;
+    efer |= trampoline_efer;
     wrmsrl(MSR_EFER, efer);
+    wrmsrl(MSR_IA32_CR_PAT, XEN_MSR_PAT);
     write_cr0(X86_CR0_PE | X86_CR0_MP | X86_CR0_ET | X86_CR0_NE | X86_CR0_WP |
               X86_CR0_AM | X86_CR0_PG);
     asm volatile ( "mov    %[cr4], %%cr4\n\t"
@@ -250,35 +249,43 @@ static void __init noreturn efi_arch_post_exit_boot(void)
                    "or     $"__stringify(X86_CR4_PGE)", %[cr4]\n\t"
                    "mov    %[cr4], %%cr4\n\t"
 #endif
-                   "movabs $__start_xen, %[rip]\n\t"
-                   "lgdt   gdt_descr(%%rip)\n\t"
-                   "mov    stack_start(%%rip), %%rsp\n\t"
+                   "lgdt   boot_gdtr(%%rip)\n\t"
                    "mov    %[ds], %%ss\n\t"
                    "mov    %[ds], %%ds\n\t"
                    "mov    %[ds], %%es\n\t"
                    "mov    %[ds], %%fs\n\t"
                    "mov    %[ds], %%gs\n\t"
-                   "movl   %[cs], 8(%%rsp)\n\t"
-                   "mov    %[rip], (%%rsp)\n\t"
-                   "lretq  %[stkoff]-16"
+
+                   /* Jump to higher mappings. */
+                   "mov    stack_start(%%rip), %%rsp\n\t"
+                   "movabs $__start_xen, %[rip]\n\t"
+                   "push   %[cs]\n\t"
+                   "push   %[rip]\n\t"
+                   "lretq"
                    : [rip] "=&r" (efer/* any dead 64-bit variable */),
                      [cr4] "+&r" (cr4)
                    : [cr3] "r" (idle_pg_table),
-                     [cs] "ir" (__HYPERVISOR_CS),
+                     [cs] "i" (__HYPERVISOR_CS),
                      [ds] "r" (__HYPERVISOR_DS),
-                     [stkoff] "i" (STACK_SIZE - sizeof(struct cpu_info)),
                      "D" (&mbi)
                    : "memory" );
-    for( ; ; ); /* not reached */
+    unreachable();
 }
 
-static void __init efi_arch_cfg_file_early(EFI_FILE_HANDLE dir_handle, char *section)
+static void __init efi_arch_cfg_file_early(const EFI_LOADED_IMAGE *image,
+                                           EFI_FILE_HANDLE dir_handle,
+                                           const char *section)
 {
 }
 
-static void __init efi_arch_cfg_file_late(EFI_FILE_HANDLE dir_handle, char *section)
+static void __init efi_arch_cfg_file_late(const EFI_LOADED_IMAGE *image,
+                                          EFI_FILE_HANDLE dir_handle,
+                                          const char *section)
 {
     union string name;
+
+    if ( read_section(image, L"ucode", &ucode, NULL) )
+        return;
 
     name.s = get_value(&cfg, section, "ucode");
     if ( !name.s )
@@ -294,7 +301,7 @@ static void __init efi_arch_cfg_file_late(EFI_FILE_HANDLE dir_handle, char *sect
 
 static void __init efi_arch_handle_cmdline(CHAR16 *image_name,
                                            CHAR16 *cmdline_options,
-                                           char *cfgfile_options)
+                                           const char *cfgfile_options)
 {
     union string name;
 
@@ -480,16 +487,19 @@ static void __init efi_arch_edd(void)
 
 static void __init efi_arch_console_init(UINTN cols, UINTN rows)
 {
+#ifdef CONFIG_VIDEO
     vga_console_info.video_type = XEN_VGATYPE_TEXT_MODE_3;
     vga_console_info.u.text_mode_3.columns = cols;
     vga_console_info.u.text_mode_3.rows = rows;
     vga_console_info.u.text_mode_3.font_height = 16;
+#endif
 }
 
 static void __init efi_arch_video_init(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
                                        UINTN info_size,
                                        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mode_info)
 {
+#ifdef CONFIG_VIDEO
     int bpp = 0;
 
     switch ( mode_info->PixelFormat )
@@ -526,9 +536,10 @@ static void __init efi_arch_video_init(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
         bpp = set_color(mode_info->PixelInformation.BlueMask, bpp,
                         &vga_console_info.u.vesa_lfb.blue_pos,
                         &vga_console_info.u.vesa_lfb.blue_size);
-        bpp = set_color(mode_info->PixelInformation.ReservedMask, bpp,
-                        &vga_console_info.u.vesa_lfb.rsvd_pos,
-                        &vga_console_info.u.vesa_lfb.rsvd_size);
+        if ( mode_info->PixelInformation.ReservedMask )
+            bpp = set_color(mode_info->PixelInformation.ReservedMask, bpp,
+                            &vga_console_info.u.vesa_lfb.rsvd_pos,
+                            &vga_console_info.u.vesa_lfb.rsvd_size);
         if ( bpp > 0 )
             break;
         /* fall through */
@@ -548,9 +559,11 @@ static void __init efi_arch_video_init(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
         vga_console_info.u.vesa_lfb.bytes_per_line =
             (mode_info->PixelsPerScanLine * bpp + 7) >> 3;
         vga_console_info.u.vesa_lfb.lfb_base = gop->Mode->FrameBufferBase;
+        vga_console_info.u.vesa_lfb.ext_lfb_base = gop->Mode->FrameBufferBase >> 32;
         vga_console_info.u.vesa_lfb.lfb_size =
             (gop->Mode->FrameBufferSize + 0xffff) >> 16;
     }
+#endif
 }
 
 static void __init efi_arch_memory_setup(void)
@@ -560,7 +573,12 @@ static void __init efi_arch_memory_setup(void)
 
     /* Allocate space for trampoline (in first Mb). */
     cfg.addr = 0x100000;
-    cfg.size = trampoline_end - trampoline_start;
+
+    if ( efi_enabled(EFI_LOADER) )
+        cfg.size = trampoline_end - trampoline_start;
+    else
+        cfg.size = TRAMPOLINE_SPACE + TRAMPOLINE_STACK_SPACE;
+
     status = efi_bs->AllocatePages(AllocateMaxAddress, EfiLoaderData,
                                    PFN_UP(cfg.size), &cfg.addr);
     if ( status == EFI_SUCCESS )
@@ -571,25 +589,62 @@ static void __init efi_arch_memory_setup(void)
         PrintStr(L"Trampoline space cannot be allocated; will try fallback.\r\n");
     }
 
-    /* Initialise L2 identity-map and boot-map page table entries (16MB). */
-    for ( i = 0; i < 8; ++i )
-    {
-        unsigned int slot = (xen_phys_start >> L2_PAGETABLE_SHIFT) + i;
-        paddr_t addr = slot << L2_PAGETABLE_SHIFT;
+    if ( !efi_enabled(EFI_LOADER) )
+        return;
 
-        l2_identmap[slot] = l2e_from_paddr(addr, PAGE_HYPERVISOR|_PAGE_PSE);
-        slot &= L2_PAGETABLE_ENTRIES - 1;
-        l2_bootmap[slot] = l2e_from_paddr(addr, __PAGE_HYPERVISOR|_PAGE_PSE);
+    /*
+     * Map Xen into the higher mappings, using 2M superpages.
+     *
+     * NB: We are currently in physical mode, so a RIP-relative relocation
+     * against _start/_end result in our arbitrary placement by the bootloader
+     * in memory, rather than the intended high mappings position.  Subtract
+     * xen_phys_start to get the appropriate slots in l2_xenmap[].
+     */
+    for ( i =  l2_table_offset((UINTN)_start   - xen_phys_start);
+          i <= l2_table_offset((UINTN)_end - 1 - xen_phys_start); ++i )
+        l2_xenmap[i] =
+            l2e_from_paddr(xen_phys_start + (i << L2_PAGETABLE_SHIFT),
+                           PAGE_HYPERVISOR_RWX | _PAGE_PSE);
+
+    /* Check that there is at least 4G of mapping space in l2_*map[] */
+    BUILD_BUG_ON((sizeof(l2_bootmap)   / L2_PAGETABLE_ENTRIES) < 4);
+    BUILD_BUG_ON((sizeof(l2_directmap) / L2_PAGETABLE_ENTRIES) < 4);
+
+    /* Initialize L3 boot-map page directory entries. */
+    for ( i = 0; i < 4; ++i )
+        l3_bootmap[i] = l3e_from_paddr((UINTN)l2_bootmap + i * PAGE_SIZE,
+                                       __PAGE_HYPERVISOR);
+    /*
+     * Map Xen into the directmap (needed for early-boot pagetable
+     * handling/walking), and identity map Xen into bootmap (needed for the
+     * transition from the EFI pagetables to Xen), using 2M superpages.
+     *
+     * NB: We are currently in physical mode, so a RIP-relative relocation
+     * against _start/_end gets their real position in memory, which are the
+     * appropriate l2 slots to map.
+     */
+#define l2_4G_offset(a)                                                 \
+    (((UINTN)(a) >> L2_PAGETABLE_SHIFT) & (4 * L2_PAGETABLE_ENTRIES - 1))
+
+    for ( i  = l2_4G_offset(_start);
+          i <= l2_4G_offset(_end - 1); ++i )
+    {
+        l2_pgentry_t pte = l2e_from_paddr(i << L2_PAGETABLE_SHIFT,
+                                          __PAGE_HYPERVISOR | _PAGE_PSE);
+
+        l2_bootmap[i] = pte;
+
+        /* Bootmap RWX/Non-global.  Directmap RW/Global. */
+        l2e_add_flags(pte, PAGE_HYPERVISOR);
+
+        l2_directmap[i] = pte;
     }
-    /* Initialise L3 boot-map page directory entries. */
-    l3_bootmap[l3_table_offset(xen_phys_start)] =
-        l3e_from_paddr((UINTN)l2_bootmap, __PAGE_HYPERVISOR);
-    l3_bootmap[l3_table_offset(xen_phys_start + (8 << L2_PAGETABLE_SHIFT) - 1)] =
-        l3e_from_paddr((UINTN)l2_bootmap, __PAGE_HYPERVISOR);
+#undef l2_4G_offset
 }
 
-static void __init efi_arch_handle_module(struct file *file, const CHAR16 *name,
-                                          char *options)
+static void __init efi_arch_handle_module(const struct file *file,
+                                          const CHAR16 *name,
+                                          const char *options)
 {
     union string local_name;
     void *ptr;
@@ -624,18 +679,24 @@ static void __init efi_arch_handle_module(struct file *file, const CHAR16 *name,
 static void __init efi_arch_cpu(void)
 {
     uint32_t eax = cpuid_eax(0x80000000);
+    uint32_t *caps = boot_cpu_data.x86_capability;
+
+    boot_tsc_stamp = rdtsc();
+
+    caps[cpufeat_word(X86_FEATURE_HYPERVISOR)] = cpuid_ecx(1);
 
     if ( (eax >> 16) == 0x8000 && eax > 0x80000000 )
     {
-        cpuid_ext_features = cpuid_edx(0x80000001);
-        boot_cpu_data.x86_capability[cpufeat_word(X86_FEATURE_SYSCALL)]
-            = cpuid_ext_features;
+        caps[cpufeat_word(X86_FEATURE_SYSCALL)] = cpuid_edx(0x80000001);
+
+        if ( cpu_has_nx )
+            trampoline_efer |= EFER_NX;
     }
 }
 
 static void __init efi_arch_blexit(void)
 {
-    if ( ucode.addr )
+    if ( ucode.need_to_free )
         efi_bs->FreePages(ucode.addr, PFN_UP(ucode.size));
 }
 
@@ -656,12 +717,47 @@ static void __init efi_arch_load_addr_check(EFI_LOADED_IMAGE *loaded_image)
     trampoline_xen_phys_start = xen_phys_start;
 }
 
-static bool_t __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
+static bool __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
 {
-    return 1; /* x86 always uses a config file */
+    return true; /* x86 always uses a config file */
 }
 
 static void __init efi_arch_flush_dcache_area(const void *vaddr, UINTN size) { }
+
+void __init efi_multiboot2(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
+{
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
+    UINTN cols, gop_mode = ~0, rows;
+
+    __set_bit(EFI_BOOT, &efi_flags);
+    __set_bit(EFI_RS, &efi_flags);
+
+    efi_init(ImageHandle, SystemTable);
+
+    efi_console_set_mode();
+
+    if ( StdOut->QueryMode(StdOut, StdOut->Mode->Mode,
+                           &cols, &rows) == EFI_SUCCESS )
+        efi_arch_console_init(cols, rows);
+
+    gop = efi_get_gop();
+
+    if ( gop )
+        gop_mode = efi_find_gop_mode(gop, 0, 0, 0);
+
+    efi_arch_edd();
+    efi_arch_cpu();
+
+    efi_tables();
+    setup_efi_pci();
+    efi_variables();
+    efi_arch_memory_setup();
+
+    if ( gop )
+        efi_set_gop_mode(gop, gop_mode);
+
+    efi_exit_boot(ImageHandle, SystemTable);
+}
 
 /*
  * Local variables:

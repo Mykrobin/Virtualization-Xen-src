@@ -1,8 +1,6 @@
 #ifndef __ASM_ARM_DEVICE_H
 #define __ASM_ARM_DEVICE_H
 
-#include <xen/init.h>
-
 enum device_type
 {
     DEV_DT,
@@ -20,6 +18,7 @@ struct device
     struct dt_device_node *of_node; /* Used by drivers imported from Linux */
 #endif
     struct dev_archdata archdata;
+    struct iommu_fwspec *iommu_fwspec; /* per-device IOMMU instance data */
 };
 
 typedef struct device device_t;
@@ -46,7 +45,11 @@ struct device_desc {
     enum device_class class;
     /* List of devices supported by this driver */
     const struct dt_device_match *dt_match;
-    /* Device initialization */
+    /*
+     * Device initialization.
+     *
+     * -EAGAIN is used to indicate that device probing is deferred.
+     */
     int (*init)(struct dt_device_node *dev, const void *data);
 };
 
@@ -68,8 +71,8 @@ struct acpi_device_desc {
  *
  *  Return 0 on success.
  */
-int __init acpi_device_init(enum device_class class,
-                            const void *data, int class_type);
+int acpi_device_init(enum device_class class,
+                     const void *data, int class_type);
 
 /**
  *  device_init - Initialize a device
@@ -79,8 +82,8 @@ int __init acpi_device_init(enum device_class class,
  *
  *  Return 0 on success.
  */
-int __init device_init(struct dt_device_node *dev, enum device_class class,
-                       const void *data);
+int device_init(struct dt_device_node *dev, enum device_class class,
+                const void *data);
 
 /**
  * device_get_type - Get the type of the device

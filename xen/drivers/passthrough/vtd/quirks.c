@@ -17,6 +17,7 @@
  */
 
 #include <xen/irq.h>
+#include <xen/param.h>
 #include <xen/sched.h>
 #include <xen/xmalloc.h>
 #include <xen/domain_page.h>
@@ -37,8 +38,8 @@
 #include "extern.h"
 #include "vtd.h"
 
-#define IOH_DEV      0
-#define IGD_DEV      2
+#define IOH_DEV      PCI_SBDF(0, 0, 0, 0)
+#define IGD_DEV      PCI_SBDF(0, 0, 2, 0)
 
 #define IGD_BAR_MASK 0xFFFFFFFFFFFF0000
 #define GGC 0x52
@@ -74,7 +75,7 @@ int is_igd_vt_enabled_quirk(void)
         return 1;
 
     /* integrated graphics on Intel platforms is located at 0:2.0 */
-    ggc = pci_conf_read16(0, 0, IGD_DEV, 0, GGC);
+    ggc = pci_conf_read16(IGD_DEV, GGC);
     return ( ggc & GGC_MEMORY_VT_ENABLED ? 1 : 0 );
 }
 
@@ -88,12 +89,12 @@ static void __init cantiga_b3_errata_init(void)
     u16 vid;
     u8 did_hi, rid;
 
-    vid = pci_conf_read16(0, 0, IGD_DEV, 0, 0);
+    vid = pci_conf_read16(IGD_DEV, 0);
     if ( vid != 0x8086 )
         return;
 
-    did_hi = pci_conf_read8(0, 0, IGD_DEV, 0, 3);
-    rid = pci_conf_read8(0, 0, IGD_DEV, 0, 8);
+    did_hi = pci_conf_read8(IGD_DEV, 3);
+    rid = pci_conf_read8(IGD_DEV, 8);
 
     if ( (did_hi == 0x2A) && (rid == 0x7) )
         is_cantiga_b3 = 1;
@@ -128,19 +129,18 @@ static void __init map_igd_reg(void)
     if ( igd_reg_va )
         return;
 
-    igd_mmio   = pci_conf_read32(0, 0, IGD_DEV, 0, PCI_BASE_ADDRESS_1);
+    igd_mmio   = pci_conf_read32(IGD_DEV, PCI_BASE_ADDRESS_1);
     igd_mmio <<= 32;
-    igd_mmio  += pci_conf_read32(0, 0, IGD_DEV, 0, PCI_BASE_ADDRESS_0);
+    igd_mmio  += pci_conf_read32(IGD_DEV, PCI_BASE_ADDRESS_0);
     igd_reg_va = ioremap(igd_mmio & IGD_BAR_MASK, 0x3000);
 }
 
 /*
  * force IGD to exit low power mode by accessing a IGD 3D regsiter.
  */
-static int cantiga_vtd_ops_preamble(struct iommu* iommu)
+static int cantiga_vtd_ops_preamble(struct vtd_iommu *iommu)
 {
-    struct intel_iommu *intel = iommu->intel;
-    struct acpi_drhd_unit *drhd = intel ? intel->drhd : NULL;
+    struct acpi_drhd_unit *drhd = iommu->drhd;
 
     if ( !is_igd_drhd(drhd) || !is_cantiga_b3 )
         return 0;
@@ -172,10 +172,9 @@ static int cantiga_vtd_ops_preamble(struct iommu* iommu)
  * parameter to a numerical value enables the quirk and
  * sets the timeout to that numerical number of msecs.
  */
-static void snb_vtd_ops_preamble(struct iommu* iommu)
+static void snb_vtd_ops_preamble(struct vtd_iommu *iommu)
 {
-    struct intel_iommu *intel = iommu->intel;
-    struct acpi_drhd_unit *drhd = intel ? intel->drhd : NULL;
+    struct acpi_drhd_unit *drhd = iommu->drhd;
     s_time_t start_time;
 
     if ( !is_igd_drhd(drhd) || !is_snb_gfx )
@@ -202,10 +201,9 @@ static void snb_vtd_ops_preamble(struct iommu* iommu)
     *(volatile u32 *)(igd_reg_va + 0x2050) = 0x10001;
 }
 
-static void snb_vtd_ops_postamble(struct iommu* iommu)
+static void snb_vtd_ops_postamble(struct vtd_iommu *iommu)
 {
-    struct intel_iommu *intel = iommu->intel;
-    struct acpi_drhd_unit *drhd = intel ? intel->drhd : NULL;
+    struct acpi_drhd_unit *drhd = iommu->drhd;
 
     if ( !is_igd_drhd(drhd) || !is_snb_gfx )
         return;
@@ -221,7 +219,7 @@ static void snb_vtd_ops_postamble(struct iommu* iommu)
  * call before VT-d translation enable and IOTLB flush operations.
  */
 
-void vtd_ops_preamble_quirk(struct iommu* iommu)
+void vtd_ops_preamble_quirk(struct vtd_iommu *iommu)
 {
     cantiga_vtd_ops_preamble(iommu);
     if ( snb_igd_timeout != 0 )
@@ -236,7 +234,7 @@ void vtd_ops_preamble_quirk(struct iommu* iommu)
 /*
  * call after VT-d translation enable and IOTLB flush operations.
  */
-void vtd_ops_postamble_quirk(struct iommu* iommu)
+void vtd_ops_postamble_quirk(struct vtd_iommu *iommu)
 {
     if ( snb_igd_timeout != 0 )
     {
@@ -247,11 +245,12 @@ void vtd_ops_postamble_quirk(struct iommu* iommu)
     }
 }
 
-static void __init parse_snb_timeout(const char *s)
+static int __init parse_snb_timeout(const char *s)
 {
     int t;
+    const char *q = NULL;
 
-    t = parse_bool(s);
+    t = parse_bool(s, NULL);
     if ( t < 0 )
     {
         if ( *s == '\0' )
@@ -259,13 +258,13 @@ static void __init parse_snb_timeout(const char *s)
         else if ( strcmp(s, "cap") == 0 )
             t = SNB_IGD_TIMEOUT;
         else
-            t = strtoul(s, NULL, 0);
+            t = strtoul(s, &q, 0);
     }
     else
         t = t ? SNB_IGD_TIMEOUT_LEGACY : 0;
     snb_igd_timeout = MILLISECS(t);
 
-    return;
+    return (q && *q) ? -EINVAL : 0;
 }
 custom_param("snb_igd_quirk", parse_snb_timeout);
 
@@ -279,8 +278,8 @@ static void __init tylersburg_intremap_quirk(void)
     for ( bus = 0; bus < 0x100; bus++ )
     {
         /* Match on System Management Registers on Device 20 Function 0 */
-        device = pci_conf_read32(0, bus, 20, 0, PCI_VENDOR_ID);
-        rev = pci_conf_read8(0, bus, 20, 0, PCI_REVISION_ID);
+        device = pci_conf_read32(PCI_SBDF(0, bus, 20, 0), PCI_VENDOR_ID);
+        rev = pci_conf_read8(PCI_SBDF(0, bus, 20, 0), PCI_REVISION_ID);
 
         if ( rev == 0x13 && device == 0x342e8086 )
         {
@@ -295,8 +294,8 @@ static void __init tylersburg_intremap_quirk(void)
 /* initialize platform identification flags */
 void __init platform_quirks_init(void)
 {
-    ioh_id = pci_conf_read32(0, 0, IOH_DEV, 0, 0);
-    igd_id = pci_conf_read32(0, 0, IGD_DEV, 0, 0);
+    ioh_id = pci_conf_read32(IOH_DEV, 0);
+    igd_id = pci_conf_read32(IGD_DEV, 0);
 
     /* Mobile 4 Series Chipset neglects to set RWBF capability. */
     if ( ioh_id == 0x2a408086 )
@@ -355,15 +354,15 @@ int me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
     u32 id;
     int rc = 0;
 
-    id = pci_conf_read32(0, 0, 0, 0, 0);
+    id = pci_conf_read32(PCI_SBDF(0, 0, 0, 0), 0);
     if ( IS_CTG(id) )
     {
         /* quit if ME does not exist */
-        if ( pci_conf_read32(0, 0, 3, 0, 0) == 0xffffffff )
+        if ( pci_conf_read32(PCI_SBDF(0, 0, 3, 0), 0) == 0xffffffff )
             return 0;
 
         /* if device is WLAN device, map ME phantom device 0:3.7 */
-        id = pci_conf_read32(0, bus, PCI_SLOT(devfn), PCI_FUNC(devfn), 0);
+        id = pci_conf_read32(PCI_SBDF3(0, bus, devfn), 0);
         switch (id)
         {
             case 0x42328086:
@@ -383,11 +382,11 @@ int me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
     else if ( IS_ILK(id) || IS_CPT(id) )
     {
         /* quit if ME does not exist */
-        if ( pci_conf_read32(0, 0, 22, 0, 0) == 0xffffffff )
+        if ( pci_conf_read32(PCI_SBDF(0, 0, 22, 0), 0) == 0xffffffff )
             return 0;
 
         /* if device is WLAN device, map ME phantom device 0:22.7 */
-        id = pci_conf_read32(0, bus, PCI_SLOT(devfn), PCI_FUNC(devfn), 0);
+        id = pci_conf_read32(PCI_SBDF3(0, bus, devfn), 0);
         switch (id)
         {
             case 0x00878086:        /* Kilmer Peak */
@@ -414,8 +413,6 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
 {
     int seg = pdev->seg;
     int bus = pdev->bus;
-    int dev = PCI_SLOT(pdev->devfn);
-    int func = PCI_FUNC(pdev->devfn);
     int pos;
     bool_t ff;
     u32 val, val2;
@@ -423,11 +420,10 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
     paddr_t pa;
     const char *action;
 
-    if ( pci_conf_read16(seg, bus, dev, func, PCI_VENDOR_ID) !=
-         PCI_VENDOR_ID_INTEL )
+    if ( pci_conf_read16(pdev->sbdf, PCI_VENDOR_ID) != PCI_VENDOR_ID_INTEL )
         return;
 
-    switch ( pci_conf_read16(seg, bus, dev, func, PCI_DEVICE_ID) )
+    switch ( pci_conf_read16(pdev->sbdf, PCI_DEVICE_ID) )
     {
     /*
      * Mask reporting Intel VT-d faults to IOH core logic:
@@ -438,10 +434,9 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
     case 0x342e: /* Tylersburg chipset (Nehalem / Westmere systems) */
     case 0x3728: /* Xeon C5500/C3500 (JasperForest) */
     case 0x3c28: /* Sandybridge */
-        val = pci_conf_read32(seg, bus, dev, func, 0x1AC);
-        pci_conf_write32(seg, bus, dev, func, 0x1AC, val | (1 << 31));
-        printk(XENLOG_INFO "Masked VT-d error signaling on %04x:%02x:%02x.%u\n",
-               seg, bus, dev, func);
+        val = pci_conf_read32(pdev->sbdf, 0x1AC);
+        pci_conf_write32(pdev->sbdf, 0x1AC, val | (1U << 31));
+        printk(XENLOG_INFO "Masked VT-d error signaling on %pp\n", &pdev->sbdf);
         break;
 
     /* Tylersburg (EP)/Boxboro (MP) chipsets (NHM-EP/EX, WSM-EP/EX) */
@@ -461,7 +456,7 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
                                           PCI_EXT_CAP_ID_VNDR);
             while ( pos )
             {
-                val = pci_conf_read32(seg, bus, dev, func, pos + PCI_VNDR_HEADER);
+                val = pci_conf_read32(pdev->sbdf, pos + PCI_VNDR_HEADER);
                 if ( PCI_VNDR_HEADER_ID(val) == 4 && PCI_VNDR_HEADER_REV(val) == 1 )
                 {
                     pos += PCI_VNDR_HEADER;
@@ -476,20 +471,19 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
             ff = pcie_aer_get_firmware_first(pdev);
         if ( !pos )
         {
-            printk(XENLOG_WARNING "%04x:%02x:%02x.%u without AER capability?\n",
-                   seg, bus, dev, func);
+            printk(XENLOG_WARNING "%pp without AER capability?\n", &pdev->sbdf);
             break;
         }
 
-        val = pci_conf_read32(seg, bus, dev, func, pos + PCI_ERR_UNCOR_MASK);
-        val2 = pci_conf_read32(seg, bus, dev, func, pos + PCI_ERR_COR_MASK);
+        val = pci_conf_read32(pdev->sbdf, pos + PCI_ERR_UNCOR_MASK);
+        val2 = pci_conf_read32(pdev->sbdf, pos + PCI_ERR_COR_MASK);
         if ( (val & PCI_ERR_UNC_UNSUP) && (val2 & PCI_ERR_COR_ADV_NFAT) )
             action = "Found masked";
         else if ( !ff )
         {
-            pci_conf_write32(seg, bus, dev, func, pos + PCI_ERR_UNCOR_MASK,
+            pci_conf_write32(pdev->sbdf, pos + PCI_ERR_UNCOR_MASK,
                              val | PCI_ERR_UNC_UNSUP);
-            pci_conf_write32(seg, bus, dev, func, pos + PCI_ERR_COR_MASK,
+            pci_conf_write32(pdev->sbdf, pos + PCI_ERR_COR_MASK,
                              val2 | PCI_ERR_COR_ADV_NFAT);
             action = "Masked";
         }
@@ -497,11 +491,10 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
             action = "Must not mask";
 
         /* XPUNCERRMSK Send Completion with Unsupported Request */
-        val = pci_conf_read32(seg, bus, dev, func, 0x20c);
-        pci_conf_write32(seg, bus, dev, func, 0x20c, val | (1 << 4));
+        val = pci_conf_read32(pdev->sbdf, 0x20c);
+        pci_conf_write32(pdev->sbdf, 0x20c, val | (1 << 4));
 
-        printk(XENLOG_INFO "%s UR signaling on %04x:%02x:%02x.%u\n",
-               action, seg, bus, dev, func);
+        printk(XENLOG_INFO "%s UR signaling on %pp\n", action, &pdev->sbdf);
         break;
 
     case 0x0040: case 0x0044: case 0x0048: /* Nehalem/Westmere */
@@ -514,8 +507,8 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
     case 0x1610: case 0x1614: case 0x1618: /* Broadwell */
     case 0x1900: case 0x1904: case 0x1908: case 0x190c: case 0x190f: /* Skylake */
     case 0x1910: case 0x1918: case 0x191f: /* Skylake */
-        bar = pci_conf_read32(seg, bus, dev, func, 0x6c);
-        bar = (bar << 32) | pci_conf_read32(seg, bus, dev, func, 0x68);
+        bar = pci_conf_read32(pdev->sbdf, 0x6c);
+        bar = (bar << 32) | pci_conf_read32(pdev->sbdf, 0x68);
         pa = bar & 0x7ffffff000UL; /* bits 12...38 */
         if ( (bar & 1) && pa &&
              page_is_ram_type(paddr_to_pfn(pa), RAM_TYPE_RESERVED) )
@@ -526,21 +519,20 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
             {
                 __set_bit(0x1c8 * 8 + 20, va);
                 iounmap(va);
-                printk(XENLOG_INFO "Masked UR signaling on %04x:%02x:%02x.%u\n",
-                       seg, bus, dev, func);
+                printk(XENLOG_INFO "Masked UR signaling on %pp\n", &pdev->sbdf);
             }
             else
-                printk(XENLOG_ERR "Could not map %"PRIpaddr" for %04x:%02x:%02x.%u\n",
-                       pa, seg, bus, dev, func);
+                printk(XENLOG_ERR "Could not map %"PRIpaddr" for %pp\n",
+                       pa, &pdev->sbdf);
         }
         else
-            printk(XENLOG_WARNING "Bogus DMIBAR %#"PRIx64" on %04x:%02x:%02x.%u\n",
-                   bar, seg, bus, dev, func);
+            printk(XENLOG_WARNING "Bogus DMIBAR %#"PRIx64" on %pp\n",
+                   bar, &pdev->sbdf);
         break;
     }
 }
 
-void __init quirk_iommu_caps(struct iommu *iommu)
+void __init quirk_iommu_caps(struct vtd_iommu *iommu)
 {
     /*
      * IOMMU Quirks:

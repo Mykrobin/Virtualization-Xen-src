@@ -28,14 +28,14 @@ conflict-max-history-seconds = 0.05
 # tick one point of conflict-credit is given to just one domain: the
 # one at the front of the queue. If false, then after each tick each
 # domain gets a point of conflict-credit.
-# 
+#
 # In environments where it is known that every transaction will
 # involve a set of nodes that is writable by at most one other domain,
 # then it is safe to set this aggregate-limit flag to false for better
 # performance. (This can be determined by considering the layout of
 # the xenstore tree and permissions, together with the content of the
 # transactions that require protection.)
-# 
+#
 # A transaction which involves a set of nodes which can be modified by
 # multiple other domains can suffer conflicts caused by any of those
 # domains, so the flag must be set to true.
@@ -44,6 +44,16 @@ conflict-rate-limit-is-aggregate = true
 # Activate node permission system
 perms-activate = true
 
+# Activate the watch permission system
+# When this is enabled unprivileged guests can only get watch events
+# for xenstore entries that they would've been able to read.
+#
+# When this is disabled unprivileged guests may get watch events
+# for xenstore entries that they cannot read. The watch event contains
+# only the entry name, not the value.
+# This restores behaviour prior to XSA-115.
+perms-watch-activate = true
+
 # Activate quota
 quota-activate = true
 quota-maxentity = 1000
@@ -51,6 +61,7 @@ quota-maxsize = 2048
 quota-maxwatch = 100
 quota-transaction = 10
 quota-maxrequests = 1024
+quota-path-max = 1024
 
 # Activate filed base backend
 persistent = false
@@ -69,3 +80,6 @@ persistent = false
 # Perodically scanning all the rings as a safenet for lazy clients.
 # Define the interval in seconds, set to negative to disable.
 # ring-scan-interval = 20
+
+xenstored-kva = @XENSTORED_KVA@
+xenstored-port = @XENSTORED_PORT@

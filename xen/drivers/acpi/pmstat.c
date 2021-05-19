@@ -21,7 +21,6 @@
 #
 *****************************************************************************/
 
-#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/sched.h>
@@ -65,7 +64,7 @@ int do_get_pm_info(struct xen_sysctl_get_pmstat *op)
     case PMSTAT_PX:
         if ( !(xen_processor_pmbits & XEN_PROCESSOR_PM_PX) )
             return -ENODEV;
-        if ( !cpufreq_driver )
+        if ( !cpufreq_driver.init )
             return -ENODEV;
         if ( !pmpt || !(pmpt->perf.init & XEN_PX_INIT) )
             return -EINVAL;
@@ -256,16 +255,16 @@ static int get_cpufreq_para(struct xen_sysctl_pm_op *op)
         return ret;
 
     op->u.get_para.cpuinfo_cur_freq =
-        cpufreq_driver->get ? cpufreq_driver->get(op->cpuid) : policy->cur;
+        cpufreq_driver.get ? cpufreq_driver.get(op->cpuid) : policy->cur;
     op->u.get_para.cpuinfo_max_freq = policy->cpuinfo.max_freq;
     op->u.get_para.cpuinfo_min_freq = policy->cpuinfo.min_freq;
     op->u.get_para.scaling_cur_freq = policy->cur;
     op->u.get_para.scaling_max_freq = policy->max;
     op->u.get_para.scaling_min_freq = policy->min;
 
-    if ( cpufreq_driver->name[0] )
+    if ( cpufreq_driver.name[0] )
         strlcpy(op->u.get_para.scaling_driver, 
-            cpufreq_driver->name, CPUFREQ_NAME_LEN);
+            cpufreq_driver.name, CPUFREQ_NAME_LEN);
     else
         strlcpy(op->u.get_para.scaling_driver, "Unknown", CPUFREQ_NAME_LEN);
 
@@ -399,7 +398,40 @@ int do_pm_op(struct xen_sysctl_pm_op *op)
     int ret = 0;
     const struct processor_pminfo *pmpt;
 
-    if ( !op || op->cpuid >= nr_cpu_ids || !cpu_online(op->cpuid) )
+    switch ( op->cmd )
+    {
+    case XEN_SYSCTL_pm_op_set_sched_opt_smt:
+    {
+        uint32_t saved_value = sched_smt_power_savings;
+
+        if ( op->cpuid != 0 )
+            return -EINVAL;
+        sched_smt_power_savings = !!op->u.set_sched_opt_smt;
+        op->u.set_sched_opt_smt = saved_value;
+        return 0;
+    }
+
+    case XEN_SYSCTL_pm_op_get_max_cstate:
+        BUILD_BUG_ON(XEN_SYSCTL_CX_UNLIMITED != UINT_MAX);
+        if ( op->cpuid == 0 )
+            op->u.get_max_cstate = acpi_get_cstate_limit();
+        else if ( op->cpuid == 1 )
+            op->u.get_max_cstate = acpi_get_csubstate_limit();
+        else
+            ret = -EINVAL;
+        return ret;
+
+    case XEN_SYSCTL_pm_op_set_max_cstate:
+        if ( op->cpuid == 0 )
+            acpi_set_cstate_limit(op->u.set_max_cstate);
+        else if ( op->cpuid == 1 )
+            acpi_set_csubstate_limit(op->u.set_max_cstate);
+        else
+            ret = -EINVAL;
+        return ret;
+    }
+
+    if ( op->cpuid >= nr_cpu_ids || !cpu_online(op->cpuid) )
         return -EINVAL;
     pmpt = processor_pminfo[op->cpuid];
 
@@ -439,41 +471,6 @@ int do_pm_op(struct xen_sysctl_pm_op *op)
         break;
     }
 
-    case XEN_SYSCTL_pm_op_set_sched_opt_smt:
-    {
-        uint32_t saved_value;
-
-        saved_value = sched_smt_power_savings;
-        sched_smt_power_savings = !!op->u.set_sched_opt_smt;
-        op->u.set_sched_opt_smt = saved_value;
-
-        break;
-    }
-
-    case XEN_SYSCTL_pm_op_set_vcpu_migration_delay:
-    {
-        set_vcpu_migration_delay(op->u.set_vcpu_migration_delay);
-        break;
-    }
-
-    case XEN_SYSCTL_pm_op_get_vcpu_migration_delay:
-    {
-        op->u.get_vcpu_migration_delay = get_vcpu_migration_delay();
-        break;
-    }
-
-    case XEN_SYSCTL_pm_op_get_max_cstate:
-    {
-        op->u.get_max_cstate = acpi_get_cstate_limit();
-        break;
-    }
-
-    case XEN_SYSCTL_pm_op_set_max_cstate:
-    {
-        acpi_set_cstate_limit(op->u.set_max_cstate);
-        break;
-    }
-
     case XEN_SYSCTL_pm_op_enable_turbo:
     {
         ret = cpufreq_update_turbo(op->cpuid, CPUFREQ_TURBO_ENABLED);
@@ -495,7 +492,7 @@ int do_pm_op(struct xen_sysctl_pm_op *op)
     return ret;
 }
 
-int acpi_set_pdc_bits(u32 acpi_id, XEN_GUEST_HANDLE_PARAM(uint32) pdc)
+int acpi_set_pdc_bits(uint32_t acpi_id, XEN_GUEST_HANDLE(uint32) pdc)
 {
     u32 bits[3];
     int ret;

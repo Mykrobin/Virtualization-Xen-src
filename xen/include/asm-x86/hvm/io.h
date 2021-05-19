@@ -19,10 +19,8 @@
 #ifndef __ASM_X86_HVM_IO_H__
 #define __ASM_X86_HVM_IO_H__
 
-#include <asm/hvm/vpic.h>
-#include <asm/hvm/vioapic.h>
+#include <xen/pci.h>
 #include <public/hvm/ioreq.h>
-#include <public/event_channel.h>
 
 #define NR_IO_HANDLERS 32
 
@@ -41,22 +39,6 @@ struct hvm_mmio_ops {
     hvm_mmio_read_t  read;
     hvm_mmio_write_t write;
 };
-
-static inline paddr_t hvm_mmio_first_byte(const ioreq_t *p)
-{
-    return unlikely(p->df) ?
-           p->addr - (p->count - 1ul) * p->size :
-           p->addr;
-}
-
-static inline paddr_t hvm_mmio_last_byte(const ioreq_t *p)
-{
-    unsigned long size = p->size;
-
-    return unlikely(p->df) ?
-           p->addr + size - 1:
-           p->addr + (p->count * size) - 1;
-}
 
 typedef int (*portio_action_t)(
     int dir, unsigned int port, unsigned int bytes, uint32_t *val);
@@ -97,8 +79,6 @@ struct hvm_io_ops {
 int hvm_process_io_intercept(const struct hvm_io_handler *handler,
                              ioreq_t *p);
 
-const struct hvm_io_handler *hvm_find_io_handler(ioreq_t *p);
-
 int hvm_io_intercept(ioreq_t *p);
 
 struct hvm_io_handler *hvm_next_io_handler(struct domain *d);
@@ -112,21 +92,34 @@ void register_portio_handler(
     struct domain *d, unsigned int port, unsigned int size,
     portio_action_t action);
 
-void relocate_portio_handler(
+bool relocate_portio_handler(
     struct domain *d, unsigned int old_port, unsigned int new_port,
     unsigned int size);
 
 void send_timeoffset_req(unsigned long timeoff);
-void send_invalidate_req(void);
-int handle_mmio(void);
-int handle_mmio_with_translation(unsigned long gla, unsigned long gpfn,
-                                 struct npfec);
-int handle_pio(uint16_t port, unsigned int size, int dir);
+bool handle_mmio_with_translation(unsigned long gla, unsigned long gpfn,
+                                  struct npfec);
+bool handle_pio(uint16_t port, unsigned int size, int dir);
 void hvm_interrupt_post(struct vcpu *v, int vector, int type);
-void hvm_dpci_eoi(struct domain *d, unsigned int guest_irq,
-                  const union vioapic_redir_entry *ent);
+void hvm_dpci_eoi(struct domain *d, unsigned int guest_irq);
 void msix_write_completion(struct vcpu *);
+
+#ifdef CONFIG_HVM
 void msixtbl_init(struct domain *d);
+#else
+static inline void msixtbl_init(struct domain *d) {}
+#endif
+
+/* Arch-specific MSI data for vPCI. */
+struct vpci_arch_msi {
+    int pirq;
+    bool bound;
+};
+
+/* Arch-specific MSI-X entry data for vPCI. */
+struct vpci_arch_msix_entry {
+    int pirq;
+};
 
 enum stdvga_cache_state {
     STDVGA_CACHE_UNINITIALIZED,
@@ -151,7 +144,28 @@ void stdvga_deinit(struct domain *d);
 
 extern void hvm_dpci_msi_eoi(struct domain *d, int vector);
 
-void register_dpci_portio_handler(struct domain *d);
+/* Decode a PCI port IO access into a bus/slot/func/reg. */
+unsigned int hvm_pci_decode_addr(unsigned int cf8, unsigned int addr,
+                                 pci_sbdf_t *sbdf);
+
+/*
+ * HVM port IO handler that performs forwarding of guest IO ports into machine
+ * IO ports.
+ */
+void register_g2m_portio_handler(struct domain *d);
+
+/* HVM port IO handler for vPCI accesses. */
+void register_vpci_portio_handler(struct domain *d);
+
+/* HVM MMIO handler for PCI MMCFG accesses. */
+int register_vpci_mmcfg_handler(struct domain *d, paddr_t addr,
+                                unsigned int start_bus, unsigned int end_bus,
+                                unsigned int seg);
+/* Destroy tracked MMCFG areas. */
+void destroy_vpci_mmcfg(struct domain *d);
+
+/* Check if an address is between a MMCFG region for a domain. */
+bool vpci_is_mmcfg_address(const struct domain *d, paddr_t addr);
 
 #endif /* __ASM_X86_HVM_IO_H__ */
 

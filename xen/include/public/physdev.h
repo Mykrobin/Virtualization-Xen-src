@@ -148,7 +148,7 @@ struct physdev_irq {
 };
 typedef struct physdev_irq physdev_irq_t;
 DEFINE_XEN_GUEST_HANDLE(physdev_irq_t);
- 
+
 #define MAP_PIRQ_TYPE_MSI               0x0
 #define MAP_PIRQ_TYPE_GSI               0x1
 #define MAP_PIRQ_TYPE_UNKNOWN           0x2
@@ -192,7 +192,7 @@ struct physdev_manage_pci {
     /* IN */
     uint8_t bus;
     uint8_t devfn;
-}; 
+};
 
 typedef struct physdev_manage_pci physdev_manage_pci_t;
 DEFINE_XEN_GUEST_HANDLE(physdev_manage_pci_t);
@@ -229,11 +229,11 @@ DEFINE_XEN_GUEST_HANDLE(physdev_manage_pci_ext_t);
 struct physdev_op {
     uint32_t cmd;
     union {
-        struct physdev_irq_status_query      irq_status_query;
-        struct physdev_set_iopl              set_iopl;
-        struct physdev_set_iobitmap          set_iobitmap;
-        struct physdev_apic                  apic_op;
-        struct physdev_irq                   irq_op;
+        physdev_irq_status_query_t irq_status_query;
+        physdev_set_iopl_t         set_iopl;
+        physdev_set_iobitmap_t     set_iobitmap;
+        physdev_apic_t             apic_op;
+        physdev_irq_t              irq_op;
     } u;
 };
 typedef struct physdev_op physdev_op_t;
@@ -258,7 +258,7 @@ DEFINE_XEN_GUEST_HANDLE(physdev_setup_gsi_t);
  * the hypercall returns a free pirq */
 #define PHYSDEVOP_get_free_pirq    23
 struct physdev_get_free_pirq {
-    /* IN */ 
+    /* IN */
     int type;
     /* OUT */
     uint32_t pirq;
@@ -300,11 +300,7 @@ struct physdev_pci_device_add {
      * First element ([0]) is PXM domain associated with the device (if
      * XEN_PCI_DEV_PXM is set)
      */
-#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
-    uint32_t optarr[];
-#elif defined(__GNUC__)
-    uint32_t optarr[0];
-#endif
+    uint32_t optarr[XEN_FLEX_ARRAY_DIM];
 };
 typedef struct physdev_pci_device_add physdev_pci_device_add_t;
 DEFINE_XEN_GUEST_HANDLE(physdev_pci_device_add_t);
@@ -338,7 +334,7 @@ struct physdev_dbgp_op {
     uint8_t op;
     uint8_t bus;
     union {
-        struct physdev_pci_device pci;
+        physdev_pci_device_t pci;
     } u;
 };
 typedef struct physdev_dbgp_op physdev_dbgp_op_t;

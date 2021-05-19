@@ -25,9 +25,6 @@
     __DEFINE_COMPAT_HANDLE(name, name)
 #define COMPAT_HANDLE(name)          __compat_handle_ ## name
 
-/* NB: it is assumed that if an arch uses the compat layer it does not
- * distinguish handles from parameter handles. */
-#define COMPAT_HANDLE_PARAM(name)    __compat_handle_ ## name
 /* Is the compat handle a NULL reference? */
 #define compat_handle_is_null(hnd)        ((hnd).c == 0)
 
@@ -230,8 +227,8 @@ void xlat_start_info(struct start_info *, enum XLAT_start_info_console);
 struct vcpu_runstate_info;
 void xlat_vcpu_runstate_info(struct vcpu_runstate_info *);
 
+struct domain;
 int switch_compat(struct domain *);
-int switch_native(struct domain *);
 
 #else
 

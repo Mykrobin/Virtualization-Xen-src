@@ -1,4 +1,3 @@
-#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/bitops.h>
@@ -55,14 +54,6 @@ static void init_centaur(struct cpuinfo_x86 *c)
 		init_c3(c);
 }
 
-static const struct cpu_dev centaur_cpu_dev = {
-	.c_vendor	= "Centaur",
-	.c_ident	= { "CentaurHauls" },
+const struct cpu_dev centaur_cpu_dev = {
 	.c_init		= init_centaur,
 };
-
-int __init centaur_init_cpu(void)
-{
-	cpu_devs[X86_VENDOR_CENTAUR] = &centaur_cpu_dev;
-	return 0;
-}

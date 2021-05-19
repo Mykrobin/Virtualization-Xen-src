@@ -23,10 +23,10 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
-#include <xen/config.h>
 #include <acpi/pdc_intel.h>
 #include <acpi/acconfig.h>
 #include <acpi/actbl.h>
+#include <xen/errno.h>
 
 #define COMPILER_DEPENDENT_INT64   long long
 #define COMPILER_DEPENDENT_UINT64  unsigned long long
@@ -77,8 +77,8 @@ int __acpi_release_global_lock(unsigned int *lock);
 	    :"=r"(n_hi), "=r"(n_lo)	\
 	    :"0"(n_hi), "1"(n_lo))
 
-extern bool_t acpi_lapic, acpi_ioapic, acpi_noirq;
-extern bool_t acpi_force, acpi_ht, acpi_disabled;
+extern bool acpi_lapic, acpi_ioapic, acpi_noirq;
+extern bool acpi_force, acpi_ht, acpi_disabled;
 extern u32 acpi_smi_cmd;
 extern u8 acpi_enable_value, acpi_disable_value;
 void acpi_pic_sci_set_trigger(unsigned int, u16);
@@ -99,16 +99,11 @@ extern void acpi_restore_state_mem(void);
 
 extern unsigned long acpi_wakeup_address;
 
-/* early initialization routine */
-extern void acpi_reserve_bootmem(void);
-
 #define ARCH_HAS_POWER_INIT	1
 
 extern s8 acpi_numa;
 extern int acpi_scan_nodes(u64 start, u64 end);
 #define NR_NODE_MEMBLKS (MAX_NUMNODES*2)
-
-#ifdef CONFIG_ACPI_SLEEP
 
 extern struct acpi_sleep_info acpi_sinfo;
 #define acpi_video_flags bootsym(video_flags)
@@ -137,8 +132,6 @@ struct acpi_sleep_info {
     bool_t sleep_extended;
 };
 
-#endif /* CONFIG_ACPI_SLEEP */
-
 #define MAX_MADT_ENTRIES	MAX(256, 2 * NR_CPUS)
 extern u32 x86_acpiid_to_apicid[];
 #define MAX_LOCAL_APIC		MAX(256, 4 * NR_CPUS)
@@ -149,6 +142,15 @@ extern u32 pmtmr_ioport;
 extern unsigned int pmtmr_width;
 
 int acpi_dmar_init(void);
+int acpi_ivrs_init(void);
+
+static inline int acpi_iommu_init(void)
+{
+    int ret = acpi_dmar_init();
+
+    return ret == -ENODEV ? acpi_ivrs_init() : ret;
+}
+
 void acpi_mmcfg_init(void);
 
 /* Incremented whenever we transition through S3. Value is 1 during boot. */
@@ -161,6 +163,6 @@ void hvm_acpi_sleep_button(struct domain *d);
 void save_rest_processor_state(void);
 void restore_rest_processor_state(void);
 
-#define ACPI_MAP_MEM_ATTR	PAGE_HYPERVISOR_NOCACHE
+#define ACPI_MAP_MEM_ATTR	PAGE_HYPERVISOR_UCMINUS
 
 #endif /*__X86_ASM_ACPI_H*/

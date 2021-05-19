@@ -7,7 +7,6 @@
 #include <xen/libfdt/libfdt.h>
 #include <asm/setup.h>
 #include <asm/smp.h>
-#include "efi-dom0.h"
 
 void noreturn efi_xen_start(void *fdt_ptr, uint32_t fdt_size);
 void __flush_dcache_area(const void *vaddr, unsigned long size);
@@ -124,55 +123,61 @@ static void __init *lookup_fdt_config_table(EFI_SYSTEM_TABLE *sys_table)
     return fdt;
 }
 
+static bool __init meminfo_add_bank(struct meminfo *mem,
+                                    EFI_MEMORY_DESCRIPTOR *desc)
+{
+    struct membank *bank;
+
+    if ( mem->nr_banks >= NR_MEM_BANKS )
+        return false;
+
+    bank = &mem->bank[mem->nr_banks];
+    bank->start = desc->PhysicalStart;
+    bank->size = desc->NumberOfPages * EFI_PAGE_SIZE;
+
+    mem->nr_banks++;
+
+    return true;
+}
+
 static EFI_STATUS __init efi_process_memory_map_bootinfo(EFI_MEMORY_DESCRIPTOR *map,
                                                 UINTN mmap_size,
                                                 UINTN desc_size)
 {
     int Index;
-    int i = 0;
-#ifdef CONFIG_ACPI
-    int j = 0;
-#endif
     EFI_MEMORY_DESCRIPTOR *desc_ptr = map;
 
     for ( Index = 0; Index < (mmap_size / desc_size); Index++ )
     {
-        if ( desc_ptr->Type == EfiConventionalMemory ||
-             (!map_bs &&
-              (desc_ptr->Type == EfiBootServicesCode ||
-               desc_ptr->Type == EfiBootServicesData)) )
+        if ( desc_ptr->Attribute & EFI_MEMORY_WB &&
+             (desc_ptr->Type == EfiConventionalMemory ||
+              desc_ptr->Type == EfiLoaderCode ||
+              desc_ptr->Type == EfiLoaderData ||
+              (!map_bs &&
+               (desc_ptr->Type == EfiBootServicesCode ||
+                desc_ptr->Type == EfiBootServicesData))) )
         {
-            if ( i >= NR_MEM_BANKS )
+            if ( !meminfo_add_bank(&bootinfo.mem, desc_ptr) )
             {
                 PrintStr(L"Warning: All " __stringify(NR_MEM_BANKS)
                           " bootinfo mem banks exhausted.\r\n");
                 break;
             }
-            bootinfo.mem.bank[i].start = desc_ptr->PhysicalStart;
-            bootinfo.mem.bank[i].size = desc_ptr->NumberOfPages * EFI_PAGE_SIZE;
-            ++i;
         }
 #ifdef CONFIG_ACPI
         else if ( desc_ptr->Type == EfiACPIReclaimMemory )
         {
-            if ( j >= NR_MEM_BANKS )
+            if ( !meminfo_add_bank(&bootinfo.acpi, desc_ptr) )
             {
                 PrintStr(L"Error: All " __stringify(NR_MEM_BANKS)
                           " acpi meminfo mem banks exhausted.\r\n");
                 return EFI_LOAD_ERROR;
             }
-            acpi_mem.bank[j].start = desc_ptr->PhysicalStart;
-            acpi_mem.bank[j].size  = desc_ptr->NumberOfPages * EFI_PAGE_SIZE;
-            ++j;
         }
 #endif
         desc_ptr = NextMemoryDescriptor(desc_ptr, desc_size);
     }
 
-    bootinfo.mem.nr_banks = i;
-#ifdef CONFIG_ACPI
-    acpi_mem.nr_banks = j;
-#endif
     return EFI_SUCCESS;
 }
 
@@ -309,7 +314,10 @@ static void __init *fdt_increase_size(struct file *fdtfile, int add_size)
     if ( fdt_size )
     {
         if ( fdt_open_into(dtbfile.ptr, new_fdt, pages * EFI_PAGE_SIZE) )
+        {
+            efi_bs->FreePages(fdt_addr, pages);
             return NULL;
+        }
     }
     else
     {
@@ -321,7 +329,10 @@ static void __init *fdt_increase_size(struct file *fdtfile, int add_size)
          * system table that is passed in the FDT.
          */
         if ( fdt_create_empty_tree(new_fdt, pages * EFI_PAGE_SIZE) )
+        {
+            efi_bs->FreePages(fdt_addr, pages);
             return NULL;
+        }
     }
 
     /*
@@ -330,12 +341,13 @@ static void __init *fdt_increase_size(struct file *fdtfile, int add_size)
      * code will free it.  If the original FDT came from a configuration
      * table, we don't own that memory and can't free it.
      */
-    if ( dtbfile.size )
+    if ( dtbfile.need_to_free )
         efi_bs->FreePages(dtbfile.addr, PFN_UP(dtbfile.size));
 
     /* Update 'file' info for new memory so we clean it up on error exits */
     dtbfile.addr = fdt_addr;
     dtbfile.size = pages * EFI_PAGE_SIZE;
+    dtbfile.need_to_free = true;
     return new_fdt;
 }
 
@@ -365,32 +377,41 @@ static void __init efi_arch_pre_exit_boot(void)
 {
 }
 
-static void __init efi_arch_post_exit_boot(void)
+static void __init noreturn efi_arch_post_exit_boot(void)
 {
     efi_xen_start(fdt, fdt_totalsize(fdt));
 }
 
-static void __init efi_arch_cfg_file_early(EFI_FILE_HANDLE dir_handle, char *section)
+static void __init efi_arch_cfg_file_early(const EFI_LOADED_IMAGE *image,
+                                           EFI_FILE_HANDLE dir_handle,
+                                           const char *section)
 {
     union string name;
 
     /*
      * The DTB must be processed before any other entries in the configuration
-     * file, as the DTB is updated as modules are loaded.
+     * file, as the DTB is updated as modules are loaded.  Prefer the one
+     * stored as a PE section in a unified image, and fall back to a file
+     * on disk if the section is not present.
      */
-    name.s = get_value(&cfg, section, "dtb");
-    if ( name.s )
+    if ( !read_section(image, L"dtb", &dtbfile, NULL) )
     {
-        split_string(name.s);
-        read_file(dir_handle, s2w(&name), &dtbfile, NULL);
-        efi_bs->FreePool(name.w);
+        name.s = get_value(&cfg, section, "dtb");
+        if ( name.s )
+        {
+            split_string(name.s);
+            read_file(dir_handle, s2w(&name), &dtbfile, NULL);
+            efi_bs->FreePool(name.w);
+        }
     }
     fdt = fdt_increase_size(&dtbfile, cfg.size + EFI_PAGE_SIZE);
     if ( !fdt )
         blexit(L"Unable to create new FDT");
 }
 
-static void __init efi_arch_cfg_file_late(EFI_FILE_HANDLE dir_handle, char *section)
+static void __init efi_arch_cfg_file_late(const EFI_LOADED_IMAGE *image,
+                                          EFI_FILE_HANDLE dir_handle,
+                                          const char *section)
 {
 }
 
@@ -415,7 +436,7 @@ static void __init efi_arch_memory_setup(void)
 
 static void __init efi_arch_handle_cmdline(CHAR16 *image_name,
                                            CHAR16 *cmdline_options,
-                                           char *cfgfile_options)
+                                           const char *cfgfile_options)
 {
     union string name;
     char *buf;
@@ -476,8 +497,9 @@ static void __init efi_arch_handle_cmdline(CHAR16 *image_name,
     efi_bs->FreePool(buf);
 }
 
-static void __init efi_arch_handle_module(struct file *file, const CHAR16 *name,
-                                          char *options)
+static void __init efi_arch_handle_module(const struct file *file,
+                                          const CHAR16 *name,
+                                          const char *options)
 {
     int node;
     int chosen;
@@ -540,7 +562,7 @@ static void __init efi_arch_cpu(void)
 
 static void __init efi_arch_blexit(void)
 {
-    if ( dtbfile.addr && dtbfile.size )
+    if ( dtbfile.need_to_free )
         efi_bs->FreePages(dtbfile.addr, PFN_UP(dtbfile.size));
     if ( memmap )
         efi_bs->FreePool(memmap);
@@ -557,7 +579,7 @@ static void __init efi_arch_load_addr_check(EFI_LOADED_IMAGE *loaded_image)
         blexit(L"Xen must be loaded at a 4 KByte boundary.");
 }
 
-static bool_t __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
+static bool __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
 {
     /*
      * For arm, we may get a device tree from GRUB (or other bootloader)
@@ -569,19 +591,20 @@ static bool_t __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
 
     fdt = lookup_fdt_config_table(SystemTable);
     dtbfile.ptr = fdt;
-    dtbfile.size = 0;  /* Config table memory can't be freed, so set size to 0 */
+    dtbfile.need_to_free = false; /* Config table memory can't be freed. */
     if ( !fdt || fdt_node_offset_by_compatible(fdt, 0, "multiboot,module") < 0 )
     {
         /*
          * We either have no FDT, or one without modules, so we must have a
          * Xen EFI configuration file to specify modules.  (dom0 required)
          */
-        return 1;
+        return true;
     }
     PrintStr(L"Using modules provided by bootloader in FDT\r\n");
     /* We have modules already defined in fdt, just add space. */
     fdt = fdt_increase_size(&dtbfile, EFI_PAGE_SIZE);
-    return 0;
+
+    return false;
 }
 
 static void __init efi_arch_console_init(UINTN cols, UINTN rows)

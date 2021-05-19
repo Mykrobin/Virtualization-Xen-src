@@ -17,7 +17,6 @@
  * GNU General Public License for more details.
  */
 
-#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/spinlock.h>
 #include <xen/irq.h>
@@ -27,6 +26,8 @@
 
 #include <asm/gic.h>
 #include <asm/vgic.h>
+
+const unsigned int nr_irqs = NR_IRQS;
 
 static unsigned int local_irqs_type[NR_LOCAL_IRQS];
 static DEFINE_SPINLOCK(local_irqs_type_lock);
@@ -43,7 +44,14 @@ static void ack_none(struct irq_desc *irq)
     printk("unexpected IRQ trap at irq %02x\n", irq->irq);
 }
 
-static void end_none(struct irq_desc *irq) { }
+static void end_none(struct irq_desc *irq)
+{
+    /*
+     * Still allow a CPU to end an interrupt if we receive a spurious
+     * interrupt. This will prevent the CPU to lose interrupt forever.
+     */
+    gic_hw_ops->gic_host_irq_type->end(irq);
+}
 
 hw_irq_controller no_irq_type = {
     .typename = "none",
@@ -60,11 +68,13 @@ static DEFINE_PER_CPU(irq_desc_t[NR_LOCAL_IRQS], local_irq_desc);
 
 irq_desc_t *__irq_to_desc(int irq)
 {
-    if (irq < NR_LOCAL_IRQS) return &this_cpu(local_irq_desc)[irq];
+    if ( irq < NR_LOCAL_IRQS )
+        return &this_cpu(local_irq_desc)[irq];
+
     return &irq_desc[irq-NR_LOCAL_IRQS];
 }
 
-int __init arch_init_one_irq_desc(struct irq_desc *desc)
+int arch_init_one_irq_desc(struct irq_desc *desc)
 {
     desc->arch.type = IRQ_TYPE_INVALID;
     return 0;
@@ -75,9 +85,14 @@ static int __init init_irq_data(void)
 {
     int irq;
 
-    for (irq = NR_LOCAL_IRQS; irq < NR_IRQS; irq++) {
+    for ( irq = NR_LOCAL_IRQS; irq < NR_IRQS; irq++ )
+    {
         struct irq_desc *desc = irq_to_desc(irq);
-        init_one_irq_desc(desc);
+        int rc = init_one_irq_desc(desc);
+
+        if ( rc )
+            return rc;
+
         desc->irq = irq;
         desc->action  = NULL;
     }
@@ -91,9 +106,14 @@ static int init_local_irq_data(void)
 
     spin_lock(&local_irqs_type_lock);
 
-    for (irq = 0; irq < NR_LOCAL_IRQS; irq++) {
+    for ( irq = 0; irq < NR_LOCAL_IRQS; irq++ )
+    {
         struct irq_desc *desc = irq_to_desc(irq);
-        init_one_irq_desc(desc);
+        int rc = init_one_irq_desc(desc);
+
+        if ( rc )
+            return rc;
+
         desc->irq = irq;
         desc->action  = NULL;
 
@@ -187,12 +207,13 @@ int request_irq(unsigned int irq, unsigned int irqflags,
 void do_IRQ(struct cpu_user_regs *regs, unsigned int irq, int is_fiq)
 {
     struct irq_desc *desc = irq_to_desc(irq);
+    struct irqaction *action;
 
     perfc_incr(irqs);
 
     ASSERT(irq >= 16); /* SGIs do not come down this path */
 
-    if (irq < 32)
+    if ( irq < 32 )
         perfc_incr(ppis);
     else
         perfc_incr(spis);
@@ -204,12 +225,14 @@ void do_IRQ(struct cpu_user_regs *regs, unsigned int irq, int is_fiq)
     spin_lock(&desc->lock);
     desc->handler->ack(desc);
 
+#ifndef NDEBUG
     if ( !desc->action )
     {
         printk("Unknown %s %#3.3x\n",
                is_fiq ? "FIQ" : "IRQ", irq);
         goto out;
     }
+#endif
 
     if ( test_bit(_IRQ_GUEST, &desc->status) )
     {
@@ -223,40 +246,27 @@ void do_IRQ(struct cpu_user_regs *regs, unsigned int irq, int is_fiq)
         /*
          * The irq cannot be a PPI, we only support delivery of SPIs to
          * guests.
-	 */
-        vgic_vcpu_inject_spi(info->d, info->virq);
+         */
+        vgic_inject_irq(info->d, NULL, info->virq, true);
         goto out_no_end;
     }
 
-    set_bit(_IRQ_PENDING, &desc->status);
-
-    /*
-     * Since we set PENDING, if another processor is handling a different
-     * instance of this same irq, the other processor will take care of it.
-     */
-    if ( test_bit(_IRQ_DISABLED, &desc->status) ||
-         test_bit(_IRQ_INPROGRESS, &desc->status) )
+    if ( test_bit(_IRQ_DISABLED, &desc->status) )
         goto out;
 
     set_bit(_IRQ_INPROGRESS, &desc->status);
 
-    while ( test_bit(_IRQ_PENDING, &desc->status) )
+    action = desc->action;
+
+    spin_unlock_irq(&desc->lock);
+
+    do
     {
-        struct irqaction *action;
+        action->handler(irq, action->dev_id, regs);
+        action = action->next;
+    } while ( action );
 
-        clear_bit(_IRQ_PENDING, &desc->status);
-        action = desc->action;
-
-        spin_unlock_irq(&desc->lock);
-
-        do
-        {
-            action->handler(irq, action->dev_id, regs);
-            action = action->next;
-        } while ( action );
-
-        spin_lock_irq(&desc->lock);
-    }
+    spin_lock_irq(&desc->lock);
 
     clear_bit(_IRQ_INPROGRESS, &desc->status);
 
@@ -316,7 +326,7 @@ void release_irq(unsigned int irq, const void *dev_id)
 static int __setup_irq(struct irq_desc *desc, unsigned int irqflags,
                        struct irqaction *new)
 {
-    bool_t shared = !!(irqflags & IRQF_SHARED);
+    bool shared = irqflags & IRQF_SHARED;
 
     ASSERT(new != NULL);
 
@@ -345,7 +355,7 @@ int setup_irq(unsigned int irq, unsigned int irqflags, struct irqaction *new)
     int rc;
     unsigned long flags;
     struct irq_desc *desc;
-    bool_t disabled;
+    bool disabled;
 
     desc = irq_to_desc(irq);
 
@@ -388,10 +398,10 @@ err:
     return rc;
 }
 
-bool_t is_assignable_irq(unsigned int irq)
+bool is_assignable_irq(unsigned int irq)
 {
     /* For now, we can only route SPIs to the guest */
-    return ((irq >= NR_LOCAL_IRQS) && (irq < gic_number_lines()));
+    return (irq >= NR_LOCAL_IRQS) && (irq < gic_number_lines());
 }
 
 /*
@@ -400,7 +410,7 @@ bool_t is_assignable_irq(unsigned int irq)
  *
  * XXX: See whether it is possible to let any domain configure the type.
  */
-bool_t irq_type_set_by_domain(const struct domain *d)
+bool irq_type_set_by_domain(const struct domain *d)
 {
     return (d == hardware_domain);
 }
@@ -481,20 +491,17 @@ int route_irq_to_guest(struct domain *d, unsigned int virq,
         {
             struct domain *ad = irq_get_domain(desc);
 
-            if ( d == ad )
-            {
-                if ( irq_get_guest_info(desc)->virq != virq )
-                {
-                    printk(XENLOG_G_ERR
-                           "d%u: IRQ %u is already assigned to vIRQ %u\n",
-                           d->domain_id, irq, irq_get_guest_info(desc)->virq);
-                    retval = -EBUSY;
-                }
-            }
-            else
+            if ( d != ad )
             {
                 printk(XENLOG_G_ERR "IRQ %u is already used by domain %u\n",
                        irq, ad->domain_id);
+                retval = -EBUSY;
+            }
+            else if ( irq_get_guest_info(desc)->virq != virq )
+            {
+                printk(XENLOG_G_ERR
+                       "d%u: IRQ %u is already assigned to vIRQ %u\n",
+                       d->domain_id, irq, irq_get_guest_info(desc)->virq);
                 retval = -EBUSY;
             }
         }
@@ -536,18 +543,15 @@ int release_guest_irq(struct domain *d, unsigned int virq)
     struct irq_desc *desc;
     struct irq_guest *info;
     unsigned long flags;
-    struct pending_irq *p;
     int ret;
 
     /* Only SPIs are supported */
     if ( virq < NR_LOCAL_IRQS || virq >= vgic_num_irqs(d) )
         return -EINVAL;
 
-    p = spi_to_pending(d, virq);
-    if ( !p->desc )
+    desc = vgic_get_hw_irq_desc(d, NULL, virq);
+    if ( !desc )
         return -EINVAL;
-
-    desc = p->desc;
 
     spin_lock_irqsave(&desc->lock, flags);
 
@@ -606,7 +610,7 @@ void pirq_set_affinity(struct domain *d, int pirq, const cpumask_t *mask)
     BUG();
 }
 
-static bool_t irq_validate_new_type(unsigned int curr, unsigned new)
+static bool irq_validate_new_type(unsigned int curr, unsigned new)
 {
     return (curr == IRQ_TYPE_INVALID || curr == new );
 }

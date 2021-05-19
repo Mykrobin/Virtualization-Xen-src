@@ -5,7 +5,6 @@
  * tables for IO APICS as well as uniprocessor 8259-alikes.
  */
 
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <asm/regs.h>
@@ -21,6 +20,7 @@
 #include <asm/apic.h>
 #include <asm/asm_defns.h>
 #include <io_ports.h>
+#include <irq_vectors.h>
 
 /*
  * This is the 'legacy' 8259A Programmable Interrupt Controller,
@@ -33,9 +33,9 @@
 
 static DEFINE_SPINLOCK(i8259A_lock);
 
-static bool_t _mask_and_ack_8259A_irq(unsigned int irq);
+static bool _mask_and_ack_8259A_irq(unsigned int irq);
 
-bool_t bogus_8259A_irq(unsigned int irq)
+bool bogus_8259A_irq(unsigned int irq)
 {
     return _mask_and_ack_8259A_irq(irq);
 }
@@ -194,11 +194,11 @@ static inline int i8259A_irq_real(unsigned int irq)
  * to the two 8259s is important!  Return a boolean
  * indicating whether the irq was genuine or spurious.
  */
-static bool_t _mask_and_ack_8259A_irq(unsigned int irq)
+static bool _mask_and_ack_8259A_irq(unsigned int irq)
 {
     unsigned int irqmask = 1 << irq;
     unsigned long flags;
-    bool_t is_real_irq = 1; /* Assume real unless spurious */
+    bool is_real_irq = true; /* Assume real unless spurious */
 
     spin_lock_irqsave(&i8259A_lock, flags);
 
@@ -219,7 +219,7 @@ static bool_t _mask_and_ack_8259A_irq(unsigned int irq)
      */
     if ((cached_irq_mask & irqmask) && !i8259A_irq_real(irq)) {
         static int spurious_irq_mask;
-        is_real_irq = 0;
+        is_real_irq = false;
         /* Report spurious IRQ, once per IRQ line. */
         if (!(spurious_irq_mask & irqmask)) {
             printk("spurious 8259A interrupt: IRQ%d.\n", irq);
@@ -342,17 +342,15 @@ void __init init_IRQ(void)
 
     init_8259A(0);
 
-    BUG_ON(init_irq_data() < 0);
-
     for (irq = 0; platform_legacy_irq(irq); irq++) {
         struct irq_desc *desc = irq_to_desc(irq);
         
         if ( irq == 2 ) /* IRQ2 doesn't exist */
             continue;
         desc->handler = &i8259A_irq_type;
-        per_cpu(vector_irq, cpu)[FIRST_LEGACY_VECTOR + irq] = irq;
+        per_cpu(vector_irq, cpu)[LEGACY_VECTOR(irq)] = irq;
         cpumask_copy(desc->arch.cpu_mask, cpumask_of(cpu));
-        desc->arch.vector = FIRST_LEGACY_VECTOR + irq;
+        desc->arch.vector = LEGACY_VECTOR(irq);
     }
     
     per_cpu(vector_irq, cpu)[IRQ0_VECTOR] = 0;

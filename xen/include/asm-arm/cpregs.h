@@ -1,8 +1,6 @@
 #ifndef __ASM_ARM_CPREGS_H
 #define __ASM_ARM_CPREGS_H
 
-#include <xen/stringify.h>
-
 /*
  * AArch32 Co-processor registers.
  *
@@ -47,8 +45,8 @@
     ((__HSR_CPREG_##op1) << HSR_CP64_OP1_SHIFT)
 
 /* Encode a register as per HSR ISS pattern */
-#define HSR_CPREG32(X) _HSR_CPREG32(X)
-#define HSR_CPREG64(X) _HSR_CPREG64(X)
+#define HSR_CPREG32(X...) _HSR_CPREG32(X)
+#define HSR_CPREG64(X...) _HSR_CPREG64(X)
 
 /*
  * Order registers by Coprocessor-> CRn-> Opcode 1-> CRm-> Opcode 2
@@ -65,6 +63,8 @@
 #define FPSID           p10,7,c0,c0,0   /* Floating-Point System ID Register */
 #define FPSCR           p10,7,c1,c0,0   /* Floating-Point Status and Control Register */
 #define MVFR0           p10,7,c7,c0,0   /* Media and VFP Feature Register 0 */
+#define MVFR1           p10,7,c6,c0,0   /* Media and VFP Feature Register 1 */
+#define MVFR2           p10,7,c5,c0,0   /* Media and VFP Feature Register 2 */
 #define FPEXC           p10,7,c8,c0,0   /* Floating-Point Exception Control Register */
 #define FPINST          p10,7,c9,c0,0   /* Floating-Point Instruction Register */
 #define FPINST2         p10,7,c10,c0,0  /* Floating-point Instruction Register 2 */
@@ -106,21 +106,27 @@
 
 /* CP15 CR0: CPUID and Cache Type Registers */
 #define MIDR            p15,0,c0,c0,0   /* Main ID Register */
+#define CTR             p15,0,c0,c0,1   /* Cache Type Register */
 #define MPIDR           p15,0,c0,c0,5   /* Multiprocessor Affinity Register */
 #define ID_PFR0         p15,0,c0,c1,0   /* Processor Feature Register 0 */
 #define ID_PFR1         p15,0,c0,c1,1   /* Processor Feature Register 1 */
+#define ID_PFR2         p15,0,c0,c3,4   /* Processor Feature Register 2 */
 #define ID_DFR0         p15,0,c0,c1,2   /* Debug Feature Register 0 */
+#define ID_DFR1         p15,0,c0,c3,5   /* Debug Feature Register 1 */
 #define ID_AFR0         p15,0,c0,c1,3   /* Auxiliary Feature Register 0 */
 #define ID_MMFR0        p15,0,c0,c1,4   /* Memory Model Feature Register 0 */
 #define ID_MMFR1        p15,0,c0,c1,5   /* Memory Model Feature Register 1 */
 #define ID_MMFR2        p15,0,c0,c1,6   /* Memory Model Feature Register 2 */
 #define ID_MMFR3        p15,0,c0,c1,7   /* Memory Model Feature Register 3 */
+#define ID_MMFR4        p15,0,c0,c2,6   /* Memory Model Feature Register 4 */
+#define ID_MMFR5        p15,0,c0,c3,6   /* Memory Model Feature Register 5 */
 #define ID_ISAR0        p15,0,c0,c2,0   /* ISA Feature Register 0 */
 #define ID_ISAR1        p15,0,c0,c2,1   /* ISA Feature Register 1 */
 #define ID_ISAR2        p15,0,c0,c2,2   /* ISA Feature Register 2 */
 #define ID_ISAR3        p15,0,c0,c2,3   /* ISA Feature Register 3 */
 #define ID_ISAR4        p15,0,c0,c2,4   /* ISA Feature Register 4 */
 #define ID_ISAR5        p15,0,c0,c2,5   /* ISA Feature Register 5 */
+#define ID_ISAR6        p15,0,c0,c2,7   /* ISA Feature Register 6 */
 #define CCSIDR          p15,1,c0,c0,0   /* Cache Size ID Registers */
 #define CLIDR           p15,1,c0,c0,1   /* Cache Level ID Register */
 #define CSSELR          p15,2,c0,c0,0   /* Cache Size Selection Register */
@@ -140,7 +146,8 @@
 #define HSTR            p15,4,c1,c1,3   /* Hyp. System Trap Register */
 
 /* CP15 CR2: Translation Table Base and Control Registers */
-#define TTBCR           p15,0,c2,c0,2   /* Translatation Table Base Control Register */
+#define TTBCR           p15,0,c2,c0,2   /* Translation Table Base Control Register */
+#define TTBCR2          p15,0,c2,c0,3   /* Translation Table Base Control Register 2 */
 #define TTBR0           p15,0,c2        /* Translation Table Base Reg. 0 */
 #define TTBR1           p15,1,c2        /* Translation Table Base Reg. 1 */
 #define HTTBR           p15,4,c2        /* Hyp. Translation Table Base Register */
@@ -246,6 +253,9 @@
 /* CP15 CR11: DMA Operations for TCM Access */
 
 /* CP15 CR12:  */
+#define ICC_SGI1R       p15,0,c12       /* Interrupt Controller SGI Group 1 */
+#define ICC_ASGI1R      p15,1,c12       /* Interrupt Controller Alias SGI Group 1 Register */
+#define ICC_SGI0R       p15,2,c12       /* Interrupt Controller SGI Group 0 */
 #define VBAR            p15,0,c12,c0,0  /* Vector Base Address Register */
 #define HVBAR           p15,4,c12,c0,0  /* Hyp. Vector Base Address Register */
 
@@ -300,28 +310,32 @@
 #define CPACR_EL1               CPACR
 #define CPTR_EL2                HCPTR
 #define CSSELR_EL1              CSSELR
+#define CTR_EL0                 CTR
 #define DACR32_EL2              DACR
 #define ESR_EL1                 DFSR
 #define ESR_EL2                 HSR
-#define FAR_EL1                 HIFAR
-#define FAR_EL2                 HIFAR
 #define HCR_EL2                 HCR
 #define HPFAR_EL2               HPFAR
 #define HSTR_EL2                HSTR
 #define ID_AFR0_EL1             ID_AFR0
 #define ID_DFR0_EL1             ID_DFR0
+#define ID_DFR1_EL1             ID_DFR1
 #define ID_ISAR0_EL1            ID_ISAR0
 #define ID_ISAR1_EL1            ID_ISAR1
 #define ID_ISAR2_EL1            ID_ISAR2
 #define ID_ISAR3_EL1            ID_ISAR3
 #define ID_ISAR4_EL1            ID_ISAR4
 #define ID_ISAR5_EL1            ID_ISAR5
+#define ID_ISAR6_EL1            ID_ISAR6
 #define ID_MMFR0_EL1            ID_MMFR0
 #define ID_MMFR1_EL1            ID_MMFR1
 #define ID_MMFR2_EL1            ID_MMFR2
 #define ID_MMFR3_EL1            ID_MMFR3
+#define ID_MMFR4_EL1            ID_MMFR4
+#define ID_MMFR5_EL1            ID_MMFR5
 #define ID_PFR0_EL1             ID_PFR0
 #define ID_PFR1_EL1             ID_PFR1
+#define ID_PFR2_EL1             ID_PFR2
 #define IFSR32_EL2              IFSR
 #define MDCR_EL2                HDCR
 #define MIDR_EL1                MIDR
@@ -345,6 +359,9 @@
 #define VPIDR_EL2               VPIDR
 #define VTCR_EL2                VTCR
 #define VTTBR_EL2               VTTBR
+#define MVFR0_EL1               MVFR0
+#define MVFR1_EL1               MVFR1
+#define MVFR2_EL1               MVFR2
 #endif
 
 #endif

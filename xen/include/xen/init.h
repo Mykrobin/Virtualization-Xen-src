@@ -9,6 +9,7 @@
  */
 #define __init            __text_section(".init.text")
 #define __exit            __text_section(".exit.text")
+#define __cold            __text_section(".text.cold")
 #define __initdata        __section(".init.data")
 #define __initconst       __section(".init.rodata")
 #define __initconstrel    __section(".init.rodata.rel")
@@ -69,49 +70,6 @@ typedef void (*exitcall_t)(void);
 
 void do_presmp_initcalls(void);
 void do_initcalls(void);
-
-/*
- * Used for kernel command line parameter setup
- */
-struct kernel_param {
-    const char *name;
-    enum {
-        OPT_STR,
-        OPT_UINT,
-        OPT_BOOL,
-        OPT_SIZE,
-        OPT_CUSTOM
-    } type;
-    unsigned int len;
-    void *var;
-};
-
-extern const struct kernel_param __setup_start[], __setup_end[];
-
-#define __setup_str static const __initconst \
-    __attribute__((__aligned__(1))) char
-#define __kparam static const __initsetup \
-    __attribute__((__aligned__(sizeof(void *)))) struct kernel_param
-
-#define custom_param(_name, _var) \
-    __setup_str __setup_str_##_var[] = _name; \
-    __kparam __setup_##_var = { __setup_str_##_var, OPT_CUSTOM, 0, _var }
-#define boolean_param(_name, _var) \
-    __setup_str __setup_str_##_var[] = _name; \
-    __kparam __setup_##_var = \
-        { __setup_str_##_var, OPT_BOOL, sizeof(_var), &_var }
-#define integer_param(_name, _var) \
-    __setup_str __setup_str_##_var[] = _name; \
-    __kparam __setup_##_var = \
-        { __setup_str_##_var, OPT_UINT, sizeof(_var), &_var }
-#define size_param(_name, _var) \
-    __setup_str __setup_str_##_var[] = _name; \
-    __kparam __setup_##_var = \
-        { __setup_str_##_var, OPT_SIZE, sizeof(_var), &_var }
-#define string_param(_name, _var) \
-    __setup_str __setup_str_##_var[] = _name; \
-    __kparam __setup_##_var = \
-        { __setup_str_##_var, OPT_STR, sizeof(_var), &_var }
 
 #endif /* __ASSEMBLY__ */
 

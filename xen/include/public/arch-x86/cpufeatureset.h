@@ -87,6 +87,8 @@ enum {
  *   'A' = All guests.
  *   'S' = All HVM guests (not PV guests).
  *   'H' = HVM HAP guests (not PV or HVM Shadow guests).
+ *   Upper case => Available by default
+ *   Lower case => Can be opted-in to, but not available by default.
  */
 
 /* Intel-defined CPU features, CPUID level 0x00000001.edx, word 0 */
@@ -114,17 +116,18 @@ XEN_CPUFEATURE(MMX,           0*32+23) /*A  Multimedia Extensions */
 XEN_CPUFEATURE(FXSR,          0*32+24) /*A  FXSAVE and FXRSTOR instructions */
 XEN_CPUFEATURE(SSE,           0*32+25) /*A  Streaming SIMD Extensions */
 XEN_CPUFEATURE(SSE2,          0*32+26) /*A  Streaming SIMD Extensions-2 */
+XEN_CPUFEATURE(SS,            0*32+27) /*A  CPU self snoop */
 XEN_CPUFEATURE(HTT,           0*32+28) /*!A Hyper-Threading Technology */
 XEN_CPUFEATURE(TM1,           0*32+29) /*   Thermal Monitor 1 */
 XEN_CPUFEATURE(PBE,           0*32+31) /*   Pending Break Enable */
 
 /* Intel-defined CPU features, CPUID level 0x00000001.ecx, word 1 */
 XEN_CPUFEATURE(SSE3,          1*32+ 0) /*A  Streaming SIMD Extensions-3 */
-XEN_CPUFEATURE(PCLMULQDQ,     1*32+ 1) /*A  Carry-less mulitplication */
+XEN_CPUFEATURE(PCLMULQDQ,     1*32+ 1) /*A  Carry-less multiplication */
 XEN_CPUFEATURE(DTES64,        1*32+ 2) /*   64-bit Debug Store */
 XEN_CPUFEATURE(MONITOR,       1*32+ 3) /*   Monitor/Mwait support */
 XEN_CPUFEATURE(DSCPL,         1*32+ 4) /*   CPL Qualified Debug Store */
-XEN_CPUFEATURE(VMX,           1*32+ 5) /*S  Virtual Machine Extensions */
+XEN_CPUFEATURE(VMX,           1*32+ 5) /*h  Virtual Machine Extensions */
 XEN_CPUFEATURE(SMX,           1*32+ 6) /*   Safer Mode Extensions */
 XEN_CPUFEATURE(EIST,          1*32+ 7) /*   Enhanced SpeedStep */
 XEN_CPUFEATURE(TM2,           1*32+ 8) /*   Thermal Monitor 2 */
@@ -146,7 +149,7 @@ XEN_CPUFEATURE(XSAVE,         1*32+26) /*A  XSAVE/XRSTOR/XSETBV/XGETBV */
 XEN_CPUFEATURE(OSXSAVE,       1*32+27) /*!  OSXSAVE */
 XEN_CPUFEATURE(AVX,           1*32+28) /*A  Advanced Vector Extensions */
 XEN_CPUFEATURE(F16C,          1*32+29) /*A  Half-precision convert instruction */
-XEN_CPUFEATURE(RDRAND,        1*32+30) /*A  Digital Random Number Generator */
+XEN_CPUFEATURE(RDRAND,        1*32+30) /*!A Digital Random Number Generator */
 XEN_CPUFEATURE(HYPERVISOR,    1*32+31) /*!A Running under some hypervisor */
 
 /* AMD-defined CPU features, CPUID level 0x80000001.edx, word 2 */
@@ -155,7 +158,7 @@ XEN_CPUFEATURE(NX,            2*32+20) /*A  Execute Disable */
 XEN_CPUFEATURE(MMXEXT,        2*32+22) /*A  AMD MMX extensions */
 XEN_CPUFEATURE(FFXSR,         2*32+25) /*A  FFXSR instruction optimizations */
 XEN_CPUFEATURE(PAGE1GB,       2*32+26) /*H  1Gb large page support */
-XEN_CPUFEATURE(RDTSCP,        2*32+27) /*S  RDTSCP */
+XEN_CPUFEATURE(RDTSCP,        2*32+27) /*A  RDTSCP */
 XEN_CPUFEATURE(LM,            2*32+29) /*A  Long Mode (x86-64) */
 XEN_CPUFEATURE(3DNOWEXT,      2*32+30) /*A  AMD 3DNow! extensions */
 XEN_CPUFEATURE(3DNOW,         2*32+31) /*A  3DNow! */
@@ -163,7 +166,7 @@ XEN_CPUFEATURE(3DNOW,         2*32+31) /*A  3DNow! */
 /* AMD-defined CPU features, CPUID level 0x80000001.ecx, word 3 */
 XEN_CPUFEATURE(LAHF_LM,       3*32+ 0) /*A  LAHF/SAHF in long mode */
 XEN_CPUFEATURE(CMP_LEGACY,    3*32+ 1) /*!A If yes HyperThreading not valid */
-XEN_CPUFEATURE(SVM,           3*32+ 2) /*S  Secure virtual machine */
+XEN_CPUFEATURE(SVM,           3*32+ 2) /*h  Secure virtual machine */
 XEN_CPUFEATURE(EXTAPIC,       3*32+ 3) /*   Extended APIC space */
 XEN_CPUFEATURE(CR8_LEGACY,    3*32+ 4) /*S  CR8 in 32-bit mode */
 XEN_CPUFEATURE(ABM,           3*32+ 5) /*A  Advanced bit manipulation */
@@ -171,11 +174,11 @@ XEN_CPUFEATURE(SSE4A,         3*32+ 6) /*A  SSE-4A */
 XEN_CPUFEATURE(MISALIGNSSE,   3*32+ 7) /*A  Misaligned SSE mode */
 XEN_CPUFEATURE(3DNOWPREFETCH, 3*32+ 8) /*A  3DNow prefetch instructions */
 XEN_CPUFEATURE(OSVW,          3*32+ 9) /*   OS Visible Workaround */
-XEN_CPUFEATURE(IBS,           3*32+10) /*S  Instruction Based Sampling */
+XEN_CPUFEATURE(IBS,           3*32+10) /*   Instruction Based Sampling */
 XEN_CPUFEATURE(XOP,           3*32+11) /*A  extended AVX instructions */
 XEN_CPUFEATURE(SKINIT,        3*32+12) /*   SKINIT/STGI instructions */
 XEN_CPUFEATURE(WDT,           3*32+13) /*   Watchdog timer */
-XEN_CPUFEATURE(LWP,           3*32+15) /*S  Light Weight Profiling */
+XEN_CPUFEATURE(LWP,           3*32+15) /*   Light Weight Profiling */
 XEN_CPUFEATURE(FMA4,          3*32+16) /*A  4 operands MAC instructions */
 XEN_CPUFEATURE(NODEID_MSR,    3*32+19) /*   NodeId MSR */
 XEN_CPUFEATURE(TBM,           3*32+21) /*A  trailing bit manipulations */
@@ -204,16 +207,17 @@ XEN_CPUFEATURE(INVPCID,       5*32+10) /*H  Invalidate Process Context ID */
 XEN_CPUFEATURE(RTM,           5*32+11) /*A  Restricted Transactional Memory */
 XEN_CPUFEATURE(PQM,           5*32+12) /*   Platform QoS Monitoring */
 XEN_CPUFEATURE(NO_FPU_SEL,    5*32+13) /*!  FPU CS/DS stored as zero */
-XEN_CPUFEATURE(MPX,           5*32+14) /*S  Memory Protection Extensions */
+XEN_CPUFEATURE(MPX,           5*32+14) /*s  Memory Protection Extensions */
 XEN_CPUFEATURE(PQE,           5*32+15) /*   Platform QoS Enforcement */
 XEN_CPUFEATURE(AVX512F,       5*32+16) /*A  AVX-512 Foundation Instructions */
 XEN_CPUFEATURE(AVX512DQ,      5*32+17) /*A  AVX-512 Doubleword & Quadword Instrs */
 XEN_CPUFEATURE(RDSEED,        5*32+18) /*A  RDSEED instruction */
 XEN_CPUFEATURE(ADX,           5*32+19) /*A  ADCX, ADOX instructions */
 XEN_CPUFEATURE(SMAP,          5*32+20) /*S  Supervisor Mode Access Prevention */
-XEN_CPUFEATURE(AVX512IFMA,    5*32+21) /*A  AVX-512 Integer Fused Multiply Add */
+XEN_CPUFEATURE(AVX512_IFMA,   5*32+21) /*A  AVX-512 Integer Fused Multiply Add */
 XEN_CPUFEATURE(CLFLUSHOPT,    5*32+23) /*A  CLFLUSHOPT instruction */
 XEN_CPUFEATURE(CLWB,          5*32+24) /*A  CLWB instruction */
+XEN_CPUFEATURE(PROC_TRACE,    5*32+25) /*   Processor Trace */
 XEN_CPUFEATURE(AVX512PF,      5*32+26) /*A  AVX-512 Prefetch Instructions */
 XEN_CPUFEATURE(AVX512ER,      5*32+27) /*A  AVX-512 Exponent & Reciprocal Instrs */
 XEN_CPUFEATURE(AVX512CD,      5*32+28) /*A  AVX-512 Conflict Detection Instrs */
@@ -223,26 +227,55 @@ XEN_CPUFEATURE(AVX512VL,      5*32+31) /*A  AVX-512 Vector Length Extensions */
 
 /* Intel-defined CPU features, CPUID level 0x00000007:0.ecx, word 6 */
 XEN_CPUFEATURE(PREFETCHWT1,   6*32+ 0) /*A  PREFETCHWT1 instruction */
-XEN_CPUFEATURE(AVX512VBMI,    6*32+ 1) /*A  AVX-512 Vector Byte Manipulation Instrs */
+XEN_CPUFEATURE(AVX512_VBMI,   6*32+ 1) /*A  AVX-512 Vector Byte Manipulation Instrs */
+XEN_CPUFEATURE(UMIP,          6*32+ 2) /*S  User Mode Instruction Prevention */
 XEN_CPUFEATURE(PKU,           6*32+ 3) /*H  Protection Keys for Userspace */
 XEN_CPUFEATURE(OSPKE,         6*32+ 4) /*!  OS Protection Keys Enable */
+XEN_CPUFEATURE(AVX512_VBMI2,  6*32+ 6) /*A  Additional AVX-512 Vector Byte Manipulation Instrs */
+XEN_CPUFEATURE(CET_SS,        6*32+ 7) /*   CET - Shadow Stacks */
+XEN_CPUFEATURE(GFNI,          6*32+ 8) /*A  Galois Field Instrs */
+XEN_CPUFEATURE(VAES,          6*32+ 9) /*A  Vector AES Instrs */
+XEN_CPUFEATURE(VPCLMULQDQ,    6*32+10) /*A  Vector Carry-less Multiplication Instrs */
+XEN_CPUFEATURE(AVX512_VNNI,   6*32+11) /*A  Vector Neural Network Instrs */
+XEN_CPUFEATURE(AVX512_BITALG, 6*32+12) /*A  Support for VPOPCNT[B,W] and VPSHUFBITQMB */
+XEN_CPUFEATURE(AVX512_VPOPCNTDQ, 6*32+14) /*A  POPCNT for vectors of DW/QW */
+XEN_CPUFEATURE(TSXLDTRK,      6*32+16) /*a  TSX load tracking suspend/resume insns */
+XEN_CPUFEATURE(RDPID,         6*32+22) /*A  RDPID instruction */
+XEN_CPUFEATURE(CLDEMOTE,      6*32+25) /*A  CLDEMOTE instruction */
+XEN_CPUFEATURE(MOVDIRI,       6*32+27) /*a  MOVDIRI instruction */
+XEN_CPUFEATURE(MOVDIR64B,     6*32+28) /*a  MOVDIR64B instruction */
+XEN_CPUFEATURE(ENQCMD,        6*32+29) /*   ENQCMD{,S} instructions */
 
 /* AMD-defined CPU features, CPUID level 0x80000007.edx, word 7 */
-XEN_CPUFEATURE(ITSC,          7*32+ 8) /*   Invariant TSC */
+XEN_CPUFEATURE(ITSC,          7*32+ 8) /*a  Invariant TSC */
 XEN_CPUFEATURE(EFRO,          7*32+10) /*   APERF/MPERF Read Only interface */
 
 /* AMD-defined CPU features, CPUID level 0x80000008.ebx, word 8 */
 XEN_CPUFEATURE(CLZERO,        8*32+ 0) /*A  CLZERO instruction */
+XEN_CPUFEATURE(RSTR_FP_ERR_PTRS, 8*32+ 2) /*A  (F)X{SAVE,RSTOR} always saves/restores FPU Error pointers */
+XEN_CPUFEATURE(WBNOINVD,      8*32+ 9) /*   WBNOINVD instruction */
 XEN_CPUFEATURE(IBPB,          8*32+12) /*A  IBPB support only (no IBRS, used by AMD) */
+XEN_CPUFEATURE(AMD_PPIN,      8*32+23) /*   Protected Processor Inventory Number */
 
 /* Intel-defined CPU features, CPUID level 0x00000007:0.edx, word 9 */
+XEN_CPUFEATURE(AVX512_4VNNIW, 9*32+ 2) /*A  AVX512 Neural Network Instructions */
+XEN_CPUFEATURE(AVX512_4FMAPS, 9*32+ 3) /*A  AVX512 Multiply Accumulation Single Precision */
+XEN_CPUFEATURE(AVX512_VP2INTERSECT, 9*32+8) /*a  VP2INTERSECT{D,Q} insns */
+XEN_CPUFEATURE(SRBDS_CTRL,    9*32+ 9) /*   MSR_MCU_OPT_CTRL and RNGDS_MITG_DIS. */
 XEN_CPUFEATURE(MD_CLEAR,      9*32+10) /*A  VERW clears microarchitectural buffers */
 XEN_CPUFEATURE(TSX_FORCE_ABORT, 9*32+13) /* MSR_TSX_FORCE_ABORT.RTM_ABORT */
+XEN_CPUFEATURE(SERIALIZE,     9*32+14) /*a  SERIALIZE insn */
+XEN_CPUFEATURE(CET_IBT,       9*32+20) /*   CET - Indirect Branch Tracking */
 XEN_CPUFEATURE(IBRSB,         9*32+26) /*A  IBRS and IBPB support (used by Intel) */
-XEN_CPUFEATURE(STIBP,         9*32+27) /*A! STIBP */
+XEN_CPUFEATURE(STIBP,         9*32+27) /*A  STIBP */
 XEN_CPUFEATURE(L1D_FLUSH,     9*32+28) /*S  MSR_FLUSH_CMD and L1D flush. */
-XEN_CPUFEATURE(ARCH_CAPS,     9*32+29) /*   IA32_ARCH_CAPABILITIES MSR */
+XEN_CPUFEATURE(ARCH_CAPS,     9*32+29) /*a  IA32_ARCH_CAPABILITIES MSR */
+XEN_CPUFEATURE(CORE_CAPS,     9*32+30) /*   IA32_CORE_CAPABILITIES MSR */
 XEN_CPUFEATURE(SSBD,          9*32+31) /*A  MSR_SPEC_CTRL.SSBD available */
+
+/* Intel-defined CPU features, CPUID level 0x00000007:1.eax, word 10 */
+XEN_CPUFEATURE(AVX_VNNI,     10*32+ 4) /*A  AVX-VNNI Instructions */
+XEN_CPUFEATURE(AVX512_BF16,  10*32+ 5) /*A  AVX512 BFloat16 Instructions */
 
 #endif /* XEN_CPUFEATURE */
 

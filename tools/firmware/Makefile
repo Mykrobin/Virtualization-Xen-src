@@ -4,16 +4,20 @@ include $(XEN_ROOT)/tools/Rules.mk
 # hvmloader is a 32-bit protected mode binary.
 TARGET      := hvmloader/hvmloader
 INST_DIR := $(DESTDIR)$(XENFIRMWAREDIR)
+DEBG_DIR := $(DESTDIR)$(DEBUG_DIR)$(XENFIRMWAREDIR)
 
 SUBDIRS-y :=
 SUBDIRS-$(CONFIG_OVMF) += ovmf-dir
 SUBDIRS-$(CONFIG_SEABIOS) += seabios-dir
 SUBDIRS-$(CONFIG_ROMBIOS) += rombios
 SUBDIRS-$(CONFIG_ROMBIOS) += vgabios
-SUBDIRS-$(CONFIG_ROMBIOS) += etherboot
+SUBDIRS-$(CONFIG_IPXE) += etherboot
+SUBDIRS-$(CONFIG_PV_SHIM) += xen-dir
 SUBDIRS-y += hvmloader
 
-LD32BIT-$(CONFIG_FreeBSD) := LD32BIT_FLAG=-melf_i386_fbsd
+SEABIOSCC ?= $(CC)
+SEABIOSLD ?= $(LD)
+SEABIOS_EXTRAVERSION ?= "-Xen"
 
 ovmf-dir:
 	GIT=$(GIT) $(XEN_ROOT)/scripts/git-checkout.sh $(OVMF_UPSTREAM_URL) $(OVMF_UPSTREAM_REVISION) ovmf-dir
@@ -21,7 +25,10 @@ ovmf-dir:
 
 seabios-dir:
 	GIT=$(GIT) $(XEN_ROOT)/scripts/git-checkout.sh $(SEABIOS_UPSTREAM_URL) $(SEABIOS_UPSTREAM_REVISION) seabios-dir
-	$(MAKE) -C seabios-dir defconfig
+	cp seabios-config seabios-dir/.config;
+	$(MAKE) -C seabios-dir olddefconfig CC=$(SEABIOSCC) LD=$(SEABIOSLD)
+	rm -f seabios-dir/.version
+	echo '$(SEABIOS_UPSTREAM_REVISION)' > seabios-dir/.version
 
 .PHONY: all
 all: $(SUBDIRS-y)
@@ -34,18 +41,42 @@ ifeq ($(CONFIG_ROMBIOS),y)
 	false ; \
 	fi
 endif
-	$(MAKE) $(LD32BIT-y) CC=$(CC) PYTHON=$(PYTHON) subdirs-$@
-
+	$(MAKE) CC=$(CC) PYTHON=$(PYTHON) subdirs-$@
 
 .PHONY: install
 install: all
 	[ -d $(INST_DIR) ] || $(INSTALL_DIR) $(INST_DIR)
+	[ -d $(DEBG_DIR) ] || $(INSTALL_DIR) $(DEBG_DIR)
 	[ ! -e $(TARGET) ] || $(INSTALL_DATA) $(TARGET) $(INST_DIR)
 ifeq ($(CONFIG_SEABIOS),y)
 	$(INSTALL_DATA) seabios-dir/out/bios.bin $(INST_DIR)/seabios.bin
 endif
 ifeq ($(CONFIG_OVMF),y)
 	$(INSTALL_DATA) ovmf-dir/ovmf.bin $(INST_DIR)/ovmf.bin
+endif
+ifeq ($(CONFIG_IPXE),y)
+	$(INSTALL_DATA) etherboot/ipxe/src/bin/ipxe.bin $(INST_DIR)/ipxe.bin
+endif
+ifeq ($(CONFIG_PV_SHIM),y)
+	$(INSTALL_DATA) xen-dir/xen-shim $(INST_DIR)/xen-shim
+	$(INSTALL_DATA) xen-dir/xen-shim-syms $(DEBG_DIR)/xen-shim-syms
+endif
+
+.PHONY: uninstall
+uninstall:
+	rm -f $(addprefix $(INST_DIR)/, $(notdir $(TARGET)))
+ifeq ($(CONFIG_SEABIOS),y)
+	rm -f $(INST_DIR)/seabios.bin
+endif
+ifeq ($(CONFIG_OVMF),y)
+	rm -f $(INST_DIR)/ovmf.bin
+endif
+ifeq ($(CONFIG_IPXE),y)
+	rm -f $(INST_DIR)/ipxe.bin
+endif
+ifeq ($(CONFIG_PV_SHIM),y)
+	rm -f $(INST_DIR)/xen-shim
+	rm -f $(DEBG_DIR)/xen-shim-syms
 endif
 
 .PHONY: clean
@@ -88,7 +119,7 @@ seabios-dir-force-update: seabios-dir
 
 subdir-clean-seabios-dir:
 	set -e; if test -d seabios-dir/.; then \
-		$(MAKE) -C seabios-dir clean; \
+		$(MAKE) -C seabios-dir CC=$(SEABIOSCC) LD=$(SEABIOSLD) clean; \
 	fi
 
 subtree-force-update:
@@ -102,3 +133,6 @@ endif
 subtree-force-update-all:
 	$(MAKE) seabios-dir-force-update
 	$(MAKE) ovmf-dir-force-update
+
+subdir-all-seabios-dir: seabios-dir
+	$(MAKE) -C $< CC=$(SEABIOSCC) LD=$(SEABIOSLD) PYTHON=$(PYTHON) EXTRAVERSION=$(SEABIOS_EXTRAVERSION) all;

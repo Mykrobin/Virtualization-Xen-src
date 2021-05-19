@@ -11,14 +11,7 @@
 #include "talloc.h"
 #include "utils.h"
 
-struct record_hdr {
-	uint32_t num_perms;
-	uint32_t datalen;
-	uint32_t childlen;
-	struct xs_permissions perms[0];
-};
-
-static uint32_t total_size(struct record_hdr *hdr)
+static uint32_t total_size(struct xs_tdb_record_hdr *hdr)
 {
 	return sizeof(*hdr) + hdr->num_perms * sizeof(struct xs_permissions) 
 		+ hdr->datalen + hdr->childlen;
@@ -58,7 +51,7 @@ int main(int argc, char *argv[])
 	key = tdb_firstkey(tdb);
 	while (key.dptr) {
 		TDB_DATA data;
-		struct record_hdr *hdr;
+		struct xs_tdb_record_hdr *hdr;
 
 		data = tdb_fetch(tdb, key);
 		hdr = (void *)data.dptr;
@@ -66,8 +59,8 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "%.*s: BAD truncated\n",
 				(int)key.dsize, key.dptr);
 		else if (data.dsize != total_size(hdr))
-			fprintf(stderr, "%.*s: BAD length %i for %i/%i/%i (%i)\n",
-				(int)key.dsize, key.dptr, (int)data.dsize,
+			fprintf(stderr, "%.*s: BAD length %zu for %u/%u/%u (%u)\n",
+				(int)key.dsize, key.dptr, data.dsize,
 				hdr->num_perms, hdr->datalen,
 				hdr->childlen, total_size(hdr));
 		else {
@@ -76,7 +69,7 @@ int main(int argc, char *argv[])
 
 			printf("%.*s: ", (int)key.dsize, key.dptr);
 			for (i = 0; i < hdr->num_perms; i++)
-				printf("%s%c%i",
+				printf("%s%c%u",
 				       i == 0 ? "" : ",",
 				       perm_to_char(hdr->perms[i].perms),
 				       hdr->perms[i].id);

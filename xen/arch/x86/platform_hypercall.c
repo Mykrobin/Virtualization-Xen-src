@@ -6,7 +6,6 @@
  * Copyright (c) 2002-2006, K Fraser
  */
 
-#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
@@ -28,9 +27,11 @@
 #include <public/platform.h>
 #include <acpi/cpufreq/processor_perf.h>
 #include <asm/edd.h>
+#include <asm/microcode.h>
 #include <asm/mtrr.h>
 #include <asm/io_apic.h>
 #include <asm/setup.h>
+#include "cpu/mcheck/mce.h"
 #include "cpu/mtrr/mtrr.h"
 #include <xsm/xsm.h>
 
@@ -63,7 +64,7 @@ long cpu_frequency_change_helper(void *data)
     return cpu_frequency_change((uint64_t)data);
 }
 
-static bool_t allow_access_msr(unsigned int msr)
+static bool allow_access_msr(unsigned int msr)
 {
     switch ( msr )
     {
@@ -71,10 +72,10 @@ static bool_t allow_access_msr(unsigned int msr)
     case MSR_IA32_CMT_EVTSEL:
     case MSR_IA32_CMT_CTR:
     case MSR_IA32_TSC:
-        return 1;
+        return true;
     }
 
-    return 0;
+    return false;
 }
 
 void check_resource_access(struct resource_access *ra)
@@ -95,6 +96,9 @@ void check_resource_access(struct resource_access *ra)
         switch ( entry->u.cmd )
         {
         case XEN_RESOURCE_OP_MSR_READ:
+            if ( ppin_msr && entry->idx == ppin_msr )
+                break;
+            /* fall through */
         case XEN_RESOURCE_OP_MSR_WRITE:
             if ( entry->idx >> 32 )
                 ret = -EINVAL;
@@ -144,8 +148,8 @@ void resource_access(void *info)
                  * If next entry is MSR_IA32_TSC read, then the actual rdtsc
                  * is performed together with current entry, with IRQ disabled.
                  */
-                bool_t read_tsc = (i < ra->nr_done - 1 &&
-                                   unlikely(entry[1].idx == MSR_IA32_TSC));
+                bool read_tsc = i < ra->nr_done - 1 &&
+                                unlikely(entry[1].idx == MSR_IA32_TSC);
 
                 if ( unlikely(read_tsc) )
                     local_irq_save(flags);
@@ -281,24 +285,7 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
 
         guest_from_compat_handle(data, op->u.microcode.data);
 
-        /*
-         * alloc_vcpu() will access data which is modified during
-         * microcode update
-         */
-        while ( !spin_trylock(&vcpu_alloc_lock) )
-        {
-            if ( hypercall_preempt_check() )
-            {
-                ret = hypercall_create_continuation(
-                    __HYPERVISOR_platform_op, "h", u_xenpf_op);
-                goto out;
-            }
-        }
-
-        ret = microcode_update(
-                guest_handle_to_param(data, const_void),
-                op->u.microcode.length);
-        spin_unlock(&vcpu_alloc_lock);
+        ret = microcode_update(data, op->u.microcode.length);
     }
     break;
 
@@ -389,6 +376,7 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
         }
         case XEN_FW_VBEDDC_INFO:
             ret = -ESRCH;
+#ifdef CONFIG_VIDEO
             if ( op->u.firmware_info.index != 0 )
                 break;
             if ( *(u32 *)bootsym(boot_edid_info) == 0x13131313 )
@@ -407,6 +395,7 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
                  copy_to_compat(op->u.firmware_info.u.vbeddc_info.edid,
                                 bootsym(boot_edid_info), 128) )
                 ret = -EFAULT;
+#endif
             break;
         case XEN_FW_EFI_INFO:
             ret = efi_get_info(op->u.firmware_info.index,
@@ -540,9 +529,7 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
             XEN_GUEST_HANDLE(uint32) pdc;
 
             guest_from_compat_handle(pdc, op->u.set_pminfo.u.pdc);
-            ret = acpi_set_pdc_bits(
-                    op->u.set_pminfo.id,
-                    guest_handle_to_param(pdc, uint32));
+            ret = acpi_set_pdc_bits(op->u.set_pminfo.id, pdc);
         }
         break;
 

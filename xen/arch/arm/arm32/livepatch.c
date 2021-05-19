@@ -84,15 +84,15 @@ int arch_livepatch_verify_elf(const struct livepatch_elf *elf)
     if ( hdr->e_machine != EM_ARM ||
          hdr->e_ident[EI_CLASS] != ELFCLASS32 )
     {
-        dprintk(XENLOG_ERR, LIVEPATCH "%s: Unsupported ELF Machine type!\n",
-                elf->name);
+        printk(XENLOG_ERR LIVEPATCH "%s: Unsupported ELF Machine type\n",
+               elf->name);
         return -EOPNOTSUPP;
     }
 
     if ( (hdr->e_flags & EF_ARM_EABI_MASK) != EF_ARM_EABI_VER5 )
     {
-        dprintk(XENLOG_ERR, LIVEPATCH "%s: Unsupported ELF EABI(%x)!\n",
-                elf->name, hdr->e_flags);
+        printk(XENLOG_ERR LIVEPATCH "%s: Unsupported ELF EABI(%x)\n",
+               elf->name, hdr->e_flags);
         return -EOPNOTSUPP;
     }
 
@@ -224,21 +224,21 @@ int arch_livepatch_perform(struct livepatch_elf *elf,
                            const struct livepatch_elf_sec *rela,
                            bool use_rela)
 {
-    const Elf_RelA *r_a;
-    const Elf_Rel *r;
-    unsigned int symndx, i;
-    uint32_t val;
-    void *dest;
+    unsigned int i;
     int rc = 0;
 
     for ( i = 0; i < (rela->sec->sh_size / rela->sec->sh_entsize); i++ )
     {
+        unsigned int symndx;
+        uint32_t val;
+        void *dest;
         unsigned char type;
-        s32 addend = 0;
+        s32 addend;
 
         if ( use_rela )
         {
-            r_a = rela->data + i * rela->sec->sh_entsize;
+            const Elf_RelA *r_a = rela->data + i * rela->sec->sh_entsize;
+
             symndx = ELF32_R_SYM(r_a->r_info);
             type = ELF32_R_TYPE(r_a->r_info);
             dest = base->load_addr + r_a->r_offset; /* P */
@@ -246,49 +246,46 @@ int arch_livepatch_perform(struct livepatch_elf *elf,
         }
         else
         {
-            r = rela->data + i * rela->sec->sh_entsize;
+            const Elf_Rel *r = rela->data + i * rela->sec->sh_entsize;
+
             symndx = ELF32_R_SYM(r->r_info);
             type = ELF32_R_TYPE(r->r_info);
             dest = base->load_addr + r->r_offset; /* P */
+            addend = get_addend(type, dest);
         }
 
         if ( symndx == STN_UNDEF )
         {
-            dprintk(XENLOG_ERR, LIVEPATCH "%s: Encountered STN_UNDEF\n",
-                    elf->name);
+            printk(XENLOG_ERR LIVEPATCH "%s: Encountered STN_UNDEF\n",
+                   elf->name);
             return -EOPNOTSUPP;
         }
         else if ( symndx >= elf->nsym )
         {
-            dprintk(XENLOG_ERR, LIVEPATCH "%s: Relative symbol wants symbol@%u which is past end!\n",
-                    elf->name, symndx);
+            printk(XENLOG_ERR LIVEPATCH "%s: Relative symbol wants symbol@%u which is past end\n",
+                   elf->name, symndx);
             return -EINVAL;
         }
         else if ( !elf->sym[symndx].sym )
         {
-            dprintk(XENLOG_ERR, LIVEPATCH "%s: No relative symbol@%u\n",
-                    elf->name, symndx);
+            printk(XENLOG_ERR LIVEPATCH "%s: No relative symbol@%u\n",
+                   elf->name, symndx);
             return -EINVAL;
         }
-
-        if ( !use_rela )
-            addend = get_addend(type, dest);
 
         val = elf->sym[symndx].sym->st_value; /* S */
 
         rc = perform_rel(type, dest, val, addend);
-        switch ( rc ) {
+        switch ( rc )
+        {
         case -EOVERFLOW:
-            dprintk(XENLOG_ERR, LIVEPATCH "%s: Overflow in relocation %u in %s for %s!\n",
-                    elf->name, i, rela->name, base->name);
+            printk(XENLOG_ERR LIVEPATCH "%s: Overflow in relocation %u in %s for %s\n",
+                   elf->name, i, rela->name, base->name);
             break;
 
         case -EOPNOTSUPP:
-            dprintk(XENLOG_ERR, LIVEPATCH "%s: Unhandled relocation #%x\n",
-                    elf->name, type);
-            break;
-
-        default:
+            printk(XENLOG_ERR LIVEPATCH "%s: Unhandled relocation #%x\n",
+                   elf->name, type);
             break;
         }
 

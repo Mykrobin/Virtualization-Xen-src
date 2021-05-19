@@ -7,6 +7,7 @@
 #include <Python.h>
 #define XC_WANT_COMPAT_MAP_FOREIGN_API
 #include <xenctrl.h>
+#include <xenguest.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -17,12 +18,10 @@
 #include <arpa/inet.h>
 
 #include <xen/elfnote.h>
-#include <xen/tmem.h>
-#include "xc_dom.h"
 #include <xen/hvm/hvm_info_table.h>
 #include <xen/hvm/params.h>
 
-#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+#include <xen-tools/libs.h>
 
 /* Needed for Python versions earlier than 2.3. */
 #ifndef PyMODINIT_FUNC
@@ -33,6 +32,17 @@
 #define CLS "xc"
 
 #define FLASK_CTX_LEN 1024
+
+/* Python 2 compatibility */
+#if PY_MAJOR_VERSION >= 3
+#define PyLongOrInt_FromLong PyLong_FromLong
+#define PyLongOrInt_Check PyLong_Check
+#define PyLongOrInt_AsLong PyLong_AsLong
+#else
+#define PyLongOrInt_FromLong PyInt_FromLong
+#define PyLongOrInt_Check PyInt_Check
+#define PyLongOrInt_AsLong PyInt_AsLong
+#endif
 
 static PyObject *xc_error_obj, *zero;
 
@@ -106,17 +116,28 @@ static PyObject *pyxc_domain_create(XcObject *self,
                                     PyObject *args,
                                     PyObject *kwds)
 {
-    uint32_t dom = 0, ssidref = 0, flags = 0, target = 0;
-    int      ret, i;
+    uint32_t dom = 0, target = 0;
+    int      ret;
+    size_t   i;
     PyObject *pyhandle = NULL;
-    xen_domain_handle_t handle = { 
-        0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef,
-        0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef };
+    struct xen_domctl_createdomain config = {
+        .handle = {
+            0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef,
+            0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef,
+        },
+        .max_vcpus = 1,
+        .max_evtchn_port = -1, /* No limit. */
+        .max_grant_frames = -1,
+        .max_maptrack_frames = -1,
+    };
 
-    static char *kwd_list[] = { "domid", "ssidref", "handle", "flags", "target", NULL };
+    static char *kwd_list[] = { "domid", "ssidref", "handle", "flags",
+                                "target", "max_vcpus", NULL };
 
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "|iiOii", kwd_list,
-                                      &dom, &ssidref, &pyhandle, &flags, &target))
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "|iiOiii", kwd_list,
+                                      &dom, &config.ssidref, &pyhandle,
+                                      &config.flags, &target,
+                                      &config.max_vcpus) )
         return NULL;
     if ( pyhandle != NULL )
     {
@@ -127,14 +148,22 @@ static PyObject *pyxc_domain_create(XcObject *self,
         for ( i = 0; i < sizeof(xen_domain_handle_t); i++ )
         {
             PyObject *p = PyList_GetItem(pyhandle, i);
-            if ( !PyInt_Check(p) )
+            if ( !PyLongOrInt_Check(p) )
                 goto out_exception;
-            handle[i] = (uint8_t)PyInt_AsLong(p);
+            config.handle[i] = (uint8_t)PyLongOrInt_AsLong(p);
         }
     }
 
-    if ( (ret = xc_domain_create(self->xc_handle, ssidref,
-                                 handle, flags, &dom, NULL)) < 0 )
+#if defined (__i386) || defined(__x86_64__)
+    if ( config.flags & XEN_DOMCTL_CDF_hvm )
+        config.arch.emulation_flags = (XEN_X86_EMU_ALL & ~XEN_X86_EMU_VPCI);
+#elif defined (__arm__) || defined(__aarch64__)
+    config.arch.gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE;
+#else
+#error Architecture not supported
+#endif
+
+    if ( (ret = xc_domain_create(self->xc_handle, &dom, &config)) < 0 )
         return pyxc_error_to_exception(self->xc_handle);
 
     if ( target )
@@ -142,7 +171,7 @@ static PyObject *pyxc_domain_create(XcObject *self,
             return pyxc_error_to_exception(self->xc_handle);
 
 
-    return PyInt_FromLong(dom);
+    return PyLongOrInt_FromLong(dom);
 
 out_exception:
     errno = EINVAL;
@@ -242,7 +271,7 @@ static PyObject *pyxc_vcpu_setaffinity(XcObject *self,
     {
         for ( i = 0; i < PyList_Size(cpulist); i++ ) 
         {
-            long cpu = PyInt_AsLong(PyList_GetItem(cpulist, i));
+            long cpu = PyLongOrInt_AsLong(PyList_GetItem(cpulist, i));
             if ( cpu < 0 || cpu >= nr_cpus )
             {
                 free(cpumap);
@@ -267,7 +296,7 @@ static PyObject *pyxc_vcpu_setaffinity(XcObject *self,
 
 static PyObject *pyxc_domain_sethandle(XcObject *self, PyObject *args)
 {
-    int i;
+    size_t i;
     uint32_t dom;
     PyObject *pyhandle;
     xen_domain_handle_t handle;
@@ -284,9 +313,9 @@ static PyObject *pyxc_domain_sethandle(XcObject *self, PyObject *args)
     for ( i = 0; i < sizeof(xen_domain_handle_t); i++ )
     {
         PyObject *p = PyList_GetItem(pyhandle, i);
-        if ( !PyInt_Check(p) )
+        if ( !PyLongOrInt_Check(p) )
             goto out_exception;
-        handle[i] = (uint8_t)PyInt_AsLong(p);
+        handle[i] = (uint8_t)PyLongOrInt_AsLong(p);
     }
 
     if (xc_domain_sethandle(self->xc_handle, dom, handle) < 0)
@@ -308,7 +337,8 @@ static PyObject *pyxc_domain_getinfo(XcObject *self,
     PyObject *list, *info_dict, *pyhandle;
 
     uint32_t first_dom = 0;
-    int max_doms = 1024, nr_doms, i, j;
+    int max_doms = 1024, nr_doms, i;
+    size_t j;
     xc_dominfo_t *info;
 
     static char *kwd_list[] = { "first_dom", "max_doms", NULL };
@@ -361,7 +391,7 @@ static PyObject *pyxc_domain_getinfo(XcObject *self,
             return NULL;
         }
         for ( j = 0; j < sizeof(xen_domain_handle_t); j++ )
-            PyList_SetItem(pyhandle, j, PyInt_FromLong(info[i].handle[j]));
+            PyList_SetItem(pyhandle, j, PyLongOrInt_FromLong(info[i].handle[j]));
         PyDict_SetItemString(info_dict, "handle", pyhandle);
         Py_DECREF(pyhandle);
         PyList_SetItem(list, i, info_dict);
@@ -420,7 +450,7 @@ static PyObject *pyxc_vcpu_getinfo(XcObject *self,
     for ( i = 0; i < nr_cpus; i++ )
     {
         if (*(cpumap + i / 8) & 1 ) {
-            PyObject *pyint = PyInt_FromLong(i);
+            PyObject *pyint = PyLongOrInt_FromLong(i);
             PyList_Append(cpulist, pyint);
             Py_DECREF(pyint);
         }
@@ -603,7 +633,8 @@ static PyObject *pyxc_get_device_group(XcObject *self,
 {
     uint32_t sbdf;
     uint32_t max_sdevs, num_sdevs;
-    int domid, seg, bus, dev, func, rc, i;
+    int domid, seg, bus, dev, func, rc;
+    size_t i;
     PyObject *Pystr;
     char *group_str;
     char dev_str[9];
@@ -663,139 +694,6 @@ static PyObject *pyxc_get_device_group(XcObject *self,
     return Pystr;
 }
 
-#if defined(__i386__) || defined(__x86_64__)
-static void pyxc_dom_extract_cpuid(PyObject *config,
-                                  char **regs)
-{
-    const char *regs_extract[4] = { "eax", "ebx", "ecx", "edx" };
-    PyObject *obj;
-    int i;
-
-    memset(regs, 0, 4*sizeof(*regs));
-
-    if ( !PyDict_Check(config) )
-        return;
-
-    for ( i = 0; i < 4; i++ )
-        if ( (obj = PyDict_GetItemString(config, regs_extract[i])) != NULL )
-            regs[i] = PyString_AS_STRING(obj);
-}
-
-static PyObject *pyxc_create_cpuid_dict(char **regs)
-{
-   const char *regs_extract[4] = { "eax", "ebx", "ecx", "edx" };
-   PyObject *dict;
-   int i;
-
-   dict = PyDict_New();
-   for ( i = 0; i < 4; i++ )
-   {
-       if ( regs[i] == NULL )
-           continue;
-       PyDict_SetItemString(dict, regs_extract[i],
-                            PyString_FromString(regs[i]));
-       free(regs[i]);
-       regs[i] = NULL;
-   }
-   return dict;
-}
-
-static PyObject *pyxc_dom_check_cpuid(XcObject *self,
-                                      PyObject *args)
-{
-    PyObject *sub_input, *config;
-    unsigned int input[2];
-    char *regs[4], *regs_transform[4];
-
-    if ( !PyArg_ParseTuple(args, "iOO", &input[0], &sub_input, &config) )
-        return NULL;
-
-    pyxc_dom_extract_cpuid(config, regs);
-
-    input[1] = XEN_CPUID_INPUT_UNUSED;
-    if ( PyLong_Check(sub_input) )
-        input[1] = PyLong_AsUnsignedLong(sub_input);
-
-    if ( xc_cpuid_check(self->xc_handle, input,
-                        (const char **)regs, regs_transform) )
-        return pyxc_error_to_exception(self->xc_handle);
-
-    return pyxc_create_cpuid_dict(regs_transform);
-}
-
-static PyObject *pyxc_dom_set_policy_cpuid(XcObject *self,
-                                           PyObject *args)
-{
-    int domid;
-
-    if ( !PyArg_ParseTuple(args, "i", &domid) )
-        return NULL;
-
-    if ( xc_cpuid_apply_policy(self->xc_handle, domid, NULL, 0) )
-        return pyxc_error_to_exception(self->xc_handle);
-
-    Py_INCREF(zero);
-    return zero;
-}
-
-
-static PyObject *pyxc_dom_set_cpuid(XcObject *self,
-                                    PyObject *args)
-{
-    PyObject *sub_input, *config;
-    unsigned int domid, input[2];
-    char *regs[4], *regs_transform[4];
-
-    if ( !PyArg_ParseTuple(args, "IIOO", &domid,
-                           &input[0], &sub_input, &config) )
-        return NULL;
-
-    pyxc_dom_extract_cpuid(config, regs);
-
-    input[1] = XEN_CPUID_INPUT_UNUSED;
-    if ( PyLong_Check(sub_input) )
-        input[1] = PyLong_AsUnsignedLong(sub_input);
-
-    if ( xc_cpuid_set(self->xc_handle, domid, input, (const char **)regs,
-                      regs_transform) )
-        return pyxc_error_to_exception(self->xc_handle);
-
-    return pyxc_create_cpuid_dict(regs_transform);
-}
-
-static PyObject *pyxc_dom_set_machine_address_size(XcObject *self,
-						   PyObject *args,
-						   PyObject *kwds)
-{
-    uint32_t dom, width;
-
-    if (!PyArg_ParseTuple(args, "ii", &dom, &width))
-	return NULL;
-
-    if (xc_domain_set_machine_address_size(self->xc_handle, dom, width) != 0)
-	return pyxc_error_to_exception(self->xc_handle);
-
-    Py_INCREF(zero);
-    return zero;
-}
-
-static PyObject *pyxc_dom_suppress_spurious_page_faults(XcObject *self,
-						      PyObject *args,
-						      PyObject *kwds)
-{
-    uint32_t dom;
-
-    if (!PyArg_ParseTuple(args, "i", &dom))
-	return NULL;
-
-    if (xc_domain_suppress_spurious_page_faults(self->xc_handle, dom) != 0)
-	return pyxc_error_to_exception(self->xc_handle);
-
-    Py_INCREF(zero);
-    return zero;
-}
-#endif /* __i386__ || __x86_64__ */
-
 static PyObject *pyxc_gnttab_hvm_seed(XcObject *self,
 				      PyObject *args,
 				      PyObject *kwds)
@@ -812,9 +710,9 @@ static PyObject *pyxc_gnttab_hvm_seed(XcObject *self,
 				      &console_domid, &xenstore_domid) )
         return NULL;
 
-    if ( xc_dom_gnttab_hvm_seed(self->xc_handle, dom,
-				console_gmfn, xenstore_gmfn,
-				console_domid, xenstore_domid) != 0 )
+    if ( xc_dom_gnttab_seed(self->xc_handle, dom, true,
+                            console_gmfn, xenstore_gmfn,
+                            console_domid, xenstore_domid) != 0 )
         return pyxc_error_to_exception(self->xc_handle);
 
     return Py_None;
@@ -836,7 +734,7 @@ static PyObject *pyxc_evtchn_alloc_unbound(XcObject *self,
     if ( (port = xc_evtchn_alloc_unbound(self->xc_handle, dom, remote_dom)) < 0 )
         return pyxc_error_to_exception(self->xc_handle);
 
-    return PyInt_FromLong(port);
+    return PyLongOrInt_FromLong(port);
 }
 
 static PyObject *pyxc_evtchn_reset(XcObject *self,
@@ -940,7 +838,7 @@ static PyObject *pyxc_readconsolering(XcObject *self,
         str = ptr;
     }
 
-    obj = PyString_FromStringAndSize(str, count);
+    obj = PyBytes_FromStringAndSize(str, count);
     free(str);
     return obj;
 }
@@ -966,12 +864,18 @@ static PyObject *pyxc_physinfo(XcObject *self)
 {
     xc_physinfo_t pinfo;
     char cpu_cap[128], virt_caps[128], *p;
-    int i;
-    const char *virtcap_names[] = { "hvm", "hvm_directio" };
+    size_t i;
+    const char *virtcap_names[] = { "hvm", "pv" };
+    const unsigned virtcaps_bits[] = { XEN_SYSCTL_PHYSCAP_hvm,
+                                       XEN_SYSCTL_PHYSCAP_pv };
 
     if ( xc_physinfo(self->xc_handle, &pinfo) != 0 )
         return pyxc_error_to_exception(self->xc_handle);
 
+    /*
+     * Keep in sync with tools/xl/xl_info.c:output_xeninfo
+     * and struct xen_sysctl_physinfo (especially bit fields).
+     */
     p = cpu_cap;
     *p = '\0';
     for ( i = 0; i < sizeof(pinfo.hw_cap)/4; i++ )
@@ -980,9 +884,13 @@ static PyObject *pyxc_physinfo(XcObject *self)
 
     p = virt_caps;
     *p = '\0';
-    for ( i = 0; i < 2; i++ )
-        if ( (pinfo.capabilities >> i) & 1 )
+    for ( i = 0; i < ARRAY_SIZE(virtcaps_bits); i++ )
+        if ( pinfo.capabilities & virtcaps_bits[i] )
           p += sprintf(p, "%s ", virtcap_names[i]);
+    if ( pinfo.capabilities & XEN_SYSCTL_PHYSCAP_directio )
+        for ( i = 0; i < ARRAY_SIZE(virtcaps_bits); i++ )
+            if ( pinfo.capabilities & virtcaps_bits[i] )
+              p += sprintf(p, "%s_directio ", virtcap_names[i]);
     if ( p != virt_caps )
       *(p-1) = '\0';
 
@@ -1063,7 +971,7 @@ static PyObject *pyxc_topologyinfo(XcObject *self)
         }
         else
         {
-            PyObject *pyint = PyInt_FromLong(cputopo[i].core);
+            PyObject *pyint = PyLongOrInt_FromLong(cputopo[i].core);
             PyList_Append(cpu_to_core_obj, pyint);
             Py_DECREF(pyint);
         }
@@ -1074,7 +982,7 @@ static PyObject *pyxc_topologyinfo(XcObject *self)
         }
         else
         {
-            PyObject *pyint = PyInt_FromLong(cputopo[i].socket);
+            PyObject *pyint = PyLongOrInt_FromLong(cputopo[i].socket);
             PyList_Append(cpu_to_socket_obj, pyint);
             Py_DECREF(pyint);
         }
@@ -1085,13 +993,13 @@ static PyObject *pyxc_topologyinfo(XcObject *self)
         }
         else
         {
-            PyObject *pyint = PyInt_FromLong(cputopo[i].node);
+            PyObject *pyint = PyLongOrInt_FromLong(cputopo[i].node);
             PyList_Append(cpu_to_node_obj, pyint);
             Py_DECREF(pyint);
         }
     }
 
-    ret_obj = Py_BuildValue("{s:i}", "max_cpu_index", num_cpus + 1);
+    ret_obj = Py_BuildValue("{s:i}", "max_cpu_index", num_cpus - 1);
 
     PyDict_SetItemString(ret_obj, "cpu_to_core", cpu_to_core_obj);
     Py_DECREF(cpu_to_core_obj);
@@ -1139,18 +1047,18 @@ static PyObject *pyxc_numainfo(XcObject *self)
         unsigned invalid_node;
 
         /* Total Memory */
-        pyint = PyInt_FromLong(meminfo[i].memsize >> 20); /* MB */
+        pyint = PyLongOrInt_FromLong(meminfo[i].memsize >> 20); /* MB */
         PyList_Append(node_to_memsize_obj, pyint);
         Py_DECREF(pyint);
 
         /* Free Memory */
-        pyint = PyInt_FromLong(meminfo[i].memfree >> 20); /* MB */
+        pyint = PyLongOrInt_FromLong(meminfo[i].memfree >> 20); /* MB */
         PyList_Append(node_to_memfree_obj, pyint);
         Py_DECREF(pyint);
 
         /* DMA memory. */
         xc_availheap(self->xc_handle, 0, 32, i, &free_heap);
-        pyint = PyInt_FromLong(free_heap >> 20); /* MB */
+        pyint = PyLongOrInt_FromLong(free_heap >> 20); /* MB */
         PyList_Append(node_to_dma32_mem_obj, pyint);
         Py_DECREF(pyint);
 
@@ -1166,7 +1074,7 @@ static PyObject *pyxc_numainfo(XcObject *self)
             }
             else
             {
-                pyint = PyInt_FromLong(dist);
+                pyint = PyLongOrInt_FromLong(dist);
                 PyList_Append(node_to_node_dist_obj, pyint);
                 Py_DECREF(pyint);
             }
@@ -1194,6 +1102,26 @@ out:
     free(meminfo);
     free(distance);
     return ret_obj ? ret_obj : pyxc_error_to_exception(self->xc_handle);
+}
+
+static PyObject *pyxc_xenbuildid(XcObject *self)
+{
+    xen_build_id_t *buildid;
+    int i, r;
+    char *str;
+
+    buildid = alloca(XC_PAGE_SIZE);
+    buildid->len = XC_PAGE_SIZE - sizeof(*buildid);
+
+    r = xc_version(self->xc_handle, XENVER_build_id, buildid);
+    if ( r <= 0 )
+        return pyxc_error_to_exception(self->xc_handle);
+
+    str = alloca((r * 2) + 1);
+    for ( i = 0; i < r; i++ )
+        snprintf(&str[i * 2], 3, "%02hhx", buildid->buf[i]);
+
+    return Py_BuildValue("s", str);
 }
 
 static PyObject *pyxc_xeninfo(XcObject *self)
@@ -1360,16 +1288,19 @@ static PyObject *pyxc_sched_credit2_domain_set(XcObject *self,
 {
     uint32_t domid;
     uint16_t weight;
-    static char *kwd_list[] = { "domid", "weight", NULL };
-    static char kwd_type[] = "I|H";
-    struct xen_domctl_sched_credit2 sdom;
+    uint16_t cap;
+    static char *kwd_list[] = { "domid", "weight", "cap", NULL };
+    static char kwd_type[] = "I|HH";
+    struct xen_domctl_sched_credit2 sdom = { };
 
     weight = 0;
+    cap = 0;
     if( !PyArg_ParseTupleAndKeywords(args, kwds, kwd_type, kwd_list,
-                                     &domid, &weight) )
+                                     &domid, &weight, &cap) )
         return NULL;
 
     sdom.weight = weight;
+    sdom.cap = cap;
 
     if ( xc_sched_credit2_domain_set(self->xc_handle, domid, &sdom) != 0 )
         return pyxc_error_to_exception(self->xc_handle);
@@ -1381,7 +1312,7 @@ static PyObject *pyxc_sched_credit2_domain_set(XcObject *self,
 static PyObject *pyxc_sched_credit2_domain_get(XcObject *self, PyObject *args)
 {
     uint32_t domid;
-    struct xen_domctl_sched_credit2 sdom;
+    struct xen_domctl_sched_credit2 sdom = { };
 
     if( !PyArg_ParseTuple(args, "I", &domid) )
         return NULL;
@@ -1389,8 +1320,8 @@ static PyObject *pyxc_sched_credit2_domain_get(XcObject *self, PyObject *args)
     if ( xc_sched_credit2_domain_get(self->xc_handle, domid, &sdom) != 0 )
         return pyxc_error_to_exception(self->xc_handle);
 
-    return Py_BuildValue("{s:H}",
-                         "weight",  sdom.weight);
+    return Py_BuildValue("{s:HH}",
+                         "weight", "cap",  sdom.weight, sdom.cap);
 }
 
 static PyObject *pyxc_domain_setmaxmem(XcObject *self, PyObject *args)
@@ -1538,20 +1469,6 @@ static PyObject *pyxc_domain_set_tsc_info(XcObject *self, PyObject *args)
     return zero;
 }
 
-static PyObject *pyxc_domain_disable_migrate(XcObject *self, PyObject *args)
-{
-    uint32_t dom;
-
-    if (!PyArg_ParseTuple(args, "i", &dom))
-        return NULL;
-
-    if (xc_domain_disable_migrate(self->xc_handle, dom) != 0)
-        return pyxc_error_to_exception(self->xc_handle);
-
-    Py_INCREF(zero);
-    return zero;
-}
-
 static PyObject *pyxc_domain_send_trigger(XcObject *self,
                                           PyObject *args,
                                           PyObject *kwds)
@@ -1605,71 +1522,6 @@ static PyObject *dom_op(XcObject *self, PyObject *args,
     return zero;
 }
 
-static PyObject *pyxc_tmem_control(XcObject *self,
-                                   PyObject *args,
-                                   PyObject *kwds)
-{
-    int32_t pool_id;
-    uint32_t subop;
-    uint32_t cli_id;
-    uint32_t len;
-    uint32_t arg;
-    char *buf;
-    char _buffer[32768], *buffer = _buffer;
-    int rc;
-
-    static char *kwd_list[] = { "pool_id", "subop", "cli_id", "arg1", "arg2", "buf", NULL };
-
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "iiiiis", kwd_list,
-                        &pool_id, &subop, &cli_id, &len, &arg, &buf) )
-        return NULL;
-
-    if ( (subop == XEN_SYSCTL_TMEM_OP_LIST) && (len > 32768) )
-        len = 32768;
-
-    if ( (rc = xc_tmem_control(self->xc_handle, pool_id, subop, cli_id, len, arg, buffer)) < 0 )
-        return Py_BuildValue("i", rc);
-
-    switch (subop) {
-        case XEN_SYSCTL_TMEM_OP_LIST:
-            return Py_BuildValue("s", buffer);
-        case XEN_SYSCTL_TMEM_OP_FLUSH:
-            return Py_BuildValue("i", rc);
-        case XEN_SYSCTL_TMEM_OP_QUERY_FREEABLE_MB:
-            return Py_BuildValue("i", rc);
-        case XEN_SYSCTL_TMEM_OP_THAW:
-        case XEN_SYSCTL_TMEM_OP_FREEZE:
-        case XEN_SYSCTL_TMEM_OP_DESTROY:
-        default:
-            break;
-    }
-
-    Py_INCREF(zero);
-    return zero;
-}
-
-static PyObject *pyxc_tmem_shared_auth(XcObject *self,
-                                   PyObject *args,
-                                   PyObject *kwds)
-{
-    uint32_t cli_id;
-    uint32_t arg1;
-    char *uuid_str;
-    int rc;
-
-    static char *kwd_list[] = { "cli_id", "uuid_str", "arg1", NULL };
-
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "isi", kwd_list,
-                                   &cli_id, &uuid_str, &arg1) )
-        return NULL;
-
-    if ( (rc = xc_tmem_auth(self->xc_handle, cli_id, uuid_str, arg1)) < 0 )
-        return Py_BuildValue("i", rc);
-
-    Py_INCREF(zero);
-    return zero;
-}
-
 static PyObject *pyxc_dom_set_memshr(XcObject *self, PyObject *args)
 {
     uint32_t dom;
@@ -1700,7 +1552,7 @@ static PyObject *cpumap_to_cpulist(XcObject *self, xc_cpumap_t cpumap)
     {
         if ( *cpumap & (1 << (i % 8)) )
         {
-            PyObject* pyint = PyInt_FromLong(i);
+            PyObject* pyint = PyLongOrInt_FromLong(i);
 
             PyList_Append(cpulist, pyint);
             Py_DECREF(pyint);
@@ -1715,7 +1567,7 @@ static PyObject *pyxc_cpupool_create(XcObject *self,
                                      PyObject *args,
                                      PyObject *kwds)
 {
-    uint32_t cpupool = 0, sched = XEN_SCHEDULER_CREDIT;
+    uint32_t cpupool = XC_CPUPOOL_POOLID_ANY, sched = XEN_SCHEDULER_CREDIT;
 
     static char *kwd_list[] = { "pool", "sched", NULL };
 
@@ -1726,7 +1578,7 @@ static PyObject *pyxc_cpupool_create(XcObject *self,
     if ( xc_cpupool_create(self->xc_handle, &cpupool, sched) < 0 )
         return pyxc_error_to_exception(self->xc_handle);
 
-    return PyInt_FromLong(cpupool);
+    return PyLongOrInt_FromLong(cpupool);
 }
 
 static PyObject *pyxc_cpupool_destroy(XcObject *self,
@@ -1882,7 +1734,7 @@ static PyObject *pyflask_context_to_sid(PyObject *self, PyObject *args,
         return PyErr_SetFromErrno(xc_error_obj);
     }
 
-    return PyInt_FromLong(sid);
+    return PyLongOrInt_FromLong(sid);
 }
 
 static PyObject *pyflask_sid_to_context(PyObject *self, PyObject *args,
@@ -2162,14 +2014,14 @@ static PyMethodDef pyxc_methods[] = {
 
     { "gnttab_hvm_seed",
       (PyCFunction)pyxc_gnttab_hvm_seed,
-      METH_KEYWORDS, "\n"
+      METH_VARARGS | METH_KEYWORDS, "\n"
       "Initialise HVM guest grant table.\n"
       " dom     [int]:      Identifier of domain to build into.\n"
       " console_gmfn [int]: \n"
       " xenstore_gmfn [int]: \n"
       " console_domid [int]: \n"
       " xenstore_domid [int]: \n"
-      "Returns: None on sucess. Raises exception on error.\n" },
+      "Returns: None on success. Raises exception on error.\n" },
 
     { "hvm_get_param", 
       (PyCFunction)pyxc_hvm_param_get,
@@ -2191,7 +2043,7 @@ static PyMethodDef pyxc_methods[] = {
     { "get_device_group",
       (PyCFunction)pyxc_get_device_group,
       METH_VARARGS, "\n"
-      "get sibling devices infomation.\n"
+      "get sibling devices information.\n"
       " dom     [int]:      Domain to assign device to.\n"
       " seg     [int]:      PCI segment.\n"
       " bus     [int]:      PCI bus.\n"
@@ -2231,7 +2083,7 @@ static PyMethodDef pyxc_methods[] = {
 
     { "sched_credit_domain_set",
       (PyCFunction)pyxc_sched_credit_domain_set,
-      METH_KEYWORDS, "\n"
+      METH_VARARGS | METH_KEYWORDS, "\n"
       "Set the scheduling parameters for a domain when running with the\n"
       "SMP credit scheduler.\n"
       " domid     [int]:   domain id to set\n"
@@ -2249,7 +2101,7 @@ static PyMethodDef pyxc_methods[] = {
 
     { "sched_credit2_domain_set",
       (PyCFunction)pyxc_sched_credit2_domain_set,
-      METH_KEYWORDS, "\n"
+      METH_VARARGS | METH_KEYWORDS, "\n"
       "Set the scheduling parameters for a domain when running with the\n"
       "SMP credit2 scheduler.\n"
       " domid     [int]:   domain id to set\n"
@@ -2341,6 +2193,13 @@ static PyMethodDef pyxc_methods[] = {
       "Returns [dict]: information about Xen"
       "        [None]: on failure.\n" },
 
+    { "buildid",
+      (PyCFunction)pyxc_xenbuildid,
+      METH_NOARGS, "\n"
+      "Get Xen buildid\n"
+      "Returns [str]: Xen buildid"
+      "        [None]: on failure.\n" },
+
     { "shadow_control", 
       (PyCFunction)pyxc_shadow_control, 
       METH_VARARGS | METH_KEYWORDS, "\n"
@@ -2376,7 +2235,7 @@ static PyMethodDef pyxc_methods[] = {
     { "domain_set_memmap_limit", 
       (PyCFunction)pyxc_domain_set_memmap_limit, 
       METH_VARARGS, "\n"
-      "Set a domain's physical memory mappping limit\n"
+      "Set a domain's physical memory mapping limit\n"
       " dom [int]: Identifier of domain.\n"
       " map_limitkb [int]: .\n"
       "Returns: [int] 0 on success; -1 on error.\n" },
@@ -2430,14 +2289,7 @@ static PyMethodDef pyxc_methods[] = {
       "Set a domain's TSC mode\n"
       " dom        [int]: Domain whose TSC mode is being set.\n"
       " tsc_mode   [int]: 0=default (monotonic, but native where possible)\n"
-      "                   1=always emulate 2=never emulate 3=pvrdtscp\n"
-      "Returns: [int] 0 on success; -1 on error.\n" },
-
-    { "domain_disable_migrate",
-      (PyCFunction)pyxc_domain_disable_migrate,
-      METH_VARARGS, "\n"
-      "Marks domain as non-migratable AND non-restoreable\n"
-      " dom        [int]: Domain whose TSC mode is being set.\n"
+      "                   1=always emulate 2=never emulate\n"
       "Returns: [int] 0 on success; -1 on error.\n" },
 
     { "domain_send_trigger",
@@ -2454,71 +2306,6 @@ static PyMethodDef pyxc_methods[] = {
       METH_VARARGS | METH_KEYWORDS, "\n"
       "Inject debug keys into Xen.\n"
       " keys    [str]: String of keys to inject.\n" },
-
-#if defined(__i386__) || defined(__x86_64__)
-    { "domain_check_cpuid", 
-      (PyCFunction)pyxc_dom_check_cpuid, 
-      METH_VARARGS, "\n"
-      "Apply checks to host CPUID.\n"
-      " input [long]: Input for cpuid instruction (eax)\n"
-      " sub_input [long]: Second input (optional, may be None) for cpuid "
-      "                     instruction (ecx)\n"
-      " config [dict]: Dictionary of register\n"
-      " config [dict]: Dictionary of register, use for checking\n\n"
-      "Returns: [int] 0 on success; exception on error.\n" },
-    
-    { "domain_set_cpuid", 
-      (PyCFunction)pyxc_dom_set_cpuid, 
-      METH_VARARGS, "\n"
-      "Set cpuid response for an input and a domain.\n"
-      " dom [int]: Identifier of domain.\n"
-      " input [long]: Input for cpuid instruction (eax)\n"
-      " sub_input [long]: Second input (optional, may be None) for cpuid "
-      "                     instruction (ecx)\n"
-      " config [dict]: Dictionary of register\n\n"
-      "Returns: [int] 0 on success; exception on error.\n" },
-
-    { "domain_set_policy_cpuid", 
-      (PyCFunction)pyxc_dom_set_policy_cpuid, 
-      METH_VARARGS, "\n"
-      "Set the default cpuid policy for a domain.\n"
-      " dom [int]: Identifier of domain.\n\n"
-      "Returns: [int] 0 on success; exception on error.\n" },
-
-    { "domain_set_machine_address_size",
-      (PyCFunction)pyxc_dom_set_machine_address_size,
-      METH_VARARGS, "\n"
-      "Set maximum machine address size for this domain.\n"
-      " dom [int]: Identifier of domain.\n"
-      " width [int]: Maximum machine address width.\n" },
-
-    { "domain_suppress_spurious_page_faults",
-      (PyCFunction)pyxc_dom_suppress_spurious_page_faults,
-      METH_VARARGS, "\n"
-      "Do not propagate spurious page faults to this guest.\n"
-      " dom [int]: Identifier of domain.\n" },
-#endif
-
-    { "tmem_control",
-      (PyCFunction)pyxc_tmem_control,
-      METH_VARARGS | METH_KEYWORDS, "\n"
-      "Do various control on a tmem pool.\n"
-      " pool_id [int]: Identifier of the tmem pool (-1 == all).\n"
-      " subop [int]: Supplementary Operation.\n"
-      " cli_id [int]: Client identifier (-1 == all).\n"
-      " len [int]: Length of 'buf'.\n"
-      " arg [int]: Argument.\n"
-      " buf [str]: Buffer.\n\n"
-      "Returns: [int] 0 or [str] tmem info on success; exception on error.\n" },
-
-    { "tmem_shared_auth",
-      (PyCFunction)pyxc_tmem_shared_auth,
-      METH_VARARGS | METH_KEYWORDS, "\n"
-      "De/authenticate a shared tmem pool.\n"
-      " cli_id [int]: Client identifier (-1 == all).\n"
-      " uuid_str [str]: uuid.\n"
-      " auth [int]: 0|1 .\n"
-      "Returns: [int] 0 on success; exception on error.\n" },
 
     { "dom_set_memshr", 
       (PyCFunction)pyxc_dom_set_memshr,
@@ -2585,21 +2372,21 @@ static PyMethodDef pyxc_methods[] = {
 
     { "flask_context_to_sid",
       (PyCFunction)pyflask_context_to_sid,
-      METH_KEYWORDS, "\n"
+      METH_VARARGS | METH_KEYWORDS, "\n"
       "Convert a context string to a dynamic SID.\n"
       " context [str]: String specifying context to be converted\n"
       "Returns: [int]: Numeric SID on success; -1 on error.\n" },
 
     { "flask_sid_to_context",
       (PyCFunction)pyflask_sid_to_context,
-      METH_KEYWORDS, "\n"
+      METH_VARARGS | METH_KEYWORDS, "\n"
       "Convert a dynamic SID to context string.\n"
       " context [int]: SID to be converted\n"
       "Returns: [str]: Numeric SID on success; -1 on error.\n" },
 
     { "flask_load",
       (PyCFunction)pyflask_load,
-      METH_KEYWORDS, "\n"
+      METH_VARARGS | METH_KEYWORDS, "\n"
       "Loads a policy into the hypervisor.\n"
       " policy [str]: policy to be load\n"
       "Returns: [int]: 0 on success; -1 on failure.\n" }, 
@@ -2612,14 +2399,14 @@ static PyMethodDef pyxc_methods[] = {
 
     { "flask_setenforce",
       (PyCFunction)pyflask_setenforce,
-      METH_KEYWORDS, "\n"
+      METH_VARARGS | METH_KEYWORDS, "\n"
       "Modifies the current mode for the Flask XSM module.\n"
       " mode [int]: mode to change to\n"
       "Returns: [int]: 0 on success; -1 on failure.\n" }, 
 
     { "flask_access",
       (PyCFunction)pyflask_access,
-      METH_KEYWORDS, "\n"
+      METH_VARARGS | METH_KEYWORDS, "\n"
       "Returns whether a source context has access to target context based on \
        class and permissions requested.\n"
       " scon [str]: source context\n"
@@ -2639,11 +2426,6 @@ static PyMethodDef pyxc_methods[] = {
     { NULL, NULL, 0, NULL }
 };
 
-
-static PyObject *PyXc_getattr(PyObject *obj, char *name)
-{
-    return Py_FindMethod(pyxc_methods, obj, name);
-}
 
 static PyObject *PyXc_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 {
@@ -2675,67 +2457,68 @@ static void PyXc_dealloc(XcObject *self)
         self->xc_handle = NULL;
     }
 
-    self->ob_type->tp_free((PyObject *)self);
+    Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
 static PyTypeObject PyXcType = {
+#if PY_MAJOR_VERSION >= 3
+    .ob_base = { PyObject_HEAD_INIT(NULL) },
+#else
     PyObject_HEAD_INIT(NULL)
-    0,
-    PKG "." CLS,
-    sizeof(XcObject),
-    0,
-    (destructor)PyXc_dealloc,     /* tp_dealloc        */
-    NULL,                         /* tp_print          */
-    PyXc_getattr,                 /* tp_getattr        */
-    NULL,                         /* tp_setattr        */
-    NULL,                         /* tp_compare        */
-    NULL,                         /* tp_repr           */
-    NULL,                         /* tp_as_number      */
-    NULL,                         /* tp_as_sequence    */
-    NULL,                         /* tp_as_mapping     */
-    NULL,                         /* tp_hash           */
-    NULL,                         /* tp_call           */
-    NULL,                         /* tp_str            */
-    NULL,                         /* tp_getattro       */
-    NULL,                         /* tp_setattro       */
-    NULL,                         /* tp_as_buffer      */
-    Py_TPFLAGS_DEFAULT,           /* tp_flags          */
-    "Xen client connections",     /* tp_doc            */
-    NULL,                         /* tp_traverse       */
-    NULL,                         /* tp_clear          */
-    NULL,                         /* tp_richcompare    */
-    0,                            /* tp_weaklistoffset */
-    NULL,                         /* tp_iter           */
-    NULL,                         /* tp_iternext       */
-    pyxc_methods,                 /* tp_methods        */
-    NULL,                         /* tp_members        */
-    NULL,                         /* tp_getset         */
-    NULL,                         /* tp_base           */
-    NULL,                         /* tp_dict           */
-    NULL,                         /* tp_descr_get      */
-    NULL,                         /* tp_descr_set      */
-    0,                            /* tp_dictoffset     */
-    (initproc)PyXc_init,          /* tp_init           */
-    NULL,                         /* tp_alloc          */
-    PyXc_new,                     /* tp_new            */
+#endif
+    .tp_name = PKG "." CLS,
+    .tp_basicsize = sizeof(XcObject),
+    .tp_itemsize = 0,
+    .tp_dealloc = (destructor)PyXc_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = "Xen client connections",
+    .tp_methods = pyxc_methods,
+    .tp_init = (initproc)PyXc_init,
+    .tp_new = PyXc_new,
 };
 
 static PyMethodDef xc_methods[] = { { NULL } };
 
+
+#if PY_MAJOR_VERSION >= 3
+static PyModuleDef xc_module = {
+    PyModuleDef_HEAD_INIT,
+    PKG,     /* name */
+    NULL,   /* docstring */
+    -1,     /* size of per-interpreter state, -1 means the module use global
+               variables */
+    xc_methods
+};
+#endif
+
+#if PY_MAJOR_VERSION >= 3
+#define INITERROR return NULL
+PyMODINIT_FUNC PyInit_xc(void)
+#else
+#define INITERROR return
 PyMODINIT_FUNC initxc(void)
+#endif
 {
     PyObject *m;
 
     if (PyType_Ready(&PyXcType) < 0)
-        return;
+        INITERROR;
 
+#if PY_MAJOR_VERSION >= 3
+    m = PyModule_Create(&xc_module);
+#else
     m = Py_InitModule(PKG, xc_methods);
+#endif
 
     if (m == NULL)
-      return;
+        INITERROR;
 
     xc_error_obj = PyErr_NewException(PKG ".Error", PyExc_RuntimeError, NULL);
-    zero = PyInt_FromLong(0);
+    if (xc_error_obj == NULL) {
+        Py_DECREF(m);
+        INITERROR;
+    }
+    zero = PyLongOrInt_FromLong(0);
 
     /* KAF: This ensures that we get debug output in a timely manner. */
     setbuf(stdout, NULL);
@@ -2751,12 +2534,15 @@ PyMODINIT_FUNC initxc(void)
     PyModule_AddIntConstant(m, "XEN_SCHEDULER_CREDIT", XEN_SCHEDULER_CREDIT);
     PyModule_AddIntConstant(m, "XEN_SCHEDULER_CREDIT2", XEN_SCHEDULER_CREDIT2);
 
+#if PY_MAJOR_VERSION >= 3
+    return m;
+#endif
 }
 
 
 /*
  * Local variables:
- *  c-indent-level: 4
+ *  mode: C
  *  c-basic-offset: 4
  * End:
  */

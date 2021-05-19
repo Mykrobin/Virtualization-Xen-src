@@ -2607,7 +2607,7 @@ void ata_detect( )
   write_byte(ebda_seg,&EbdaData->ata.channels[3].irq,11);
 #endif
 #if BX_MAX_ATA_INTERFACES > 4
-#error Please fill the ATA interface informations
+#error Please fill the ATA interface information
 #endif
 
   // Device detection
@@ -3226,7 +3226,7 @@ ASM_END
     current++;
     write_word(ebda_seg, &EbdaData->ata.trsfsectors,current);
     count--;
-    status = inb(iobase1 + ATA_CB_STAT);
+    status = await_ide(NOT_BSY, iobase1, IDE_TIMEOUT);
     if (count == 0) {
       if ( (status & (ATA_CB_STAT_BSY | ATA_CB_STAT_RDY | ATA_CB_STAT_DF | ATA_CB_STAT_DRQ | ATA_CB_STAT_ERR) )
           != ATA_CB_STAT_RDY ) {

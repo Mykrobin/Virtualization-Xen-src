@@ -1,18 +1,20 @@
-CFLAGS += -fshort-wchar
+CFLAGS-y += -fshort-wchar
 
-obj-y += stub.o
+quiet_cmd_objcopy_o_ihex = OBJCOPY $@
+cmd_objcopy_o_ihex = $(OBJCOPY) -I ihex -O binary $< $@
 
-create = test -e $(1) || touch -t 199901010000 $(1)
+%.o: %.ihex FORCE
+	$(call if_changed,objcopy_o_ihex)
 
-efi := y$(shell rm -f disabled)
-efi := $(if $(efi),$(shell $(CC) $(filter-out $(CFLAGS-y) .%.d,$(CFLAGS)) -c check.c 2>disabled && echo y))
-efi := $(if $(efi),$(shell $(LD) -mi386pep --subsystem=10 -o check.efi check.o 2>disabled && echo y))
-efi := $(if $(efi),$(shell rm disabled)y,$(shell $(call create,boot.init.o); $(call create,runtime.o)))
+boot.init.o: buildid.o
 
-extra-$(efi) += boot.init.o relocs-dummy.o runtime.o compat.o buildid.o
+EFIOBJ := boot.init.o pe.init.o ebmalloc.o compat.o runtime.o
 
-%.o: %.ihex
-	$(OBJCOPY) -I ihex -O binary $< $@
+$(call cc-option-add,cflags-stack-boundary,CC,-mpreferred-stack-boundary=4)
+$(EFIOBJ): CFLAGS-stack-boundary := $(cflags-stack-boundary)
 
-stub.o: $(extra-y)
-nogcov-$(efi) += stub.o
+obj-y := stub.o
+obj-$(XEN_BUILD_EFI) := $(filter-out %.init.o,$(EFIOBJ))
+obj-bin-$(XEN_BUILD_EFI) := $(filter %.init.o,$(EFIOBJ))
+extra-$(XEN_BUILD_EFI) += buildid.o relocs-dummy.o
+nocov-$(XEN_BUILD_EFI) += stub.o

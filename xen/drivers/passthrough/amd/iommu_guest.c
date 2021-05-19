@@ -16,11 +16,9 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/sched.h>
 #include <asm/p2m.h>
-#include <asm/amd-iommu.h>
-#include <asm/hvm/svm/amd-iommu-proto.h>
 
+#include "iommu.h"
 
 #define IOMMU_MMIO_SIZE                         0x8000
 #define IOMMU_MMIO_PAGE_NR                      0x8
@@ -31,12 +29,6 @@
 #define GUEST_CR3_1_LEVEL                       0x0
 #define GUEST_ADDRESS_SIZE_6_LEVEL              0x2
 #define HOST_ADDRESS_SIZE_6_LEVEL               0x2
-
-#define guest_iommu_set_status(iommu, bit) \
-        iommu_set_bit(&((iommu)->reg_status.lo), bit)
-
-#define guest_iommu_clear_status(iommu, bit) \
-        iommu_clear_bit(&((iommu)->reg_status.lo), bit)
 
 #define reg_to_u64(reg) (((uint64_t)reg.hi << 32) | reg.lo )
 #define u64_to_reg(reg, val) \
@@ -58,12 +50,12 @@ static uint16_t guest_bdf(struct domain *d, uint16_t machine_bdf)
 
 static inline struct guest_iommu *domain_iommu(struct domain *d)
 {
-    return dom_iommu(d)->arch.g_iommu;
+    return dom_iommu(d)->arch.amd.g_iommu;
 }
 
 static inline struct guest_iommu *vcpu_iommu(struct vcpu *v)
 {
-    return dom_iommu(v->domain)->arch.g_iommu;
+    return dom_iommu(v->domain)->arch.amd.g_iommu;
 }
 
 static void guest_iommu_enable(struct guest_iommu *iommu)
@@ -76,39 +68,39 @@ static void guest_iommu_disable(struct guest_iommu *iommu)
     iommu->enabled = 0;
 }
 
-static uint64_t get_guest_cr3_from_dte(dev_entry_t *dte)
+/*
+ * The Guest CR3 Table is a table written by the guest kernel, pointing at
+ * gCR3 values for PASID transactions to use.  The Device Table Entry points
+ * at a system physical address.
+ *
+ * However, these helpers deliberately use untyped parameters without
+ * reference to gfn/mfn because they are used both for programming the real
+ * IOMMU, and interpreting a guests programming of its vIOMMU.
+ */
+static uint64_t dte_get_gcr3_table(const struct amd_iommu_dte *dte)
 {
-    uint64_t gcr3_1, gcr3_2, gcr3_3;
-
-    gcr3_1 = get_field_from_reg_u32(dte->data[1],
-                                    IOMMU_DEV_TABLE_GCR3_1_MASK,
-                                    IOMMU_DEV_TABLE_GCR3_1_SHIFT);
-    gcr3_2 = get_field_from_reg_u32(dte->data[2],
-                                    IOMMU_DEV_TABLE_GCR3_2_MASK,
-                                    IOMMU_DEV_TABLE_GCR3_2_SHIFT);
-    gcr3_3 = get_field_from_reg_u32(dte->data[3],
-                                    IOMMU_DEV_TABLE_GCR3_3_MASK,
-                                    IOMMU_DEV_TABLE_GCR3_3_SHIFT);
-
-    return ((gcr3_3 << 31) | (gcr3_2 << 15 ) | (gcr3_1 << 12)) >> PAGE_SHIFT;
+    return (((uint64_t)dte->gcr3_trp_51_31 << 31) |
+            (dte->gcr3_trp_30_15 << 15) |
+            (dte->gcr3_trp_14_12 << 12));
 }
 
-static uint16_t get_domid_from_dte(dev_entry_t *dte)
+static void dte_set_gcr3_table(struct amd_iommu_dte *dte, uint16_t dom_id,
+                               uint64_t addr, bool gv, uint8_t glx)
 {
-    return get_field_from_reg_u32(dte->data[2], IOMMU_DEV_TABLE_DOMAIN_ID_MASK,
-                                  IOMMU_DEV_TABLE_DOMAIN_ID_SHIFT);
-}
+#define GCR3_MASK(hi, lo) (((1ul << ((hi) + 1)) - 1) & ~((1ul << (lo)) - 1))
 
-static uint16_t get_glx_from_dte(dev_entry_t *dte)
-{
-    return get_field_from_reg_u32(dte->data[1], IOMMU_DEV_TABLE_GLX_MASK,
-                                  IOMMU_DEV_TABLE_GLX_SHIFT);
-}
+    /* I bit must be set when gcr3 is enabled */
+    dte->i = true;
 
-static uint16_t get_gv_from_dte(dev_entry_t *dte)
-{
-    return get_field_from_reg_u32(dte->data[1],IOMMU_DEV_TABLE_GV_MASK,
-                                  IOMMU_DEV_TABLE_GV_SHIFT);
+    dte->gcr3_trp_14_12 = MASK_EXTR(addr, GCR3_MASK(14, 12));
+    dte->gcr3_trp_30_15 = MASK_EXTR(addr, GCR3_MASK(30, 15));
+    dte->gcr3_trp_51_31 = MASK_EXTR(addr, GCR3_MASK(51, 31));
+
+    dte->domain_id = dom_id;
+    dte->glx = glx;
+    dte->gv = gv;
+
+#undef GCR3_MASK
 }
 
 static unsigned int host_domid(struct domain *d, uint64_t g_domid)
@@ -140,14 +132,13 @@ static void guest_iommu_deliver_msi(struct domain *d)
 
 static unsigned long guest_iommu_get_table_mfn(struct domain *d,
                                                uint64_t base_raw,
-                                               unsigned int entry_size,
                                                unsigned int pos)
 {
     unsigned long idx, gfn, mfn;
     p2m_type_t p2mt;
 
     gfn = get_gfn_from_base_reg(base_raw);
-    idx = (pos * entry_size) >> PAGE_SHIFT;
+    idx = pos >> PAGE_SHIFT;
 
     mfn = mfn_x(get_gfn(d, gfn + idx, &p2mt));
     put_gfn(d, gfn);
@@ -170,14 +161,14 @@ static void guest_iommu_enable_ring_buffer(struct guest_iommu *iommu,
     uint32_t length_raw = get_field_from_reg_u32(buffer->reg_base.hi,
                                                  RING_BF_LENGTH_MASK,
                                                  RING_BF_LENGTH_SHIFT);
-    buffer->entries = 1 << length_raw;
+    buffer->size = entry_size << length_raw;
 }
 
 void guest_iommu_add_ppr_log(struct domain *d, u32 entry[])
 {
     uint16_t gdev_id;
     unsigned long mfn, tail, head;
-    ppr_entry_t *log, *log_base;
+    ppr_entry_t *log;
     struct guest_iommu *iommu;
 
     if ( !is_hvm_domain(d) )
@@ -187,10 +178,10 @@ void guest_iommu_add_ppr_log(struct domain *d, u32 entry[])
     if ( !iommu )
         return;
 
-    tail = iommu_get_rb_pointer(iommu->ppr_log.reg_tail.lo);
-    head = iommu_get_rb_pointer(iommu->ppr_log.reg_head.lo);
+    tail = iommu->ppr_log.reg_tail.lo;
+    head = iommu->ppr_log.reg_head.lo;
 
-    if ( tail >= iommu->ppr_log.entries || head >= iommu->ppr_log.entries )
+    if ( tail >= iommu->ppr_log.size || head >= iommu->ppr_log.size )
     {
         AMD_IOMMU_DEBUG("Error: guest iommu ppr log overflows\n");
         guest_iommu_disable(iommu);
@@ -198,11 +189,10 @@ void guest_iommu_add_ppr_log(struct domain *d, u32 entry[])
     }
 
     mfn = guest_iommu_get_table_mfn(d, reg_to_u64(iommu->ppr_log.reg_base),
-                                    sizeof(ppr_entry_t), tail);
-    ASSERT(mfn_valid(mfn));
+                                    tail);
+    ASSERT(mfn_valid(_mfn(mfn)));
 
-    log_base = map_domain_page(_mfn(mfn));
-    log = log_base + tail % (PAGE_SIZE / sizeof(ppr_entry_t));
+    log = map_domain_page(_mfn(mfn)) + (tail & ~PAGE_MASK);
 
     /* Convert physical device id back into virtual device id */
     gdev_id = guest_bdf(d, iommu_get_devid_from_cmd(entry[0]));
@@ -211,13 +201,15 @@ void guest_iommu_add_ppr_log(struct domain *d, u32 entry[])
     memcpy(log, entry, sizeof(ppr_entry_t));
 
     /* Now shift ppr log tail pointer */
-    if ( ++tail >= iommu->ppr_log.entries )
+    tail += sizeof(ppr_entry_t);
+    if ( tail >= iommu->ppr_log.size )
     {
         tail = 0;
-        guest_iommu_set_status(iommu, IOMMU_STATUS_PPR_LOG_OVERFLOW_SHIFT);
+        iommu->reg_status.lo |= IOMMU_STATUS_PPR_LOG_OVERFLOW;
     }
-    iommu_set_rb_pointer(&iommu->ppr_log.reg_tail.lo, tail);
-    unmap_domain_page(log_base);
+
+    iommu->ppr_log.reg_tail.lo = tail;
+    unmap_domain_page(log);
 
     guest_iommu_deliver_msi(d);
 }
@@ -226,7 +218,7 @@ void guest_iommu_add_event_log(struct domain *d, u32 entry[])
 {
     uint16_t dev_id;
     unsigned long mfn, tail, head;
-    event_entry_t *log, *log_base;
+    event_entry_t *log;
     struct guest_iommu *iommu;
 
     if ( !is_hvm_domain(d) )
@@ -236,10 +228,10 @@ void guest_iommu_add_event_log(struct domain *d, u32 entry[])
     if ( !iommu )
         return;
 
-    tail = iommu_get_rb_pointer(iommu->event_log.reg_tail.lo);
-    head = iommu_get_rb_pointer(iommu->event_log.reg_head.lo);
+    tail = iommu->event_log.reg_tail.lo;
+    head = iommu->event_log.reg_head.lo;
 
-    if ( tail >= iommu->event_log.entries || head >= iommu->event_log.entries )
+    if ( tail >= iommu->event_log.size || head >= iommu->event_log.size )
     {
         AMD_IOMMU_DEBUG("Error: guest iommu event overflows\n");
         guest_iommu_disable(iommu);
@@ -247,11 +239,10 @@ void guest_iommu_add_event_log(struct domain *d, u32 entry[])
     }
 
     mfn = guest_iommu_get_table_mfn(d, reg_to_u64(iommu->event_log.reg_base),
-                                    sizeof(event_entry_t), tail);
-    ASSERT(mfn_valid(mfn));
+                                    tail);
+    ASSERT(mfn_valid(_mfn(mfn)));
 
-    log_base = map_domain_page(_mfn(mfn));
-    log = log_base + tail % (PAGE_SIZE / sizeof(event_entry_t));
+    log = map_domain_page(_mfn(mfn)) + (tail & ~PAGE_MASK);
 
     /* re-write physical device id into virtual device id */
     dev_id = guest_bdf(d, iommu_get_devid_from_cmd(entry[0]));
@@ -259,14 +250,15 @@ void guest_iommu_add_event_log(struct domain *d, u32 entry[])
     memcpy(log, entry, sizeof(event_entry_t));
 
     /* Now shift event log tail pointer */
-    if ( ++tail >= iommu->event_log.entries )
+    tail += sizeof(event_entry_t);
+    if ( tail >= iommu->event_log.size )
     {
         tail = 0;
-        guest_iommu_set_status(iommu, IOMMU_STATUS_EVENT_OVERFLOW_SHIFT);
+        iommu->reg_status.lo |= IOMMU_STATUS_EVENT_LOG_OVERFLOW;
     }
 
-    iommu_set_rb_pointer(&iommu->event_log.reg_tail.lo, tail);
-    unmap_domain_page(log_base);
+    iommu->event_log.reg_tail.lo = tail;
+    unmap_domain_page(log);
 
     guest_iommu_deliver_msi(d);
 }
@@ -346,18 +338,18 @@ static int do_invalidate_iotlb_pages(struct domain *d, cmd_entry_t *cmd)
 
 static int do_completion_wait(struct domain *d, cmd_entry_t *cmd)
 {
-    bool_t com_wait_int_en, com_wait_int, i, s;
+    bool com_wait_int, i, s;
     struct guest_iommu *iommu;
     unsigned long gfn;
     p2m_type_t p2mt;
 
     iommu = domain_iommu(d);
 
-    i = iommu_get_bit(cmd->data[0], IOMMU_COMP_WAIT_I_FLAG_SHIFT);
-    s = iommu_get_bit(cmd->data[0], IOMMU_COMP_WAIT_S_FLAG_SHIFT);
+    i = cmd->data[0] & IOMMU_COMP_WAIT_I_FLAG_MASK;
+    s = cmd->data[0] & IOMMU_COMP_WAIT_S_FLAG_MASK;
 
     if ( i )
-        guest_iommu_set_status(iommu, IOMMU_STATUS_COMP_WAIT_INT_SHIFT);
+        iommu->reg_status.lo |= IOMMU_STATUS_COMP_WAIT_INT;
 
     if ( s )
     {
@@ -383,12 +375,9 @@ static int do_completion_wait(struct domain *d, cmd_entry_t *cmd)
         unmap_domain_page(vaddr);
     }
 
-    com_wait_int_en = iommu_get_bit(iommu->reg_ctrl.lo,
-                                    IOMMU_CONTROL_COMP_WAIT_INT_SHIFT);
-    com_wait_int = iommu_get_bit(iommu->reg_status.lo,
-                                 IOMMU_STATUS_COMP_WAIT_INT_SHIFT);
+    com_wait_int = iommu->reg_status.lo & IOMMU_STATUS_COMP_WAIT_INT;
 
-    if ( com_wait_int_en && com_wait_int )
+    if ( iommu->reg_ctrl.com_wait_int_en && com_wait_int )
         guest_iommu_deliver_msi(d);
 
     return 0;
@@ -397,7 +386,7 @@ static int do_completion_wait(struct domain *d, cmd_entry_t *cmd)
 static int do_invalidate_dte(struct domain *d, cmd_entry_t *cmd)
 {
     uint16_t gbdf, mbdf, req_id, gdom_id, hdom_id;
-    dev_entry_t *gdte, *mdte, *dte_base;
+    struct amd_iommu_dte *gdte, *mdte, *dte_base;
     struct amd_iommu *iommu = NULL;
     struct guest_iommu *g_iommu;
     uint64_t gcr3_gfn, gcr3_mfn;
@@ -414,23 +403,23 @@ static int do_invalidate_dte(struct domain *d, cmd_entry_t *cmd)
         return 0;
 
     /* Sometimes guest invalidates devices from non-exists dtes */
-    if ( (gbdf * sizeof(dev_entry_t)) > g_iommu->dev_table.size )
+    if ( (gbdf * sizeof(struct amd_iommu_dte)) > g_iommu->dev_table.size )
         return 0;
 
     dte_mfn = guest_iommu_get_table_mfn(d,
                                         reg_to_u64(g_iommu->dev_table.reg_base),
-                                        sizeof(dev_entry_t), gbdf);
-    ASSERT(mfn_valid(dte_mfn));
+                                        sizeof(struct amd_iommu_dte) * gbdf);
+    ASSERT(mfn_valid(_mfn(dte_mfn)));
 
     /* Read guest dte information */
     dte_base = map_domain_page(_mfn(dte_mfn));
 
-    gdte = dte_base + gbdf % (PAGE_SIZE / sizeof(dev_entry_t));
+    gdte = &dte_base[gbdf % (PAGE_SIZE / sizeof(struct amd_iommu_dte))];
 
-    gdom_id  = get_domid_from_dte(gdte);
-    gcr3_gfn = get_guest_cr3_from_dte(gdte);
-    glx      = get_glx_from_dte(gdte);
-    gv       = get_gv_from_dte(gdte);
+    gdom_id = gdte->domain_id;
+    gcr3_gfn = dte_get_gcr3_table(gdte) >> PAGE_SHIFT;
+    glx = gdte->glx;
+    gv = gdte->gv;
 
     unmap_domain_page(dte_base);
 
@@ -441,7 +430,7 @@ static int do_invalidate_dte(struct domain *d, cmd_entry_t *cmd)
     gcr3_mfn = mfn_x(get_gfn(d, gcr3_gfn, &p2mt));
     put_gfn(d, gcr3_gfn);
 
-    ASSERT(mfn_valid(gcr3_mfn));
+    ASSERT(mfn_valid(_mfn(gcr3_mfn)));
 
     iommu = find_iommu_for_device(0, mbdf);
     if ( !iommu )
@@ -454,11 +443,11 @@ static int do_invalidate_dte(struct domain *d, cmd_entry_t *cmd)
     /* Setup host device entry */
     hdom_id = host_domid(d, gdom_id);
     req_id = get_dma_requestor_id(iommu->seg, mbdf);
-    mdte = iommu->dev_table.buffer + (req_id * sizeof(dev_entry_t));
+    dte_base = iommu->dev_table.buffer;
+    mdte = &dte_base[req_id];
 
     spin_lock_irqsave(&iommu->lock, flags);
-    iommu_dte_set_guest_cr3((u32 *)mdte, hdom_id,
-                            gcr3_mfn << PAGE_SHIFT, gv, glx);
+    dte_set_gcr3_table(mdte, hdom_id, gcr3_mfn << PAGE_SHIFT, gv, glx);
 
     amd_iommu_flush_device(iommu, req_id);
     spin_unlock_irqrestore(&iommu->lock, flags);
@@ -466,11 +455,11 @@ static int do_invalidate_dte(struct domain *d, cmd_entry_t *cmd)
     return 0;
 }
 
-static void guest_iommu_process_command(unsigned long _d)
+static void guest_iommu_process_command(void *data)
 {
-    unsigned long opcode, tail, head, entries_per_page, cmd_mfn;
-    cmd_entry_t *cmd, *cmd_base;
-    struct domain *d = (struct domain *)_d;
+    unsigned long opcode, tail, head, cmd_mfn;
+    cmd_entry_t *cmd;
+    struct domain *d = data;
     struct guest_iommu *iommu;
 
     iommu = domain_iommu(d);
@@ -478,22 +467,19 @@ static void guest_iommu_process_command(unsigned long _d)
     if ( !iommu->enabled )
         return;
 
-    head = iommu_get_rb_pointer(iommu->cmd_buffer.reg_head.lo);
-    tail = iommu_get_rb_pointer(iommu->cmd_buffer.reg_tail.lo);
+    head = iommu->cmd_buffer.reg_head.lo;
+    tail = iommu->cmd_buffer.reg_tail.lo;
 
     /* Tail pointer is rolled over by guest driver, value outside
      * cmd_buffer_entries cause iommu disabled
      */
 
-    if ( tail >= iommu->cmd_buffer.entries ||
-         head >= iommu->cmd_buffer.entries )
+    if ( tail >= iommu->cmd_buffer.size || head >= iommu->cmd_buffer.size )
     {
         AMD_IOMMU_DEBUG("Error: guest iommu cmd buffer overflows\n");
         guest_iommu_disable(iommu);
         return;
     }
-
-    entries_per_page = PAGE_SIZE / sizeof(cmd_entry_t);
 
     while ( head != tail )
     {
@@ -501,11 +487,10 @@ static void guest_iommu_process_command(unsigned long _d)
 
         cmd_mfn = guest_iommu_get_table_mfn(d,
                                             reg_to_u64(iommu->cmd_buffer.reg_base),
-                                            sizeof(cmd_entry_t), head);
-        ASSERT(mfn_valid(cmd_mfn));
+                                            head);
+        ASSERT(mfn_valid(_mfn(cmd_mfn)));
 
-        cmd_base = map_domain_page(_mfn(cmd_mfn));
-        cmd = cmd_base + head % entries_per_page;
+        cmd = map_domain_page(_mfn(cmd_mfn)) + (head & ~PAGE_MASK);
 
         opcode = get_field_from_reg_u32(cmd->data[1],
                                         IOMMU_CMD_OPCODE_MASK,
@@ -538,52 +523,30 @@ static void guest_iommu_process_command(unsigned long _d)
             break;
         }
 
-        unmap_domain_page(cmd_base);
-        if ( ++head >= iommu->cmd_buffer.entries )
+        unmap_domain_page(cmd);
+        head += sizeof(cmd_entry_t);
+        if ( head >= iommu->cmd_buffer.size )
             head = 0;
         if ( ret )
             guest_iommu_disable(iommu);
     }
 
     /* Now shift cmd buffer head pointer */
-    iommu_set_rb_pointer(&iommu->cmd_buffer.reg_head.lo, head);
+    iommu->cmd_buffer.reg_head.lo = head;
     return;
 }
 
-static int guest_iommu_write_ctrl(struct guest_iommu *iommu, uint64_t newctrl)
+static int guest_iommu_write_ctrl(struct guest_iommu *iommu, uint64_t val)
 {
-    bool_t cmd_en, event_en, iommu_en, ppr_en, ppr_log_en;
-    bool_t cmd_en_old, event_en_old, iommu_en_old;
-    bool_t cmd_run;
+    union amd_iommu_control newctrl = { .raw = val };
 
-    iommu_en = iommu_get_bit(newctrl,
-                             IOMMU_CONTROL_TRANSLATION_ENABLE_SHIFT);
-    iommu_en_old = iommu_get_bit(iommu->reg_ctrl.lo,
-                                 IOMMU_CONTROL_TRANSLATION_ENABLE_SHIFT);
-
-    cmd_en = iommu_get_bit(newctrl,
-                           IOMMU_CONTROL_COMMAND_BUFFER_ENABLE_SHIFT);
-    cmd_en_old = iommu_get_bit(iommu->reg_ctrl.lo,
-                               IOMMU_CONTROL_COMMAND_BUFFER_ENABLE_SHIFT);
-    cmd_run = iommu_get_bit(iommu->reg_status.lo,
-                            IOMMU_STATUS_CMD_BUFFER_RUN_SHIFT);
-    event_en = iommu_get_bit(newctrl,
-                             IOMMU_CONTROL_EVENT_LOG_ENABLE_SHIFT);
-    event_en_old = iommu_get_bit(iommu->reg_ctrl.lo,
-                                 IOMMU_CONTROL_EVENT_LOG_ENABLE_SHIFT);
-
-    ppr_en = iommu_get_bit(newctrl,
-                           IOMMU_CONTROL_PPR_ENABLE_SHIFT);
-    ppr_log_en = iommu_get_bit(newctrl,
-                               IOMMU_CONTROL_PPR_LOG_ENABLE_SHIFT);
-
-    if ( iommu_en )
+    if ( newctrl.iommu_en )
     {
         guest_iommu_enable(iommu);
         guest_iommu_enable_dev_table(iommu);
     }
 
-    if ( iommu_en && cmd_en )
+    if ( newctrl.iommu_en && newctrl.cmd_buf_en )
     {
         guest_iommu_enable_ring_buffer(iommu, &iommu->cmd_buffer,
                                        sizeof(cmd_entry_t));
@@ -591,35 +554,37 @@ static int guest_iommu_write_ctrl(struct guest_iommu *iommu, uint64_t newctrl)
         tasklet_schedule(&iommu->cmd_buffer_tasklet);
     }
 
-    if ( iommu_en && event_en )
+    if ( newctrl.iommu_en && newctrl.event_log_en )
     {
         guest_iommu_enable_ring_buffer(iommu, &iommu->event_log,
                                        sizeof(event_entry_t));
-        guest_iommu_set_status(iommu, IOMMU_STATUS_EVENT_LOG_RUN_SHIFT);
-        guest_iommu_clear_status(iommu, IOMMU_STATUS_EVENT_OVERFLOW_SHIFT);
+        iommu->reg_status.lo |=  IOMMU_STATUS_EVENT_LOG_RUN;
+        iommu->reg_status.lo &= ~IOMMU_STATUS_EVENT_LOG_OVERFLOW;
     }
 
-    if ( iommu_en && ppr_en && ppr_log_en )
+    if ( newctrl.iommu_en && newctrl.ppr_en && newctrl.ppr_log_en )
     {
         guest_iommu_enable_ring_buffer(iommu, &iommu->ppr_log,
                                        sizeof(ppr_entry_t));
-        guest_iommu_set_status(iommu, IOMMU_STATUS_PPR_LOG_RUN_SHIFT);
-        guest_iommu_clear_status(iommu, IOMMU_STATUS_PPR_LOG_OVERFLOW_SHIFT);
+        iommu->reg_status.lo |=  IOMMU_STATUS_PPR_LOG_RUN;
+        iommu->reg_status.lo &= ~IOMMU_STATUS_PPR_LOG_OVERFLOW;
     }
 
-    if ( iommu_en && cmd_en_old && !cmd_en )
+    if ( newctrl.iommu_en && iommu->reg_ctrl.cmd_buf_en &&
+         !newctrl.cmd_buf_en )
     {
         /* Disable iommu command processing */
         tasklet_kill(&iommu->cmd_buffer_tasklet);
     }
 
-    if ( event_en_old && !event_en )
-        guest_iommu_clear_status(iommu, IOMMU_STATUS_EVENT_LOG_RUN_SHIFT);
+    if ( iommu->reg_ctrl.event_log_en && !newctrl.event_log_en )
+        iommu->reg_status.lo &= ~IOMMU_STATUS_EVENT_LOG_RUN;
 
-    if ( iommu_en_old && !iommu_en )
+    if ( iommu->reg_ctrl.iommu_en && !newctrl.iommu_en )
         guest_iommu_disable(iommu);
 
-    u64_to_reg(&iommu->reg_ctrl, newctrl);
+    iommu->reg_ctrl = newctrl;
+
     return 0;
 }
 
@@ -661,13 +626,13 @@ static uint64_t iommu_mmio_read64(struct guest_iommu *iommu,
         val = reg_to_u64(iommu->ppr_log.reg_tail);
         break;
     case IOMMU_CONTROL_MMIO_OFFSET:
-        val = reg_to_u64(iommu->reg_ctrl);
+        val = iommu->reg_ctrl.raw;
         break;
     case IOMMU_STATUS_MMIO_OFFSET:
         val = reg_to_u64(iommu->reg_status);
         break;
     case IOMMU_EXT_FEATURE_MMIO_OFFSET:
-        val = reg_to_u64(iommu->reg_ext_feature);
+        val = iommu->reg_ext_feature.raw;
         break;
 
     default:
@@ -733,32 +698,32 @@ static void guest_iommu_mmio_write64(struct guest_iommu *iommu,
         guest_iommu_write_ctrl(iommu, val);
         break;
     case IOMMU_CMD_BUFFER_HEAD_OFFSET:
-        u64_to_reg(&iommu->cmd_buffer.reg_head, val);
+        iommu->cmd_buffer.reg_head.lo = val & IOMMU_RING_BUFFER_PTR_MASK;
         break;
     case IOMMU_CMD_BUFFER_TAIL_OFFSET:
-        u64_to_reg(&iommu->cmd_buffer.reg_tail, val);
+        iommu->cmd_buffer.reg_tail.lo = val & IOMMU_RING_BUFFER_PTR_MASK;
         tasklet_schedule(&iommu->cmd_buffer_tasklet);
         break;
     case IOMMU_EVENT_LOG_HEAD_OFFSET:
-        u64_to_reg(&iommu->event_log.reg_head, val);
+        iommu->event_log.reg_head.lo = val & IOMMU_RING_BUFFER_PTR_MASK;
         break;
     case IOMMU_EVENT_LOG_TAIL_OFFSET:
-        u64_to_reg(&iommu->event_log.reg_tail, val);
+        iommu->event_log.reg_tail.lo = val & IOMMU_RING_BUFFER_PTR_MASK;
         break;
     case IOMMU_PPR_LOG_HEAD_OFFSET:
-        u64_to_reg(&iommu->ppr_log.reg_head, val);
+        iommu->ppr_log.reg_head.lo = val & IOMMU_RING_BUFFER_PTR_MASK;
         break;
     case IOMMU_PPR_LOG_TAIL_OFFSET:
-        u64_to_reg(&iommu->ppr_log.reg_tail, val);
+        iommu->ppr_log.reg_tail.lo = val & IOMMU_RING_BUFFER_PTR_MASK;
         break;
     case IOMMU_STATUS_MMIO_OFFSET:
-        val &= IOMMU_STATUS_EVENT_OVERFLOW_MASK |
-               IOMMU_STATUS_EVENT_LOG_INT_MASK |
-               IOMMU_STATUS_COMP_WAIT_INT_MASK |
-               IOMMU_STATUS_PPR_LOG_OVERFLOW_MASK |
-               IOMMU_STATUS_PPR_LOG_INT_MASK |
-               IOMMU_STATUS_GAPIC_LOG_OVERFLOW_MASK |
-               IOMMU_STATUS_GAPIC_LOG_INT_MASK;
+        val &= IOMMU_STATUS_EVENT_LOG_OVERFLOW |
+               IOMMU_STATUS_EVENT_LOG_INT |
+               IOMMU_STATUS_COMP_WAIT_INT |
+               IOMMU_STATUS_PPR_LOG_OVERFLOW |
+               IOMMU_STATUS_PPR_LOG_INT |
+               IOMMU_STATUS_GAPIC_LOG_OVERFLOW |
+               IOMMU_STATUS_GAPIC_LOG_INT;
         u64_to_reg(&iommu->reg_status, reg_to_u64(iommu->reg_status) & ~val);
         break;
 
@@ -831,39 +796,26 @@ int guest_iommu_set_base(struct domain *d, uint64_t base)
 /* Initialize mmio read only bits */
 static void guest_iommu_reg_init(struct guest_iommu *iommu)
 {
-    uint32_t lower, upper;
+    union amd_iommu_ext_features ef = {
+        /* Support prefetch */
+        .flds.pref_sup = 1,
+        /* Support PPR log */
+        .flds.ppr_sup = 1,
+        /* Support guest translation */
+        .flds.gt_sup = 1,
+        /* Support invalidate all command */
+        .flds.ia_sup = 1,
+        /* Host translation size has 6 levels */
+        .flds.hats = HOST_ADDRESS_SIZE_6_LEVEL,
+        /* Guest translation size has 6 levels */
+        .flds.gats = GUEST_ADDRESS_SIZE_6_LEVEL,
+        /* Single level gCR3 */
+        .flds.glx_sup = GUEST_CR3_1_LEVEL,
+        /* 9 bit PASID */
+        .flds.pas_max = PASMAX_9_bit,
+    };
 
-    lower = upper = 0;
-    /* Support prefetch */
-    iommu_set_bit(&lower,IOMMU_EXT_FEATURE_PREFSUP_SHIFT);
-    /* Support PPR log */
-    iommu_set_bit(&lower,IOMMU_EXT_FEATURE_PPRSUP_SHIFT);
-    /* Support guest translation */
-    iommu_set_bit(&lower,IOMMU_EXT_FEATURE_GTSUP_SHIFT);
-    /* Support invalidate all command */
-    iommu_set_bit(&lower,IOMMU_EXT_FEATURE_IASUP_SHIFT);
-
-    /* Host translation size has 6 levels */
-    set_field_in_reg_u32(HOST_ADDRESS_SIZE_6_LEVEL, lower,
-                         IOMMU_EXT_FEATURE_HATS_MASK,
-                         IOMMU_EXT_FEATURE_HATS_SHIFT,
-                         &lower);
-    /* Guest translation size has 6 levels */
-    set_field_in_reg_u32(GUEST_ADDRESS_SIZE_6_LEVEL, lower,
-                         IOMMU_EXT_FEATURE_GATS_MASK,
-                         IOMMU_EXT_FEATURE_GATS_SHIFT,
-                         &lower);
-    /* Single level gCR3 */
-    set_field_in_reg_u32(GUEST_CR3_1_LEVEL, lower,
-                         IOMMU_EXT_FEATURE_GLXSUP_MASK,
-                         IOMMU_EXT_FEATURE_GLXSUP_SHIFT, &lower);
-    /* 9 bit PASID */
-    set_field_in_reg_u32(PASMAX_9_bit, upper,
-                         IOMMU_EXT_FEATURE_PASMAX_MASK,
-                         IOMMU_EXT_FEATURE_PASMAX_SHIFT, &upper);
-
-    iommu->reg_ext_feature.lo = lower;
-    iommu->reg_ext_feature.hi = upper;
+    iommu->reg_ext_feature = ef;
 }
 
 static int guest_iommu_mmio_range(struct vcpu *v, unsigned long addr)
@@ -886,7 +838,7 @@ int guest_iommu_init(struct domain* d)
     struct guest_iommu *iommu;
     struct domain_iommu *hd = dom_iommu(d);
 
-    if ( !is_hvm_domain(d) || !iommu_enabled || !iommuv2_enabled ||
+    if ( !is_hvm_domain(d) || !is_iommu_enabled(d) || !iommuv2_enabled ||
          !has_viommu(d) )
         return 0;
 
@@ -900,10 +852,9 @@ int guest_iommu_init(struct domain* d)
     guest_iommu_reg_init(iommu);
     iommu->mmio_base = ~0ULL;
     iommu->domain = d;
-    hd->arch.g_iommu = iommu;
+    hd->arch.amd.g_iommu = iommu;
 
-    tasklet_init(&iommu->cmd_buffer_tasklet,
-                 guest_iommu_process_command, (unsigned long)d);
+    tasklet_init(&iommu->cmd_buffer_tasklet, guest_iommu_process_command, d);
 
     spin_lock_init(&iommu->lock);
 
@@ -923,5 +874,5 @@ void guest_iommu_destroy(struct domain *d)
     tasklet_kill(&iommu->cmd_buffer_tasklet);
     xfree(iommu);
 
-    dom_iommu(d)->arch.g_iommu = NULL;
+    dom_iommu(d)->arch.amd.g_iommu = NULL;
 }

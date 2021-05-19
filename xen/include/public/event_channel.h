@@ -74,6 +74,9 @@
 #define EVTCHNOP_init_control    11
 #define EVTCHNOP_expand_array    12
 #define EVTCHNOP_set_priority    13
+#ifdef __XEN__
+#define EVTCHNOP_reset_cont      14
+#endif
 /* ` } */
 
 typedef uint32_t evtchn_port_t;
@@ -307,7 +310,7 @@ typedef struct evtchn_expand_array evtchn_expand_array_t;
  */
 struct evtchn_set_priority {
     /* IN parameters. */
-    uint32_t port;
+    evtchn_port_t port;
     uint32_t priority;
 };
 typedef struct evtchn_set_priority evtchn_set_priority_t;
@@ -321,16 +324,16 @@ typedef struct evtchn_set_priority evtchn_set_priority_t;
 struct evtchn_op {
     uint32_t cmd; /* enum event_channel_op */
     union {
-        struct evtchn_alloc_unbound    alloc_unbound;
-        struct evtchn_bind_interdomain bind_interdomain;
-        struct evtchn_bind_virq        bind_virq;
-        struct evtchn_bind_pirq        bind_pirq;
-        struct evtchn_bind_ipi         bind_ipi;
-        struct evtchn_close            close;
-        struct evtchn_send             send;
-        struct evtchn_status           status;
-        struct evtchn_bind_vcpu        bind_vcpu;
-        struct evtchn_unmask           unmask;
+        evtchn_alloc_unbound_t    alloc_unbound;
+        evtchn_bind_interdomain_t bind_interdomain;
+        evtchn_bind_virq_t        bind_virq;
+        evtchn_bind_pirq_t        bind_pirq;
+        evtchn_bind_ipi_t         bind_ipi;
+        evtchn_close_t            close;
+        evtchn_send_t             send;
+        evtchn_status_t           status;
+        evtchn_bind_vcpu_t        bind_vcpu;
+        evtchn_unmask_t           unmask;
     } u;
 };
 typedef struct evtchn_op evtchn_op_t;

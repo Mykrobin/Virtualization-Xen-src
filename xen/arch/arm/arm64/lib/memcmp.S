@@ -22,7 +22,6 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/config.h>
 #include "assembler.h"
 
 /*
@@ -211,7 +210,7 @@ CPU_LE( lsr	tmp2, tmp2, tmp1 )
 .Lunequal_proc:
 	cbz	diff, .Lremain8
 
-/*There is differnence occured in the latest comparison.*/
+/*There is differnence occurred in the latest comparison.*/
 .Lnot_limit:
 /*
 * For little endian,reverse the low significant equal bits into MSB,then

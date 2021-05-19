@@ -3,8 +3,8 @@
 
 AC_PREREQ([2.67])
 AC_INIT([Xen Hypervisor Tools], m4_esyscmd([../version.sh ../xen/Makefile]),
-    [xen-devel@lists.xen.org], [xen], [http://www.xen.org/])
-AC_CONFIG_SRCDIR([libxl/libxl.c])
+    [xen-devel@lists.xen.org], [xen], [https://www.xen.org/])
+AC_CONFIG_SRCDIR([libs/light/libxl.c])
 AC_CONFIG_FILES([
 ../config/Tools.mk
 hotplug/FreeBSD/rc.d/xencommons
@@ -21,8 +21,6 @@ hotplug/Linux/xen-hotplug-common.sh
 hotplug/Linux/xendomains
 hotplug/NetBSD/rc.d/xencommons
 hotplug/NetBSD/rc.d/xendriverdomain
-libxl/xenlight.pc.in
-libxl/xlutil.pc.in
 ocaml/xenstored/oxenstored.conf
 ])
 AC_CONFIG_HEADERS([config.h])
@@ -75,6 +73,8 @@ m4_include([../m4/fetcher.m4])
 m4_include([../m4/ax_compare_version.m4])
 m4_include([../m4/paths.m4])
 m4_include([../m4/systemd.m4])
+m4_include([../m4/golang.m4])
+m4_include([../m4/header.m4])
 
 AX_XEN_EXPAND_CONFIG()
 
@@ -86,6 +86,7 @@ AX_ARG_DEFAULT_ENABLE([ocamltools], [Disable Ocaml tools])
 AX_ARG_DEFAULT_ENABLE([xsmpolicy], [Disable XSM policy compilation])
 AX_ARG_DEFAULT_DISABLE([ovmf], [Enable OVMF])
 AX_ARG_DEFAULT_ENABLE([seabios], [Disable SeaBIOS])
+AX_ARG_DEFAULT_ENABLE([golang], [Disable Go tools])
 
 AC_ARG_WITH([linux-backend-modules],
     AS_HELP_STRING([--with-linux-backend-modules="mod1 mod2"],
@@ -108,7 +109,6 @@ xen-scsibk
 usbbk
 pciback
 xen-acpi-processor
-blktap2
 "
 ;;
 *)
@@ -117,24 +117,6 @@ LINUX_BACKEND_MODULES=
 esac])
 LINUX_BACKEND_MODULES="`eval echo $LINUX_BACKEND_MODULES`"
 AC_SUBST(LINUX_BACKEND_MODULES)
-
-dnl Enable blktap2 on Linux only.
-AC_ARG_ENABLE([blktap2],
-    AS_HELP_STRING([--enable-blktap2],
-                   [Enable blktap2, (DEFAULT is on for Linux, otherwise off)]),,[
-    case "$host_os" in
-        linux*)
-           enable_blktap2="yes";;
-        *) enable_blktap2="no";;
-    esac
-])
-AS_IF([test "x$enable_blktap2" = "xyes"], [
-AC_DEFINE([HAVE_BLKTAP2], [1], [Blktap2 enabled])
-    blktap2=y],[
-    blktap2=n
-])
-AC_SUBST(blktap2)
-
 
 AC_ARG_ENABLE([qemu-traditional],
     AS_HELP_STRING([--enable-qemu-traditional],
@@ -213,6 +195,15 @@ AC_SUBST(qemu_xen)
 AC_SUBST(qemu_xen_path)
 AC_SUBST(qemu_xen_systemd)
 
+AC_ARG_WITH([stubdom-qmp-proxy],
+    AC_HELP_STRING([--stubdom-qmp-proxy@<:@=PATH@:>@],
+        [Use supplied binary PATH as a QMP proxy into stubdomain]),[
+    stubdom_qmp_proxy="$withval"
+],[
+    stubdom_qmp_proxy="$bindir/vchan-socket-proxy"
+])
+AC_DEFINE_UNQUOTED([STUBDOM_QMP_PROXY_PATH], ["$stubdom_qmp_proxy"], [QMP proxy path])
+
 AC_ARG_WITH([system-seabios],
     AS_HELP_STRING([--with-system-seabios@<:@=PATH@:>@],
        [Use system supplied seabios PATH instead of building and installing
@@ -221,7 +212,8 @@ AC_ARG_WITH([system-seabios],
     seabios=n
     case $withval in
         no) seabios_path= ;;
-        *)  seabios_path=$withval ;;
+        /*)  seabios_path=$withval ;;
+        *) AC_MSG_ERROR([Seabios specified, but is not an absolute path]) ;;
     esac
 ],[])
 AS_IF([test "x$seabios" = "xy" -o -n "$seabios_path" ], [
@@ -238,7 +230,8 @@ AC_ARG_WITH([system-ovmf],
     ovmf=n
     case $withval in
         no) ovmf_path= ;;
-        *)  ovmf_path=$withval ;;
+        /*)  ovmf_path=$withval ;;
+        *) AC_MSG_ERROR([OVMF specified, but is not an absolute path]) ;;
     esac
 ],[])
 AS_IF([test "x$ovmf" = "xy" -o -n "$ovmf_path" ], [
@@ -246,6 +239,39 @@ AS_IF([test "x$ovmf" = "xy" -o -n "$ovmf_path" ], [
                        ["${ovmf_path:-$XENFIRMWAREDIR/ovmf.bin}"],
                        [OVMF path])
 ])
+
+AC_ARG_ENABLE([ipxe],
+    AS_HELP_STRING([--disable-ipxe],
+                   [Enable in-tree IPXE, (DEFAULT is on if rombios is enabled,
+                    otherwise off, see also --with-system-ipxe)]),
+    [
+     AS_IF([test "x$enable_ipxe" = "xno"], [ipxe=n], [ipxe=y])
+    ],
+    [
+    AS_IF([test "x$enable_rombios" = "xno"], [ipxe=n], [ipxe=y])
+])
+AC_ARG_WITH([system-ipxe],
+    AS_HELP_STRING([--with-system-ipxe@<:@=PATH@:>@],
+       [Use system supplied IPXE PATH instead of building and installing
+        our own version, it takes precedence over --{en,dis}able-ipxe and is
+        bound by the presence of rombios, --without-system-ipxe is an error]),[
+    case $withval in
+        no) AC_MSG_ERROR([--without-system-ipxe has no effect]) ;;
+        /*)  ipxe_path=$withval; ipxe=n ;;
+        *) AC_MSG_ERROR([IPXE specified, but is not an absolute path]) ;;
+    esac
+],[])
+AS_IF([test "x$ipxe" = "xy" -o -n "$ipxe_path" ], [
+
+    AS_IF([test "x$enable_rombios" = "xno"], [
+        AC_MSG_ERROR([Rombios is required to use IPXE])
+    ], [])
+
+    AC_DEFINE_UNQUOTED([IPXE_PATH],
+                       ["${ipxe_path:-$XENFIRMWAREDIR/ipxe.bin}"],
+                       [IPXE path])
+])
+AC_SUBST(ipxe)
 
 AC_ARG_WITH([extra-qemuu-configure-args],
     AS_HELP_STRING([--with-extra-qemuu-configure-args@<:@="--ARG1 ..."@:>@],
@@ -272,9 +298,6 @@ AC_ARG_VAR([PYTHON], [Path to the Python parser])
 AC_ARG_VAR([PERL], [Path to Perl parser])
 AC_ARG_VAR([BISON], [Path to Bison parser generator])
 AC_ARG_VAR([FLEX], [Path to Flex lexical analyser generator])
-AC_ARG_VAR([CURL], [Path to curl-config tool])
-AC_ARG_VAR([XML], [Path to xml2-config tool])
-AC_ARG_VAR([BASH], [Path to bash shell])
 AC_ARG_VAR([XGETTEXT], [Path to xgetttext tool])
 AC_ARG_VAR([AS86], [Path to as86 tool])
 AC_ARG_VAR([LD86], [Path to ld86 tool])
@@ -286,8 +309,8 @@ AC_ARG_VAR([AWK], [Path to awk tool])
 AC_PROG_CC
 AC_PROG_MAKE_SET
 AC_PROG_INSTALL
-AC_PATH_PROG([BISON], [bison])
 AC_PATH_PROG([FLEX], [flex])
+AC_PATH_PROG([ABI_DUMPER], [abi-dumper])
 AX_PATH_PROG_OR_FAIL([PERL], [perl])
 AX_PATH_PROG_OR_FAIL([AWK], [awk])
 
@@ -300,10 +323,27 @@ AS_IF([test "x$ocamltools" = "xy"], [
             AC_MSG_ERROR([Ocaml tools enabled, but missing ocamlopt or ocamlfind])])
         ocamltools="n"
     ], [
-        AX_COMPARE_VERSION([$OCAMLVERSION], [lt], [3.09.3], [
+        AX_COMPARE_VERSION([$OCAMLVERSION], [lt], [4.02.0], [
             AS_IF([test "x$enable_ocamltools" = "xyes"], [
                 AC_MSG_ERROR([Your version of OCaml: $OCAMLVERSION is not supported])])
             ocamltools="n"
+        ])
+    ])
+])
+
+AS_IF([test "x$golang" = "xy"], [
+    AC_PROG_GO
+    AS_IF([test "x$GO" = "xno"], [
+        AS_IF([test "x$enable_golang" =  "xyes"], [
+            AC_MSG_ERROR([Go tools enabled, but missing go compiler])
+        ])
+        golang="n"
+    ], [
+        AX_COMPARE_VERSION([$GOVERSION], [lt], [1.11.1], [
+            AS_IF([test "x$enable_golang" = "xyes"], [
+                AC_MSG_ERROR(["Your version of go: $GOVERSION is not supported"])
+            ])
+            golang="n"
         ])
     ])
 ])
@@ -320,14 +360,19 @@ AS_IF([test "x$xsmpolicy" = "xy"], [
         xsmpolicy="n"
     ])
 ])
-AX_PATH_PROG_OR_FAIL([BASH], [bash])
-AS_IF([echo "$PYTHON" | grep -q "^/"], [
-    PYTHONPATH=$PYTHON
-    PYTHON=`basename $PYTHONPATH`
-],[test -z "$PYTHON"], [PYTHON="python"],
-[AC_MSG_ERROR([PYTHON specified, but is not an absolute path])])
+dnl FreeBSD doesn't require bash (hotplug scripts are in plain sh)
+case "$host_os" in
+  freebsd*) ;;
+  *) AX_PATH_PROG_OR_FAIL([BASH], [bash]);;
+esac
+AS_IF([test -z "$PYTHON"], [AC_CHECK_PROGS([PYTHON], [python3 python python2], err)])
+AS_IF([test "$PYTHON" = "err"], [AC_MSG_ERROR([No python interpreter found])])
+AS_IF([echo "$PYTHON" | grep -q "^/"], [], [AC_PATH_PROG([PYTHON], [$PYTHON])])
+PYTHONPATH=$PYTHON
+PYTHON=`basename $PYTHONPATH`
+
 AX_PATH_PROG_OR_FAIL([PYTHONPATH], [$PYTHON])
-AX_CHECK_PYTHON_VERSION([2], [3])
+AX_CHECK_PYTHON_VERSION([2], [6])
 
 AS_IF([test "$cross_compiling" != yes], [
     AX_CHECK_PYTHON_DEVEL()
@@ -370,14 +415,11 @@ AC_CHECK_LIB([lzma], [lzma_stream_decoder], [zlib="$zlib -DHAVE_LZMA -llzma"])
 AC_CHECK_HEADER([lzo/lzo1x.h], [
 AC_CHECK_LIB([lzo2], [lzo1x_decompress], [zlib="$zlib -DHAVE_LZO1X -llzo2"])
 ])
+PKG_CHECK_MODULES([libzstd], [libzstd],
+    [zlib="$zlib -DHAVE_ZSTD $libzstd_CFLAGS $libzstd_LIBS"], [true])
 AC_SUBST(zlib)
-AS_IF([test "x$enable_blktap2" = "xyes"], [
-AC_CHECK_LIB([aio], [io_setup], [], [AC_MSG_ERROR([Could not find libaio])])
-])
 AC_SUBST(system_aio)
 AX_CHECK_EXTFS
-AC_CHECK_LIB([gcrypt], [gcry_md_hash_buffer], [libgcrypt="y"], [libgcrypt="n"])
-AC_SUBST(libgcrypt)
 AX_CHECK_PTHREAD
 AX_CHECK_PTYFUNCS
 AC_CHECK_LIB([yajl], [yajl_alloc], [],
@@ -455,5 +497,32 @@ AS_IF([test "x$systemd" = "xy"], [
     ])
 ])
 
-AC_OUTPUT()
+AC_ARG_ENABLE([9pfs],
+    AS_HELP_STRING([--enable-9pfs],
+                   [Explicitly enable 9pfs support in QEMU build (default is to defer to QEMU configure default)]),
+    [AS_IF([test "x$enable_9pfs" = "xyes"], [ninepfs=y], [ninepfs=n])],[
+])
 
+AC_SUBST(ninepfs)
+
+AC_ARG_ENABLE([pvshim],
+    AS_HELP_STRING([--disable-pvshim],
+                   [Disable pvshim build (enabled by default on 64bit x86)]),
+    [AS_IF([test "x$enable_pvshim" = "xno"], [pvshim=n], [pvshim=y])], [
+    cpu=`test -z "$target_cpu" && echo "$host_cpu" || echo "$target_cpu"`
+    case "${XEN_COMPILE_ARCH-${XEN_TARGET_ARCH-$cpu}}" in
+        x86_64)
+           pvshim="y";;
+        *) pvshim="n";;
+    esac
+])
+AC_SUBST(pvshim)
+AS_IF([test "x$pvshim" = "xy"], [
+    AX_PATH_PROG_OR_FAIL([BISON], [bison])
+], [
+    AC_PATH_PROG([BISON], [bison])
+])
+
+AX_FIND_HEADER([INCLUDE_ENDIAN_H], [endian.h sys/endian.h])
+
+AC_OUTPUT()

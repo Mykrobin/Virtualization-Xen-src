@@ -1,19 +1,22 @@
 #ifndef __ARCH_X86_ATOMIC__
 #define __ARCH_X86_ATOMIC__
 
-#include <xen/config.h>
 #include <xen/atomic.h>
 #include <asm/system.h>
 
-#define build_read_atomic(name, size, type, reg, barrier) \
+#define build_read_atomic(name, size, type, reg) \
 static inline type name(const volatile type *addr) \
-{ type ret; asm volatile("mov" size " %1,%0":reg (ret) \
-:"m" (*(volatile type *)addr) barrier); return ret; }
+{ \
+    type ret; \
+    asm volatile ( "mov" size " %1,%0" : reg (ret) : "m" (*addr) ); \
+    return ret; \
+}
 
-#define build_write_atomic(name, size, type, reg, barrier) \
+#define build_write_atomic(name, size, type, reg) \
 static inline void name(volatile type *addr, type val) \
-{ asm volatile("mov" size " %1,%0": "=m" (*(volatile type *)addr) \
-:reg (val) barrier); }
+{ \
+    asm volatile ( "mov" size " %1,%0" : "=m" (*addr) : reg (val) ); \
+}
 
 #define build_add_sized(name, size, type, reg) \
     static inline void name(volatile type *addr, type val)              \
@@ -23,15 +26,15 @@ static inline void name(volatile type *addr, type val) \
                      : reg (val));                                      \
     }
 
-build_read_atomic(read_u8_atomic, "b", uint8_t, "=q", )
-build_read_atomic(read_u16_atomic, "w", uint16_t, "=r", )
-build_read_atomic(read_u32_atomic, "l", uint32_t, "=r", )
-build_read_atomic(read_u64_atomic, "q", uint64_t, "=r", )
+build_read_atomic(read_u8_atomic, "b", uint8_t, "=q")
+build_read_atomic(read_u16_atomic, "w", uint16_t, "=r")
+build_read_atomic(read_u32_atomic, "l", uint32_t, "=r")
+build_read_atomic(read_u64_atomic, "q", uint64_t, "=r")
 
-build_write_atomic(write_u8_atomic, "b", uint8_t, "q", )
-build_write_atomic(write_u16_atomic, "w", uint16_t, "r", )
-build_write_atomic(write_u32_atomic, "l", uint32_t, "r", )
-build_write_atomic(write_u64_atomic, "q", uint64_t, "r", )
+build_write_atomic(write_u8_atomic, "b", uint8_t, "q")
+build_write_atomic(write_u16_atomic, "w", uint16_t, "r")
+build_write_atomic(write_u32_atomic, "l", uint32_t, "r")
+build_write_atomic(write_u64_atomic, "q", uint64_t, "r")
 
 build_add_sized(add_u8_sized, "b", uint8_t, "qi")
 build_add_sized(add_u16_sized, "w", uint16_t, "ri")
@@ -46,6 +49,7 @@ void __bad_atomic_size(void);
 
 #define read_atomic(p) ({                                 \
     unsigned long x_;                                     \
+    CLANG_DISABLE_WARN_GCC_COMPAT_START                   \
     switch ( sizeof(*(p)) ) {                             \
     case 1: x_ = read_u8_atomic((uint8_t *)(p)); break;   \
     case 2: x_ = read_u16_atomic((uint16_t *)(p)); break; \
@@ -53,11 +57,14 @@ void __bad_atomic_size(void);
     case 8: x_ = read_u64_atomic((uint64_t *)(p)); break; \
     default: x_ = 0; __bad_atomic_size(); break;          \
     }                                                     \
+    CLANG_DISABLE_WARN_GCC_COMPAT_END                     \
     (typeof(*(p)))x_;                                     \
 })
 
 #define write_atomic(p, x) ({                             \
     typeof(*(p)) __x = (x);                               \
+    /* Check that the pointer is not a const type */      \
+    void *__maybe_unused p_ = &__x;                       \
     unsigned long x_ = (unsigned long)__x;                \
     switch ( sizeof(*(p)) ) {                             \
     case 1: write_u8_atomic((uint8_t *)(p), x_); break;   \
@@ -133,17 +140,13 @@ static inline int atomic_sub_return(int i, atomic_t *v)
 
 static inline int atomic_sub_and_test(int i, atomic_t *v)
 {
-    bool_t c;
+    bool c;
 
-#ifdef __GCC_ASM_FLAG_OUTPUTS__
-    asm volatile ( "lock; subl %2,%0"
-                   : "+m" (*(volatile int *)&v->counter), "=@ccz" (c)
-                   : "ir" (i) : "memory" );
-#else
-    asm volatile ( "lock; subl %2,%0; setz %1"
-                   : "+m" (*(volatile int *)&v->counter), "=qm" (c)
-                   : "ir" (i) : "memory" );
-#endif
+    asm volatile ( "lock; subl %[i], %[counter]\n\t"
+                   ASM_FLAG_OUT(, "setz %[zf]\n\t")
+                   : [counter] "+m" (*(volatile int *)&v->counter),
+                     [zf] ASM_FLAG_OUT("=@ccz", "=qm") (c)
+                   : [i] "ir" (i) : "memory" );
 
     return c;
 }
@@ -163,17 +166,13 @@ static inline int atomic_inc_return(atomic_t *v)
 
 static inline int atomic_inc_and_test(atomic_t *v)
 {
-    bool_t c;
+    bool c;
 
-#ifdef __GCC_ASM_FLAG_OUTPUTS__
-    asm volatile ( "lock; incl %0"
-                   : "+m" (*(volatile int *)&v->counter), "=@ccz" (c)
+    asm volatile ( "lock; incl %[counter]\n\t"
+                   ASM_FLAG_OUT(, "setz %[zf]\n\t")
+                   : [counter] "+m" (*(volatile int *)&v->counter),
+                     [zf] ASM_FLAG_OUT("=@ccz", "=qm") (c)
                    :: "memory" );
-#else
-    asm volatile ( "lock; incl %0; setz %1"
-                   : "+m" (*(volatile int *)&v->counter), "=qm" (c)
-                   :: "memory" );
-#endif
 
     return c;
 }
@@ -193,34 +192,26 @@ static inline int atomic_dec_return(atomic_t *v)
 
 static inline int atomic_dec_and_test(atomic_t *v)
 {
-    bool_t c;
+    bool c;
 
-#ifdef __GCC_ASM_FLAG_OUTPUTS__
-    asm volatile ( "lock; decl %0"
-                   : "+m" (*(volatile int *)&v->counter), "=@ccz" (c)
+    asm volatile ( "lock; decl %[counter]\n\t"
+                   ASM_FLAG_OUT(, "setz %[zf]\n\t")
+                   : [counter] "+m" (*(volatile int *)&v->counter),
+                     [zf] ASM_FLAG_OUT("=@ccz", "=qm") (c)
                    :: "memory" );
-#else
-    asm volatile ( "lock; decl %0; setz %1"
-                   : "+m" (*(volatile int *)&v->counter), "=qm" (c)
-                   :: "memory" );
-#endif
 
     return c;
 }
 
 static inline int atomic_add_negative(int i, atomic_t *v)
 {
-    bool_t c;
+    bool c;
 
-#ifdef __GCC_ASM_FLAG_OUTPUTS__
-    asm volatile ( "lock; addl %2,%0"
-                   : "+m" (*(volatile int *)&v->counter), "=@ccs" (c)
-                   : "ir" (i) : "memory" );
-#else
-    asm volatile ( "lock; addl %2,%0; sets %1"
-                   : "+m" (*(volatile int *)&v->counter), "=qm" (c)
-                   : "ir" (i) : "memory" );
-#endif
+    asm volatile ( "lock; addl %[i], %[counter]\n\t"
+                   ASM_FLAG_OUT(, "sets %[sf]\n\t")
+                   : [counter] "+m" (*(volatile int *)&v->counter),
+                     [sf] ASM_FLAG_OUT("=@ccs", "=qm") (c)
+                   : [i] "ir" (i) : "memory" );
 
     return c;
 }
@@ -233,6 +224,14 @@ static inline int atomic_add_unless(atomic_t *v, int a, int u)
     while (c != u && (old = atomic_cmpxchg(v, c, c + a)) != c)
         c = old;
     return c;
+}
+
+static inline void atomic_and(int m, atomic_t *v)
+{
+    asm volatile (
+        "lock andl %1, %0"
+        : "+m" (*(volatile int *)&v->counter)
+        : "ir" (m) );
 }
 
 #define atomic_xchg(v, new) (xchg(&((v)->counter), new))

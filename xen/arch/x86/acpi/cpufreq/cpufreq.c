@@ -31,6 +31,7 @@
 #include <xen/errno.h>
 #include <xen/delay.h>
 #include <xen/cpumask.h>
+#include <xen/param.h>
 #include <xen/sched.h>
 #include <xen/timer.h>
 #include <xen/xmalloc.h>
@@ -38,7 +39,6 @@
 #include <asm/msr.h>
 #include <asm/io.h>
 #include <asm/processor.h>
-#include <asm/percpu.h>
 #include <asm/cpufeature.h>
 #include <acpi/acpi.h>
 #include <acpi/cpufreq/cpufreq.h>
@@ -53,9 +53,7 @@ enum {
 
 struct acpi_cpufreq_data *cpufreq_drv_data[NR_CPUS];
 
-static struct cpufreq_driver acpi_cpufreq_driver;
-
-static bool_t __read_mostly acpi_pstate_strict;
+static bool __read_mostly acpi_pstate_strict;
 boolean_param("acpi_pstate_strict", acpi_pstate_strict);
 
 static int check_est_cpu(unsigned int cpuid)
@@ -272,7 +270,6 @@ unsigned int get_measured_perf(unsigned int cpu, unsigned int flag)
     struct cpufreq_policy *policy;    
     struct perf_pair readin, cur, *saved;
     unsigned int perf_percent;
-    unsigned int retval;
 
     if (!cpu_online(cpu))
         return 0;
@@ -320,16 +317,13 @@ unsigned int get_measured_perf(unsigned int cpu, unsigned int flag)
     else
         perf_percent = 0;
 
-    retval = policy->cpuinfo.max_freq * perf_percent / 100;
-
-    return retval;
+    return policy->cpuinfo.max_freq * perf_percent / 100;
 }
 
 static unsigned int get_cur_freq_on_cpu(unsigned int cpu)
 {
     struct cpufreq_policy *policy;
     struct acpi_cpufreq_data *data;
-    unsigned int freq;
 
     if (!cpu_online(cpu))
         return 0;
@@ -343,8 +337,7 @@ static unsigned int get_cur_freq_on_cpu(unsigned int cpu)
         data->acpi_data == NULL || data->freq_table == NULL))
         return 0;
 
-    freq = extract_freq(get_cur_val(cpumask_of(cpu)), data);
-    return freq;
+    return extract_freq(get_cur_val(cpumask_of(cpu)), data);
 }
 
 static void feature_detect(void *info)
@@ -355,7 +348,7 @@ static void feature_detect(void *info)
     if ( cpu_has_aperfmperf )
     {
         policy->aperf_mperf = 1;
-        acpi_cpufreq_driver.getavg = get_measured_perf;
+        cpufreq_driver.getavg = get_measured_perf;
     }
 
     eax = cpuid_eax(6);
@@ -593,7 +586,7 @@ acpi_cpufreq_cpu_init(struct cpufreq_policy *policy)
         policy->cur = acpi_cpufreq_guess_freq(data, policy->cpu);
         break;
     case ACPI_ADR_SPACE_FIXED_HARDWARE:
-        acpi_cpufreq_driver.get = get_cur_freq_on_cpu;
+        cpufreq_driver.get = get_cur_freq_on_cpu;
         policy->cur = get_cur_freq_on_cpu(cpu);
         break;
     default:
@@ -635,7 +628,7 @@ static int acpi_cpufreq_cpu_exit(struct cpufreq_policy *policy)
     return 0;
 }
 
-static struct cpufreq_driver acpi_cpufreq_driver = {
+static const struct cpufreq_driver __initconstrel acpi_cpufreq_driver = {
     .name   = "acpi-cpufreq",
     .verify = acpi_cpufreq_verify,
     .target = acpi_cpufreq_target,
@@ -651,20 +644,21 @@ static int __init cpufreq_driver_init(void)
         (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL))
         ret = cpufreq_register_driver(&acpi_cpufreq_driver);
     else if ((cpufreq_controller == FREQCTL_xen) &&
-        (boot_cpu_data.x86_vendor == X86_VENDOR_AMD))
+        (boot_cpu_data.x86_vendor &
+         (X86_VENDOR_AMD | X86_VENDOR_HYGON)))
         ret = powernow_register_driver();
 
     return ret;
 }
-__initcall(cpufreq_driver_init);
+presmp_initcall(cpufreq_driver_init);
 
 int cpufreq_cpu_init(unsigned int cpuid)
 {
     int ret;
 
-    /* Currently we only handle Intel and AMD processor */
-    if ( (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL ) ||
-         (boot_cpu_data.x86_vendor == X86_VENDOR_AMD ) )
+    /* Currently we only handle Intel, AMD and Hygon processor */
+    if ( boot_cpu_data.x86_vendor &
+         (X86_VENDOR_INTEL | X86_VENDOR_AMD | X86_VENDOR_HYGON) )
         ret = cpufreq_add_cpu(cpuid);
     else
         ret = -EFAULT;

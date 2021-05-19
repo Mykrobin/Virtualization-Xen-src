@@ -13,6 +13,7 @@
 #include <xsm/xsm.h>
 #include <xen/guest_access.h>
 #include <xen/err.h>
+#include <xen/param.h>
 
 #include <public/xsm/flask_op.h>
 
@@ -26,10 +27,10 @@
 #define _copy_from_guest copy_from_guest
 
 enum flask_bootparam_t __read_mostly flask_bootparam = FLASK_BOOTPARAM_ENFORCING;
-static void parse_flask_param(char *s);
+static int parse_flask_param(const char *s);
 custom_param("flask", parse_flask_param);
 
-bool_t __read_mostly flask_enforcing = 1;
+bool __read_mostly flask_enforcing = true;
 
 #define MAX_POLICY_SIZE 0x4000000
 
@@ -58,7 +59,7 @@ static int flask_security_make_bools(void);
 
 extern int ss_initialized;
 
-static void __init parse_flask_param(char *s)
+static int __init parse_flask_param(const char *s)
 {
     if ( !strcmp(s, "enforcing") )
         flask_bootparam = FLASK_BOOTPARAM_ENFORCING;
@@ -70,6 +71,8 @@ static void __init parse_flask_param(char *s)
         flask_bootparam = FLASK_BOOTPARAM_PERMISSIVE;
     else
         flask_bootparam = FLASK_BOOTPARAM_INVALID;
+
+    return (flask_bootparam == FLASK_BOOTPARAM_INVALID) ? -EINVAL : 0;
 }
 
 static int domain_has_security(struct domain *d, u32 perms)
@@ -423,7 +426,7 @@ static int flask_security_make_bools(void)
     return ret;
 }
 
-#ifdef CONFIG_FLASK_AVC_STATS
+#ifdef CONFIG_XSM_FLASK_AVC_STATS
 
 static int flask_security_avc_cachestats(struct xen_flask_cache_stats *arg)
 {
@@ -453,7 +456,7 @@ static int flask_security_load(struct xen_flask_load *load)
 {
     int ret;
     void *buf = NULL;
-    bool_t is_reload = ss_initialized;
+    bool is_reload = ss_initialized;
 
     ret = domain_has_security(current->domain, SECURITY__LOAD_POLICY);
     if ( ret )
@@ -711,7 +714,7 @@ ret_t do_flask_op(XEN_GUEST_HANDLE_PARAM(xsm_op_t) u_flask_op)
         rv = avc_get_hash_stats(&op.u.hash_stats);
         break;
 
-#ifdef CONFIG_FLASK_AVC_STATS
+#ifdef CONFIG_XSM_FLASK_AVC_STATS
     case FLASK_AVC_CACHESTATS:
         rv = flask_security_avc_cachestats(&op.u.cache_stats);
         break;
@@ -786,8 +789,6 @@ CHECK_flask_transition;
 
 #define xen_flask_load compat_flask_load
 #define flask_security_load compat_security_load
-
-#define xen_flask_userlist compat_flask_userlist
 
 #define xen_flask_sid_context compat_flask_sid_context
 #define flask_security_context compat_security_context

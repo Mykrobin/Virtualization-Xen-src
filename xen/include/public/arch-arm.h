@@ -61,15 +61,15 @@
  *
  * All memory which is shared with other entities in the system
  * (including the hypervisor and other guests) must reside in memory
- * which is mapped as Normal Inner-cacheable. This applies to:
+ * which is mapped as Normal Inner Write-Back Outer Write-Back Inner-Shareable.
+ * This applies to:
  *  - hypercall arguments passed via a pointer to guest memory.
  *  - memory shared via the grant table mechanism (including PV I/O
  *    rings etc).
  *  - memory shared with the hypervisor (struct shared_info, struct
  *    vcpu_info, the grant table, etc).
  *
- * Any Inner cache allocation strategy (Write-Back, Write-Through etc)
- * is acceptable. There is no restriction on the Outer-cacheability.
+ * Any cache allocation hints are acceptable.
  */
 
 /*
@@ -191,12 +191,26 @@
 #define XEN_GUEST_HANDLE_PARAM(name)    __guest_handle_ ## name
 #define set_xen_guest_handle_raw(hnd, val)                  \
     do {                                                    \
-        typeof(&(hnd)) _sxghr_tmp = &(hnd);                 \
+        __typeof__(&(hnd)) _sxghr_tmp = &(hnd);             \
         _sxghr_tmp->q = 0;                                  \
         _sxghr_tmp->p = val;                                \
     } while ( 0 )
 #define set_xen_guest_handle(hnd, val) set_xen_guest_handle_raw(hnd, val)
 
+typedef uint64_t xen_pfn_t;
+#define PRI_xen_pfn PRIx64
+#define PRIu_xen_pfn PRIu64
+
+/*
+ * Maximum number of virtual CPUs in legacy multi-processor guests.
+ * Only one. All other VCPUS must use VCPUOP_register_vcpu_info.
+ */
+#define XEN_LEGACY_MAX_VCPUS 1
+
+typedef uint64_t xen_ulong_t;
+#define PRI_xen_ulong PRIx64
+
+#if defined(__XEN__) || defined(__XEN_TOOLS__)
 #if defined(__GNUC__) && !defined(__STRICT_ANSI__)
 /* Anonymous union includes both 32- and 64-bit names (e.g., r0/x0). */
 # define __DECL_REG(n64, n32) union {          \
@@ -272,17 +286,6 @@ DEFINE_XEN_GUEST_HANDLE(vcpu_guest_core_regs_t);
 
 #undef __DECL_REG
 
-typedef uint64_t xen_pfn_t;
-#define PRI_xen_pfn PRIx64
-
-/* Maximum number of virtual CPUs in legacy multi-processor guests. */
-/* Only one. All other VCPUS must use VCPUOP_register_vcpu_info */
-#define XEN_LEGACY_MAX_VCPUS 1
-
-typedef uint64_t xen_ulong_t;
-#define PRI_xen_ulong PRIx64
-
-#if defined(__XEN__) || defined(__XEN_TOOLS__)
 struct vcpu_guest_context {
 #define _VGCF_online                   0
 #define VGCF_online                    (1<<_VGCF_online)
@@ -290,7 +293,7 @@ struct vcpu_guest_context {
 
     struct vcpu_guest_core_regs user_regs;  /* Core CPU registers */
 
-    uint32_t sctlr;
+    uint64_t sctlr;
     uint64_t ttbcr, ttbr0, ttbr1;
 };
 typedef struct vcpu_guest_context vcpu_guest_context_t;
@@ -303,9 +306,15 @@ DEFINE_XEN_GUEST_HANDLE(vcpu_guest_context_t);
 #define XEN_DOMCTL_CONFIG_GIC_NATIVE    0
 #define XEN_DOMCTL_CONFIG_GIC_V2        1
 #define XEN_DOMCTL_CONFIG_GIC_V3        2
+
+#define XEN_DOMCTL_CONFIG_TEE_NONE      0
+#define XEN_DOMCTL_CONFIG_TEE_OPTEE     1
+
 struct xen_arch_domainconfig {
     /* IN/OUT */
     uint8_t gic_version;
+    /* IN */
+    uint16_t tee_type;
     /* IN */
     uint32_t nr_spis;
     /*
@@ -373,7 +382,7 @@ typedef uint64_t xen_callback_t;
 #define PSR_GUEST32_INIT  (PSR_ABT_MASK|PSR_FIQ_MASK|PSR_IRQ_MASK|PSR_MODE_SVC)
 #define PSR_GUEST64_INIT (PSR_ABT_MASK|PSR_FIQ_MASK|PSR_IRQ_MASK|PSR_MODE_EL1h)
 
-#define SCTLR_GUEST_INIT    0x00c50078
+#define SCTLR_GUEST_INIT    xen_mk_ullong(0x00c50078)
 
 /*
  * Virtual machine platform (memory layout, interrupts)
@@ -400,15 +409,18 @@ typedef uint64_t xen_callback_t;
 #define GUEST_GICV3_GICD_BASE      xen_mk_ullong(0x03001000)
 #define GUEST_GICV3_GICD_SIZE      xen_mk_ullong(0x00010000)
 
-#define GUEST_GICV3_RDIST_STRIDE   xen_mk_ullong(0x00020000)
 #define GUEST_GICV3_RDIST_REGIONS  1
 
 #define GUEST_GICV3_GICR0_BASE     xen_mk_ullong(0x03020000) /* vCPU0..127 */
 #define GUEST_GICV3_GICR0_SIZE     xen_mk_ullong(0x01000000)
 
 /* ACPI tables physical address */
-#define GUEST_ACPI_BASE 0x20000000ULL
-#define GUEST_ACPI_SIZE 0x02000000ULL
+#define GUEST_ACPI_BASE xen_mk_ullong(0x20000000)
+#define GUEST_ACPI_SIZE xen_mk_ullong(0x02000000)
+
+/* PL011 mappings */
+#define GUEST_PL011_BASE    xen_mk_ullong(0x22000000)
+#define GUEST_PL011_SIZE    xen_mk_ullong(0x00001000)
 
 /*
  * 16MB == 4096 pages reserved for guest to use as a region to map its
@@ -443,6 +455,8 @@ typedef uint64_t xen_callback_t;
 #define GUEST_TIMER_PHYS_S_PPI  29
 #define GUEST_TIMER_PHYS_NS_PPI 30
 #define GUEST_EVTCHN_PPI        31
+
+#define GUEST_VPL011_SPI        32
 
 /* PSCI functions */
 #define PSCI_cpu_suspend 0

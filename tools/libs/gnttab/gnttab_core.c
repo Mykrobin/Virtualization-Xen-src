@@ -1,6 +1,7 @@
 /******************************************************************************
  *
  * Copyright (c) 2007-2008, D G Murray <Derek.Murray@cl.cam.ac.uk>
+ * Copyright (c) 2018, Oleksandr Andrushchenko, EPAM Systems Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -22,6 +23,11 @@
 
 #include "private.h"
 
+static int all_restrict_cb(Xentoolcore__Active_Handle *ah, domid_t domid) {
+    xengnttab_handle *xgt = CONTAINER_OF(ah, *xgt, tc_ah);
+    return xentoolcore__restrict_by_dup2_null(xgt->fd);
+}
+
 xengnttab_handle *xengnttab_open(xentoollog_logger *logger, unsigned open_flags)
 {
     xengnttab_handle *xgt = malloc(sizeof(*xgt));
@@ -32,6 +38,9 @@ xengnttab_handle *xengnttab_open(xentoollog_logger *logger, unsigned open_flags)
     xgt->fd = -1;
     xgt->logger = logger;
     xgt->logger_tofree  = NULL;
+
+    xgt->tc_ah.restrict_callback = all_restrict_cb;
+    xentoolcore__register_active_handle(&xgt->tc_ah);
 
     if (!xgt->logger) {
         xgt->logger = xgt->logger_tofree =
@@ -46,6 +55,7 @@ xengnttab_handle *xengnttab_open(xentoollog_logger *logger, unsigned open_flags)
     return xgt;
 
 err:
+    xentoolcore__deregister_active_handle(&xgt->tc_ah);
     osdep_gnttab_close(xgt);
     xtl_logger_destroy(xgt->logger_tofree);
     free(xgt);
@@ -59,10 +69,16 @@ int xengnttab_close(xengnttab_handle *xgt)
     if ( !xgt )
         return 0;
 
+    xentoolcore__deregister_active_handle(&xgt->tc_ah);
     rc = osdep_gnttab_close(xgt);
     xtl_logger_destroy(xgt->logger_tofree);
     free(xgt);
     return rc;
+}
+
+int xengnttab_fd(xengnttab_handle *xgt)
+{
+    return xgt->fd;
 }
 
 int xengnttab_set_max_grants(xengnttab_handle *xgt, uint32_t count)
@@ -118,6 +134,31 @@ int xengnttab_grant_copy(xengnttab_handle *xgt,
                          xengnttab_grant_copy_segment_t *segs)
 {
     return osdep_gnttab_grant_copy(xgt, count, segs);
+}
+
+int xengnttab_dmabuf_exp_from_refs(xengnttab_handle *xgt, uint32_t domid,
+                                   uint32_t flags, uint32_t count,
+                                   const uint32_t *refs, uint32_t *fd)
+{
+    return osdep_gnttab_dmabuf_exp_from_refs(xgt, domid, flags, count,
+                                             refs, fd);
+}
+
+int xengnttab_dmabuf_exp_wait_released(xengnttab_handle *xgt, uint32_t fd,
+                                       uint32_t wait_to_ms)
+{
+    return osdep_gnttab_dmabuf_exp_wait_released(xgt, fd, wait_to_ms);
+}
+
+int xengnttab_dmabuf_imp_to_refs(xengnttab_handle *xgt, uint32_t domid,
+                                 uint32_t fd, uint32_t count, uint32_t *refs)
+{
+    return osdep_gnttab_dmabuf_imp_to_refs(xgt, domid, fd, count, refs);
+}
+
+int xengnttab_dmabuf_imp_release(xengnttab_handle *xgt, uint32_t fd)
+{
+    return osdep_gnttab_dmabuf_imp_release(xgt, fd);
 }
 /*
  * Local variables:

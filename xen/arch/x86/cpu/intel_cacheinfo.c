@@ -7,7 +7,6 @@
  *	Andi Kleen / Andreas Herrmann	: CPUID4 emulation on AMD.
  */
 
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
@@ -81,8 +80,6 @@ static const struct _cache_table cache_table[] =
 	{ 0x00, 0, 0}
 };
 
-unsigned short			num_cache_leaves;
-
 int cpuid4_cache_lookup(int index, struct cpuid4_info *this_leaf)
 {
 	union _cpuid4_leaf_eax 	eax;
@@ -119,12 +116,12 @@ static int find_num_cache_leaves(void)
 	return i;
 }
 
-unsigned int init_intel_cacheinfo(struct cpuinfo_x86 *c)
+void init_intel_cacheinfo(struct cpuinfo_x86 *c)
 {
 	unsigned int trace = 0, l1i = 0, l1d = 0, l2 = 0, l3 = 0; /* Cache sizes */
 	unsigned int new_l1d = 0, new_l1i = 0; /* Cache sizes from cpuid(4) */
 	unsigned int new_l2 = 0, new_l3 = 0, i; /* Cache sizes from cpuid(4) */
-	unsigned int l2_id = 0, l3_id = 0, num_threads_sharing, index_msb;
+	static unsigned int num_cache_leaves;
 
 	if (c->cpuid_level > 3) {
 		static int is_initialized;
@@ -157,15 +154,9 @@ unsigned int init_intel_cacheinfo(struct cpuinfo_x86 *c)
 					break;
 				    case 2:
 					new_l2 = this_leaf.size/1024;
-					num_threads_sharing = 1 + this_leaf.eax.split.num_threads_sharing;
-					index_msb = get_count_order(num_threads_sharing);
-					l2_id = c->apicid >> index_msb;
 					break;
 				    case 3:
 					new_l3 = this_leaf.size/1024;
-					num_threads_sharing = 1 + this_leaf.eax.split.num_threads_sharing;
-					index_msb = get_count_order(num_threads_sharing);
-					l3_id = c->apicid >> index_msb;
 					break;
 				    default:
 					break;
@@ -177,7 +168,9 @@ unsigned int init_intel_cacheinfo(struct cpuinfo_x86 *c)
 	 * Don't use cpuid2 if cpuid4 is supported. For P4, we use cpuid2 for
 	 * trace cache
 	 */
-	if ((num_cache_leaves == 0 || c->x86 == 15) && c->cpuid_level > 1) {
+	if ((num_cache_leaves == 0 || c->x86 == 15) && c->cpuid_level > 1 &&
+	    c->x86_vendor != X86_VENDOR_SHANGHAI)
+	{
 		/* supports eax=2  call */
 		int i, j, n;
 		int regs[4];
@@ -269,6 +262,4 @@ unsigned int init_intel_cacheinfo(struct cpuinfo_x86 *c)
 	}
 
 	c->x86_cache_size = l3 ? l3 : (l2 ? l2 : (l1i+l1d));
-
-	return l2;
 }

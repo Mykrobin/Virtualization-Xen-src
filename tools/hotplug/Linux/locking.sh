@@ -41,25 +41,31 @@ claim_lock()
     # from chiark-utils, except using flock.  It has the benefit of
     # it being possible to safely remove the lockfile when done.
     # See below for a correctness proof.
-    local rightfile
+    local stat
     while true; do
         eval "exec $_lockfd<>$_lockfile"
         flock -x $_lockfd || return $?
-        # We can't just stat /dev/stdin or /proc/self/fd/$_lockfd or
-        # use bash's test -ef because those all go through what is
-        # actually a synthetic symlink in /proc and we aren't
-        # guaranteed that our stat(2) won't lose the race with an
-        # rm(1) between reading the synthetic link and traversing the
-        # file system to find the inum.  Perl is very fast so use that.
-        rightfile=$( perl -e '
-            open STDIN, "<&'$_lockfd'" or die $!;
-            my $fd_inum = (stat STDIN)[1]; die $! unless defined $fd_inum;
-            my $file_inum = (stat $ARGV[0])[1];
-            print "y\n" if $fd_inum eq $file_inum;
-                             ' "$_lockfile" )
-        if [ x$rightfile = xy ]; then break; fi
-	# Some versions of bash appear to be buggy if the same
-	# $_lockfile is opened repeatedly. Close the current fd here.
+        # Although /dev/stdin (i.e. /proc/self/fd/0) looks like a symlink,
+        # stat(2) bypasses the synthetic symlink and directly accesses the
+        # underlying open-file.  So this works correctly even if the file
+        # has been renamed or unlinked.  stat will output two lines like:
+        # WW.XXX
+        # YY.ZZZ
+        # which need to be separated and compared.
+        if stat=$( stat -L -c '%D.%i' /dev/stdin $_lockfile 0<&$_lockfd 2>/dev/null )
+        then
+            local file_stat
+            local fd_stat
+
+            # match on literal newline
+            fd_stat=${stat%
+*}
+            file_stat=${stat#*
+}
+            if [ "$fd_stat" = "$file_stat" ] ; then break; fi
+        fi
+        # Some versions of bash appear to be buggy if the same
+        # $_lockfile is opened repeatedly. Close the current fd here.
         eval "exec $_lockfd<&-"
     done
 }

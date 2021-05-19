@@ -1,21 +1,21 @@
 #ifndef __ASM_DOMAIN_H__
 #define __ASM_DOMAIN_H__
 
-#include <xen/config.h>
 #include <xen/cache.h>
-#include <xen/sched.h>
+#include <xen/timer.h>
 #include <asm/page.h>
 #include <asm/p2m.h>
 #include <asm/vfp.h>
 #include <asm/mmio.h>
 #include <asm/gic.h>
+#include <asm/vgic.h>
+#include <asm/vpl011.h>
 #include <public/hvm/params.h>
-#include <xen/serial.h>
 
 struct hvm_domain
 {
     uint64_t              params[HVM_NR_PARAMS];
-}  __cacheline_aligned;
+};
 
 #ifdef CONFIG_ARM_64
 enum domain_type {
@@ -29,15 +29,15 @@ enum domain_type {
 #define is_64bit_domain(d) (0)
 #endif
 
-extern int dom0_11_mapping;
-#define is_domain_direct_mapped(d) ((d) == hardware_domain && dom0_11_mapping)
+/* The hardware domain has always its memory direct mapped. */
+#define is_domain_direct_mapped(d) ((d) == hardware_domain)
 
 struct vtimer {
-        struct vcpu *v;
-        int irq;
-        struct timer timer;
-        uint32_t ctl;
-        uint64_t cval;
+    struct vcpu *v;
+    int irq;
+    struct timer timer;
+    uint32_t ctl;
+    uint64_t cval;
 };
 
 struct arch_domain
@@ -49,69 +49,18 @@ struct arch_domain
     /* Virtual MMU */
     struct p2m_domain p2m;
 
-    struct hvm_domain hvm_domain;
-    gfn_t *grant_shared_gfn;
-    gfn_t *grant_status_gfn;
+    struct hvm_domain hvm;
 
     struct vmmio vmmio;
 
     /* Continuable domain_relinquish_resources(). */
-    enum {
-        RELMEM_not_started,
-        RELMEM_xen,
-        RELMEM_page,
-        RELMEM_mapping,
-        RELMEM_done,
-    } relmem;
+    unsigned int rel_priv;
 
-    /* Virtual CPUID */
-    uint32_t vpidr;
-
-    struct {
-        uint64_t offset;
-    } phys_timer_base;
     struct {
         uint64_t offset;
     } virt_timer_base;
 
-    struct {
-        /* Version of the vGIC */
-        enum gic_version version;
-        /* GIC HW version specific vGIC driver handler */
-        const struct vgic_ops *handler;
-        /*
-         * Covers access to other members of this struct _except_ for
-         * shared_irqs where each member contains its own locking.
-         *
-         * If both class of lock is required then this lock must be
-         * taken first. If multiple rank locks are required (including
-         * the per-vcpu private_irqs rank) then they must be taken in
-         * rank order.
-         */
-        spinlock_t lock;
-        uint32_t ctlr;
-        int nr_spis; /* Number of SPIs */
-        unsigned long *allocated_irqs; /* bitmap of IRQs allocated */
-        struct vgic_irq_rank *shared_irqs;
-        /*
-         * SPIs are domain global, SGIs and PPIs are per-VCPU and stored in
-         * struct arch_vcpu.
-         */
-        struct pending_irq *pending_irqs;
-        /* Base address for guest GIC */
-        paddr_t dbase; /* Distributor base address */
-#ifdef CONFIG_HAS_GICV3
-        /* GIC V3 addressing */
-        /* List of contiguous occupied by the redistributors */
-        struct vgic_rdist_region {
-            paddr_t base;                   /* Base address */
-            paddr_t size;                   /* Size */
-            unsigned int first_cpu;         /* First CPU handled */
-        } *rdist_regions;
-        int nr_regions;                     /* Number of rdist regions */
-        uint32_t rdist_stride;              /* Re-Distributor stride */
-#endif
-    } vgic;
+    struct vgic_dist vgic;
 
     struct vuart {
 #define VUART_BUF_SIZE 128
@@ -132,6 +81,14 @@ struct arch_domain
     struct {
         uint8_t privileged_call_enabled : 1;
     } monitor;
+
+#ifdef CONFIG_SBSA_VUART_CONSOLE
+    struct vpl011 vpl011;
+#endif
+
+#ifdef CONFIG_TEE
+    void *tee;
+#endif
 }  __cacheline_aligned;
 
 struct arch_vcpu
@@ -198,13 +155,17 @@ struct arch_vcpu
 #endif
 
     /* Control Registers */
-    uint32_t actlr, sctlr;
+    register_t sctlr;
+    uint32_t actlr;
     uint32_t cpacr;
 
     uint32_t contextidr;
     register_t tpidr_el0;
     register_t tpidr_el1;
     register_t tpidrro_el0;
+
+    /* HYP configuration */
+    register_t hcr_el2;
 
     uint32_t teecr, teehbr; /* ThumbEE, 32-bit guests only */
 #ifdef CONFIG_ARM_32
@@ -226,49 +187,28 @@ struct arch_vcpu
     union gic_state_data gic;
     uint64_t lr_mask;
 
-    struct {
-        /*
-         * SGIs and PPIs are per-VCPU, SPIs are domain global and in
-         * struct arch_domain.
-         */
-        struct pending_irq pending_irqs[32];
-        struct vgic_irq_rank *private_irqs;
-
-        /* This list is ordered by IRQ priority and it is used to keep
-         * track of the IRQs that the VGIC injected into the guest.
-         * Depending on the availability of LR registers, the IRQs might
-         * actually be in an LR, and therefore injected into the guest,
-         * or queued in gic.lr_pending.
-         * As soon as an IRQ is EOI'd by the guest and removed from the
-         * corresponding LR it is also removed from this list. */
-        struct list_head inflight_irqs;
-        /* lr_pending is used to queue IRQs (struct pending_irq) that the
-         * vgic tried to inject in the guest (calling gic_set_guest_irq) but
-         * no LRs were available at the time.
-         * As soon as an LR is freed we remove the first IRQ from this
-         * list and write it to the LR register.
-         * lr_pending is a subset of vgic.inflight_irqs. */
-        struct list_head lr_pending;
-        spinlock_t lock;
-
-        /* GICv3: redistributor base and flags for this vCPU */
-        paddr_t rdist_base;
-#define VGIC_V3_RDIST_LAST  (1 << 0)        /* last vCPU of the rdist */
-        uint8_t flags;
-    } vgic;
+    struct vgic_cpu vgic;
 
     /* Timer registers  */
     uint32_t cntkctl;
 
     struct vtimer phys_timer;
     struct vtimer virt_timer;
-    bool_t vtimer_initialized;
+    bool   vtimer_initialized;
+
+    /*
+     * The full P2M may require some cleaning (e.g when emulation
+     * set/way). As the action can take a long time, it requires
+     * preemption. It is deferred until we return to guest, where we can
+     * more easily check for softirqs and preempt the vCPU safely.
+     */
+    bool need_flush_to_ram;
+
 }  __cacheline_aligned;
 
 void vcpu_show_execution_state(struct vcpu *);
 void vcpu_show_registers(const struct vcpu *);
-
-unsigned int domain_max_vcpus(const struct domain *);
+void vcpu_switch_to_aarch64_mode(struct vcpu *);
 
 /*
  * Due to the restriction of GICv3, the number of vCPUs in AFF0 is
@@ -319,6 +259,10 @@ static inline void free_vcpu_guest_context(struct vcpu_guest_context *vgc)
 }
 
 static inline void arch_vcpu_block(struct vcpu *v) {}
+
+#define arch_vm_assist_valid_mask(d) (1UL << VMASST_TYPE_runstate_update_flag)
+
+#define has_vpci(d)    ({ (void)(d); false; })
 
 #endif /* __ASM_DOMAIN_H__ */
 

@@ -28,20 +28,20 @@ extern const struct platform_desc _splatform[], _eplatform[];
 static const struct platform_desc *platform;
 
 
-static bool_t __init platform_is_compatible(const struct platform_desc *plat)
+static bool __init platform_is_compatible(const struct platform_desc *plat)
 {
     const char *const *compat;
 
     if ( !plat->compatible )
-        return 0;
+        return false;
 
     for ( compat = plat->compatible; *compat; compat++ )
     {
         if ( dt_machine_is_compatible(*compat) )
-            return 1;
+            return true;
     }
 
-    return 0;
+    return false;
 }
 
 void __init platform_init(void)
@@ -71,7 +71,7 @@ void __init platform_init(void)
         res = platform->init();
 
     if ( res )
-        panic("Unable to initialize the platform");
+        panic("Unable to initialize the platform\n");
 }
 
 int __init platform_init_time(void)
@@ -95,7 +95,7 @@ int __init platform_specific_mapping(struct domain *d)
 }
 
 #ifdef CONFIG_ARM_32
-int __init platform_cpu_up(int cpu)
+int platform_cpu_up(int cpu)
 {
     if ( psci_ver )
         return call_psci_cpu_on(cpu);
@@ -127,17 +127,25 @@ void platform_poweroff(void)
         platform->poweroff();
 }
 
-bool_t platform_has_quirk(uint32_t quirk)
+bool platform_smc(struct cpu_user_regs *regs)
+{
+    if ( likely(platform && platform->smc) )
+        return platform->smc(regs);
+
+    return false;
+}
+
+bool platform_has_quirk(uint32_t quirk)
 {
     uint32_t quirks = 0;
 
     if ( platform && platform->quirks )
         quirks = platform->quirks();
 
-    return !!(quirks & quirk);
+    return (quirks & quirk);
 }
 
-bool_t platform_device_is_blacklisted(const struct dt_device_node *node)
+bool platform_device_is_blacklisted(const struct dt_device_node *node)
 {
     const struct dt_device_match *blacklist = NULL;
 
@@ -145,6 +153,11 @@ bool_t platform_device_is_blacklisted(const struct dt_device_node *node)
         blacklist = platform->blacklist_dev;
 
     return (dt_match_node(blacklist, node) != NULL);
+}
+
+unsigned int arch_get_dma_bitsize(void)
+{
+    return ( platform && platform->dma_bitsize ) ? platform->dma_bitsize : 32;
 }
 
 /*

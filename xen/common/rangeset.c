@@ -304,6 +304,98 @@ int rangeset_report_ranges(
     return rc;
 }
 
+int rangeset_claim_range(struct rangeset *r, unsigned long size,
+                         unsigned long *s)
+{
+    struct range *prev, *next;
+    unsigned long start = 0;
+
+    write_lock(&r->lock);
+
+    for ( prev = NULL, next = first_range(r);
+          next;
+          prev = next, next = next_range(r, next) )
+    {
+        if ( (next->s - start) >= size )
+            goto insert;
+
+        if ( next->e == ~0UL )
+            goto out;
+
+        start = next->e + 1;
+    }
+
+    if ( (~0UL - start) + 1 >= size )
+        goto insert;
+
+ out:
+    write_unlock(&r->lock);
+    return -ENOSPC;
+
+ insert:
+    if ( unlikely(!prev) )
+    {
+        next = alloc_range(r);
+        if ( !next )
+        {
+            write_unlock(&r->lock);
+            return -ENOMEM;
+        }
+
+        next->s = start;
+        next->e = start + size - 1;
+        insert_range(r, prev, next);
+    }
+    else
+        prev->e += size;
+
+    write_unlock(&r->lock);
+
+    *s = start;
+
+    return 0;
+}
+
+int rangeset_consume_ranges(struct rangeset *r,
+                            int (*cb)(unsigned long s, unsigned long e, void *,
+                                      unsigned long *c),
+                            void *ctxt)
+{
+    int rc = 0;
+
+    write_lock(&r->lock);
+    while ( !rangeset_is_empty(r) )
+    {
+        unsigned long consumed = 0;
+        struct range *x = first_range(r);
+
+        rc = cb(x->s, x->e, ctxt, &consumed);
+
+        ASSERT(consumed <= x->e - x->s + 1);
+        x->s += consumed;
+        if ( x->s > x->e )
+            destroy_range(r, x);
+
+        if ( rc )
+            break;
+    }
+    write_unlock(&r->lock);
+
+    return rc;
+}
+
+static int merge(unsigned long s, unsigned long e, void *data)
+{
+    struct rangeset *r = data;
+
+    return rangeset_add_range(r, s, e);
+}
+
+int rangeset_merge(struct rangeset *r1, struct rangeset *r2)
+{
+    return rangeset_report_ranges(r2, 0, ~0ul, merge, r1);
+}
+
 int rangeset_add_singleton(
     struct rangeset *r, unsigned long s)
 {
@@ -402,6 +494,9 @@ void rangeset_domain_destroy(
 {
     struct rangeset *r;
 
+    if ( list_head_is_null(&d->rangesets) )
+        return;
+
     while ( !list_empty(&d->rangesets) )
     {
         r = list_entry(d->rangesets.next, struct rangeset, rangeset_list);
@@ -446,8 +541,7 @@ static void print_limit(struct rangeset *r, unsigned long s)
     printk((r->flags & RANGESETF_prettyprint_hex) ? "%lx" : "%lu", s);
 }
 
-void rangeset_printk(
-    struct rangeset *r)
+static void rangeset_printk(struct rangeset *r)
 {
     int nr_printed = 0;
     struct range *x;

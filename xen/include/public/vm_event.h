@@ -29,7 +29,7 @@
 
 #include "xen.h"
 
-#define VM_EVENT_INTERFACE_VERSION 0x00000002
+#define VM_EVENT_INTERFACE_VERSION 0x00000007
 
 #if defined(__XEN__) || defined(__XEN_TOOLS__)
 
@@ -105,6 +105,28 @@
  * if any of those flags are set, only those will be honored).
  */
 #define VM_EVENT_FLAG_SET_EMUL_INSN_DATA (1 << 9)
+/*
+ * Have a one-shot VM_EVENT_REASON_INTERRUPT event sent for the first
+ * interrupt pending after resuming the VCPU.
+ */
+#define VM_EVENT_FLAG_GET_NEXT_INTERRUPT (1 << 10)
+/*
+ * Execute fast singlestepping on vm_event response.
+ * Requires the vCPU to be paused already (synchronous events only).
+ *
+ * On a response requires setting the  p2midx field of fast_singlestep to which
+ * Xen will switch the vCPU to on the occurance of the first singlestep, after
+ * which singlestep gets automatically disabled.
+ */
+#define VM_EVENT_FLAG_FAST_SINGLESTEP    (1 << 11)
+/*
+ * Set if the event comes from a nested VM and thus npt_base is valid.
+ */
+#define VM_EVENT_FLAG_NESTED_P2M         (1 << 12)
+/*
+ * Reset the vmtrace buffer (if vmtrace is enabled)
+ */
+#define VM_EVENT_FLAG_RESET_VMTRACE      (1 << 13)
 
 /*
  * Reasons for the vm event request
@@ -139,12 +161,24 @@
  *       These kinds of events will be filtered out in future versions.
  */
 #define VM_EVENT_REASON_PRIVILEGED_CALL         11
+/* An interrupt has been delivered. */
+#define VM_EVENT_REASON_INTERRUPT               12
+/* A descriptor table register was accessed. */
+#define VM_EVENT_REASON_DESCRIPTOR_ACCESS       13
+/* Current instruction is not implemented by the emulator */
+#define VM_EVENT_REASON_EMUL_UNIMPLEMENTED      14
 
 /* Supported values for the vm_event_write_ctrlreg index. */
 #define VM_EVENT_X86_CR0    0
 #define VM_EVENT_X86_CR3    1
 #define VM_EVENT_X86_CR4    2
 #define VM_EVENT_X86_XCR0   3
+
+/* The limit field is right-shifted by 12 bits if .ar.g is set. */
+struct vm_event_x86_selector_reg {
+    uint32_t limit  :    20;
+    uint32_t ar     :    12;
+};
 
 /*
  * Using custom vCPU structs (i.e. not hvm_hw_cpu) for both x86 and ARM
@@ -168,6 +202,7 @@ struct vm_event_regs_x86 {
     uint64_t r14;
     uint64_t r15;
     uint64_t rflags;
+    uint64_t dr6;
     uint64_t dr7;
     uint64_t rip;
     uint64_t cr0;
@@ -180,10 +215,46 @@ struct vm_event_regs_x86 {
     uint64_t msr_efer;
     uint64_t msr_star;
     uint64_t msr_lstar;
+    uint64_t gdtr_base;
+
+    /*
+     * When VM_EVENT_FLAG_NESTED_P2M is set, this event comes from a nested
+     * VM.  npt_base is the guest physical address of the L1 hypervisors
+     * EPT/NPT tables for the nested guest.
+     *
+     * All bits outside of architectural address ranges are reserved for
+     * future metadata.
+     */
+    uint64_t npt_base;
+
+    /*
+     * Current position in the vmtrace buffer, or ~0 if vmtrace is not active.
+     *
+     * For Intel Processor Trace, it is the upper half of MSR_RTIT_OUTPUT_MASK.
+     */
+    uint64_t vmtrace_pos;
+
+    uint32_t cs_base;
+    uint32_t ss_base;
+    uint32_t ds_base;
+    uint32_t es_base;
     uint64_t fs_base;
     uint64_t gs_base;
-    uint32_t cs_arbytes;
-    uint32_t _pad;
+    struct vm_event_x86_selector_reg cs;
+    struct vm_event_x86_selector_reg ss;
+    struct vm_event_x86_selector_reg ds;
+    struct vm_event_x86_selector_reg es;
+    struct vm_event_x86_selector_reg fs;
+    struct vm_event_x86_selector_reg gs;
+    uint64_t shadow_gs;
+    uint16_t gdtr_limit;
+    uint16_t cs_sel;
+    uint16_t ss_sel;
+    uint16_t ds_sel;
+    uint16_t es_sel;
+    uint16_t fs_sel;
+    uint16_t gs_sel;
+    uint16_t _pad;
 };
 
 /*
@@ -240,8 +311,13 @@ struct vm_event_singlestep {
     uint64_t gfn;
 };
 
+struct vm_event_fast_singlestep {
+    uint16_t p2midx;
+};
+
 struct vm_event_debug {
     uint64_t gfn;
+    uint64_t pending_dbg; /* Behaves like the VT-x PENDING_DBG field. */
     uint32_t insn_length;
     uint8_t type;        /* HVMOP_TRAP_* */
     uint8_t _pad[3];
@@ -249,7 +325,26 @@ struct vm_event_debug {
 
 struct vm_event_mov_to_msr {
     uint64_t msr;
-    uint64_t value;
+    uint64_t new_value;
+    uint64_t old_value;
+};
+
+#define VM_EVENT_DESC_IDTR           1
+#define VM_EVENT_DESC_GDTR           2
+#define VM_EVENT_DESC_LDTR           3
+#define VM_EVENT_DESC_TR             4
+
+struct vm_event_desc_access {
+    union {
+        struct {
+            uint32_t instr_info;         /* VMX: VMCS Instruction-Information */
+            uint32_t _pad1;
+            uint64_t exit_qualification; /* VMX: VMCS Exit Qualification */
+        } vmx;
+    } arch;
+    uint8_t descriptor;                  /* VM_EVENT_DESC_* */
+    uint8_t is_write;
+    uint8_t _pad[6];
 };
 
 struct vm_event_cpuid {
@@ -257,6 +352,14 @@ struct vm_event_cpuid {
     uint32_t leaf;
     uint32_t subleaf;
     uint32_t _pad;
+};
+
+struct vm_event_interrupt_x86 {
+    uint32_t vector;
+    uint32_t type;
+    uint32_t error_code;
+    uint32_t _pad;
+    uint64_t cr2;
 };
 
 #define MEM_PAGING_DROP_PAGE       (1 << 0)
@@ -298,10 +401,15 @@ typedef struct vm_event_st {
         struct vm_event_mem_access            mem_access;
         struct vm_event_write_ctrlreg         write_ctrlreg;
         struct vm_event_mov_to_msr            mov_to_msr;
+        struct vm_event_desc_access           desc_access;
         struct vm_event_singlestep            singlestep;
+        struct vm_event_fast_singlestep       fast_singlestep;
         struct vm_event_debug                 software_breakpoint;
         struct vm_event_debug                 debug_exception;
         struct vm_event_cpuid                 cpuid;
+        union {
+            struct vm_event_interrupt_x86     x86;
+        } interrupt;
     } u;
 
     union {

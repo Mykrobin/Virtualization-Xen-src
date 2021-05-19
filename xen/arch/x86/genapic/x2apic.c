@@ -16,10 +16,10 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/cpu.h>
 #include <xen/cpumask.h>
+#include <xen/param.h>
 #include <asm/apicdef.h>
 #include <asm/genapic.h>
 #include <asm/apic.h>
@@ -37,10 +37,6 @@ static DEFINE_PER_CPU(cpumask_var_t, scratch_mask);
 static inline u32 x2apic_cluster(unsigned int cpu)
 {
     return per_cpu(cpu_2_logical_apicid, cpu) >> 16;
-}
-
-static void init_apic_ldr_x2apic_phys(void)
-{
 }
 
 static void init_apic_ldr_x2apic_cluster(void)
@@ -107,12 +103,12 @@ static void send_IPI_mask_x2apic_phys(const cpumask_t *cpumask, int vector)
      * CPU is seen by notified remote CPUs. The WRMSR contained within
      * apic_icr_write() can otherwise be executed early.
      * 
-     * The reason mb() is sufficient here is subtle: the register arguments
+     * The reason smp_mb() is sufficient here is subtle: the register arguments
      * to WRMSR must depend on a memory read executed after the barrier. This
      * is guaranteed by cpu_physical_id(), which reads from a global array (and
      * so cannot be hoisted above the barrier even by a clever compiler).
      */
-    mb();
+    smp_mb();
 
     local_irq_save(flags);
 
@@ -136,7 +132,7 @@ static void send_IPI_mask_x2apic_cluster(const cpumask_t *cpumask, int vector)
     const cpumask_t *cluster_cpus;
     unsigned long flags;
 
-    mb(); /* See above for an explanation. */
+    smp_mb(); /* See above for an explanation. */
 
     local_irq_save(flags);
 
@@ -155,7 +151,7 @@ static void send_IPI_mask_x2apic_cluster(const cpumask_t *cpumask, int vector)
             msr_content |= per_cpu(cpu_2_logical_apicid, cpu);
         }
 
-        BUG_ON(!msr_content);
+        BUG_ON(!(msr_content & 0xffff));
         msr_content = (msr_content << 32) | APIC_DM_FIXED |
                       APIC_DEST_LOGICAL | vector;
         apic_wrmsr(APIC_ICR, msr_content);
@@ -164,26 +160,24 @@ static void send_IPI_mask_x2apic_cluster(const cpumask_t *cpumask, int vector)
     local_irq_restore(flags);
 }
 
-static const struct genapic apic_x2apic_phys = {
+static const struct genapic __initconstrel apic_x2apic_phys = {
     APIC_INIT("x2apic_phys", NULL),
     .int_delivery_mode = dest_Fixed,
     .int_dest_mode = 0 /* physical delivery */,
-    .init_apic_ldr = init_apic_ldr_x2apic_phys,
+    .init_apic_ldr = init_apic_ldr_phys,
     .clustered_apic_check = clustered_apic_check_x2apic,
-    .target_cpus = target_cpus_all,
     .vector_allocation_cpumask = vector_allocation_cpumask_phys,
     .cpu_mask_to_apicid = cpu_mask_to_apicid_phys,
     .send_IPI_mask = send_IPI_mask_x2apic_phys,
     .send_IPI_self = send_IPI_self_x2apic
 };
 
-static const struct genapic apic_x2apic_cluster = {
+static const struct genapic __initconstrel apic_x2apic_cluster = {
     APIC_INIT("x2apic_cluster", NULL),
     .int_delivery_mode = dest_LowestPrio,
     .int_dest_mode = 1 /* logical delivery */,
     .init_apic_ldr = init_apic_ldr_x2apic_cluster,
     .clustered_apic_check = clustered_apic_check_x2apic,
-    .target_cpus = target_cpus_all,
     .vector_allocation_cpumask = vector_allocation_cpumask_x2apic_cluster,
     .cpu_mask_to_apicid = cpu_mask_to_apicid_x2apic_cluster,
     .send_IPI_mask = send_IPI_mask_x2apic_cluster,
@@ -233,7 +227,30 @@ boolean_param("x2apic_phys", x2apic_phys);
 const struct genapic *__init apic_x2apic_probe(void)
 {
     if ( x2apic_phys < 0 )
-        x2apic_phys = !!(acpi_gbl_FADT.flags & ACPI_FADT_APIC_PHYSICAL);
+    {
+        /*
+         * Force physical mode if there's no interrupt remapping support: The
+         * ID in clustered mode requires a 32 bit destination field due to
+         * the usage of the high 16 bits to hold the cluster ID.
+         */
+        x2apic_phys = !iommu_intremap ||
+                      (acpi_gbl_FADT.flags & ACPI_FADT_APIC_PHYSICAL);
+    }
+    else if ( !x2apic_phys )
+        switch ( iommu_intremap )
+        {
+        case iommu_intremap_off:
+        case iommu_intremap_restricted:
+            printk("WARNING: x2APIC cluster mode is not supported %s interrupt remapping -"
+                   " forcing phys mode\n",
+                   iommu_intremap == iommu_intremap_off ? "without"
+                                                        : "with restricted");
+            x2apic_phys = true;
+            break;
+
+        case iommu_intremap_full:
+            break;
+        }
 
     if ( x2apic_phys )
         return &apic_x2apic_phys;
@@ -257,11 +274,11 @@ void __init check_x2apic_preenabled(void)
         return;
 
     /* Check whether x2apic mode was already enabled by the BIOS. */
-    rdmsr(MSR_IA32_APICBASE, lo, hi);
-    if ( lo & MSR_IA32_APICBASE_EXTD )
+    rdmsr(MSR_APIC_BASE, lo, hi);
+    if ( lo & APIC_BASE_EXTD )
     {
         printk("x2APIC mode is already enabled by BIOS.\n");
         x2apic_enabled = 1;
-        genapic = apic_x2apic_probe();
+        genapic = *apic_x2apic_probe();
     }
 }

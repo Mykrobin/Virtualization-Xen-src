@@ -13,12 +13,11 @@
  *  Mikael Pettersson : PM converted to driver model. Disable/enable API.
  */
 
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
+#include <xen/param.h>
 #include <xen/irq.h>
-#include <xen/nmi.h>
 #include <xen/delay.h>
 #include <xen/time.h>
 #include <xen/sched.h>
@@ -30,6 +29,7 @@
 #include <asm/mc146818rtc.h>
 #include <asm/msr.h>
 #include <asm/mpspec.h>
+#include <asm/nmi.h>
 #include <asm/debugger.h>
 #include <asm/div64.h>
 #include <asm/apic.h>
@@ -38,44 +38,54 @@ unsigned int nmi_watchdog = NMI_NONE;
 static unsigned int nmi_hz = HZ;
 static unsigned int nmi_perfctr_msr;	/* the MSR to reset in NMI handler */
 static unsigned int nmi_p4_cccr_val;
+static unsigned int nmi_p6_event_width;
 static DEFINE_PER_CPU(struct timer, nmi_timer);
 static DEFINE_PER_CPU(unsigned int, nmi_timer_ticks);
 
 /* opt_watchdog: If true, run a watchdog NMI on each processor. */
-bool_t __initdata opt_watchdog = 0;
+bool __initdata opt_watchdog;
 
 /* watchdog_force: If true, process unknown NMIs when running the watchdog. */
-bool_t watchdog_force = 0;
+bool watchdog_force;
 
-static void __init parse_watchdog(char *s)
+static int __init parse_watchdog(const char *s)
 {
     if ( !*s )
     {
-        opt_watchdog = 1;
-        return;
+        opt_watchdog = true;
+        return 0;
     }
 
-    switch ( parse_bool(s) )
+    switch ( parse_bool(s, NULL) )
     {
     case 0:
-        opt_watchdog = 0;
-        return;
+        opt_watchdog = false;
+        return 0;
     case 1:
-        opt_watchdog = 1;
-        return;
+        opt_watchdog = true;
+        return 0;
     }
 
     if ( !strcmp(s, "force") )
-        watchdog_force = opt_watchdog = 1;
+        watchdog_force = opt_watchdog = true;
+    else
+        return -EINVAL;
+
+    return 0;
 }
 custom_param("watchdog", parse_watchdog);
 
 /* opt_watchdog_timeout: Number of seconds to wait before panic. */
 static unsigned int opt_watchdog_timeout = 5;
-static void parse_watchdog_timeout(char * s)
+
+static int parse_watchdog_timeout(const char *s)
 {
-    opt_watchdog_timeout = simple_strtoull(s, NULL, 0);
+    const char *q;
+
+    opt_watchdog_timeout = simple_strtoull(s, &q, 0);
     opt_watchdog = !!opt_watchdog_timeout;
+
+    return *q ? -EINVAL : 0;
 }
 custom_param("watchdog_timeout", parse_watchdog_timeout);
 
@@ -115,12 +125,14 @@ int nmi_active;
 #define P6_EVNTSEL_USR		(1 << 16)
 #define P6_EVENT_CPU_CLOCKS_NOT_HALTED	 0x79
 #define CORE_EVENT_CPU_CLOCKS_NOT_HALTED 0x3c
-#define P6_EVENT_WIDTH          32
+/* Bit width of IA32_PMCx MSRs is reported using CPUID.0AH:EAX[23:16]. */
+#define P6_EVENT_WIDTH_MASK	(((1 << 8) - 1) << 16)
+#define P6_EVENT_WIDTH_MIN	32
 
 #define P4_ESCR_EVENT_SELECT(N)	((N)<<25)
 #define P4_CCCR_OVF_PMI0	(1<<26)
 #define P4_CCCR_OVF_PMI1	(1<<27)
-#define P4_CCCR_OVF		(1<<31)
+#define P4_CCCR_OVF		(1u << 31)
 #define P4_CCCR_THRESHOLD(N)	((N)<<20)
 #define P4_CCCR_COMPLEMENT	(1<<19)
 #define P4_CCCR_COMPARE		(1<<18)
@@ -139,33 +151,32 @@ int nmi_active;
 
 static void __init wait_for_nmis(void *p)
 {
-    unsigned int cpu = smp_processor_id();
-    unsigned int start_count = nmi_count(cpu);
+    unsigned int start_count = this_cpu(nmi_count);
     unsigned long ticks = 10 * 1000 * cpu_khz / nmi_hz;
     unsigned long s, e;
 
     s = rdtsc();
     do {
         cpu_relax();
-        if ( nmi_count(cpu) >= start_count + 2 )
+        if ( this_cpu(nmi_count) >= start_count + 2 )
             break;
         e = rdtsc();
     } while( e - s < ticks );
 }
 
-int __init check_nmi_watchdog (void)
+void __init check_nmi_watchdog(void)
 {
     static unsigned int __initdata prev_nmi_count[NR_CPUS];
     int cpu;
-    bool_t ok = 1;
+    bool ok = true;
 
     if ( nmi_watchdog == NMI_NONE )
-        return 0;
+        return;
 
     printk("Testing NMI watchdog on all CPUs:");
 
     for_each_online_cpu ( cpu )
-        prev_nmi_count[cpu] = nmi_count(cpu);
+        prev_nmi_count[cpu] = per_cpu(nmi_count, cpu);
 
     /*
      * Wait at most 10 ticks for 2 watchdog NMIs on each CPU.
@@ -176,10 +187,10 @@ int __init check_nmi_watchdog (void)
 
     for_each_online_cpu ( cpu )
     {
-        if ( nmi_count(cpu) - prev_nmi_count[cpu] < 2 )
+        if ( per_cpu(nmi_count, cpu) - prev_nmi_count[cpu] < 2 )
         {
             printk(" %d", cpu);
-            ok = 0;
+            ok = false;
         }
     }
 
@@ -197,7 +208,7 @@ int __init check_nmi_watchdog (void)
     if ( nmi_watchdog == NMI_LOCAL_APIC )
         nmi_hz = max(1ul, cpu_khz >> 20);
 
-    return 0;
+    return;
 }
 
 static void nmi_timer_fn(void *unused)
@@ -316,6 +327,15 @@ static void setup_p6_watchdog(unsigned counter)
 
     nmi_perfctr_msr = MSR_P6_PERFCTR(0);
 
+    if ( !nmi_p6_event_width && current_cpu_data.cpuid_level >= 0xa )
+        nmi_p6_event_width = MASK_EXTR(cpuid_eax(0xa), P6_EVENT_WIDTH_MASK);
+    if ( !nmi_p6_event_width )
+        nmi_p6_event_width = P6_EVENT_WIDTH_MIN;
+
+    if ( nmi_p6_event_width < P6_EVENT_WIDTH_MIN ||
+         nmi_p6_event_width > BITS_PER_LONG )
+        return;
+
     clear_msr_range(MSR_P6_EVNTSEL(0), 2);
     clear_msr_range(MSR_P6_PERFCTR(0), 2);
 
@@ -378,7 +398,7 @@ void setup_apic_nmi_watchdog(void)
     case X86_VENDOR_AMD:
         switch (boot_cpu_data.x86) {
         case 6:
-        case 0xf ... 0x17:
+        case 0xf ... 0x19:
             setup_k7_watchdog();
             break;
         default:
@@ -449,7 +469,7 @@ void watchdog_enable(void)
     atomic_dec(&watchdog_disable_count);
 }
 
-bool_t watchdog_enabled(void)
+bool watchdog_enabled(void)
 {
     return !atomic_read(&watchdog_disable_count);
 }
@@ -471,9 +491,9 @@ int __init watchdog_setup(void)
 }
 
 /* Returns false if this was not a watchdog NMI, true otherwise */
-bool_t nmi_watchdog_tick(const struct cpu_user_regs *regs)
+bool nmi_watchdog_tick(const struct cpu_user_regs *regs)
 {
-    bool_t watchdog_tick = 1;
+    bool watchdog_tick = true;
     unsigned int sum = this_cpu(nmi_timer_ticks);
 
     if ( (this_cpu(last_irq_sums) == sum) && watchdog_enabled() )
@@ -506,7 +526,7 @@ bool_t nmi_watchdog_tick(const struct cpu_user_regs *regs)
         {
             rdmsrl(MSR_P4_IQ_CCCR0, msr_content);
             if ( !(msr_content & P4_CCCR_OVF) )
-                watchdog_tick = 0;
+                watchdog_tick = false;
 
             /*
              * P4 quirks:
@@ -521,8 +541,8 @@ bool_t nmi_watchdog_tick(const struct cpu_user_regs *regs)
         else if ( nmi_perfctr_msr == MSR_P6_PERFCTR(0) )
         {
             rdmsrl(MSR_P6_PERFCTR(0), msr_content);
-            if ( msr_content & (1ULL << P6_EVENT_WIDTH) )
-                watchdog_tick = 0;
+            if ( msr_content & (1ULL << (nmi_p6_event_width - 1)) )
+                watchdog_tick = false;
 
             /*
              * Only P6 based Pentium M need to re-unmask the apic vector but
@@ -534,7 +554,7 @@ bool_t nmi_watchdog_tick(const struct cpu_user_regs *regs)
         {
             rdmsrl(MSR_K7_PERFCTR0, msr_content);
             if ( msr_content & (1ULL << K7_EVENT_WIDTH) )
-                watchdog_tick = 0;
+                watchdog_tick = false;
         }
         write_watchdog_counter(NULL);
     }
@@ -566,25 +586,24 @@ static void do_nmi_trigger(unsigned char key)
 
 static void do_nmi_stats(unsigned char key)
 {
-    int i;
-    struct domain *d;
-    struct vcpu *v;
+    const struct vcpu *v;
+    unsigned int cpu;
+    bool pend, mask;
 
     printk("CPU\tNMI\n");
-    for_each_online_cpu ( i )
-        printk("%3d\t%3d\n", i, nmi_count(i));
+    for_each_online_cpu ( cpu )
+        printk("%3u\t%3u\n", cpu, per_cpu(nmi_count, cpu));
 
-    if ( ((d = hardware_domain) == NULL) || (d->vcpu == NULL) ||
-         ((v = d->vcpu[0]) == NULL) )
+    if ( !hardware_domain || !(v = domain_vcpu(hardware_domain, 0)) )
         return;
 
-    i = v->async_exception_mask & (1 << VCPU_TRAP_NMI);
-    if ( v->nmi_pending || i )
-        printk("dom0 vpu0: NMI %s%s\n",
-               v->nmi_pending ? "pending " : "",
-               i ? "masked " : "");
+    pend = v->arch.nmi_pending;
+    mask = v->arch.async_exception_mask & (1 << VCPU_TRAP_NMI);
+    if ( pend || mask )
+        printk("%pv: NMI%s%s\n",
+               v, pend ? " pending" : "", mask ? " masked" : "");
     else
-        printk("dom0 vcpu0: NMI neither pending nor masked\n");
+        printk("%pv: NMI neither pending nor masked\n", v);
 }
 
 static __init int register_nmi_trigger(void)

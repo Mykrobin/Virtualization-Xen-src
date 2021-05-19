@@ -32,9 +32,18 @@
 #include <caml/fail.h>
 #include <caml/callback.h>
 
+#include <sys/mman.h>
 #include "mmap_stubs.h"
 
 #define GET_C_STRUCT(a) ((struct mmap_interface *) a)
+
+/*
+ * Bytes_val has been introduced by Ocaml 4.06.1. So define our own version
+ * if needed.
+ */
+#ifndef Bytes_val
+#define Bytes_val(x) ((unsigned char *) Bp_val(x))
+#endif
 
 CAMLprim value ml_interface_read(value ml_interface,
                                  value ml_buffer,
@@ -44,7 +53,7 @@ CAMLprim value ml_interface_read(value ml_interface,
 	CAMLlocal1(ml_result);
 
 	struct mmap_interface *interface = GET_C_STRUCT(ml_interface);
-	char *buffer = String_val(ml_buffer);
+	unsigned char *buffer = Bytes_val(ml_buffer);
 	int len = Int_val(ml_len);
 	int result;
 
@@ -103,7 +112,7 @@ CAMLprim value ml_interface_write(value ml_interface,
 	CAMLlocal1(ml_result);
 
 	struct mmap_interface *interface = GET_C_STRUCT(ml_interface);
-	char *buffer = String_val(ml_buffer);
+	const unsigned char *buffer = Bytes_val(ml_buffer);
 	int len = Int_val(ml_len);
 	int result;
 
@@ -158,6 +167,8 @@ CAMLprim value ml_interface_set_server_features(value interface, value v)
 {
 	CAMLparam2(interface, v);
 	struct xenstore_domain_interface *intf = GET_C_STRUCT(interface)->addr;
+	if (intf == (void*)MAP_FAILED)
+		caml_failwith("Interface closed");
 
 	intf->server_features = Int_val(v);
 

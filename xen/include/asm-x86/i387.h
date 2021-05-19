@@ -12,7 +12,6 @@
 #define __ASM_I386_I387_H
 
 #include <xen/types.h>
-#include <xen/percpu.h>
 
 /* Byte offset of the stored word size within the FXSAVE area/portion. */
 #define FPU_WORD_SIZE_OFFSET 511
@@ -34,5 +33,8 @@ void vcpu_save_fpu(struct vcpu *v);
 void save_fpu_enable(void);
 
 int vcpu_init_fpu(struct vcpu *v);
+struct xsave_struct;
+void vcpu_setup_fpu(struct vcpu *v, struct xsave_struct *xsave_area,
+                    const void *data, unsigned int fcw_default);
 void vcpu_destroy_fpu(struct vcpu *v);
 #endif /* __ASM_I386_I387_H */

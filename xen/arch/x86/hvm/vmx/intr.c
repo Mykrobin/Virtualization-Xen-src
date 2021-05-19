@@ -16,13 +16,13 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/trace.h>
 #include <xen/event.h>
+#include <asm/apicdef.h>
 #include <asm/current.h>
 #include <asm/cpufeature.h>
 #include <asm/processor.h>
@@ -37,6 +37,7 @@
 #include <asm/hvm/nestedhvm.h>
 #include <public/hvm/ioreq.h>
 #include <asm/hvm/trace.h>
+#include <asm/vm_event.h>
 
 /*
  * A few notes on virtual NMI and INTR delivery, and interactions with
@@ -106,9 +107,9 @@ static void vmx_enable_intr_window(struct vcpu *v, struct hvm_intack intack)
         ctl = CPU_BASED_VIRTUAL_NMI_PENDING;
     }
 
-    if ( !(v->arch.hvm_vmx.exec_control & ctl) )
+    if ( !(v->arch.hvm.vmx.exec_control & ctl) )
     {
-        v->arch.hvm_vmx.exec_control |= ctl;
+        v->arch.hvm.vmx.exec_control |= ctl;
         vmx_update_cpu_exec_control(v);
     }
 }
@@ -137,7 +138,7 @@ static void vmx_enable_intr_window(struct vcpu *v, struct hvm_intack intack)
  *  Unfortunately, interrupt blocking in L2 won't work with simple
  *  intr_window_open (which depends on L2's IF). To solve this,
  *  the following algorithm can be used:
- *   v->arch.hvm_vmx.exec_control.VIRTUAL_INTR_PENDING now denotes
+ *   v->arch.hvm.vmx.exec_control.VIRTUAL_INTR_PENDING now denotes
  *   only L0 control, physical control may be different from it.
  *       - if in L1, it behaves normally, intr window is written
  *         to physical control as it is
@@ -188,13 +189,13 @@ static int nvmx_intr_intercept(struct vcpu *v, struct hvm_intack intack)
 
     if ( nestedhvm_vcpu_in_guestmode(v) )
     {
+        ctrl = get_vvmcs(v, PIN_BASED_VM_EXEC_CONTROL);
+        if ( !(ctrl & PIN_BASED_EXT_INTR_MASK) )
+            return 0;
+
         if ( intack.source == hvm_intsrc_pic ||
                  intack.source == hvm_intsrc_lapic )
         {
-            ctrl = get_vvmcs(v, PIN_BASED_VM_EXEC_CONTROL);
-            if ( !(ctrl & PIN_BASED_EXT_INTR_MASK) )
-                return 0;
-
             vmx_inject_extint(intack.vector, intack.source);
 
             ctrl = get_vvmcs(v, VM_EXIT_CONTROLS);
@@ -208,14 +209,31 @@ static int nvmx_intr_intercept(struct vcpu *v, struct hvm_intack intack)
                 if ( unlikely(intack.source != hvm_intsrc_none) )
                     vmx_enable_intr_window(v, intack);
             }
-            else
+            else if ( !cpu_has_vmx_virtual_intr_delivery )
                 vmx_enable_intr_window(v, intack);
 
+            return 1;
+        }
+        else if ( intack.source == hvm_intsrc_vector )
+        {
+            vmx_inject_extint(intack.vector, intack.source);
             return 1;
         }
     }
 
     return 0;
+}
+
+void vmx_sync_exit_bitmap(struct vcpu *v)
+{
+    const unsigned int n = ARRAY_SIZE(v->arch.hvm.vmx.eoi_exit_bitmap);
+    unsigned int i;
+
+    while ( (i = find_first_bit(&v->arch.hvm.vmx.eoi_exitmap_changed, n)) < n )
+    {
+        clear_bit(i, &v->arch.hvm.vmx.eoi_exitmap_changed);
+        __vmwrite(EOI_EXIT_BITMAP(i), v->arch.hvm.vmx.eoi_exit_bitmap[i]);
+    }
 }
 
 void vmx_intr_assist(void)
@@ -224,19 +242,28 @@ void vmx_intr_assist(void)
     struct vcpu *v = current;
     unsigned int tpr_threshold = 0;
     enum hvm_intblk intblk;
-    int pt_vector = -1;
+    int pt_vector;
 
     /* Block event injection when single step with MTF. */
-    if ( unlikely(v->arch.hvm_vcpu.single_step) )
+    if ( unlikely(v->arch.hvm.single_step) )
     {
-        v->arch.hvm_vmx.exec_control |= CPU_BASED_MONITOR_TRAP_FLAG;
+        v->arch.hvm.vmx.exec_control |= CPU_BASED_MONITOR_TRAP_FLAG;
         vmx_update_cpu_exec_control(v);
         return;
     }
 
+    /* Block event injection while handling a sync vm_event. */
+    if ( unlikely(v->arch.vm_event) && v->arch.vm_event->sync_event )
+        return;
+
+#ifdef CONFIG_MEM_SHARING
+    /* Block event injection for VM fork if requested */
+    if ( unlikely(v->domain->arch.hvm.mem_sharing.block_interrupts) )
+        return;
+#endif
+
     /* Crank the handle on interrupt state. */
-    if ( is_hvm_vcpu(v) )
-        pt_vector = pt_update_irq(v);
+    pt_vector = pt_update_irq(v);
 
     do {
         unsigned long intr_info;
@@ -302,22 +329,65 @@ void vmx_intr_assist(void)
     }
     else if ( intack.source == hvm_intsrc_mce )
     {
-        hvm_inject_hw_exception(TRAP_machine_check, HVM_DELIVER_NO_ERROR_CODE);
+        hvm_inject_hw_exception(TRAP_machine_check, X86_EVENT_NO_EC);
     }
     else if ( cpu_has_vmx_virtual_intr_delivery &&
               intack.source != hvm_intsrc_pic &&
               intack.source != hvm_intsrc_vector )
     {
         unsigned long status;
-        unsigned int i, n;
 
        /*
-        * Set eoi_exit_bitmap for periodic timer interrup to cause EOI-induced VM
-        * exit, then pending periodic time interrups have the chance to be injected
-        * for compensation
+        * intack.vector is the highest priority vector. So we set eoi_exit_bitmap
+        * for intack.vector - give a chance to post periodic time interrupts when
+        * periodic time interrupts become the highest one
         */
-        if (pt_vector != -1)
-            vmx_set_eoi_exit_bitmap(v, pt_vector);
+        if ( pt_vector != -1 )
+        {
+#ifndef NDEBUG
+            /*
+             * We assert that intack.vector is the highest priority vector for
+             * only an interrupt from vlapic can reach this point and the
+             * highest vector is chosen in hvm_vcpu_has_pending_irq().
+             * But, in fact, the assertion failed sometimes. It is suspected
+             * that PIR is not synced to vIRR which makes pt_vector is left in
+             * PIR. In order to verify this suspicion, dump some information
+             * when the assertion fails.
+             */
+            if ( unlikely(intack.vector < pt_vector) )
+            {
+                const struct vlapic *vlapic;
+                const struct pi_desc *pi_desc;
+                const uint32_t *word;
+                unsigned int i;
+
+                printk(XENLOG_ERR "%pv: intack: %u:%02x pt: %02x\n",
+                       current, intack.source, intack.vector, pt_vector);
+
+                vlapic = vcpu_vlapic(v);
+                if ( vlapic && vlapic->regs )
+                {
+                    word = (const void *)&vlapic->regs->data[APIC_IRR];
+                    printk(XENLOG_ERR "vIRR:");
+                    for ( i = X86_NR_VECTORS / 32; i-- ; )
+                        printk(" %08x", word[i*4]);
+                    printk("\n");
+                }
+
+                pi_desc = &v->arch.hvm.vmx.pi_desc;
+                if ( pi_desc )
+                {
+                    word = (const void *)&pi_desc->pir;
+                    printk(XENLOG_ERR " PIR:");
+                    for ( i = X86_NR_VECTORS / 32; i-- ; )
+                        printk(" %08x", word[i]);
+                    printk("\n");
+                }
+            }
+#endif
+            ASSERT(intack.vector >= pt_vector);
+            vmx_set_eoi_exit_bitmap(v, intack.vector);
+        }
 
         /* we need update the RVI field */
         __vmread(GUEST_INTR_STATUS, &status);
@@ -326,13 +396,7 @@ void vmx_intr_assist(void)
                     intack.vector;
         __vmwrite(GUEST_INTR_STATUS, status);
 
-        n = ARRAY_SIZE(v->arch.hvm_vmx.eoi_exit_bitmap);
-        while ( (i = find_first_bit(&v->arch.hvm_vmx.eoi_exitmap_changed,
-                                    n)) < n )
-        {
-            clear_bit(i, &v->arch.hvm_vmx.eoi_exitmap_changed);
-            __vmwrite(EOI_EXIT_BITMAP(i), v->arch.hvm_vmx.eoi_exit_bitmap[i]);
-        }
+        vmx_sync_exit_bitmap(v);
 
         pt_intr_post(v, intack);
     }

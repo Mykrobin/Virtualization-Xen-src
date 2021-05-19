@@ -36,13 +36,20 @@
 #define MCG_TES_P               (1ULL<<11) /* Intel specific */
 #define MCG_EXT_CNT             16         /* Intel specific */
 #define MCG_SER_P               (1ULL<<24) /* Intel specific */
+#define MCG_LMCE_P              (1ULL<<27) /* Intel specific */
 /* Other bits are reserved */
 
 /* Bitfield of the MSR_IA32_MCG_STATUS register */
 #define MCG_STATUS_RIPV         0x0000000000000001ULL
 #define MCG_STATUS_EIPV         0x0000000000000002ULL
 #define MCG_STATUS_MCIP         0x0000000000000004ULL
-/* Bits 3-63 are reserved */
+#define MCG_STATUS_LMCE         0x0000000000000008ULL  /* Intel specific */
+/* Bits 3-63 are reserved on CPU not supporting LMCE */
+/* Bits 4-63 are reserved on CPU supporting LMCE */
+
+/* Bitfield of MSR_IA32_MCG_EXT_CTL register (Intel Specific) */
+#define MCG_EXT_CTL_LMCE_EN     (1ULL<<0)
+/* Other bits are reserved */
 
 /* Bitfield of MSR_K8_MCi_STATUS registers */
 /* MCA error code */
@@ -118,7 +125,7 @@ static inline int mcabanks_test(int bit, struct mca_banks* banks)
     return test_bit(bit, banks->bank_map);
 }
 
-struct mca_banks *mcabanks_alloc(void);
+struct mca_banks *mcabanks_alloc(unsigned int nr);
 void mcabanks_free(struct mca_banks *banks);
 extern struct mca_banks *mca_allbanks;
 
@@ -147,12 +154,12 @@ struct mca_error_handler
      * a seperate function to decode the corresponding actions
      * for the particular mca error later.
      */
-    int (*owned_error)(uint64_t status);
+    bool (*owned_error)(uint64_t status);
     void (*recovery_handler)(struct mca_binfo *binfo,
                     enum mce_result *result, const struct cpu_user_regs *regs);
 };
 
 /* Global variables */
-extern bool_t opt_mce;
+extern bool opt_mce;
 
 #endif /* X86_MCA_H */

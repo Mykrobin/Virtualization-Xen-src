@@ -1,6 +1,6 @@
 config 64BIT
 	bool
-	default ARCH != "arm32"
+	default "$(ARCH)" != "arm32"
 	help
 	  Say yes to build a 64-bit Xen
 	  Say no to build a 32-bit Xen
@@ -12,17 +12,15 @@ config ARM_32
 config ARM_64
 	def_bool y
 	depends on 64BIT
-	select HAS_ALTERNATIVE
-	select HAS_GICV3
+	select HAS_FAST_MULTIPLY
 
 config ARM
 	def_bool y
-	select HAS_ARM_HDLCD
+	select HAS_ALTERNATIVE
 	select HAS_DEVICE_TREE
-	select HAS_MEM_ACCESS
 	select HAS_PASSTHROUGH
 	select HAS_PDX
-	select VIDEO
+	select IOMMU_FORCE_PT_SHARE
 
 config ARCH_DEFCONFIG
 	string
@@ -34,16 +32,85 @@ menu "Architecture Features"
 source "arch/Kconfig"
 
 config ACPI
-	bool
-	prompt "ACPI (Advanced Configuration and Power Interface) Support" if EXPERT = "y"
+	bool "ACPI (Advanced Configuration and Power Interface) Support (UNSUPPORTED)" if UNSUPPORTED
 	depends on ARM_64
 	---help---
 
 	  Advanced Configuration and Power Interface (ACPI) support for Xen is
 	  an alternative to device tree on ARM64.
 
-config HAS_GICV3
-	bool
+config GICV3
+	bool "GICv3 driver"
+	depends on ARM_64 && !NEW_VGIC
+	default y
+	---help---
+
+	  Driver for the ARM Generic Interrupt Controller v3.
+	  If unsure, say Y
+
+config HAS_ITS
+        bool "GICv3 ITS MSI controller support (UNSUPPORTED)" if UNSUPPORTED
+        depends on GICV3 && !NEW_VGIC
+
+config HVM
+        def_bool y
+
+config NEW_VGIC
+	bool "Use new VGIC implementation"
+	---help---
+
+	This is an alternative implementation of the ARM GIC interrupt
+	controller emulation, based on the Linux/KVM VGIC. It has a better
+	design and fixes many shortcomings of the existing GIC emulation in
+	Xen. It will eventually replace the existing/old VGIC.
+	However at the moment it lacks support for Dom0 using the ITS for
+	using MSIs.
+	Say Y if you want to help testing this new code or if you experience
+	problems with the standard emulation.
+	At the moment this implementation is not security supported.
+
+config SBSA_VUART_CONSOLE
+	bool "Emulated SBSA UART console support"
+	default y
+	---help---
+	  Allows a guest to use SBSA Generic UART as a console. The
+	  SBSA Generic UART implements a subset of ARM PL011 UART.
+
+config ARM_SSBD
+	bool "Speculative Store Bypass Disable" if EXPERT
+	depends on HAS_ALTERNATIVE
+	default y
+	help
+	  This enables mitigation of bypassing of previous stores by speculative
+	  loads.
+
+	  If unsure, say Y.
+
+config HARDEN_BRANCH_PREDICTOR
+	bool "Harden the branch predictor against aliasing attacks" if EXPERT
+	default y
+	help
+	  Speculation attacks against some high-performance processors rely on
+	  being able to manipulate the branch predictor for a victim context by
+	  executing aliasing branches in the attacker context.  Such attacks
+	  can be partially mitigated against by clearing internal branch
+	  predictor state and limiting the prediction logic in some situations.
+
+	  This config option will take CPU-specific actions to harden the
+	  branch predictor against aliasing attacks and may rely on specific
+	  instruction sequences or control bits being set by the system
+	  firmware.
+
+	  If unsure, say Y.
+
+config TEE
+	bool "Enable TEE mediators support (UNSUPPORTED)" if UNSUPPORTED
+	default n
+	help
+	  This option enables generic TEE mediators support. It allows guests
+	  to access real TEE via one of TEE mediators implemented in XEN.
+
+source "arch/arm/tee/Kconfig"
 
 endmenu
 
@@ -117,6 +184,25 @@ config ARM64_ERRATUM_819472
 
 	  If unsure, say Y.
 
+config ARM64_ERRATUM_843419
+	bool "Cortex-A53: 843419: A load or store might access an incorrect address"
+	default y
+	depends on ARM_64
+	help
+	  This option adds an alternative code sequence to work around ARM
+	  erratum 843419 on Cortex-A53 parts up to r0p4.
+
+	  When executing in AArch64 state, a load or store instruction which uses
+	  the result of an ADRP instruction as a base register, or which uses a
+	  base register written by an instruction immediately after an ADRP to the
+	  same register, might access an incorrect address.
+
+	  The workaround enables the linker to check if the affected sequence is
+	  produced and it will fix it with an alternative not affected sequence
+	  that produce the same behavior.
+
+	  If unsure, say Y.
+
 config ARM64_ERRATUM_832075
 	bool "Cortex-A57: 832075: possible deadlock on mixing exclusive memory accesses with device loads"
 	default y
@@ -157,30 +243,56 @@ config ARM64_ERRATUM_834220
 
 	  If unsure, say Y.
 
-endmenu
-
-config HARDEN_BRANCH_PREDICTOR
-	bool "Harden the branch predictor against aliasing attacks" if EXPERT
+config ARM_ERRATUM_858921
+	bool "Cortex-A73: 858921: Possible wrong read value for CNTVCT or CNTPCT"
 	default y
 	help
-	  Speculation attacks against some high-performance processors rely on
-	  being able to manipulate the branch predictor for a victim context by
-	  executing aliasing branches in the attacker context.  Such attacks
-	  can be partially mitigated against by clearing internal branch
-	  predictor state and limiting the prediction logic in some situations.
+	  This option adds an alternative code sequence to work around ARM
+	  erratum 858921 on Cortex-A73 (all versions).
 
-	  This config option will take CPU-specific actions to harden the
-	  branch predictor against aliasing attacks and may rely on specific
-	  instruction sequences or control bits being set by the system
-	  firmware.
+	  Affected Cortex-A73 might return wrong read value for CNTVCT or CNTPCT
+	  when the counter crosses a 32bit boundary.
+
+	  The workaround involves performing the read twice, and to return
+	  one or the other value depending on whether a transition has taken place.
+	  Please note that this does not necessarily enable the workaround,
+	  as it depends on the alternative framework, which will only patch
+	  the kernel if an affected CPU is detected.
 
 	  If unsure, say Y.
+
+config ARM64_WORKAROUND_REPEAT_TLBI
+	bool
+
+config ARM64_ERRATUM_1286807
+	bool "Cortex-A76/Neoverse-N1: 1286807: Modification of the translation table for a virtual address might lead to read-after-read ordering violation"
+	default y
+	select ARM64_WORKAROUND_REPEAT_TLBI
+	depends on ARM_64
+	help
+	  This option adds a workaround for ARM Cortex-A76/Neoverse-N1 erratum 1286807.
+
+	  On the affected Cortex-A76/Neoverse-N1 cores (r0p0 to r3p0), if a virtual
+	  address for a cacheable mapping of a location is being
+	  accessed by a core while another core is remapping the virtual
+	  address to a new physical page using the recommended
+	  break-before-make sequence, then under very rare circumstances
+	  TLBI+DSB completes before a read using the translation being
+	  invalidated has been observed by other observers. The
+	  workaround repeats the TLBI+DSB operation for all the TLB flush
+	  operations.
+
+	  If unsure, say Y.
+
+endmenu
 
 config ARM64_HARDEN_BRANCH_PREDICTOR
     def_bool y if ARM_64 && HARDEN_BRANCH_PREDICTOR
 
 config ARM32_HARDEN_BRANCH_PREDICTOR
     def_bool y if ARM_32 && HARDEN_BRANCH_PREDICTOR
+
+source "arch/arm/platforms/Kconfig"
 
 source "common/Kconfig"
 

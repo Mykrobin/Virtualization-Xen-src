@@ -11,6 +11,7 @@
 #include <xen/nodemask.h>
 #include <xen/numa.h>
 #include <xen/keyhandler.h>
+#include <xen/param.h>
 #include <xen/time.h>
 #include <xen/smp.h>
 #include <xen/pfn.h>
@@ -18,7 +19,7 @@
 #include <xen/sched.h>
 #include <xen/softirq.h>
 
-static int numa_setup(char *s);
+static int numa_setup(const char *s);
 custom_param("numa", numa_setup);
 
 #ifndef Dprintk
@@ -49,7 +50,7 @@ cpumask_t node_to_cpumask[MAX_NUMNODES] __read_mostly;
 
 nodemask_t __read_mostly node_online_map = { { [0] = 1UL } };
 
-bool_t numa_off = 0;
+bool numa_off;
 s8 acpi_numa = 0;
 
 int srat_disabled(void)
@@ -99,15 +100,7 @@ static int __init populate_memnodemap(const struct node *nodes,
 static int __init allocate_cachealigned_memnodemap(void)
 {
     unsigned long size = PFN_UP(memnodemapsize * sizeof(*memnodemap));
-    unsigned long mfn = alloc_boot_pages(size, 1);
-
-    if ( !mfn )
-    {
-        printk(KERN_ERR
-               "NUMA: Unable to allocate Memory to Node hash map\n");
-        memnodemapsize = 0;
-        return -1;
-    }
+    unsigned long mfn = mfn_x(alloc_boot_pages(size, 1));
 
     memnodemap = mfn_to_virt(mfn);
     mfn <<= PAGE_SHIFT;
@@ -200,9 +193,7 @@ void __init numa_init_array(void)
         if ( cpu_to_node[i] != NUMA_NO_NODE )
             continue;
         numa_set_node(i, rr);
-        rr = next_node(rr, node_online_map);
-        if ( rr == MAX_NUMNODES )
-            rr = first_node(node_online_map);
+        rr = cycle_node(rr, node_online_map);
     }
 }
 
@@ -299,30 +290,32 @@ void numa_set_node(int cpu, nodeid_t node)
 }
 
 /* [numa=off] */
-static __init int numa_setup(char *opt) 
-{ 
+static __init int numa_setup(const char *opt)
+{
     if ( !strncmp(opt,"off",3) )
-        numa_off = 1;
-    if ( !strncmp(opt,"on",2) )
-        numa_off = 0;
+        numa_off = true;
+    else if ( !strncmp(opt,"on",2) )
+        numa_off = false;
 #ifdef CONFIG_NUMA_EMU
-    if ( !strncmp(opt, "fake=", 5) )
+    else if ( !strncmp(opt, "fake=", 5) )
     {
-        numa_off = 0;
+        numa_off = false;
         numa_fake = simple_strtoul(opt+5,NULL,0);
         if ( numa_fake >= MAX_NUMNODES )
             numa_fake = MAX_NUMNODES;
     }
 #endif
 #ifdef CONFIG_ACPI_NUMA
-    if ( !strncmp(opt,"noacpi",6) )
+    else if ( !strncmp(opt,"noacpi",6) )
     {
-        numa_off = 0;
+        numa_off = false;
         acpi_numa = -1;
     }
 #endif
+    else
+        return -EINVAL;
 
-    return 1;
+    return 0;
 } 
 
 /*
@@ -363,7 +356,7 @@ unsigned int __init arch_get_dma_bitsize(void)
              !(node_start_pfn(node) >> (32 - PAGE_SHIFT)) )
             break;
     if ( node >= MAX_NUMNODES )
-        panic("No node with memory below 4Gb");
+        panic("No node with memory below 4Gb\n");
 
     /*
      * Try to not reserve the whole node's memory for DMA, but dividing
@@ -378,14 +371,13 @@ static void dump_numa(unsigned char key)
 {
     s_time_t now = NOW();
     unsigned int i, j, n;
-    int err;
     struct domain *d;
     struct page_info *page;
     unsigned int page_num_node[MAX_NUMNODES];
     const struct vnuma_info *vnuma;
 
-    printk("'%c' pressed -> dumping numa info (now-0x%X:%08X)\n", key,
-           (u32)(now>>32), (u32)now);
+    printk("'%c' pressed -> dumping numa info (now = %"PRI_stime")\n", key,
+           now);
 
     for_each_online_node ( i )
     {
@@ -428,7 +420,7 @@ static void dump_numa(unsigned char key)
     {
         process_pending_softirqs();
 
-        printk("Domain %u (total: %u):\n", d->domain_id, d->tot_pages);
+        printk("Domain %u (total: %u):\n", d->domain_id, domain_tot_pages(d));
 
         for_each_online_node ( i )
             page_num_node[i] = 0;
@@ -436,7 +428,7 @@ static void dump_numa(unsigned char key)
         spin_lock(&d->page_alloc_lock);
         page_list_for_each(page, &d->page_list)
         {
-            i = phys_to_nid((paddr_t)page_to_mfn(page) << PAGE_SHIFT);
+            i = phys_to_nid(page_to_maddr(page));
             page_num_node[i]++;
         }
         spin_unlock(&d->page_alloc_lock);
@@ -460,12 +452,10 @@ static void dump_numa(unsigned char key)
         {
             unsigned int start_cpu = ~0U;
 
-            err = snprintf(keyhandler_scratch, 12, "%3u",
-                    vnuma->vnode_to_pnode[i]);
-            if ( err < 0 || vnuma->vnode_to_pnode[i] == NUMA_NO_NODE )
-                strlcpy(keyhandler_scratch, "???", sizeof(keyhandler_scratch));
-
-            printk("       %3u: pnode %s,", i, keyhandler_scratch);
+            if ( vnuma->vnode_to_pnode[i] == NUMA_NO_NODE )
+                printk("       %3u: pnode ???,", i);
+            else
+                printk("       %3u: pnode %3u,", i, vnuma->vnode_to_pnode[i]);
 
             printk(" vcpus ");
 

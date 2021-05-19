@@ -1,4 +1,5 @@
 #include <xen/init.h>
+#include <xen/param.h>
 #include <asm/msr.h>
 
 /*
@@ -17,7 +18,7 @@ int8_t __read_mostly cpu_has_tsx_ctrl = -1;
 
 static int __init parse_tsx(const char *s)
 {
-    int rc = 0, val = parse_bool(s);
+    int rc = 0, val = parse_bool(s, NULL);
 
     if ( val >= 0 )
         opt_tsx = val;

@@ -19,36 +19,16 @@
 #ifndef ASM_TRAP_H
 #define ASM_TRAP_H
 
-struct softirq_trap {
-	struct domain *domain;  /* domain to inject trap */
-	struct vcpu *vcpu;	/* vcpu to inject trap */
-	int processor;		/* physical cpu to inject trap */
-};
-
-struct cpu_user_regs;
-
-void async_exception_cleanup(struct vcpu *);
- 
-/**
- * guest_has_trap_callback
- *
- * returns true (non-zero) if guest registered a trap handler
- */
-extern int guest_has_trap_callback(struct domain *d, uint16_t vcpuid,
-				unsigned int trap_nr);
-
-/**
- * send_guest_trap
- *
- * delivers trap to guest analogous to send_guest_global_virq
- * return 0 on successful delivery
- */
-extern int send_guest_trap(struct domain *d, uint16_t vcpuid,
-				unsigned int trap_nr);
-
-uint32_t guest_io_read(unsigned int port, unsigned int bytes,
-                       struct domain *);
-void guest_io_write(unsigned int port, unsigned int bytes, uint32_t data,
-                    struct domain *);
+const char *trapstr(unsigned int trapnr);
 
 #endif /* ASM_TRAP_H */
+
+/*
+ * Local variables:
+ * mode: C
+ * c-file-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

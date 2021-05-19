@@ -3,14 +3,12 @@
 
 /* (C) 1992, 1993 Linus Torvalds, (C) 1997 Ingo Molnar */
 
-#include <xen/config.h>
 #include <asm/atomic.h>
 #include <asm/numa.h>
 #include <xen/cpumask.h>
+#include <xen/percpu.h>
 #include <xen/smp.h>
-#include <xen/hvm/irq.h>
-#include <irq_vectors.h>
-#include <asm/percpu.h>
+#include <asm/hvm/irq.h>
 
 extern unsigned int nr_irqs_gsi;
 extern unsigned int nr_irqs;
@@ -25,7 +23,7 @@ extern unsigned int nr_irqs;
 #define LEGACY_VECTOR(irq)          ((irq) + FIRST_LEGACY_VECTOR)
 
 typedef struct {
-    DECLARE_BITMAP(_bits,NR_VECTORS);
+    DECLARE_BITMAP(_bits, X86_NR_VECTORS);
 } vmask_t;
 
 struct irq_desc;
@@ -33,13 +31,24 @@ struct irq_desc;
 struct arch_irq_desc {
         s16 vector;                  /* vector itself is only 8 bits, */
         s16 old_vector;              /* but we use -1 for unassigned  */
+        /*
+         * Except for high priority interrupts @cpu_mask may have bits set for
+         * offline CPUs.  Consumers need to be careful to mask this down to
+         * online ones as necessary.  There is supposed to always be a non-
+         * empty intersection with cpu_online_map.
+         */
         cpumask_var_t cpu_mask;
         cpumask_var_t old_cpu_mask;
         cpumask_var_t pending_mask;
-        unsigned move_cleanup_count;
         vmask_t *used_vectors;
+        unsigned move_cleanup_count;
         u8 move_in_progress : 1;
         s8 used;
+        /*
+         * Weak reference to domain having permission over this IRQ (which can
+         * be different from the domain actually having the IRQ assigned)
+         */
+        domid_t creator_domid;
 };
 
 /* For use with irq_desc.arch.used */
@@ -49,10 +58,10 @@ struct arch_irq_desc {
 
 #define IRQ_VECTOR_UNASSIGNED (-1)
 
-typedef int vector_irq_t[NR_VECTORS];
+typedef int vector_irq_t[X86_NR_VECTORS];
 DECLARE_PER_CPU(vector_irq_t, vector_irq);
 
-extern bool_t opt_noirqbalance;
+extern bool opt_noirqbalance;
 
 #define OPT_IRQ_VECTOR_MAP_DEFAULT 0 /* Do the default thing  */
 #define OPT_IRQ_VECTOR_MAP_NONE    1 /* None */ 
@@ -69,12 +78,12 @@ DECLARE_PER_CPU(struct cpu_user_regs *, __irq_regs);
 
 static inline struct cpu_user_regs *get_irq_regs(void)
 {
-	return __get_cpu_var(__irq_regs);
+	return this_cpu(__irq_regs);
 }
 
 static inline struct cpu_user_regs *set_irq_regs(struct cpu_user_regs *new_regs)
 {
-	struct cpu_user_regs *old_regs, **pp_regs = &__get_cpu_var(__irq_regs);
+	struct cpu_user_regs *old_regs, **pp_regs = &this_cpu(__irq_regs);
 
 	old_regs = *pp_regs;
 	*pp_regs = new_regs;
@@ -109,7 +118,7 @@ void mask_8259A(void);
 void unmask_8259A(void);
 void init_8259A(int aeoi);
 void make_8259A_irq(unsigned int irq);
-bool_t bogus_8259A_irq(unsigned int irq);
+bool bogus_8259A_irq(unsigned int irq);
 int i8259A_suspend(void);
 int i8259A_resume(void);
 
@@ -146,10 +155,9 @@ int get_free_pirqs(struct domain *, unsigned int nr);
 void free_domain_pirqs(struct domain *d);
 int map_domain_emuirq_pirq(struct domain *d, int pirq, int irq);
 int unmap_domain_pirq_emuirq(struct domain *d, int pirq);
-bool_t hvm_domain_use_pirq(const struct domain *, const struct pirq *);
 
 /* Reset irq affinities to match the given CPU mask. */
-void fixup_irqs(const cpumask_t *mask, bool_t verbose);
+void fixup_irqs(const cpumask_t *mask, bool verbose);
 void fixup_eoi(void);
 
 int  init_irq_data(void);
@@ -157,7 +165,11 @@ int  init_irq_data(void);
 void clear_irq_vector(int irq);
 
 int irq_to_vector(int irq);
-int create_irq(nodeid_t node);
+/*
+ * If grant_access is set the current domain is given permissions over
+ * the created IRQ.
+ */
+int create_irq(nodeid_t node, bool grant_access);
 void destroy_irq(unsigned int irq);
 int assign_irq_vector(int irq, const cpumask_t *);
 
@@ -175,6 +187,7 @@ void move_masked_irq(struct irq_desc *);
 
 int bind_irq_vector(int irq, int vector, const cpumask_t *);
 
+void end_nonmaskable_irq(struct irq_desc *, uint8_t vector);
 void irq_set_affinity(struct irq_desc *, const cpumask_t *mask);
 
 int init_domain_irq_mapping(struct domain *);
@@ -189,16 +202,20 @@ void cleanup_domain_irq_mapping(struct domain *);
 #define domain_pirq_to_emuirq(d, pirq) pirq_field(d, pirq,              \
     arch.hvm.emuirq, IRQ_UNBOUND)
 #define domain_emuirq_to_pirq(d, emuirq) ({                             \
-    void *__ret = radix_tree_lookup(&(d)->arch.hvm_domain.emuirq_pirq,  \
-                                    emuirq);                            \
+    void *__ret = radix_tree_lookup(&(d)->arch.hvm.emuirq_pirq, emuirq);\
     __ret ? radix_tree_ptr_to_int(__ret) : IRQ_UNBOUND;                 \
 })
 #define IRQ_UNBOUND -1
 #define IRQ_PT -2
 #define IRQ_MSI_EMU -3
 
-bool_t cpu_has_pending_apic_eoi(void);
+bool cpu_has_pending_apic_eoi(void);
 
 static inline void arch_move_irqs(struct vcpu *v) { }
+
+struct msi_info;
+int allocate_and_map_gsi_pirq(struct domain *d, int index, int *pirq_p);
+int allocate_and_map_msi_pirq(struct domain *d, int index, int *pirq_p,
+                              int type, struct msi_info *msi);
 
 #endif /* _ASM_HW_IRQ_H */

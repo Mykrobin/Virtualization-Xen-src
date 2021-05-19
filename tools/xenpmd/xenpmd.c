@@ -32,6 +32,7 @@
  * passed to the guest when appropriate battery ports are read/written to.
  */
 
+#define _GNU_SOURCE         /* for asprintf() */
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -40,6 +41,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <xenstore.h>
+#include <assert.h>
 
 /* #define RUN_STANDALONE */
 #define RUN_IN_SIMULATE_MODE
@@ -100,7 +102,8 @@ FILE *get_next_battery_file(DIR *battery_dir,
 {
     FILE *file = 0;
     struct dirent *dir_entries;
-    char file_name[32];
+    char *file_name;
+    int ret;
     
     do 
     {
@@ -110,12 +113,16 @@ FILE *get_next_battery_file(DIR *battery_dir,
         if ( strlen(dir_entries->d_name) < 4 )
             continue;
         if ( battery_info_type == BIF ) 
-            snprintf(file_name, 32, BATTERY_INFO_FILE_PATH,
+            ret = asprintf(&file_name, BATTERY_INFO_FILE_PATH,
                      dir_entries->d_name);
         else 
-            snprintf(file_name, 32, BATTERY_STATE_FILE_PATH,
+            ret = asprintf(&file_name, BATTERY_STATE_FILE_PATH,
                      dir_entries->d_name);
+        /* This should not happen but is needed to pass gcc checks */
+        if (ret < 0)
+            continue;
         file = fopen(file_name, "r");
+        free(file_name);
     } while ( !file );
 
     return file;
@@ -186,25 +193,29 @@ void set_attribute_battery_info(char *attrib_name,
 
     if ( strstr(attrib_name, "model number") ) 
     {
-        strncpy(info->model_number, attrib_value, 32);
+        strncpy(info->model_number, attrib_value, 31);
+        info->model_number[31] = '\0';
         return;
     }
 
     if ( strstr(attrib_name, "serial number") ) 
     {
-        strncpy(info->serial_number, attrib_value, 32);
+        strncpy(info->serial_number, attrib_value, 31);
+        info->serial_number[31] = '\0';
         return;
     }
 
     if ( strstr(attrib_name, "battery type") ) 
     {
-        strncpy(info->battery_type, attrib_value, 32);
+        strncpy(info->battery_type, attrib_value, 31);
+        info->battery_type[31] = '\0';
         return;
     }
 
     if ( strstr(attrib_name, "OEM info") ) 
     {
-        strncpy(info->oem_info, attrib_value, 32);
+        strncpy(info->oem_info, attrib_value, 31);
+        info->oem_info[31] = '\0';
         return;
     }
 
@@ -341,18 +352,17 @@ void write_ulong_lsb_first(char *temp_val, unsigned long val)
 void write_battery_info_to_xenstore(struct battery_info *info)
 {
     char val[1024], string_info[256];
+    unsigned int len;
 
     xs_mkdir(xs, XBT_NULL, "/pm");
    
     memset(val, 0, 1024);
     memset(string_info, 0, 256);
     /* write 9 dwords (so 9*4) + length of 4 strings + 4 null terminators */
-    snprintf(val, 3, "%02x", 
-             (unsigned int)(9*4 +
-                            strlen(info->model_number) +
-                            strlen(info->serial_number) +
-                            strlen(info->battery_type) +
-                            strlen(info->oem_info) + 4));
+    len = 9 * 4 + strlen(info->model_number) + strlen(info->serial_number) +
+          strlen(info->battery_type) + strlen(info->oem_info) + 4;
+    assert(len < 255);
+    snprintf(val, 3, "%02x", len);
     write_ulong_lsb_first(val+2, info->present);
     write_ulong_lsb_first(val+10, info->design_capacity);
     write_ulong_lsb_first(val+18, info->last_full_capacity);
@@ -498,18 +508,18 @@ int main(int argc, char *argv[])
 #ifndef RUN_STANDALONE
     daemonize();
 #endif
-    xs = (struct xs_handle *)xs_daemon_open();
+    xs = xs_open(0);
     if ( xs == NULL ) 
         return -1;
 
     if ( write_one_time_battery_info() == 0 ) 
     {
-        xs_daemon_close(xs);
+        xs_close(xs);
         return -1;
     }
 
     wait_for_and_update_battery_status_request();
-    xs_daemon_close(xs);
+    xs_close(xs);
     return 0;
 }
 

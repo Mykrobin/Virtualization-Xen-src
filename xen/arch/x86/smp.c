@@ -8,20 +8,57 @@
  *	later.
  */
 
-#include <xen/config.h>
+#include <xen/cpu.h>
 #include <xen/irq.h>
 #include <xen/sched.h>
 #include <xen/delay.h>
 #include <xen/perfc.h>
 #include <xen/spinlock.h>
 #include <asm/current.h>
+#include <asm/guest.h>
 #include <asm/smp.h>
 #include <asm/mc146818rtc.h>
 #include <asm/flushtlb.h>
 #include <asm/hardirq.h>
 #include <asm/hpet.h>
 #include <asm/hvm/support.h>
+#include <asm/setup.h>
+#include <irq_vectors.h>
 #include <mach_apic.h>
+
+/* Helper functions to prepare APIC register values. */
+static unsigned int prepare_ICR(unsigned int shortcut, int vector)
+{
+    return APIC_DM_FIXED | shortcut | vector;
+}
+
+static unsigned int prepare_ICR2(unsigned int mask)
+{
+    return SET_xAPIC_DEST_FIELD(mask);
+}
+
+void apic_wait_icr_idle(void)
+{
+    if ( x2apic_enabled )
+        return;
+
+    while ( apic_read(APIC_ICR) & APIC_ICR_BUSY )
+        cpu_relax();
+}
+
+/* Helper for sending APIC IPIs using a shorthand. */
+static void send_IPI_shortcut(unsigned int shortcut, int vector,
+                              unsigned int dest)
+{
+    unsigned int cfg;
+
+    /* Wait for idle. */
+    apic_wait_icr_idle();
+    /* Prepare target chip field. */
+    cfg = prepare_ICR(shortcut, vector) | dest;
+    /* Send the IPI. The write to APIC_ICR fires this off. */
+    apic_write(APIC_ICR, cfg);
+}
 
 /*
  * send_IPI_mask(cpumask, vector): sends @vector IPI to CPUs in @cpumask,
@@ -30,12 +67,56 @@
 
 void send_IPI_mask(const cpumask_t *mask, int vector)
 {
-    genapic->send_IPI_mask(mask, vector);
+    bool cpus_locked = false;
+    cpumask_t *scratch = this_cpu(send_ipi_cpumask);
+
+    if ( in_irq() || in_mce_handler() || in_nmi_handler() )
+    {
+        /*
+         * When in IRQ, NMI or #MC context fallback to the old (and simpler)
+         * IPI sending routine, and avoid doing any performance optimizations
+         * (like using a shorthand) in order to avoid using the scratch
+         * cpumask which cannot be used in interrupt context.
+         */
+        alternative_vcall(genapic.send_IPI_mask, mask, vector);
+        return;
+    }
+
+    /*
+     * This can only be safely used when no CPU hotplug or unplug operations
+     * are taking place, there are no offline CPUs (unless those have been
+     * onlined and parked), there are no disabled CPUs and all possible CPUs in
+     * the system have been accounted for.
+     */
+    if ( system_state > SYS_STATE_smp_boot &&
+         !unaccounted_cpus && !disabled_cpus &&
+         /* NB: get_cpu_maps lock requires enabled interrupts. */
+         local_irq_is_enabled() && (cpus_locked = get_cpu_maps()) &&
+         (park_offline_cpus ||
+          cpumask_equal(&cpu_online_map, &cpu_present_map)) )
+        cpumask_or(scratch, mask, cpumask_of(smp_processor_id()));
+    else
+    {
+        if ( cpus_locked )
+        {
+            put_cpu_maps();
+            cpus_locked = false;
+        }
+        cpumask_clear(scratch);
+    }
+
+    if ( cpumask_equal(scratch, &cpu_online_map) )
+        send_IPI_shortcut(APIC_DEST_ALLBUT, vector, APIC_DEST_PHYSICAL);
+    else
+        alternative_vcall(genapic.send_IPI_mask, mask, vector);
+
+    if ( cpus_locked )
+        put_cpu_maps();
 }
 
 void send_IPI_self(int vector)
 {
-    genapic->send_IPI_self(vector);
+    alternative_vcall(genapic.send_IPI_self, vector);
 }
 
 /*
@@ -80,48 +161,10 @@ void send_IPI_self(int vector)
  * The following functions deal with sending IPIs between CPUs.
  */
 
-static inline int __prepare_ICR (unsigned int shortcut, int vector)
-{
-    return APIC_DM_FIXED | shortcut | vector;
-}
-
-static inline int __prepare_ICR2 (unsigned int mask)
-{
-    return SET_xAPIC_DEST_FIELD(mask);
-}
-
-void apic_wait_icr_idle(void)
-{
-    if ( x2apic_enabled )
-        return;
-
-    while ( apic_read( APIC_ICR ) & APIC_ICR_BUSY )
-        cpu_relax();
-}
-
-static void __default_send_IPI_shortcut(unsigned int shortcut, int vector,
-                                    unsigned int dest)
-{
-    unsigned int cfg;
-
-    /*
-     * Wait for idle.
-     */
-    apic_wait_icr_idle();
-
-    /*
-     * prepare target chip field
-     */
-    cfg = __prepare_ICR(shortcut, vector) | dest;
-    /*
-     * Send the IPI. The write to APIC_ICR fires this off.
-     */
-    apic_write_around(APIC_ICR, cfg);
-}
-
 void send_IPI_self_legacy(uint8_t vector)
 {
-    __default_send_IPI_shortcut(APIC_DEST_SELF, vector, APIC_DEST_PHYSICAL);
+    /* NMI continuation handling relies on using a shorthand here. */
+    send_IPI_shortcut(APIC_DEST_SELF, vector, APIC_DEST_PHYSICAL);
 }
 
 void send_IPI_mask_flat(const cpumask_t *cpumask, int vector)
@@ -145,18 +188,18 @@ void send_IPI_mask_flat(const cpumask_t *cpumask, int vector)
     /*
      * prepare target chip field
      */
-    cfg = __prepare_ICR2(mask);
-    apic_write_around(APIC_ICR2, cfg);
+    cfg = prepare_ICR2(mask);
+    apic_write(APIC_ICR2, cfg);
 
     /*
      * program the ICR
      */
-    cfg = __prepare_ICR(0, vector) | APIC_DEST_LOGICAL;
+    cfg = prepare_ICR(0, vector) | APIC_DEST_LOGICAL;
 
     /*
      * Send the IPI. The write to APIC_ICR fires this off.
      */
-    apic_write_around(APIC_ICR, cfg);
+    apic_write(APIC_ICR, cfg);
     
     local_irq_restore(flags);
 }
@@ -181,18 +224,18 @@ void send_IPI_mask_phys(const cpumask_t *mask, int vector)
         /*
          * prepare target chip field
          */
-        cfg = __prepare_ICR2(cpu_physical_id(query_cpu));
-        apic_write_around(APIC_ICR2, cfg);
+        cfg = prepare_ICR2(cpu_physical_id(query_cpu));
+        apic_write(APIC_ICR2, cfg);
 
         /*
          * program the ICR
          */
-        cfg = __prepare_ICR(0, vector) | APIC_DEST_PHYSICAL;
+        cfg = prepare_ICR(0, vector) | APIC_DEST_PHYSICAL;
 
         /*
          * Send the IPI. The write to APIC_ICR fires this off.
          */
-        apic_write_around(APIC_ICR, cfg);
+        apic_write(APIC_ICR, cfg);
     }
 
     local_irq_restore(flags);
@@ -208,9 +251,10 @@ void invalidate_interrupt(struct cpu_user_regs *regs)
     unsigned int flags = flush_flags;
     ack_APIC_irq();
     perfc_incr(ipis);
-    if ( __sync_local_execstate() )
+    if ( (flags & FLUSH_VCPU_STATE) && __sync_local_execstate() )
         flags &= ~(FLUSH_TLB | FLUSH_TLB_GLOBAL | FLUSH_ROOT_PGTBL);
-    flush_area_local(flush_va, flags);
+    if ( flags & ~(FLUSH_VCPU_STATE | FLUSH_ORDER_MASK) )
+        flush_area_local(flush_va, flags);
     cpumask_clear_cpu(smp_processor_id(), &flush_cpumask);
 }
 
@@ -220,12 +264,19 @@ void flush_area_mask(const cpumask_t *mask, const void *va, unsigned int flags)
 
     ASSERT(local_irq_is_enabled());
 
-    if ( cpumask_test_cpu(cpu, mask) )
+    if ( (flags & ~(FLUSH_VCPU_STATE | FLUSH_ORDER_MASK)) &&
+         cpumask_test_cpu(cpu, mask) )
         flags = flush_area_local(va, flags);
 
     if ( (flags & ~FLUSH_ORDER_MASK) &&
          !cpumask_subset(mask, cpumask_of(cpu)) )
     {
+        if ( cpu_has_hypervisor &&
+             !(flags & ~(FLUSH_TLB | FLUSH_TLB_GLOBAL | FLUSH_VA_VALID |
+                         FLUSH_ORDER_MASK)) &&
+             !hypervisor_flush_tlb(mask, va, flags) )
+            return;
+
         spin_lock(&flush_lock);
         cpumask_and(&flush_cpumask, mask, &cpu_online_map);
         cpumask_clear_cpu(cpu, &flush_cpumask);
@@ -301,23 +352,32 @@ static void stop_this_cpu(void *dummy)
  */
 void smp_send_stop(void)
 {
-    int timeout = 10;
+    unsigned int cpu = smp_processor_id();
 
-    local_irq_disable();
-    fixup_irqs(cpumask_of(smp_processor_id()), 0);
-    local_irq_enable();
+    if ( num_online_cpus() > 1 )
+    {
+        int timeout = 10;
 
-    smp_call_function(stop_this_cpu, NULL, 0);
+        local_irq_disable();
+        fixup_irqs(cpumask_of(cpu), 0);
+        local_irq_enable();
 
-    /* Wait 10ms for all other CPUs to go offline. */
-    while ( (num_online_cpus() > 1) && (timeout-- > 0) )
-        mdelay(1);
+        smp_call_function(stop_this_cpu, NULL, 0);
 
-    local_irq_disable();
-    disable_IO_APIC();
-    hpet_disable();
-    __stop_this_cpu();
-    local_irq_enable();
+        /* Wait 10ms for all other CPUs to go offline. */
+        while ( (num_online_cpus() > 1) && (timeout-- > 0) )
+            mdelay(1);
+    }
+
+    if ( cpu_online(cpu) )
+    {
+        local_irq_disable();
+        disable_IO_APIC();
+        hpet_disable();
+        __stop_this_cpu();
+        x2apic_enabled = (current_local_apic_mode() == APIC_MODE_X2APIC);
+        local_irq_enable();
+    }
 }
 
 void smp_send_nmi_allbutself(void)
@@ -337,4 +397,37 @@ void call_function_interrupt(struct cpu_user_regs *regs)
     ack_APIC_irq();
     perfc_incr(ipis);
     smp_call_function_interrupt();
+}
+
+long cpu_up_helper(void *data)
+{
+    unsigned int cpu = (unsigned long)data;
+    int ret = cpu_up(cpu);
+
+    /* Have one more go on EBUSY. */
+    if ( ret == -EBUSY )
+        ret = cpu_up(cpu);
+
+    if ( !ret && !opt_smt &&
+         cpu_data[cpu].compute_unit_id == INVALID_CUID &&
+         cpumask_weight(per_cpu(cpu_sibling_mask, cpu)) > 1 )
+    {
+        ret = cpu_down_helper(data);
+        if ( ret )
+            printk("Could not re-offline CPU%u (%d)\n", cpu, ret);
+        else
+            ret = -EPERM;
+    }
+
+    return ret;
+}
+
+long cpu_down_helper(void *data)
+{
+    int cpu = (unsigned long)data;
+    int ret = cpu_down(cpu);
+    /* Have one more go on EBUSY. */
+    if ( ret == -EBUSY )
+        ret = cpu_down(cpu);
+    return ret;
 }

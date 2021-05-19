@@ -1,21 +1,21 @@
 /******************************************************************************
  * x86_emulate.h
- * 
+ *
  * Generic x86 (32-bit and 64-bit) instruction decoder and emulator.
- * 
+ *
  * Copyright (c) 2005-2007 Keir Fraser
  * Copyright (c) 2005-2007 XenSource Inc.
- * 
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
@@ -23,11 +23,25 @@
 #ifndef __X86_EMULATE_H__
 #define __X86_EMULATE_H__
 
+#include <xen/lib/x86/cpuid.h>
+
 #define MAX_INST_LEN 15
+
+#if defined(__i386__)
+# define X86_NR_GPRS 8
+#elif defined(__x86_64__)
+# define X86_NR_GPRS 16
+#else
+# error Unknown compilation width
+#endif
 
 struct x86_emulate_ctxt;
 
-/* Comprehensive enumeration of x86 segment registers. */
+/*
+ * Comprehensive enumeration of x86 segment registers.  Various bits of code
+ * rely on this order (general purpose before system, tr at the beginning of
+ * system).
+ */
 enum x86_segment {
     /* General purpose.  Matches the SReg3 encoding in opcode/ModRM bytes. */
     x86_seg_es,
@@ -36,66 +50,78 @@ enum x86_segment {
     x86_seg_ds,
     x86_seg_fs,
     x86_seg_gs,
-    /* System. */
+    /* System: Valid to use for implicit table references. */
     x86_seg_tr,
     x86_seg_ldtr,
     x86_seg_gdtr,
     x86_seg_idtr,
-    /*
-     * Dummy: used to emulate direct processor accesses to management
-     * structures (TSS, GDT, LDT, IDT, etc.) which use linear addressing
-     * (no segment component) and bypass usual segment- and page-level
-     * protection checks.
-     */
+    /* No Segment: For accesses which are already linear. */
     x86_seg_none
 };
 
-#define is_x86_user_segment(seg) ((unsigned)(seg) <= x86_seg_gs)
+static inline bool is_x86_user_segment(enum x86_segment seg)
+{
+    unsigned int idx = seg;
 
-/* Classification of the types of software generated interrupts/exceptions. */
-enum x86_swint_type {
-    x86_swint_icebp, /* 0xf1 */
-    x86_swint_int3,  /* 0xcc */
-    x86_swint_into,  /* 0xce */
-    x86_swint_int,   /* 0xcd $n */
-};
+    return idx <= x86_seg_gs;
+}
+static inline bool is_x86_system_segment(enum x86_segment seg)
+{
+    return seg >= x86_seg_tr && seg < x86_seg_none;
+}
 
-/* How much help is required with software event injection? */
-enum x86_swint_emulation {
-    x86_swint_emulate_none, /* Hardware supports all software injection properly */
-    x86_swint_emulate_icebp,/* Help needed with `icebp` (0xf1) */
-    x86_swint_emulate_all,  /* Help needed with all software events */
-};
-
-/* 
- * Attribute for segment selector. This is a copy of bit 40:47 & 52:55 of the
- * segment descriptor. It happens to match the format of an AMD SVM VMCB.
+/*
+ * x86 event types. This enumeration is valid for:
+ *  Intel VMX: {VM_ENTRY,VM_EXIT,IDT_VECTORING}_INTR_INFO[10:8]
+ *  AMD SVM: eventinj[10:8] and exitintinfo[10:8] (types 0-4 only)
  */
-typedef union segment_attributes {
-    uint16_t bytes;
-    struct
-    {
-        uint16_t type:4;    /* 0;  Bit 40-43 */
-        uint16_t s:   1;    /* 4;  Bit 44 */
-        uint16_t dpl: 2;    /* 5;  Bit 45-46 */
-        uint16_t p:   1;    /* 7;  Bit 47 */
-        uint16_t avl: 1;    /* 8;  Bit 52 */
-        uint16_t l:   1;    /* 9;  Bit 53 */
-        uint16_t db:  1;    /* 10; Bit 54 */
-        uint16_t g:   1;    /* 11; Bit 55 */
-        uint16_t pad: 4;
-    } fields;
-} segment_attributes_t;
+enum x86_event_type {
+    X86_EVENTTYPE_EXT_INTR,         /* External interrupt */
+    X86_EVENTTYPE_NMI = 2,          /* NMI */
+    X86_EVENTTYPE_HW_EXCEPTION,     /* Hardware exception */
+    X86_EVENTTYPE_SW_INTERRUPT,     /* Software interrupt (CD nn) */
+    X86_EVENTTYPE_PRI_SW_EXCEPTION, /* ICEBP (F1) */
+    X86_EVENTTYPE_SW_EXCEPTION,     /* INT3 (CC), INTO (CE) */
+};
+#define X86_EVENT_NO_EC (-1)        /* No error code. */
+
+struct x86_event {
+    int16_t       vector;
+    uint8_t       type;         /* X86_EVENTTYPE_* */
+    uint8_t       insn_len;     /* Instruction length */
+    int32_t       error_code;   /* X86_EVENT_NO_EC if n/a */
+    unsigned long cr2;          /* Only for TRAP_page_fault h/w exception */
+};
 
 /*
  * Full state of a segment register (visible and hidden portions).
- * Again, this happens to match the format of an AMD SVM VMCB.
+ * Chosen to match the format of an AMD SVM VMCB.
  */
 struct segment_register {
     uint16_t   sel;
-    segment_attributes_t attr;
+    union {
+        uint16_t attr;
+        struct {
+            uint16_t type:4;
+            uint16_t s:   1;
+            uint16_t dpl: 2;
+            uint16_t p:   1;
+            uint16_t avl: 1;
+            uint16_t l:   1;
+            uint16_t db:  1;
+            uint16_t g:   1;
+            uint16_t pad: 4;
+        };
+    };
     uint32_t   limit;
     uint64_t   base;
+};
+
+struct x86_emul_fpu_aux {
+    unsigned long ip, dp;
+    uint16_t cs, ds;
+    unsigned int op:11;
+    unsigned int dval:1;
 };
 
 /*
@@ -109,8 +135,33 @@ struct segment_register {
 #define X86EMUL_EXCEPTION      2
  /* Retry the emulation for some reason. No state modified. */
 #define X86EMUL_RETRY          3
- /* (cmpxchg accessor): CMPXCHG failed. Maps to X86EMUL_RETRY in caller. */
-#define X86EMUL_CMPXCHG_FAILED 3
+ /*
+  * Operation fully done by one of the hooks:
+  * - validate(): operation completed (except common insn retire logic)
+  * - read_segment(x86_seg_tr, ...): bypass I/O bitmap access
+  * - read_io() / write_io(): bypass GPR update (non-string insns only)
+  * Undefined behavior when used anywhere else.
+  */
+#define X86EMUL_DONE           4
+ /*
+  * Current instruction is not implemented by the emulator.
+  * This value should only be returned by the core emulator when a valid
+  * opcode is found but the execution logic for that instruction is missing.
+  * It should NOT be returned by any of the x86_emulate_ops callbacks.
+  */
+#define X86EMUL_UNIMPLEMENTED  5
+ /*
+  * The current instruction's opcode is not valid.
+  * If this error code is returned by a function, an #UD trap should be
+  * raised by the final consumer of it.
+  *
+  * TODO: For the moment X86EMUL_UNRECOGNIZED and X86EMUL_UNIMPLEMENTED
+  * can be used interchangeably therefore raising an #UD trap is not
+  * strictly expected for now.
+ */
+#define X86EMUL_UNRECOGNIZED   X86EMUL_UNIMPLEMENTED
+ /* (cmpxchg accessor): CMPXCHG failed. */
+#define X86EMUL_CMPXCHG_FAILED 7
 
 /* FPU sub-types which may be requested via ->get_fpu(). */
 enum x86_emulate_fpu_type {
@@ -118,13 +169,51 @@ enum x86_emulate_fpu_type {
     X86EMUL_FPU_wait, /* WAIT/FWAIT instruction */
     X86EMUL_FPU_mmx, /* MMX instruction set (%mm0-%mm7) */
     X86EMUL_FPU_xmm, /* SSE instruction set (%xmm0-%xmm7/15) */
-    X86EMUL_FPU_ymm  /* AVX/XOP instruction set (%ymm0-%ymm7/15) */
+    X86EMUL_FPU_ymm, /* AVX/XOP instruction set (%ymm0-%ymm7/15) */
+    X86EMUL_FPU_opmask, /* AVX512 opmask instruction set (%k0-%k7) */
+    X86EMUL_FPU_zmm, /* AVX512 instruction set (%zmm0-%zmm7/31) */
+    /* This sentinel will never be passed to ->get_fpu(). */
+    X86EMUL_FPU_none
 };
+
+enum x86emul_cache_op {
+    x86emul_clflush,
+    x86emul_clflushopt,
+    x86emul_clwb,
+    x86emul_invd,
+    x86emul_wbinvd,
+    x86emul_wbnoinvd,
+};
+
+enum x86emul_tlb_op {
+    x86emul_invlpg,
+    x86emul_invlpga,
+    x86emul_invpcid,
+};
+
+static inline unsigned int x86emul_invpcid_aux(unsigned int pcid,
+                                            unsigned int type)
+{
+    ASSERT(!(pcid & ~0xfff));
+    return (type << 12) | pcid;
+}
+
+static inline unsigned int x86emul_invpcid_pcid(unsigned int aux)
+{
+    return aux & 0xfff;
+}
+
+static inline unsigned int x86emul_invpcid_type(unsigned int aux)
+{
+    return aux >> 12;
+}
+
+struct x86_emulate_state;
 
 /*
  * These operations represent the instruction emulator's interface to memory,
  * I/O ports, privileged state... pretty much everything other than GPRs.
- * 
+ *
  * NOTES:
  *  1. If the access fails (cannot emulate, or a standard access faults) then
  *     it is up to the memop to propagate the fault to the guest VM via
@@ -165,7 +254,10 @@ struct x86_emulate_ops
 
     /*
      * insn_fetch: Emulate fetch from instruction byte stream.
-     *  Parameters are same as for 'read'. @seg is always x86_seg_cs.
+     *  Except for @bytes, all parameters are the same as for 'read'.
+     *  @bytes: Access length (0 <= @bytes < 16, with zero meaning
+     *  "validate address only").
+     *  @seg is always x86_seg_cs.
      */
     int (*insn_fetch)(
         enum x86_segment seg,
@@ -186,10 +278,27 @@ struct x86_emulate_ops
         struct x86_emulate_ctxt *ctxt);
 
     /*
-     * cmpxchg: Emulate an atomic (LOCKed) CMPXCHG operation.
+     * rmw: Emulate a memory read-modify-write.
+     * @eflags: [IN/OUT] Pointer to EFLAGS to be updated according to
+     *                   instruction effects.
+     * @state:  [IN/OUT] Pointer to (opaque) emulator state.
+     */
+    int (*rmw)(
+        enum x86_segment seg,
+        unsigned long offset,
+        unsigned int bytes,
+        uint32_t *eflags,
+        struct x86_emulate_state *state,
+        struct x86_emulate_ctxt *ctxt);
+
+    /*
+     * cmpxchg: Emulate a CMPXCHG operation.
      *  @p_old: [IN ] Pointer to value expected to be current at @addr.
+     *          [OUT] Pointer to value found at @addr (may always be
+     *                updated, meaningful for X86EMUL_CMPXCHG_FAILED only).
      *  @p_new: [IN ] Pointer to value to write to @addr.
      *  @bytes: [IN ] Operation size (up to 8 (x86/32) or 16 (x86/64) bytes).
+     *  @lock:  [IN ] atomic (LOCKed) operation
      */
     int (*cmpxchg)(
         enum x86_segment seg,
@@ -197,6 +306,31 @@ struct x86_emulate_ops
         void *p_old,
         void *p_new,
         unsigned int bytes,
+        bool lock,
+        struct x86_emulate_ctxt *ctxt);
+
+    /*
+     * blk: Emulate a large (block) memory access.
+     * @p_data: [IN/OUT] (optional) Pointer to source/destination buffer.
+     * @eflags: [IN/OUT] Pointer to EFLAGS to be updated according to
+     *                   instruction effects.
+     * @state:  [IN/OUT] Pointer to (opaque) emulator state.
+     */
+    int (*blk)(
+        enum x86_segment seg,
+        unsigned long offset,
+        void *p_data,
+        unsigned int bytes,
+        uint32_t *eflags,
+        struct x86_emulate_state *state,
+        struct x86_emulate_ctxt *ctxt);
+
+    /*
+     * validate: Post-decode, pre-emulate hook to allow caller controlled
+     * filtering.
+     */
+    int (*validate)(
+        const struct x86_emulate_state *state,
         struct x86_emulate_ctxt *ctxt);
 
     /*
@@ -271,7 +405,7 @@ struct x86_emulate_ops
      */
     int (*write_segment)(
         enum x86_segment seg,
-        struct segment_register *reg,
+        const struct segment_register *reg,
         struct x86_emulate_ctxt *ctxt);
 
     /*
@@ -331,6 +465,24 @@ struct x86_emulate_ops
         struct x86_emulate_ctxt *ctxt);
 
     /*
+     * read_xcr: Read from extended control register.
+     *  @reg:   [IN ] Register to read.
+     */
+    int (*read_xcr)(
+        unsigned int reg,
+        uint64_t *val,
+        struct x86_emulate_ctxt *ctxt);
+
+    /*
+     * write_xcr: Write to extended control register.
+     *  @reg:   [IN ] Register to write.
+     */
+    int (*write_xcr)(
+        unsigned int reg,
+        uint64_t val,
+        struct x86_emulate_ctxt *ctxt);
+
+    /*
      * read_msr: Read from model-specific register.
      *  @reg:   [IN ] Register to read.
      */
@@ -348,44 +500,43 @@ struct x86_emulate_ops
         uint64_t val,
         struct x86_emulate_ctxt *ctxt);
 
-    /* wbinvd: Write-back and invalidate cache contents. */
-    int (*wbinvd)(
+    /*
+     * cache_op: Write-back and/or invalidate cache contents.
+     *
+     * @seg:@offset applicable only to some of enum x86emul_cache_op.
+     */
+    int (*cache_op)(
+        enum x86emul_cache_op op,
+        enum x86_segment seg,
+        unsigned long offset,
         struct x86_emulate_ctxt *ctxt);
 
     /*
-     * cpuid: Emulate CPUID via given set of EAX-EDX inputs/outputs.
+     * tlb_op: Invalidate paging structures which map addressed byte.
      *
-     * May return X86EMUL_EXCEPTION, which causes the emulator to inject
-     * #GP[0].  Used to implement CPUID faulting.
+     * @addr and @aux have @op-specific meaning:
+     * - INVLPG:  @aux:@addr represent seg:offset
+     * - INVLPGA: @addr is the linear address, @aux the ASID
+     * - INVPCID: @addr is the linear address, @aux the combination of
+     *            PCID and type (see x86emul_invpcid_*()).
      */
+    int (*tlb_op)(
+        enum x86emul_tlb_op op,
+        unsigned long addr,
+        unsigned long aux,
+        struct x86_emulate_ctxt *ctxt);
+
+    /* cpuid: Emulate CPUID via given set of EAX-EDX inputs/outputs. */
     int (*cpuid)(
-        unsigned int *eax,
-        unsigned int *ebx,
-        unsigned int *ecx,
-        unsigned int *edx,
-        struct x86_emulate_ctxt *ctxt);
-
-    /* inject_hw_exception */
-    int (*inject_hw_exception)(
-        uint8_t vector,
-        int32_t error_code,
-        struct x86_emulate_ctxt *ctxt);
-
-    /* inject_sw_interrupt */
-    int (*inject_sw_interrupt)(
-        enum x86_swint_type type,
-        uint8_t vector,
-        uint8_t insn_len,
+        uint32_t leaf,
+        uint32_t subleaf,
+        struct cpuid_leaf *res,
         struct x86_emulate_ctxt *ctxt);
 
     /*
      * get_fpu: Load emulated environment's FPU state onto processor.
-     *  @exn_callback: On any FPU or SIMD exception, pass control to
-     *                 (*exception_callback)(exception_callback_arg, regs).
      */
     int (*get_fpu)(
-        void (*exception_callback)(void *, struct cpu_user_regs *),
-        void *exception_callback_arg,
         enum x86_emulate_fpu_type type,
         struct x86_emulate_ctxt *ctxt);
 
@@ -393,15 +544,14 @@ struct x86_emulate_ops
      * put_fpu: Relinquish the FPU. Unhook from FPU/SIMD exception handlers.
      *  The handler, if installed, must be prepared to get called without
      *  the get_fpu one having got called before!
+     * @backout: Undo updates to the specified register file (can, besides
+     *           X86EMUL_FPU_none, only be X86EMUL_FPU_fpu at present);
+     * @aux: Packaged up FIP/FDP/FOP values to load into FPU.
      */
     void (*put_fpu)(
-        struct x86_emulate_ctxt *ctxt);
-
-    /* invlpg: Invalidate paging structures which map addressed byte. */
-    int (*invlpg)(
-        enum x86_segment seg,
-        unsigned long offset,
-        struct x86_emulate_ctxt *ctxt);
+        struct x86_emulate_ctxt *ctxt,
+        enum x86_emulate_fpu_type backout,
+        const struct x86_emul_fpu_aux *aux);
 
     /* vmfunc: Emulate VMFUNC via given set of EAX ECX inputs */
     int (*vmfunc)(
@@ -412,6 +562,23 @@ struct cpu_user_regs;
 
 struct x86_emulate_ctxt
 {
+    /*
+     * Input-only state:
+     */
+
+    /* CPUID Policy for the domain. */
+    const struct cpuid_policy *cpuid;
+
+    /* Set this if writes may have side effects. */
+    bool force_writeback;
+
+    /* Caller data that can be used by x86_emulate_ops' routines. */
+    void *data;
+
+    /*
+     * Input/output state:
+     */
+
     /* Register state before/after emulation. */
     struct cpu_user_regs *regs;
 
@@ -421,27 +588,30 @@ struct x86_emulate_ctxt
     /* Stack pointer width in bits (16, 32 or 64). */
     unsigned int sp_size;
 
-    /* Canonical opcode (see below). */
+    /* Long mode active? */
+    bool lma;
+
+    /*
+     * Output-only state:
+     */
+
+    /* Canonical opcode (see below) (valid only on X86EMUL_OKAY). */
     unsigned int opcode;
-
-    /* Software event injection support. */
-    enum x86_swint_emulation swint_emulate;
-
-    /* Set this if writes may have side effects. */
-    uint8_t force_writeback;
 
     /* Retirement state, set by the emulator (valid only on X86EMUL_OKAY). */
     union {
+        uint8_t raw;
         struct {
-            uint8_t hlt:1;          /* Instruction HLTed. */
-            uint8_t mov_ss:1;       /* Instruction sets MOV-SS irq shadow. */
-            uint8_t sti:1;          /* Instruction sets STI irq shadow. */
-        } flags;
-        uint8_t byte;
+            bool hlt:1;          /* Instruction HLTed. */
+            bool mov_ss:1;       /* Instruction sets MOV-SS irq shadow. */
+            bool sti:1;          /* Instruction sets STI irq shadow. */
+            bool unblock_nmi:1;  /* Instruction clears NMI blocking. */
+            bool singlestep:1;   /* Singlestepping was active. */
+        };
     } retire;
 
-    /* Caller data that can be used by x86_emulate_ops' routines. */
-    void *data;
+    bool event_pending;
+    struct x86_event event;
 };
 
 /*
@@ -498,6 +668,11 @@ struct x86_emulate_ctxt
 # define X86EMUL_OPC_EVEX_F2(ext, byte) \
     (X86EMUL_OPC_F2(ext, byte) | X86EMUL_OPC_EVEX_)
 
+#define X86EMUL_OPC_XOP(ext, byte)    X86EMUL_OPC(0x8f##ext, byte)
+#define X86EMUL_OPC_XOP_66(ext, byte) X86EMUL_OPC_66(0x8f##ext, byte)
+#define X86EMUL_OPC_XOP_F3(ext, byte) X86EMUL_OPC_F3(0x8f##ext, byte)
+#define X86EMUL_OPC_XOP_F2(ext, byte) X86EMUL_OPC_F2(0x8f##ext, byte)
+
 struct x86_emulate_stub {
     union {
         void (*func)(void);
@@ -513,21 +688,54 @@ struct x86_emulate_stub {
 
 /*
  * x86_emulate: Emulate an instruction.
- * Returns -1 on failure, 0 on success.
+ * Returns X86EMUL_* constants.
  */
 int
 x86_emulate(
     struct x86_emulate_ctxt *ctxt,
     const struct x86_emulate_ops *ops);
 
+#ifndef NDEBUG
+/*
+ * In debug builds, wrap x86_emulate() with some assertions about its expected
+ * behaviour.
+ */
+int x86_emulate_wrapper(
+    struct x86_emulate_ctxt *ctxt,
+    const struct x86_emulate_ops *ops);
+#define x86_emulate x86_emulate_wrapper
+#endif
+
+#ifdef __XEN__
+# include <xen/nospec.h>
+#else
+# define array_access_nospec(arr, idx) arr[idx]
+#endif
+
+/* Map GPRs by ModRM encoding to their offset within struct cpu_user_regs. */
+extern const uint8_t cpu_user_regs_gpr_offsets[X86_NR_GPRS];
+
 /*
  * Given the 'reg' portion of a ModRM byte, and a register block, return a
  * pointer into the block that addresses the relevant register.
- * @highbyte_regs specifies whether to decode AH,CH,DH,BH.
  */
-void *
-decode_register(
-    uint8_t modrm_reg, struct cpu_user_regs *regs, int highbyte_regs);
+static inline unsigned long *decode_gpr(struct cpu_user_regs *regs,
+                                        unsigned int modrm)
+{
+    /* Check that the array is a power of two. */
+    BUILD_BUG_ON(ARRAY_SIZE(cpu_user_regs_gpr_offsets) &
+                 (ARRAY_SIZE(cpu_user_regs_gpr_offsets) - 1));
+
+    /*
+     * Note that this also acts as array_access_nospec() stand-in.  Higher
+     * bits may legitimately come in set here, from EVEX decoding, and
+     * hence truncation is what we want (bits not ignored will get checked
+     * elsewhere).
+     */
+    modrm &= ARRAY_SIZE(cpu_user_regs_gpr_offsets) - 1;
+
+    return (void *)regs + cpu_user_regs_gpr_offsets[modrm];
+}
 
 /* Unhandleable read, write or instruction fetch */
 int
@@ -538,8 +746,6 @@ x86emul_unhandleable_rw(
     unsigned int bytes,
     struct x86_emulate_ctxt *ctxt);
 
-#ifdef __XEN__
-
 struct x86_emulate_state *
 x86_decode_insn(
     struct x86_emulate_ctxt *ctxt,
@@ -548,19 +754,100 @@ x86_decode_insn(
         void *p_data, unsigned int bytes,
         struct x86_emulate_ctxt *ctxt));
 
+unsigned int
+x86_insn_opsize(const struct x86_emulate_state *state);
 int
 x86_insn_modrm(const struct x86_emulate_state *state,
                unsigned int *rm, unsigned int *reg);
+unsigned long
+x86_insn_operand_ea(const struct x86_emulate_state *state,
+                    enum x86_segment *seg);
+unsigned long
+x86_insn_immediate(const struct x86_emulate_state *state,
+                   unsigned int nr);
 unsigned int
 x86_insn_length(const struct x86_emulate_state *state,
                 const struct x86_emulate_ctxt *ctxt);
+bool
+x86_insn_is_mem_access(const struct x86_emulate_state *state,
+                       const struct x86_emulate_ctxt *ctxt);
+bool
+x86_insn_is_mem_write(const struct x86_emulate_state *state,
+                      const struct x86_emulate_ctxt *ctxt);
+bool
+x86_insn_is_portio(const struct x86_emulate_state *state,
+                   const struct x86_emulate_ctxt *ctxt);
+bool
+x86_insn_is_cr_access(const struct x86_emulate_state *state,
+                      const struct x86_emulate_ctxt *ctxt);
 
-#ifdef NDEBUG
+#if !defined(__XEN__) || defined(NDEBUG)
 static inline void x86_emulate_free_state(struct x86_emulate_state *state) {}
 #else
 void x86_emulate_free_state(struct x86_emulate_state *state);
 #endif
 
+#ifdef __XEN__
+
+int x86emul_read_xcr(unsigned int reg, uint64_t *val,
+                     struct x86_emulate_ctxt *ctxt);
+int x86emul_write_xcr(unsigned int reg, uint64_t val,
+                      struct x86_emulate_ctxt *ctxt);
+
+int x86emul_read_dr(unsigned int reg, unsigned long *val,
+                    struct x86_emulate_ctxt *ctxt);
+int x86emul_write_dr(unsigned int reg, unsigned long val,
+                     struct x86_emulate_ctxt *ctxt);
+int x86emul_cpuid(uint32_t leaf, uint32_t subleaf,
+                  struct cpuid_leaf *res, struct x86_emulate_ctxt *ctxt);
+
 #endif
+
+int
+x86_emul_rmw(
+    void *ptr,
+    unsigned int bytes,
+    uint32_t *eflags,
+    struct x86_emulate_state *state,
+    struct x86_emulate_ctxt *ctxt);
+int
+x86_emul_blk(
+    void *ptr,
+    void *data,
+    unsigned int bytes,
+    uint32_t *eflags,
+    struct x86_emulate_state *state,
+    struct x86_emulate_ctxt *ctxt);
+
+static inline void x86_emul_hw_exception(
+    unsigned int vector, int error_code, struct x86_emulate_ctxt *ctxt)
+{
+    ASSERT(!ctxt->event_pending);
+
+    ctxt->event.vector = vector;
+    ctxt->event.type = X86_EVENTTYPE_HW_EXCEPTION;
+    ctxt->event.error_code = error_code;
+
+    ctxt->event_pending = true;
+}
+
+static inline void x86_emul_pagefault(
+    int error_code, unsigned long cr2, struct x86_emulate_ctxt *ctxt)
+{
+    ASSERT(!ctxt->event_pending);
+
+    ctxt->event.vector = 14; /* TRAP_page_fault */
+    ctxt->event.type = X86_EVENTTYPE_HW_EXCEPTION;
+    ctxt->event.error_code = error_code;
+    ctxt->event.cr2 = cr2;
+
+    ctxt->event_pending = true;
+}
+
+static inline void x86_emul_reset_event(struct x86_emulate_ctxt *ctxt)
+{
+    ctxt->event_pending = false;
+    ctxt->event = (struct x86_event){};
+}
 
 #endif /* __X86_EMULATE_H__ */

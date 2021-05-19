@@ -25,10 +25,9 @@
 
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <xen-tools/libs.h>
 
 #include "private.h"
-
-#define ROUNDUP(_x,_w) (((unsigned long)(_x)+(1UL<<(_w))-1) & ~((1UL<<(_w))-1))
 
 #ifndef O_CLOEXEC
 #define O_CLOEXEC 0
@@ -51,6 +50,24 @@ int osdep_xenforeignmemory_open(xenforeignmemory_handle *fmem)
     {
         PERROR("Could not obtain handle on privileged command interface");
         return -1;
+    }
+
+    /*
+     * Older versions of privcmd return -EINVAL for unimplemented ioctls
+     * so we need to probe for the errno to use rather than just using
+     * the conventional ENOTTY.
+     */
+    if ( ioctl(fd, IOCTL_PRIVCMD_UNIMPLEMENTED, NULL) >= 0 )
+    {
+        xtl_log(fmem->logger, XTL_ERROR, -1, "xenforeignmemory",
+                "privcmd ioctl should not be implemented");
+        close(fd);
+        return -1;
+    }
+    else
+    {
+        fmem->unimpl_errno = errno;
+        errno = 0;
     }
 
     fmem->fd = fd;
@@ -142,23 +159,19 @@ out:
 }
 
 void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
-                                 uint32_t dom, int prot,
-                                 size_t num,
+                                 uint32_t dom, void *addr,
+                                 int prot, int flags, size_t num,
                                  const xen_pfn_t arr[/*num*/], int err[/*num*/])
 {
     int fd = fmem->fd;
     privcmd_mmapbatch_v2_t ioctlx;
-    void *addr;
     size_t i;
     int rc;
 
-    addr = mmap(NULL, num << PAGE_SHIFT, prot, MAP_SHARED,
+    addr = mmap(addr, num << PAGE_SHIFT, prot, flags | MAP_SHARED,
                 fd, 0);
     if ( addr == MAP_FAILED )
-    {
-        PERROR("mmap failed");
         return NULL;
-    }
 
     ioctlx.num = num;
     ioctlx.dom = dom;
@@ -257,7 +270,6 @@ void *osdep_xenforeignmemory_map(xenforeignmemory_handle *fmem,
     {
         int saved_errno = errno;
 
-        PERROR("ioctl failed");
         (void)munmap(addr, num << PAGE_SHIFT);
         errno = saved_errno;
         return NULL;
@@ -270,6 +282,67 @@ int osdep_xenforeignmemory_unmap(xenforeignmemory_handle *fmem,
                                  void *addr, size_t num)
 {
     return munmap(addr, num << PAGE_SHIFT);
+}
+
+int osdep_xenforeignmemory_restrict(xenforeignmemory_handle *fmem,
+                                    domid_t domid)
+{
+    return ioctl(fmem->fd, IOCTL_PRIVCMD_RESTRICT, &domid);
+}
+
+int osdep_xenforeignmemory_unmap_resource(
+    xenforeignmemory_handle *fmem, xenforeignmemory_resource_handle *fres)
+{
+    return fres ? munmap(fres->addr, fres->nr_frames << PAGE_SHIFT) : 0;
+}
+
+int osdep_xenforeignmemory_map_resource(
+    xenforeignmemory_handle *fmem, xenforeignmemory_resource_handle *fres)
+{
+    privcmd_mmap_resource_t mr = {
+        .dom = fres->domid,
+        .type = fres->type,
+        .id = fres->id,
+        .idx = fres->frame,
+        .num = fres->nr_frames,
+    };
+    int rc;
+
+    if ( !fres->addr && !fres->nr_frames )
+        /* Request for resource size.  Skip mmap(). */
+        goto skip_mmap;
+
+    fres->addr = mmap(fres->addr, fres->nr_frames << PAGE_SHIFT,
+                      fres->prot, fres->flags | MAP_SHARED, fmem->fd, 0);
+    if ( fres->addr == MAP_FAILED )
+        return -1;
+
+    mr.addr = (uintptr_t)fres->addr;
+
+ skip_mmap:
+    rc = ioctl(fmem->fd, IOCTL_PRIVCMD_MMAP_RESOURCE, &mr);
+    if ( rc )
+    {
+        int saved_errno;
+
+        if ( errno == fmem->unimpl_errno )
+            errno = EOPNOTSUPP;
+
+        if ( fres->addr )
+        {
+            saved_errno = errno;
+            osdep_xenforeignmemory_unmap_resource(fmem, fres);
+            errno = saved_errno;
+        }
+
+        return -1;
+    }
+
+    /* If requesting size, copy back. */
+    if ( !fres->addr )
+        fres->nr_frames = mr.num;
+
+    return 0;
 }
 
 /*

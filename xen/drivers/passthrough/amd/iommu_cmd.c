@@ -17,30 +17,23 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/sched.h>
-#include <asm/amd-iommu.h>
-#include <asm/hvm/svm/amd-iommu-proto.h>
+#include "iommu.h"
 #include "../ats.h"
 
 static int queue_iommu_command(struct amd_iommu *iommu, u32 cmd[])
 {
-    u32 tail, head, *cmd_buffer;
-    int i;
+    uint32_t tail, head;
 
-    tail = iommu->cmd_buffer.tail;
-    if ( ++tail == iommu->cmd_buffer.entries )
+    tail = iommu->cmd_buffer.tail + IOMMU_CMD_BUFFER_ENTRY_SIZE;
+    if ( tail == iommu->cmd_buffer.size )
         tail = 0;
 
-    head = iommu_get_rb_pointer(readl(iommu->mmio_base +
-                                      IOMMU_CMD_BUFFER_HEAD_OFFSET));
+    head = readl(iommu->mmio_base +
+                 IOMMU_CMD_BUFFER_HEAD_OFFSET) & IOMMU_RING_BUFFER_PTR_MASK;
     if ( head != tail )
     {
-        cmd_buffer = (u32 *)(iommu->cmd_buffer.buffer +
-                             (iommu->cmd_buffer.tail *
-                             IOMMU_CMD_BUFFER_ENTRY_SIZE));
-
-        for ( i = 0; i < IOMMU_CMD_BUFFER_U32_PER_ENTRY; i++ )
-            cmd_buffer[i] = cmd[i];
+        memcpy(iommu->cmd_buffer.buffer + iommu->cmd_buffer.tail,
+               cmd, IOMMU_CMD_BUFFER_ENTRY_SIZE);
 
         iommu->cmd_buffer.tail = tail;
         return 1;
@@ -51,13 +44,11 @@ static int queue_iommu_command(struct amd_iommu *iommu, u32 cmd[])
 
 static void commit_iommu_command_buffer(struct amd_iommu *iommu)
 {
-    u32 tail = 0;
-
-    iommu_set_rb_pointer(&tail, iommu->cmd_buffer.tail);
-    writel(tail, iommu->mmio_base+IOMMU_CMD_BUFFER_TAIL_OFFSET);
+    writel(iommu->cmd_buffer.tail,
+           iommu->mmio_base + IOMMU_CMD_BUFFER_TAIL_OFFSET);
 }
 
-int send_iommu_command(struct amd_iommu *iommu, u32 cmd[])
+static int send_iommu_command(struct amd_iommu *iommu, u32 cmd[])
 {
     if ( queue_iommu_command(iommu, cmd) )
     {
@@ -70,11 +61,11 @@ int send_iommu_command(struct amd_iommu *iommu, u32 cmd[])
 
 static void flush_command_buffer(struct amd_iommu *iommu)
 {
-    u32 cmd[4], status;
-    int loop_count, comp_wait;
+    unsigned int cmd[4], status, loop_count;
+    bool comp_wait;
 
     /* RW1C 'ComWaitInt' in status register */
-    writel(IOMMU_STATUS_COMP_WAIT_INT_MASK,
+    writel(IOMMU_STATUS_COMP_WAIT_INT,
            iommu->mmio_base + IOMMU_STATUS_MMIO_OFFSET);
 
     /* send an empty COMPLETION_WAIT command to flush command buffer */
@@ -91,16 +82,14 @@ static void flush_command_buffer(struct amd_iommu *iommu)
     loop_count = 1000;
     do {
         status = readl(iommu->mmio_base + IOMMU_STATUS_MMIO_OFFSET);
-        comp_wait = get_field_from_reg_u32(status,
-                                           IOMMU_STATUS_COMP_WAIT_INT_MASK,
-                                           IOMMU_STATUS_COMP_WAIT_INT_SHIFT);
+        comp_wait = status & IOMMU_STATUS_COMP_WAIT_INT;
         --loop_count;
     } while ( !comp_wait && loop_count );
 
     if ( comp_wait )
     {
         /* RW1C 'ComWaitInt' in status register */
-        writel(IOMMU_STATUS_COMP_WAIT_INT_MASK,
+        writel(IOMMU_STATUS_COMP_WAIT_INT,
                iommu->mmio_base + IOMMU_STATUS_MMIO_OFFSET);
         return;
     }
@@ -269,7 +258,7 @@ static void invalidate_interrupt_table(struct amd_iommu *iommu, u16 device_id)
     send_iommu_command(iommu, cmd);
 }
 
-void invalidate_iommu_all(struct amd_iommu *iommu)
+static void invalidate_iommu_all(struct amd_iommu *iommu)
 {
     u32 cmd[4], entry;
 
@@ -284,7 +273,7 @@ void invalidate_iommu_all(struct amd_iommu *iommu)
 }
 
 void amd_iommu_flush_iotlb(u8 devfn, const struct pci_dev *pdev,
-                           uint64_t gaddr, unsigned int order)
+                           daddr_t daddr, unsigned int order)
 {
     unsigned long flags;
     struct amd_iommu *iommu;
@@ -300,9 +289,8 @@ void amd_iommu_flush_iotlb(u8 devfn, const struct pci_dev *pdev,
 
     if ( !iommu )
     {
-        AMD_IOMMU_DEBUG("%s: Can't find iommu for %04x:%02x:%02x.%u\n",
-                        __func__, pdev->seg, pdev->bus,
-                        PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
+        AMD_IOMMU_DEBUG("%s: Can't find iommu for %pp\n",
+                        __func__, &pdev->sbdf);
         return;
     }
 
@@ -315,12 +303,12 @@ void amd_iommu_flush_iotlb(u8 devfn, const struct pci_dev *pdev,
 
     /* send INVALIDATE_IOTLB_PAGES command */
     spin_lock_irqsave(&iommu->lock, flags);
-    invalidate_iotlb_pages(iommu, maxpend, 0, queueid, gaddr, req_id, order);
+    invalidate_iotlb_pages(iommu, maxpend, 0, queueid, daddr, req_id, order);
     flush_command_buffer(iommu);
     spin_unlock_irqrestore(&iommu->lock, flags);
 }
 
-static void amd_iommu_flush_all_iotlbs(struct domain *d, uint64_t gaddr,
+static void amd_iommu_flush_all_iotlbs(struct domain *d, daddr_t daddr,
                                        unsigned int order)
 {
     struct pci_dev *pdev;
@@ -333,7 +321,7 @@ static void amd_iommu_flush_all_iotlbs(struct domain *d, uint64_t gaddr,
         u8 devfn = pdev->devfn;
 
         do {
-            amd_iommu_flush_iotlb(devfn, pdev, gaddr, order);
+            amd_iommu_flush_iotlb(devfn, pdev, daddr, order);
             devfn += pdev->phantom_stride;
         } while ( devfn != pdev->devfn &&
                   PCI_SLOT(devfn) == PCI_SLOT(pdev->devfn) );
@@ -342,7 +330,7 @@ static void amd_iommu_flush_all_iotlbs(struct domain *d, uint64_t gaddr,
 
 /* Flush iommu cache after p2m changes. */
 static void _amd_iommu_flush_pages(struct domain *d,
-                                   uint64_t gaddr, unsigned int order)
+                                   daddr_t daddr, unsigned int order)
 {
     unsigned long flags;
     struct amd_iommu *iommu;
@@ -352,13 +340,13 @@ static void _amd_iommu_flush_pages(struct domain *d,
     for_each_amd_iommu ( iommu )
     {
         spin_lock_irqsave(&iommu->lock, flags);
-        invalidate_iommu_pages(iommu, gaddr, dom_id, order);
+        invalidate_iommu_pages(iommu, daddr, dom_id, order);
         flush_command_buffer(iommu);
         spin_unlock_irqrestore(&iommu->lock, flags);
     }
 
     if ( ats_enabled )
-        amd_iommu_flush_all_iotlbs(d, gaddr, order);
+        amd_iommu_flush_all_iotlbs(d, daddr, order);
 }
 
 void amd_iommu_flush_all_pages(struct domain *d)
@@ -367,9 +355,9 @@ void amd_iommu_flush_all_pages(struct domain *d)
 }
 
 void amd_iommu_flush_pages(struct domain *d,
-                           unsigned long gfn, unsigned int order)
+                           unsigned long dfn, unsigned int order)
 {
-    _amd_iommu_flush_pages(d, (uint64_t) gfn << PAGE_SHIFT, order);
+    _amd_iommu_flush_pages(d, __dfn_to_daddr(dfn), order);
 }
 
 void amd_iommu_flush_device(struct amd_iommu *iommu, uint16_t bdf)

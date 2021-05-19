@@ -10,7 +10,6 @@
 
 #include <asm/atomic.h>
 #include <asm/elf.h>
-#include <asm/percpu.h>
 #include <xen/types.h>
 #include <xen/irq.h>
 #include <asm/nmi.h>
@@ -30,10 +29,11 @@
 #include <asm/io_apic.h>
 #include <xen/iommu.h>
 #include <asm/hpet.h>
+#include <xen/console.h>
 
 static cpumask_t waiting_to_crash;
 static unsigned int crashing_cpu;
-static DEFINE_PER_CPU_READ_MOSTLY(bool_t, crash_save_done);
+static DEFINE_PER_CPU_READ_MOSTLY(bool, crash_save_done);
 
 /* This becomes the NMI handler for non-crashing CPUs, when Xen is crashing. */
 static void noreturn do_nmi_crash(const struct cpu_user_regs *regs)
@@ -67,7 +67,7 @@ static void noreturn do_nmi_crash(const struct cpu_user_regs *regs)
         kexec_crash_save_cpu();
         __stop_this_cpu();
 
-        this_cpu(crash_save_done) = 1;
+        this_cpu(crash_save_done) = true;
         cpumask_clear_cpu(cpu, &waiting_to_crash);
     }
 
@@ -146,9 +146,6 @@ static void nmi_shootdown_cpus(void)
     write_atomic((unsigned long *)__va(__pa(&exception_table[TRAP_nmi])),
                  (unsigned long)&do_nmi_crash);
 
-    /* Ensure the new callback function is set before sending out the NMI. */
-    wmb();
-
     smp_send_nmi_allbutself();
 
     msecs = 1000; /* Wait at most a second for the other cpus to stop */
@@ -158,29 +155,40 @@ static void nmi_shootdown_cpus(void)
         msecs--;
     }
 
+    /*
+     * We may have NMI'd another CPU while it was holding the console lock.
+     * It won't be in a position to release the lock...
+     */
+    console_force_unlock();
+
     /* Leave a hint of how well we did trying to shoot down the other cpus */
     if ( cpumask_empty(&waiting_to_crash) )
         printk("Shot down all CPUs\n");
     else
-    {
-        cpulist_scnprintf(keyhandler_scratch, sizeof keyhandler_scratch,
-                          &waiting_to_crash);
-        printk("Failed to shoot down CPUs {%s}\n", keyhandler_scratch);
-    }
+        printk("Failed to shoot down CPUs {%*pbl}\n",
+               CPUMASK_PR(&waiting_to_crash));
 
-    /* Crash shutdown any IOMMU functionality as the crashdump kernel is not
-     * happy when booting if interrupt/dma remapping is still enabled */
+    /*
+     * Try to crash shutdown IOMMU functionality as some old crashdump
+     * kernels are not happy when booting if interrupt/dma remapping
+     * is still enabled.
+     */
     iommu_crash_shutdown();
 
-    __stop_this_cpu();
+    if ( cpu_online(cpu) )
+    {
+        __stop_this_cpu();
 
-    /* This is a bit of a hack due to the problems with the x2apic_enabled
-     * variable, but we can't do any better without a significant refactoring
-     * of the APIC code */
-    x2apic_enabled = (current_local_apic_mode() == APIC_MODE_X2APIC);
+        /*
+         * This is a bit of a hack due to the problems with the x2apic_enabled
+         * variable, but we can't do any better without a significant
+         * refactoring of the APIC code
+         */
+        x2apic_enabled = (current_local_apic_mode() == APIC_MODE_X2APIC);
 
-    disable_IO_APIC();
-    hpet_disable();
+        disable_IO_APIC();
+        hpet_disable();
+    }
 }
 
 void machine_crash_shutdown(void)
@@ -191,6 +199,13 @@ void machine_crash_shutdown(void)
 
     /* Reset CPUID masking and faulting to the host's default. */
     ctxt_switch_levelling(NULL);
+
+    /* Disable shadow stacks. */
+    if ( cpu_has_xen_shstk )
+    {
+        wrmsrl(MSR_S_CET, 0);
+        write_cr4(read_cr4() & ~X86_CR4_CET);
+    }
 
     info = kexec_crash_save_info();
     info->xen_phys_start = xen_phys_start;

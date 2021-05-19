@@ -20,16 +20,22 @@
 #ifndef __LIBACPI_H__
 #define __LIBACPI_H__
 
-#define ACPI_HAS_COM1        (1<<0)
-#define ACPI_HAS_COM2        (1<<1)
-#define ACPI_HAS_LPT1        (1<<2)
-#define ACPI_HAS_HPET        (1<<3)
-#define ACPI_HAS_SSDT_PM     (1<<4)
-#define ACPI_HAS_SSDT_S3     (1<<5)
-#define ACPI_HAS_SSDT_S4     (1<<6)
-#define ACPI_HAS_TCPA        (1<<7)
-#define ACPI_HAS_IOAPIC      (1<<8)
-#define ACPI_HAS_WAET        (1<<9)
+#define ACPI_HAS_COM1              (1<<0)
+#define ACPI_HAS_COM2              (1<<1)
+#define ACPI_HAS_LPT1              (1<<2)
+#define ACPI_HAS_HPET              (1<<3)
+#define ACPI_HAS_SSDT_PM           (1<<4)
+#define ACPI_HAS_SSDT_S3           (1<<5)
+#define ACPI_HAS_SSDT_S4           (1<<6)
+#define ACPI_HAS_TCPA              (1<<7)
+#define ACPI_HAS_IOAPIC            (1<<8)
+#define ACPI_HAS_WAET              (1<<9)
+#define ACPI_HAS_PMTIMER           (1<<10)
+#define ACPI_HAS_BUTTONS           (1<<11)
+#define ACPI_HAS_VGA               (1<<12)
+#define ACPI_HAS_8042              (1<<13)
+#define ACPI_HAS_CMOS_RTC          (1<<14)
+#define ACPI_HAS_SSDT_LAPTOP_SLATE (1<<15)
 
 struct xen_vmemrange;
 struct acpi_numa {
@@ -59,6 +65,7 @@ struct acpi_config {
     uint64_t pci_hi_start, pci_hi_len;
 
     uint32_t table_flags;
+    uint8_t acpi_revision;
 
     uint64_t vm_gid[2];
     unsigned long vm_gid_addr; /* OUT parameter */
@@ -84,7 +91,7 @@ struct acpi_config {
     unsigned long rsdp;
 
     /* x86-specific parameters */
-    uint8_t (*lapic_id)(unsigned cpu);
+    uint32_t (*lapic_id)(unsigned cpu);
     uint32_t lapic_base_address;
     uint32_t ioapic_base_address;
     uint16_t pci_isa_irq_mask;

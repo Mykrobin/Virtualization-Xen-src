@@ -12,6 +12,7 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/param.h>
 #include <xen/sched.h>
 #include <xen/pci.h>
 #include <xen/pci_regs.h>
@@ -31,11 +32,9 @@ int enable_ats_device(struct pci_dev *pdev, struct list_head *ats_list)
     BUG_ON(!pos);
 
     if ( iommu_verbose )
-        dprintk(XENLOG_INFO, "%04x:%02x:%02x.%u: ATS capability found\n",
-                seg, bus, PCI_SLOT(devfn), PCI_FUNC(devfn));
+        dprintk(XENLOG_INFO, "%pp: ATS capability found\n", &pdev->sbdf);
 
-    value = pci_conf_read16(seg, bus, PCI_SLOT(devfn),
-                            PCI_FUNC(devfn), pos + ATS_REG_CTL);
+    value = pci_conf_read16(pdev->sbdf, pos + ATS_REG_CTL);
     if ( value & ATS_ENABLE )
     {
         struct pci_dev *other;
@@ -51,24 +50,21 @@ int enable_ats_device(struct pci_dev *pdev, struct list_head *ats_list)
     if ( !(value & ATS_ENABLE) )
     {
         value |= ATS_ENABLE;
-        pci_conf_write16(seg, bus, PCI_SLOT(devfn), PCI_FUNC(devfn),
-                         pos + ATS_REG_CTL, value);
+        pci_conf_write16(pdev->sbdf, pos + ATS_REG_CTL, value);
     }
 
     if ( pos )
     {
         pdev->ats.cap_pos = pos;
-        value = pci_conf_read16(seg, bus, PCI_SLOT(devfn),
-                                PCI_FUNC(devfn), pos + ATS_REG_CAP);
+        value = pci_conf_read16(pdev->sbdf, pos + ATS_REG_CAP);
         pdev->ats.queue_depth = value & ATS_QUEUE_DEPTH_MASK ?:
                                 ATS_QUEUE_DEPTH_MASK + 1;
         list_add(&pdev->ats.list, ats_list);
     }
 
     if ( iommu_verbose )
-        dprintk(XENLOG_INFO, "%04x:%02x:%02x.%u: ATS %s enabled\n",
-                seg, bus, PCI_SLOT(devfn), PCI_FUNC(devfn),
-                pos ? "is" : "was");
+        dprintk(XENLOG_INFO, "%pp: ATS %s enabled\n",
+                &pdev->sbdf, pos ? "is" : "was");
 
     return pos;
 }
@@ -76,20 +72,15 @@ int enable_ats_device(struct pci_dev *pdev, struct list_head *ats_list)
 void disable_ats_device(struct pci_dev *pdev)
 {
     u32 value;
-    u16 seg = pdev->seg;
-    u8 bus = pdev->bus, devfn = pdev->devfn;
 
     BUG_ON(!pdev->ats.cap_pos);
 
-    value = pci_conf_read16(seg, bus, PCI_SLOT(devfn), PCI_FUNC(devfn),
-                            pdev->ats.cap_pos + ATS_REG_CTL);
+    value = pci_conf_read16(pdev->sbdf, pdev->ats.cap_pos + ATS_REG_CTL);
     value &= ~ATS_ENABLE;
-    pci_conf_write16(seg, bus, PCI_SLOT(devfn), PCI_FUNC(devfn),
-                     pdev->ats.cap_pos + ATS_REG_CTL, value);
+    pci_conf_write16(pdev->sbdf, pdev->ats.cap_pos + ATS_REG_CTL, value);
 
     list_del(&pdev->ats.list);
 
     if ( iommu_verbose )
-        dprintk(XENLOG_INFO, "%04x:%02x:%02x.%u: ATS is disabled\n",
-                seg, bus, PCI_SLOT(devfn), PCI_FUNC(devfn));
+        dprintk(XENLOG_INFO, "%pp: ATS is disabled\n", &pdev->sbdf);
 }

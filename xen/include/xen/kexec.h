@@ -1,11 +1,12 @@
 #ifndef __XEN_KEXEC_H__
 #define __XEN_KEXEC_H__
 
+#include <xen/keyhandler.h>
+
 #ifdef CONFIG_KEXEC
 
 #include <public/kexec.h>
-#include <asm/percpu.h>
-#include <xen/elfcore.h>
+
 #include <xen/kimage.h>
 
 typedef struct xen_kexec_reserve {
@@ -49,9 +50,9 @@ void machine_kexec_unload(struct kexec_image *image);
 void machine_kexec_reserved(xen_kexec_reserve_t *reservation);
 void machine_reboot_kexec(struct kexec_image *image);
 void machine_kexec(struct kexec_image *image);
-void kexec_crash(void);
+void kexec_crash(enum crash_reason reason);
 void kexec_crash_save_cpu(void);
-crash_xen_info_t *kexec_crash_save_info(void);
+struct crash_xen_info *kexec_crash_save_info(void);
 void machine_crash_shutdown(void);
 int machine_kexec_get(xen_kexec_range_t *range);
 int machine_kexec_get_xen(xen_kexec_range_t *range);
@@ -83,7 +84,11 @@ void vmcoreinfo_append_str(const char *fmt, ...)
 #define kexecing 0
 
 static inline void kexec_early_calculations(void) {}
-static inline void kexec_crash(void) {}
+static inline void kexec_crash(enum crash_reason reason)
+{
+    keyhandler_crash_action(reason);
+}
+
 static inline void kexec_crash_save_cpu(void) {}
 static inline void set_kexec_crash_area_size(u64 system_ram) {}
 

@@ -2,20 +2,21 @@
  * Compatibility hypercall routines.
  */
 
-#include <xen/config.h>
-#include <xen/errno.h>
-#include <xen/softirq.h>
+        .file "x86_64/compat/entry.S"
+
 #include <asm/asm_defns.h>
-#include <asm/apicdef.h>
 #include <asm/page.h>
+#include <asm/processor.h>
 #include <asm/desc.h>
 #include <public/xen.h>
 #include <irq_vectors.h>
 
-ENTRY(compat_hypercall)
-        ASM_CLAC
+#ifdef CONFIG_PV32
+
+ENTRY(entry_int82)
+        ALTERNATIVE "", clac, X86_FEATURE_XEN_SMAP
         pushq $0
-        movl  $TRAP_syscall, 4(%rsp)
+        movl  $HYPERCALL_VECTOR, 4(%rsp)
         SAVE_ALL compat=1 /* DPL1 gate, restricted to 32bit PV guests only. */
 
         SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
@@ -23,17 +24,12 @@ ENTRY(compat_hypercall)
 
         CR4_PV32_RESTORE
 
-        cmpb  $0,untrusted_msi(%rip)
-UNLIKELY_START(ne, msi_check)
-        movl  $HYPERCALL_VECTOR,%edi
-        call  check_for_unexpected_msi
-        LOAD_C_CLOBBERED compat=1 ax=0
-UNLIKELY_END(msi_check)
-
         GET_CURRENT(bx)
 
         mov   %rsp, %rdi
-        call  pv_hypercall
+        call  do_entry_int82
+
+#endif /* CONFIG_PV32 */
 
 /* %rbx: struct vcpu */
 ENTRY(compat_test_all_events)
@@ -51,11 +47,11 @@ ENTRY(compat_test_all_events)
         testb $TBF_EXCEPTION, TRAPBOUNCE_flags(%rdx)
         jnz   .Lcompat_process_trapbounce
 
-        testb $1,VCPU_mce_pending(%rbx)
-        jnz   compat_process_mce
+        cmpb  $0, VCPU_mce_pending(%rbx)
+        jne   compat_process_mce
 .Lcompat_test_guest_nmi:
-        testb $1,VCPU_nmi_pending(%rbx)
-        jnz   compat_process_nmi
+        cmpb  $0, VCPU_nmi_pending(%rbx)
+        jne   compat_process_nmi
 compat_test_guest_events:
         movq  VCPU_vcpu_info(%rbx),%rax
         movzwl COMPAT_VCPUINFO_upcall_pending(%rax),%eax
@@ -86,7 +82,6 @@ compat_process_softirqs:
         sti
 .Lcompat_bounce_exception:
         call  compat_create_bounce_frame
-        movb  $0, TRAPBOUNCE_flags(%rdx)
         jmp   compat_test_all_events
 
 	ALIGN
@@ -95,9 +90,9 @@ compat_process_mce:
         testb $1 << VCPU_TRAP_MCE,VCPU_async_exception_mask(%rbx)
         jnz   .Lcompat_test_guest_nmi
         sti
-        movb $0,VCPU_mce_pending(%rbx)
-        call set_guest_machinecheck_trapbounce
-        testl %eax,%eax
+        movb  $0, VCPU_mce_pending(%rbx)
+        call  set_guest_machinecheck_trapbounce
+        test  %al, %al
         jz    compat_test_all_events
         movzbl VCPU_async_exception_mask(%rbx),%edx # save mask for the
         movb %dl,VCPU_mce_old_mask(%rbx)            # iret hypercall
@@ -109,11 +104,11 @@ compat_process_mce:
 /* %rbx: struct vcpu */
 compat_process_nmi:
         testb $1 << VCPU_TRAP_NMI,VCPU_async_exception_mask(%rbx)
-        jnz  compat_test_guest_events
+        jnz   compat_test_guest_events
         sti
-        movb  $0,VCPU_nmi_pending(%rbx)
+        movb  $0, VCPU_nmi_pending(%rbx)
         call  set_guest_nmi_trapbounce
-        testl %eax,%eax
+        test  %al, %al
         jz    compat_test_all_events
         movzbl VCPU_async_exception_mask(%rbx),%edx # save mask for the
         movb %dl,VCPU_nmi_old_mask(%rbx)            # iret hypercall
@@ -128,15 +123,12 @@ compat_process_trap:
 /* %rbx: struct vcpu, interrupts disabled */
 ENTRY(compat_restore_all_guest)
         ASSERT_INTERRUPTS_DISABLED
-        mov   $~(X86_EFLAGS_IOPL|X86_EFLAGS_NT|X86_EFLAGS_VM),%r11d
+        mov   $~(X86_EFLAGS_IOPL | X86_EFLAGS_VM), %r11d
         and   UREGS_eflags(%rsp),%r11d
-.Lcr4_orig:
-        .skip .Lcr4_alt_end - .Lcr4_alt, 0x90
-.Lcr4_orig_end:
-        .pushsection .altinstr_replacement, "ax"
-.Lcr4_alt:
+
+.macro alt_cr4_pv32
         testb $3,UREGS_cs(%rsp)
-        jpe   .Lcr4_alt_end
+        jpe   2f
         mov   CPUINFO_cr4-CPUINFO_guest_cpu_user_regs(%rsp), %rax
         and   $~XEN_CR4_PV32_BITS, %rax
 1:
@@ -154,21 +146,17 @@ ENTRY(compat_restore_all_guest)
          */
         cmp   %rax, CPUINFO_cr4-CPUINFO_guest_cpu_user_regs(%rsp)
         jne   1b
-.Lcr4_alt_end:
-        .section .altinstructions, "a"
-        altinstruction_entry .Lcr4_orig, .Lcr4_orig, X86_FEATURE_ALWAYS, \
-                             (.Lcr4_orig_end - .Lcr4_orig), 0
-        altinstruction_entry .Lcr4_orig, .Lcr4_alt, X86_FEATURE_XEN_SMEP, \
-                             (.Lcr4_orig_end - .Lcr4_orig), \
-                             (.Lcr4_alt_end - .Lcr4_alt)
-        altinstruction_entry .Lcr4_orig, .Lcr4_alt, X86_FEATURE_XEN_SMAP, \
-                             (.Lcr4_orig_end - .Lcr4_orig), \
-                             (.Lcr4_alt_end - .Lcr4_alt)
-        .popsection
+2:
+.endm
+	ALTERNATIVE_2 "", \
+            alt_cr4_pv32, X86_FEATURE_XEN_SMEP, \
+            alt_cr4_pv32, X86_FEATURE_XEN_SMAP
+
         or    $X86_EFLAGS_IF,%r11
         mov   %r11d,UREGS_eflags(%rsp)
 
-        mov VCPU_arch_spec_ctrl(%rbx), %eax
+        mov VCPU_arch_msrs(%rbx), %rax
+        mov VCPUMSR_spec_ctrl_raw(%rax), %eax
 
         /* WARNING! `ret`, `call *`, `jmp *` not safe beyond this point. */
         SPEC_CTRL_EXIT_TO_PV    /* Req: a=spec_ctrl %rsp=regs/cpuinfo, Clob: cd */
@@ -213,6 +201,9 @@ ENTRY(cr4_pv32_restore)
 
 /* See lstar_enter for entry register state. */
 ENTRY(cstar_enter)
+#ifdef CONFIG_XEN_SHSTK
+        ALTERNATIVE "", "setssbsy", X86_FEATURE_XEN_SHSTK
+#endif
         /* sti could live here when we don't switch page tables below. */
         CR4_PV32_RESTORE
         movq  8(%rsp),%rax /* Restore %rax. */
@@ -233,11 +224,12 @@ ENTRY(cstar_enter)
         jz    .Lcstar_cr3_okay
         movb  $0, STACK_CPUINFO_FIELD(use_pv_cr3)(%rbx)
         mov   %rcx, %cr3
-        movq  $0, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
+        /* %r12 is still zero at this point. */
+        mov   %r12, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
 .Lcstar_cr3_okay:
         sti
 
-        __GET_CURRENT(bx)
+        movq  STACK_CPUINFO_FIELD(current_vcpu)(%rbx), %rbx
         movq  VCPU_domain(%rbx),%rcx
         cmpb  $0,DOMAIN_is_32bit_pv(%rcx)
         je    switch_to_kernel
@@ -257,7 +249,8 @@ UNLIKELY_START(z, compat_syscall_gpf)
         movq  VCPU_trap_ctxt(%rbx),%rdi
         movl  $TRAP_gp_fault,UREGS_entry_vector(%rsp)
         subl  $2,UREGS_rip(%rsp)
-        movl  $0,TRAPBOUNCE_error_code(%rdx)
+        /* %r12 is still zero at this point. */
+        mov   %r12d, TRAPBOUNCE_error_code(%rdx)
         movl  TRAP_gp_fault * TRAPINFO_sizeof + TRAPINFO_eip(%rdi),%eax
         movzwl TRAP_gp_fault * TRAPINFO_sizeof + TRAPINFO_cs(%rdi),%esi
         testb $4,TRAP_gp_fault * TRAPINFO_sizeof + TRAPINFO_flags(%rdi)
@@ -297,7 +290,7 @@ ENTRY(compat_int80_direct_trap)
 compat_create_bounce_frame:
         ASSERT_INTERRUPTS_ENABLED
         mov   %fs,%edi
-        ASM_STAC
+        ALTERNATIVE "", stac, X86_FEATURE_XEN_SMAP
         testb $2,UREGS_cs+8(%rsp)
         jz    1f
         /* Push new frame at registered guest-OS stack base. */
@@ -344,7 +337,7 @@ compat_create_bounce_frame:
         movl  TRAPBOUNCE_error_code(%rdx),%eax
 .Lft8:  movl  %eax,%fs:(%rsi)           # ERROR CODE
 1:
-        ASM_CLAC
+        ALTERNATIVE "", clac, X86_FEATURE_XEN_SMAP
         /* Rewrite our stack frame and return to guest-OS mode. */
         /* IA32 Ref. Vol. 3: TF, VM, RF and NT flags are cleared on trap. */
         andl  $~(X86_EFLAGS_VM|X86_EFLAGS_RF|\
@@ -362,7 +355,13 @@ __UNLIKELY_END(compat_bounce_null_selector)
         movl  %eax,UREGS_cs+8(%rsp)
         movl  TRAPBOUNCE_eip(%rdx),%eax
         movl  %eax,UREGS_rip+8(%rsp)
+
+        /* Trapbounce complete.  Clobber state to avoid an erroneous second injection. */
+        xor   %eax, %eax
+        mov   %ax,  TRAPBOUNCE_cs(%rdx)
+        mov   %al,  TRAPBOUNCE_flags(%rdx)
         ret
+
 .section .fixup,"ax"
 .Lfx13:
         xorl  %edi,%edi
@@ -384,7 +383,7 @@ compat_crash_page_fault_4:
         addl  $4,%esi
 compat_crash_page_fault:
 .Lft14: mov   %edi,%fs
-        ASM_CLAC
+        ALTERNATIVE "", clac, X86_FEATURE_XEN_SMAP
         movl  %esi,%edi
         call  show_page_walk
         jmp   dom_crash_sync_extable

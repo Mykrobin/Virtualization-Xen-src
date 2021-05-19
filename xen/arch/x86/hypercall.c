@@ -1,6 +1,8 @@
 /******************************************************************************
  * arch/x86/hypercall.c
  *
+ * Common x86 hypercall infrastructure.
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
@@ -17,10 +19,7 @@
  * Copyright (c) 2015,2016 Citrix Systems Ltd.
  */
 
-#include <xen/compiler.h>
 #include <xen/hypercall.h>
-#include <xen/nospec.h>
-#include <xen/trace.h>
 
 #define ARGS(x, n)                              \
     [ __HYPERVISOR_ ## x ] = { n, n }
@@ -61,12 +60,14 @@ const hypercall_args_t hypercall_args_table[NR_hypercalls] =
     ARGS(xenoprof_op, 2),
     ARGS(event_channel_op, 2),
     ARGS(physdev_op, 2),
-    ARGS(hvm_op, 2),
     ARGS(sysctl, 1),
     ARGS(domctl, 1),
     ARGS(kexec_op, 2),
-    ARGS(tmem_op, 1),
+    ARGS(argo_op, 5),
     ARGS(xenpmu_op, 2),
+    ARGS(hvm_op, 2),
+    ARGS(dm_op, 3),
+    ARGS(hypfs_op, 5),
     ARGS(mca, 1),
     ARGS(arch_1, 1),
 };
@@ -74,234 +75,202 @@ const hypercall_args_t hypercall_args_table[NR_hypercalls] =
 #undef COMP
 #undef ARGS
 
-#define HYPERCALL(x)                                                \
-    [ __HYPERVISOR_ ## x ] = { (hypercall_fn_t *) do_ ## x,         \
-                               (hypercall_fn_t *) do_ ## x }
-#define COMPAT_CALL(x)                                              \
-    [ __HYPERVISOR_ ## x ] = { (hypercall_fn_t *) do_ ## x,         \
-                               (hypercall_fn_t *) compat_ ## x }
+#define NEXT_ARG(fmt, args)                                                 \
+({                                                                          \
+    unsigned long __arg;                                                    \
+    switch ( *(fmt)++ )                                                     \
+    {                                                                       \
+    case 'i': __arg = (unsigned long)va_arg(args, unsigned int);  break;    \
+    case 'l': __arg = (unsigned long)va_arg(args, unsigned long); break;    \
+    case 'h': __arg = (unsigned long)va_arg(args, void *);        break;    \
+    default:  goto bad_fmt;                                                 \
+    }                                                                       \
+    __arg;                                                                  \
+})
 
-#define do_arch_1             paging_domctl_continuation
-
-static const hypercall_table_t pv_hypercall_table[] = {
-    COMPAT_CALL(set_trap_table),
-    HYPERCALL(mmu_update),
-    COMPAT_CALL(set_gdt),
-    HYPERCALL(stack_switch),
-    COMPAT_CALL(set_callbacks),
-    HYPERCALL(fpu_taskswitch),
-    HYPERCALL(sched_op_compat),
-    COMPAT_CALL(platform_op),
-    HYPERCALL(set_debugreg),
-    HYPERCALL(get_debugreg),
-    COMPAT_CALL(update_descriptor),
-    COMPAT_CALL(memory_op),
-    COMPAT_CALL(multicall),
-    COMPAT_CALL(update_va_mapping),
-    COMPAT_CALL(set_timer_op),
-    HYPERCALL(event_channel_op_compat),
-    COMPAT_CALL(xen_version),
-    HYPERCALL(console_io),
-    COMPAT_CALL(physdev_op_compat),
-    COMPAT_CALL(grant_table_op),
-    COMPAT_CALL(vm_assist),
-    COMPAT_CALL(update_va_mapping_otherdomain),
-    COMPAT_CALL(iret),
-    COMPAT_CALL(vcpu_op),
-    HYPERCALL(set_segment_base),
-    COMPAT_CALL(mmuext_op),
-    COMPAT_CALL(xsm_op),
-    COMPAT_CALL(nmi_op),
-    COMPAT_CALL(sched_op),
-    COMPAT_CALL(callback_op),
-#ifdef CONFIG_XENOPROF
-    COMPAT_CALL(xenoprof_op),
-#endif
-    HYPERCALL(event_channel_op),
-    COMPAT_CALL(physdev_op),
-    HYPERCALL(hvm_op),
-    HYPERCALL(sysctl),
-    HYPERCALL(domctl),
-#ifdef CONFIG_KEXEC
-    COMPAT_CALL(kexec_op),
-#endif
-#ifdef CONFIG_TMEM
-    HYPERCALL(tmem_op),
-#endif
-    HYPERCALL(xenpmu_op),
-    HYPERCALL(mca),
-    HYPERCALL(arch_1),
-};
-
-#undef do_arch_1
-#undef COMPAT_CALL
-#undef HYPERCALL
-
-void pv_hypercall(struct cpu_user_regs *regs)
+unsigned long hypercall_create_continuation(
+    unsigned int op, const char *format, ...)
 {
     struct vcpu *curr = current;
-#ifndef NDEBUG
-    unsigned long old_rip = regs->rip;
-#endif
-    unsigned long eax;
+    struct mc_state *mcs = &curr->mc_state;
+    const char *p = format;
+    unsigned long arg;
+    unsigned int i;
+    va_list args;
 
-    ASSERT(guest_kernel_mode(curr, regs));
+    curr->hcall_preempted = true;
 
-    eax = is_pv_32bit_vcpu(curr) ? regs->_eax : regs->eax;
+    va_start(args, format);
 
-    BUILD_BUG_ON(ARRAY_SIZE(pv_hypercall_table) >
-                 ARRAY_SIZE(hypercall_args_table));
-
-    if ( eax >= ARRAY_SIZE(pv_hypercall_table) )
+    if ( mcs->flags & MCSF_in_multicall )
     {
-        regs->eax = -ENOSYS;
-        return;
-    }
-
-    eax = array_index_nospec(eax, ARRAY_SIZE(pv_hypercall_table));
-
-    if ( !pv_hypercall_table[eax].native )
-    {
-        regs->eax = -ENOSYS;
-        return;
-    }
-
-    if ( !is_pv_32bit_vcpu(curr) )
-    {
-        unsigned long rdi = regs->rdi;
-        unsigned long rsi = regs->rsi;
-        unsigned long rdx = regs->rdx;
-        unsigned long r10 = regs->r10;
-        unsigned long r8 = regs->r8;
-        unsigned long r9 = regs->r9;
-
-#ifndef NDEBUG
-        /* Deliberately corrupt parameter regs not used by this hypercall. */
-        switch ( hypercall_args_table[eax].native )
-        {
-        case 0: rdi = 0xdeadbeefdeadf00dUL;
-        case 1: rsi = 0xdeadbeefdeadf00dUL;
-        case 2: rdx = 0xdeadbeefdeadf00dUL;
-        case 3: r10 = 0xdeadbeefdeadf00dUL;
-        case 4: r8 = 0xdeadbeefdeadf00dUL;
-        case 5: r9 = 0xdeadbeefdeadf00dUL;
-        }
-#endif
-        if ( unlikely(tb_init_done) )
-        {
-            unsigned long args[6] = { rdi, rsi, rdx, r10, r8, r9 };
-
-            __trace_hypercall(TRC_PV_HYPERCALL_V2, eax, args);
-        }
-
-        regs->eax = pv_hypercall_table[eax].native(rdi, rsi, rdx, r10, r8, r9);
-
-#ifndef NDEBUG
-        if ( regs->rip == old_rip )
-        {
-            /* Deliberately corrupt parameter regs used by this hypercall. */
-            switch ( hypercall_args_table[eax].native )
-            {
-            case 6: regs->r9  = 0xdeadbeefdeadf00dUL;
-            case 5: regs->r8  = 0xdeadbeefdeadf00dUL;
-            case 4: regs->r10 = 0xdeadbeefdeadf00dUL;
-            case 3: regs->rdx = 0xdeadbeefdeadf00dUL;
-            case 2: regs->rsi = 0xdeadbeefdeadf00dUL;
-            case 1: regs->rdi = 0xdeadbeefdeadf00dUL;
-            }
-        }
-#endif
+        for ( i = 0; *p != '\0'; i++ )
+            mcs->call.args[i] = NEXT_ARG(p, args);
     }
     else
     {
-        unsigned int ebx = regs->_ebx;
-        unsigned int ecx = regs->_ecx;
-        unsigned int edx = regs->_edx;
-        unsigned int esi = regs->_esi;
-        unsigned int edi = regs->_edi;
-        unsigned int ebp = regs->_ebp;
+        struct cpu_user_regs *regs = guest_cpu_user_regs();
 
-#ifndef NDEBUG
-        /* Deliberately corrupt parameter regs not used by this hypercall. */
-        switch ( hypercall_args_table[eax].compat )
+        regs->rax = op;
+
+        if ( !curr->hcall_compat )
         {
-        case 0: ebx = 0xdeadf00d;
-        case 1: ecx = 0xdeadf00d;
-        case 2: edx = 0xdeadf00d;
-        case 3: esi = 0xdeadf00d;
-        case 4: edi = 0xdeadf00d;
-        case 5: ebp = 0xdeadf00d;
-        }
-#endif
-
-        if ( unlikely(tb_init_done) )
-        {
-            unsigned long args[6] = { ebx, ecx, edx, esi, edi, ebp };
-
-            __trace_hypercall(TRC_PV_HYPERCALL_V2, eax, args);
-        }
-
-        regs->_eax = pv_hypercall_table[eax].compat(ebx, ecx, edx, esi, edi, ebp);
-
-#ifndef NDEBUG
-        if ( regs->rip == old_rip )
-        {
-            /* Deliberately corrupt parameter regs used by this hypercall. */
-            switch ( hypercall_args_table[eax].compat )
+            for ( i = 0; *p != '\0'; i++ )
             {
-            case 6: regs->_ebp = 0xdeadf00d;
-            case 5: regs->_edi = 0xdeadf00d;
-            case 4: regs->_esi = 0xdeadf00d;
-            case 3: regs->_edx = 0xdeadf00d;
-            case 2: regs->_ecx = 0xdeadf00d;
-            case 1: regs->_ebx = 0xdeadf00d;
+                arg = NEXT_ARG(p, args);
+                switch ( i )
+                {
+                case 0: regs->rdi = arg; break;
+                case 1: regs->rsi = arg; break;
+                case 2: regs->rdx = arg; break;
+                case 3: regs->r10 = arg; break;
+                case 4: regs->r8  = arg; break;
+                case 5: regs->r9  = arg; break;
+                }
             }
         }
-#endif
+        else
+        {
+            for ( i = 0; *p != '\0'; i++ )
+            {
+                arg = NEXT_ARG(p, args);
+                switch ( i )
+                {
+                case 0: regs->rbx = arg; break;
+                case 1: regs->rcx = arg; break;
+                case 2: regs->rdx = arg; break;
+                case 3: regs->rsi = arg; break;
+                case 4: regs->rdi = arg; break;
+                case 5: regs->rbp = arg; break;
+                }
+            }
+        }
     }
 
-    perfc_incr(hypercalls);
+    va_end(args);
+
+    return op;
+
+ bad_fmt:
+    va_end(args);
+    gprintk(XENLOG_ERR, "Bad hypercall continuation format '%c'\n", *p);
+    ASSERT_UNREACHABLE();
+    domain_crash(curr->domain);
+    return 0;
 }
 
-enum mc_disposition arch_do_multicall_call(struct mc_state *state)
+#undef NEXT_ARG
+
+void arch_hypercall_tasklet_result(struct vcpu *v, long res)
 {
-    struct vcpu *curr = current;
-    unsigned long op;
+    struct cpu_user_regs *regs = &v->arch.user_regs;
 
-    if ( !is_pv_32bit_vcpu(curr) )
+    regs->rax = res;
+}
+
+int hypercall_xlat_continuation(unsigned int *id, unsigned int nr,
+                                unsigned int mask, ...)
+{
+    int rc = 0;
+    struct mc_state *mcs = &current->mc_state;
+    struct cpu_user_regs *regs;
+    unsigned int i, cval = 0;
+    unsigned long nval = 0;
+    va_list args;
+
+    ASSERT(nr <= ARRAY_SIZE(mcs->call.args));
+    ASSERT(!(mask >> nr));
+    ASSERT(!id || *id < nr);
+    ASSERT(!id || !(mask & (1U << *id)));
+
+    va_start(args, mask);
+
+    if ( mcs->flags & MCSF_in_multicall )
     {
-        struct multicall_entry *call = &state->call;
+        if ( !current->hcall_preempted )
+        {
+            va_end(args);
+            return 0;
+        }
 
-        op = call->op;
-        if ( (op < ARRAY_SIZE(pv_hypercall_table)) &&
-             pv_hypercall_table[op].native )
-            call->result = pv_hypercall_table[op].native(
-                call->args[0], call->args[1], call->args[2],
-                call->args[3], call->args[4], call->args[5]);
-        else
-            call->result = -ENOSYS;
+        for ( i = 0; i < nr; ++i, mask >>= 1 )
+        {
+            if ( mask & 1 )
+            {
+                nval = va_arg(args, unsigned long);
+                cval = va_arg(args, unsigned int);
+                if ( cval == nval )
+                    mask &= ~1U;
+                else
+                    BUG_ON(nval == (unsigned int)nval);
+            }
+            else if ( id && *id == i )
+            {
+                *id = mcs->call.args[i];
+                id = NULL;
+            }
+            if ( (mask & 1) && mcs->call.args[i] == nval )
+            {
+                mcs->call.args[i] = cval;
+                ++rc;
+            }
+            else
+                BUG_ON(mcs->call.args[i] != (unsigned int)mcs->call.args[i]);
+        }
     }
-#ifdef CONFIG_COMPAT
     else
     {
-        struct compat_multicall_entry *call = &state->compat_call;
+        regs = guest_cpu_user_regs();
+        for ( i = 0; i < nr; ++i, mask >>= 1 )
+        {
+            unsigned long *reg;
 
-        op = call->op;
-        if ( (op < ARRAY_SIZE(pv_hypercall_table)) &&
-             pv_hypercall_table[op].compat )
-            call->result = pv_hypercall_table[op].compat(
-                call->args[0], call->args[1], call->args[2],
-                call->args[3], call->args[4], call->args[5]);
-        else
-            call->result = -ENOSYS;
+            switch ( i )
+            {
+            case 0: reg = &regs->rbx; break;
+            case 1: reg = &regs->rcx; break;
+            case 2: reg = &regs->rdx; break;
+            case 3: reg = &regs->rsi; break;
+            case 4: reg = &regs->rdi; break;
+            case 5: reg = &regs->rbp; break;
+            default: BUG(); reg = NULL; break;
+            }
+            if ( (mask & 1) )
+            {
+                nval = va_arg(args, unsigned long);
+                cval = va_arg(args, unsigned int);
+                if ( cval == nval )
+                    mask &= ~1U;
+                else
+                    BUG_ON(nval == (unsigned int)nval);
+            }
+            else if ( id && *id == i )
+            {
+                *id = *reg;
+                id = NULL;
+            }
+            if ( (mask & 1) && *reg == nval )
+            {
+                *reg = cval;
+                ++rc;
+            }
+            else
+                BUG_ON(*reg != (unsigned int)*reg);
+        }
     }
-#endif
 
-    return unlikely(op == __HYPERVISOR_iret)
-           ? mc_exit
-           : likely(guest_kernel_mode(curr, guest_cpu_user_regs()))
-             ? mc_continue : mc_preempt;
+    va_end(args);
+
+    return rc;
 }
+
+#ifndef CONFIG_PV
+/* Stub for arch_do_multicall_call */
+enum mc_disposition arch_do_multicall_call(struct mc_state *mc)
+{
+    return mc_exit;
+}
+#endif
 
 /*
  * Local variables:

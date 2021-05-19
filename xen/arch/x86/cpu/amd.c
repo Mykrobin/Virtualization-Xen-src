@@ -1,15 +1,15 @@
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/bitops.h>
 #include <xen/mm.h>
+#include <xen/param.h>
 #include <xen/smp.h>
 #include <xen/pci.h>
+#include <xen/warning.h>
 #include <asm/io.h>
 #include <asm/msr.h>
 #include <asm/processor.h>
 #include <asm/amd.h>
 #include <asm/hvm/support.h>
-#include <asm/setup.h> /* amd_init_cpu */
 #include <asm/spec_ctrl.h>
 #include <asm/acpi.h>
 #include <asm/apic.h>
@@ -45,6 +45,9 @@ integer_param("cpuid_mask_thermal_ecx", opt_cpuid_mask_thermal_ecx);
 /* 1 = allow, 0 = don't allow guest creation, -1 = don't allow boot */
 s8 __read_mostly opt_allow_unsafe;
 boolean_param("allow_unsafe", opt_allow_unsafe);
+
+/* Signal whether the ACPI C1E quirk is required. */
+bool __read_mostly amd_acpi_c1e_quirk;
 
 static inline int rdmsr_amd_safe(unsigned int msr, unsigned int *lo,
 				 unsigned int *hi)
@@ -200,17 +203,18 @@ static void __init noinline probe_masking_msrs(void)
 }
 
 /*
- * Context switch levelling state to the next domain.  A parameter of NULL is
- * used to context switch to the default host state (by the cpu bringup-code,
- * crash path, etc).
+ * Context switch CPUID masking state to the next domain.  Only called if
+ * CPUID Faulting isn't available, but masking MSRs have been detected.  A
+ * parameter of NULL is used to context switch to the default host state (by
+ * the cpu bringup-code, crash path, etc).
  */
-static void amd_ctxt_switch_levelling(const struct vcpu *next)
+static void amd_ctxt_switch_masking(const struct vcpu *next)
 {
 	struct cpuidmasks *these_masks = &this_cpu(cpuidmasks);
 	const struct domain *nextd = next ? next->domain : NULL;
 	const struct cpuidmasks *masks =
-		(nextd && is_pv_domain(nextd) && nextd->arch.pv_domain.cpuidmasks)
-		? nextd->arch.pv_domain.cpuidmasks : &cpuidmask_defaults;
+		(nextd && is_pv_domain(nextd) && nextd->arch.pv.cpuidmasks)
+		? nextd->arch.pv.cpuidmasks : &cpuidmask_defaults;
 
 	if ((levelling_caps & LCAP_1cd) == LCAP_1cd) {
 		uint64_t val = masks->_1cd;
@@ -221,7 +225,7 @@ static void amd_ctxt_switch_levelling(const struct vcpu *next)
 		 * kernel.
 		 */
 		if (next && is_pv_vcpu(next) && !is_idle_vcpu(next) &&
-		    !(next->arch.pv_vcpu.ctrlreg[4] & X86_CR4_OSXSAVE))
+		    !(next->arch.pv.ctrlreg[4] & X86_CR4_OSXSAVE))
 			val &= ~((uint64_t)cpufeat_mask(X86_FEATURE_OSXSAVE) << 32);
 
 		if (unlikely(these_masks->_1cd != val)) {
@@ -265,6 +269,9 @@ static void __init noinline amd_init_levelling(void)
 {
 	const struct cpuidmask *m = NULL;
 
+	if (probe_cpuid_faulting())
+		return;
+
 	probe_masking_msrs();
 
 	if (*opt_famrev != '\0') {
@@ -291,9 +298,6 @@ static void __init noinline amd_init_levelling(void)
 		if (ecx & cpufeat_mask(X86_FEATURE_XSAVE))
 			ecx |= cpufeat_mask(X86_FEATURE_OSXSAVE);
 		edx |= cpufeat_mask(X86_FEATURE_APIC);
-
-		/* Allow the HYPERVISOR bit to be set via guest policy. */
-		ecx |= cpufeat_mask(X86_FEATURE_HYPERVISOR);
 
 		cpuidmask_defaults._1cd = ((uint64_t)ecx << 32) | edx;
 	}
@@ -354,7 +358,7 @@ static void __init noinline amd_init_levelling(void)
 	}
 
 	if (levelling_caps)
-		ctxt_switch_levelling = amd_ctxt_switch_levelling;
+		ctxt_switch_masking = amd_ctxt_switch_masking;
 }
 
 /*
@@ -412,15 +416,16 @@ static void disable_c1_ramping(void)
 	int node, nr_nodes;
 
 	/* Read the number of nodes from the first Northbridge. */
-	nr_nodes = ((pci_conf_read32(0, 0, 0x18, 0x0, 0x60)>>4)&0x07)+1;
+	nr_nodes = ((pci_conf_read32(PCI_SBDF(0, 0, 0x18, 0), 0x60) >> 4) &
+		    0x07) + 1;
 	for (node = 0; node < nr_nodes; node++) {
 		/* PMM7: bus=0, dev=0x18+node, function=0x3, register=0x87. */
-		pmm7 = pci_conf_read8(0, 0, 0x18+node, 0x3, 0x87);
+		pmm7 = pci_conf_read8(PCI_SBDF(0, 0, 0x18 + node, 3), 0x87);
 		/* Invalid read means we've updated every Northbridge. */
 		if (pmm7 == 0xFF)
 			break;
 		pmm7 &= 0xFC; /* clear pmm7[1:0] */
-		pci_conf_write8(0, 0, 0x18+node, 0x3, 0x87, pmm7);
+		pci_conf_write8(PCI_SBDF(0, 0, 0x18 + node, 3), 0x87, pmm7);
 		printk ("AMD: Disabling C1 Clock Ramping Node #%x\n", node);
 	}
 }
@@ -441,7 +446,7 @@ static void disable_c1e(void *unused)
 		       smp_processor_id(), msr_content);
 }
 
-static void check_disable_c1e(unsigned int port, u8 value)
+void amd_check_disable_c1e(unsigned int port, u8 value)
 {
 	/* C1E is sometimes enabled during entry to ACPI mode. */
 	if ((port == acpi_smi_cmd) && (value == acpi_enable_value))
@@ -510,6 +515,13 @@ static void amd_get_topology(struct cpuinfo_x86 *c)
                         c->cpu_core_id = ebx & 0xFF;
                         c->x86_max_cores /= c->x86_num_siblings;
                 }
+
+                /*
+                 * In case leaf B is available, use it to derive
+                 * topology information.
+                 */
+                if (detect_extended_topology(c))
+                        return;
         }
         
         if (opt_cpu_info)
@@ -521,12 +533,113 @@ static void amd_get_topology(struct cpuinfo_x86 *c)
                                                           : c->cpu_core_id);
 }
 
-static void early_init_amd(struct cpuinfo_x86 *c)
+void amd_log_freq(const struct cpuinfo_x86 *c)
+{
+	unsigned int idx = 0, h;
+	uint64_t hi, lo, val;
+
+	if (c->x86 < 0x10 || c->x86 > 0x19 ||
+	    (c != &boot_cpu_data &&
+	     (!opt_cpu_info || (c->apicid & (c->x86_num_siblings - 1)))))
+		return;
+
+	if (c->x86 < 0x17) {
+		unsigned int node = 0;
+		uint64_t nbcfg;
+
+		/*
+		 * Make an attempt at determining the node ID, but assume
+		 * symmetric setup (using node 0) if this fails.
+		 */
+		if (c->extended_cpuid_level >= 0x8000001e &&
+		    cpu_has(c, X86_FEATURE_TOPOEXT)) {
+			node = cpuid_ecx(0x8000001e) & 0xff;
+			if (node > 7)
+				node = 0;
+		} else if (cpu_has(c, X86_FEATURE_NODEID_MSR)) {
+			rdmsrl(0xC001100C, val);
+			node = val & 7;
+		}
+
+		/*
+		 * Enable (and use) Extended Config Space accesses, as we
+		 * can't be certain that MCFG is available here during boot.
+		 */
+		rdmsrl(MSR_AMD64_NB_CFG, nbcfg);
+		wrmsrl(MSR_AMD64_NB_CFG,
+		       nbcfg | (1ULL << AMD64_NB_CFG_CF8_EXT_ENABLE_BIT));
+#define PCI_ECS_ADDRESS(sbdf, reg) \
+    (0x80000000 | ((sbdf).bdf << 8) | ((reg) & 0xfc) | (((reg) & 0xf00) << 16))
+
+		for ( ; ; ) {
+			pci_sbdf_t sbdf = PCI_SBDF(0, 0, 0x18 | node, 4);
+
+			switch (pci_conf_read32(sbdf, PCI_VENDOR_ID)) {
+			case 0x00000000:
+			case 0xffffffff:
+				/* No device at this SBDF. */
+				if (!node)
+					break;
+				node = 0;
+				continue;
+
+			default:
+				/*
+				 * Core Performance Boost Control, family
+				 * dependent up to 3 bits starting at bit 2.
+				 *
+				 * Note that boost states operate at a frequency
+				 * above the base one, and thus need to be
+				 * accounted for in order to correctly fetch the
+				 * nominal frequency of the processor.
+				 */
+				switch (c->x86) {
+				case 0x10: idx = 1; break;
+				case 0x12: idx = 7; break;
+				case 0x14: idx = 7; break;
+				case 0x15: idx = 7; break;
+				case 0x16: idx = 7; break;
+				}
+				idx &= pci_conf_read(PCI_ECS_ADDRESS(sbdf,
+				                                     0x15c),
+				                     0, 4) >> 2;
+				break;
+			}
+			break;
+		}
+
+#undef PCI_ECS_ADDRESS
+		wrmsrl(MSR_AMD64_NB_CFG, nbcfg);
+	}
+
+	lo = 0; /* gcc may not recognize the loop having at least 5 iterations */
+	for (h = c->x86 == 0x10 ? 5 : 8; h--; )
+		if (!rdmsr_safe(0xC0010064 + h, lo) && (lo >> 63))
+			break;
+	if (!(lo >> 63))
+		return;
+
+#define FREQ(v) (c->x86 < 0x17 ? ((((v) & 0x3f) + 0x10) * 100) >> (((v) >> 6) & 7) \
+		                     : (((v) & 0xff) * 25 * 8) / (((v) >> 8) & 0x3f))
+	if (idx && idx < h &&
+	    !rdmsr_safe(0xC0010064 + idx, val) && (val >> 63) &&
+	    !rdmsr_safe(0xC0010064, hi) && (hi >> 63))
+		printk("CPU%u: %lu (%lu ... %lu) MHz\n",
+		       smp_processor_id(), FREQ(val), FREQ(lo), FREQ(hi));
+	else if (h && !rdmsr_safe(0xC0010064, hi) && (hi >> 63))
+		printk("CPU%u: %lu ... %lu MHz\n",
+		       smp_processor_id(), FREQ(lo), FREQ(hi));
+	else
+		printk("CPU%u: %lu MHz\n", smp_processor_id(), FREQ(lo));
+#undef FREQ
+}
+
+void early_init_amd(struct cpuinfo_x86 *c)
 {
 	if (c == &boot_cpu_data)
 		amd_init_levelling();
 
-	amd_ctxt_switch_levelling(NULL);
+	ctxt_switch_levelling(NULL);
 }
 
 static void init_amd(struct cpuinfo_x86 *c)
@@ -565,6 +678,13 @@ static void init_amd(struct cpuinfo_x86 *c)
 		if (!rdmsr_amd_safe(0xc001100d, &l, &h))
 			wrmsr_amd_safe(0xc001100d, l, h & ~1);
 	}
+
+	/*
+	 * Older AMD CPUs don't save/load FOP/FIP/FDP unless an FPU exception
+	 * is pending.  Xen works around this at (F)XRSTOR time.
+	 */
+	if (c == &boot_cpu_data && !cpu_has(c, X86_FEATURE_RSTR_FP_ERR_PTRS))
+		setup_force_cpu_cap(X86_BUG_FPU_PTRS);
 
 	/*
 	 * Attempt to set lfence to be Dispatch Serialising.  This MSR almost
@@ -623,10 +743,30 @@ static void init_amd(struct cpuinfo_x86 *c)
 
 	switch(c->x86)
 	{
-	case 0xf ... 0x17:
+	case 0xf ... 0x11:
 		disable_c1e(NULL);
 		if (acpi_smi_cmd && (acpi_enable_value | acpi_disable_value))
-			pv_post_outb_hook = check_disable_c1e;
+			amd_acpi_c1e_quirk = true;
+		break;
+
+	case 0x15: case 0x16:
+		/*
+		 * There are some Fam15/Fam16 systems where upon resume from S3
+		 * firmware fails to re-setup properly functioning RDRAND.
+		 * By the time we can spot the problem, it is too late to take
+		 * action, and there is nothing Xen can do to repair the problem.
+		 * Clear the feature unless force-enabled on the command line.
+		 */
+		if (c == &boot_cpu_data &&
+		    cpu_has(c, X86_FEATURE_RDRAND) &&
+		    !is_forced_cpu_cap(X86_FEATURE_RDRAND)) {
+			static const char __initconst text[] =
+				"RDRAND may cease to work on this hardware upon resume from S3.\n"
+				"Please choose an explicit cpuid={no-}rdrand setting.\n";
+
+			setup_clear_cpu_cap(X86_FEATURE_RDRAND);
+			warning_add(text);
+		}
 		break;
 	}
 
@@ -691,8 +831,8 @@ static void init_amd(struct cpuinfo_x86 *c)
 
 	if (c->x86 == 0x16 && c->x86_model <= 0xf) {
 		if (c == &boot_cpu_data) {
-			l = pci_conf_read32(0, 0, 0x18, 0x3, 0x58);
-			h = pci_conf_read32(0, 0, 0x18, 0x3, 0x5c);
+			l = pci_conf_read32(PCI_SBDF(0, 0, 0x18, 3), 0x58);
+			h = pci_conf_read32(PCI_SBDF(0, 0, 0x18, 3), 0x5c);
 			if ((l & 0x1f) | (h & 0x1))
 				printk(KERN_WARNING
 				       "Applying workaround for erratum 792: %s%s%s\n",
@@ -701,11 +841,11 @@ static void init_amd(struct cpuinfo_x86 *c)
 				       (h & 0x1) ? "clearing D18F3x5C[0]" : "");
 
 			if (l & 0x1f)
-				pci_conf_write32(0, 0, 0x18, 0x3, 0x58,
+				pci_conf_write32(PCI_SBDF(0, 0, 0x18, 3), 0x58,
 						 l & ~0x1f);
 
 			if (h & 0x1)
-				pci_conf_write32(0, 0, 0x18, 0x3, 0x5c,
+				pci_conf_write32(PCI_SBDF(0, 0, 0x18, 3), 0x5c,
 						 h & ~0x1);
 		}
 
@@ -785,17 +925,11 @@ static void init_amd(struct cpuinfo_x86 *c)
 		disable_c1_ramping();
 
 	check_syscfg_dram_mod_en();
+
+	amd_log_freq(c);
 }
 
-static const struct cpu_dev amd_cpu_dev = {
-	.c_vendor	= "AMD",
-	.c_ident 	= { "AuthenticAMD" },
+const struct cpu_dev amd_cpu_dev = {
 	.c_early_init	= early_init_amd,
 	.c_init		= init_amd,
 };
-
-int __init amd_init_cpu(void)
-{
-	cpu_devs[X86_VENDOR_AMD] = &amd_cpu_dev;
-	return 0;
-}

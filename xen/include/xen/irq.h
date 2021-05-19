@@ -8,6 +8,7 @@
 #include <xen/list.h>
 #include <asm/regs.h>
 #include <asm/hardirq.h>
+#include <public/event_channel.h>
 
 struct irqaction {
     void (*handler)(int, void *, struct cpu_user_regs *);
@@ -127,12 +128,14 @@ struct vcpu;
 
 struct pirq {
     int pirq;
-    u16 evtchn;
-    bool_t masked;
+    evtchn_port_t evtchn;
     struct rcu_head rcu_head;
+    bool masked;
+    /* Architectures may require this field to be last. */
     struct arch_pirq arch;
 };
 
+#define INVALID_PIRQ (-1)
 #define pirq_info(d, p) ((struct pirq *)radix_tree_lookup(&(d)->pirq_tree, p))
 
 /* Use this instead of pirq_info() if the structure may need allocating. */
@@ -160,11 +163,6 @@ extern irq_desc_t *domain_spin_lock_irq_desc(
     struct domain *d, int irq, unsigned long *pflags);
 extern irq_desc_t *pirq_spin_lock_irq_desc(
     const struct pirq *, unsigned long *pflags);
-
-static inline void set_native_irq_info(unsigned int irq, const cpumask_t *mask)
-{
-    cpumask_copy(irq_to_desc(irq)->affinity, mask);
-}
 
 unsigned int set_desc_affinity(struct irq_desc *, const cpumask_t *);
 

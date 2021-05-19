@@ -34,6 +34,12 @@ if test "x$sysconfdir" = 'x${prefix}/etc' ; then
     esac
 fi
 
+CONFIG_DIR=$sysconfdir
+AC_SUBST(CONFIG_DIR)
+
+XEN_CONFIG_DIR=$CONFIG_DIR/xen
+AC_SUBST(XEN_CONFIG_DIR)
+
 AC_ARG_WITH([initddir],
     AS_HELP_STRING([--with-initddir=DIR],
     [Path to directory with sysv runlevel scripts. [SYSCONFDIR/init.d]]),
@@ -70,11 +76,31 @@ AC_ARG_WITH([libexec-leaf-dir],
     [libexec_subdir=$withval],
     [libexec_subdir=$PACKAGE_TARNAME])
 
+AC_ARG_WITH([xen-scriptdir],
+    AS_HELP_STRING([--with-xen-scriptdir=DIR],
+    [Path to directory for dom0 hotplug scripts. [SYSCONFDIR/xen/scripts]]),
+    [xen_scriptdir_path=$withval],
+    [xen_scriptdir_path=$XEN_CONFIG_DIR/scripts])
+XEN_SCRIPT_DIR=$xen_scriptdir_path
+AC_SUBST(XEN_SCRIPT_DIR)
+
 AC_ARG_WITH([xen-dumpdir],
     AS_HELP_STRING([--with-xen-dumpdir=DIR],
     [Path to directory for domU crash dumps. [LOCALSTATEDIR/lib/xen/dump]]),
     [xen_dumpdir_path=$withval],
     [xen_dumpdir_path=$localstatedir/lib/xen/dump])
+
+AC_ARG_WITH([rundir],
+    AS_HELP_STRING([--with-rundir=DIR],
+    [Path to directory for runtime data. [LOCALSTATEDIR/run]]),
+    [rundir_path=$withval],
+    [rundir_path=$localstatedir/run])
+
+AC_ARG_WITH([debugdir],
+    AS_HELP_STRING([--with-debugdir=DIR],
+    [Path to directory for debug symbols. [PREFIX/lib/debug]]),
+    [debugdir_path=$withval],
+    [debugdir_path=$prefix/lib/debug])
 
 if test "$libexecdir" = '${exec_prefix}/libexec' ; then
     case "$host_os" in
@@ -98,7 +124,7 @@ AC_SUBST(LIBEXEC_INC)
 XENFIRMWAREDIR=${LIBEXEC}/boot
 AC_SUBST(XENFIRMWAREDIR)
 
-XEN_RUN_DIR=$localstatedir/run/xen
+XEN_RUN_DIR=$rundir_path/xen
 AC_SUBST(XEN_RUN_DIR)
 
 XEN_LOG_DIR=$localstatedir/log/xen
@@ -107,7 +133,7 @@ AC_SUBST(XEN_LOG_DIR)
 XEN_LIB_STORED=$localstatedir/lib/xenstored
 AC_SUBST(XEN_LIB_STORED)
 
-XEN_RUN_STORED=$localstatedir/run/xenstored
+XEN_RUN_STORED=$rundir_path/xenstored
 AC_SUBST(XEN_RUN_STORED)
 
 XEN_LIB_DIR=$localstatedir/lib/xen
@@ -116,21 +142,12 @@ AC_SUBST(XEN_LIB_DIR)
 SHAREDIR=$prefix/share
 AC_SUBST(SHAREDIR)
 
-CONFIG_DIR=$sysconfdir
-AC_SUBST(CONFIG_DIR)
-
 INITD_DIR=$initddir_path
 AC_SUBST(INITD_DIR)
 
-XEN_CONFIG_DIR=$CONFIG_DIR/xen
-AC_SUBST(XEN_CONFIG_DIR)
-
-XEN_SCRIPT_DIR=$XEN_CONFIG_DIR/scripts
-AC_SUBST(XEN_SCRIPT_DIR)
-
 case "$host_os" in
 *freebsd*) XEN_LOCK_DIR=$localstatedir/lib ;;
-*netbsd*) XEN_LOCK_DIR=$localstatedir/lib ;;
+*netbsd*) XEN_LOCK_DIR=$rundir_path ;;
 *) XEN_LOCK_DIR=$localstatedir/lock ;;
 esac
 AC_SUBST(XEN_LOCK_DIR)
@@ -140,4 +157,19 @@ AC_SUBST(XEN_PAGING_DIR)
 
 XEN_DUMP_DIR=$xen_dumpdir_path
 AC_SUBST(XEN_DUMP_DIR)
+
+DEBUG_DIR=$debugdir_path
+AC_SUBST(DEBUG_DIR)
 ])
+
+case "$host_os" in
+*freebsd*) XENSTORED_KVA=/dev/xen/xenstored ;;
+*) XENSTORED_KVA=/proc/xen/xsd_kva ;;
+esac
+AC_SUBST(XENSTORED_KVA)
+
+case "$host_os" in
+*freebsd*) XENSTORED_PORT=/dev/xen/xenstored ;;
+*) XENSTORED_PORT=/proc/xen/xsd_port ;;
+esac
+AC_SUBST(XENSTORED_PORT)

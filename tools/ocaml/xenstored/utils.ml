@@ -45,23 +45,22 @@ let get_hierarchy path =
 
 let hexify s =
 	let hexseq_of_char c = sprintf "%02x" (Char.code c) in
-	let hs = String.create (String.length s * 2) in
-	for i = 0 to String.length s - 1
-	do
-		let seq = hexseq_of_char s.[i] in
-		hs.[i * 2] <- seq.[0];
-		hs.[i * 2 + 1] <- seq.[1];
-	done;
-	hs
+	let hs = Bytes.create (String.length s * 2) in
+	String.iteri (fun i c ->
+		let seq = hexseq_of_char c in
+		Bytes.set hs (i * 2) seq.[0];
+		Bytes.set hs (i * 2 + 1) seq.[1];
+	) s;
+	Bytes.unsafe_to_string hs
 
 let unhexify hs =
 	let char_of_hexseq seq0 seq1 = Char.chr (int_of_string (sprintf "0x%c%c" seq0 seq1)) in
-	let s = String.create (String.length hs / 2) in
-	for i = 0 to String.length s - 1
+	let b = Bytes.create (String.length hs / 2) in
+	for i = 0 to Bytes.length b - 1
 	do
-		s.[i] <- char_of_hexseq hs.[i * 2] hs.[i * 2 + 1]
+		Bytes.set b i (char_of_hexseq hs.[i * 2] hs.[i * 2 + 1])
 	done;
-	s
+	Bytes.unsafe_to_string b
 
 let trim_path path =
 	try
@@ -84,24 +83,47 @@ let create_unix_socket name =
 
 let read_file_single_integer filename =
 	let fd = Unix.openfile filename [ Unix.O_RDONLY ] 0o640 in
-	let buf = String.make 20 (char_of_int 0) in
+	let buf = Bytes.make 20 '\000' in
 	let sz = Unix.read fd buf 0 20 in
 	Unix.close fd;
-	int_of_string (String.sub buf 0 sz)
+	int_of_string (Bytes.sub_string buf 0 sz)
 
-let path_complete path connection_path =
-	if String.get path 0 <> '/' then
-		connection_path ^ path
-	else
-		path
-
+(* @path may be guest data and needs its length validating.  @connection_path
+ * is generated locally in xenstored and always of the form "/local/domain/$N/" *)
 let path_validate path connection_path =
-	if String.length path = 0 || String.length path > 1024 then
-		raise Define.Invalid_path
-	else
-		let cpath = path_complete path connection_path in
-		if String.get cpath 0 <> '/' then
-			raise Define.Invalid_path
-		else
-			cpath
+	let len = String.length path in
 
+	if len = 0 then raise Define.Invalid_path;
+
+	let abs_path =
+		match String.get path 0 with
+		| '/' | '@' -> path
+		| _   -> connection_path ^ path
+	in
+
+	(* Regardless whether client specified absolute or relative path,
+	   canonicalize it (above) and, for domain-relative paths, check the
+	   length of the relative part.
+
+	   This prevents paths becoming invalid across migrate when the length
+	   of the domid changes in @param connection_path.
+	 *)
+	let len = String.length abs_path in
+	let on_absolute _ _ = len in
+	let on_relative _ offset = len - offset in
+	let len = Scanf.ksscanf abs_path on_absolute "/local/domain/%d/%n" on_relative in
+	if len > !Define.path_max then raise Define.Invalid_path;
+
+	abs_path
+
+module FD : sig
+	type t = Unix.file_descr
+	val of_int: int -> t
+	val to_int : t -> int
+end = struct
+	type t = Unix.file_descr
+	(* This is like Obj.magic but just for these types,
+	   and relies on Unix.file_descr = int *)
+	external to_int : t -> int = "%identity"
+	external of_int : int -> t = "%identity"
+end

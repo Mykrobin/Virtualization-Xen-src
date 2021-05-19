@@ -3,8 +3,6 @@
 
 #ifndef __ASSEMBLY__
 
-#include <xen/config.h>
-
 typedef __signed__ char __s8;
 typedef unsigned char __u8;
 
@@ -40,6 +38,12 @@ typedef __SIZE_TYPE__ size_t;
 typedef unsigned long size_t;
 #endif
 typedef signed long ssize_t;
+
+#if defined(__PTRDIFF_TYPE__)
+typedef __PTRDIFF_TYPE__ ptrdiff_t;
+#else
+typedef signed long ptrdiff_t;
+#endif
 
 #endif /* __ASSEMBLY__ */
 

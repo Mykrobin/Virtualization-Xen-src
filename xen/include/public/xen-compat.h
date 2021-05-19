@@ -1,8 +1,8 @@
 /******************************************************************************
  * xen-compat.h
- * 
+ *
  * Guest OS interface to Xen.  Compatibility layer.
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to
  * deal in the Software without restriction, including without limitation the
@@ -27,7 +27,7 @@
 #ifndef __XEN_PUBLIC_XEN_COMPAT_H__
 #define __XEN_PUBLIC_XEN_COMPAT_H__
 
-#define __XEN_LATEST_INTERFACE_VERSION__ 0x00040800
+#define __XEN_LATEST_INTERFACE_VERSION__ 0x00040e00
 
 #if defined(__XEN__) || defined(__XEN_TOOLS__)
 /* Xen is built with matching headers and implements the latest interface. */
@@ -40,5 +40,7 @@
 #if __XEN_INTERFACE_VERSION__ > __XEN_LATEST_INTERFACE_VERSION__
 #error "These header files do not support the requested interface version."
 #endif
+
+#define COMPAT_FLEX_ARRAY_DIM XEN_FLEX_ARRAY_DIM
 
 #endif /* __XEN_PUBLIC_XEN_COMPAT_H__ */

@@ -1,27 +1,43 @@
 XEN_ROOT = $(CURDIR)/../..
 include $(XEN_ROOT)/tools/Rules.mk
 
+# Caution: some tools/libs/*/Makefile generate header files directly in
+# tools/include, and they do the [un]install actions for those, too.
+# In case other headers need to be built cwin tools/include this should be
+# taken into account, i.e. there should be no rules added here for generating
+# any tools/include/*.h files.
+
 # Relative to $(XEN_ROOT)/xen/xsm/flask
 FLASK_H_DEPEND := policy/initial_sids
 
-.PHONY: all
-all: xen-foreign xen/.dir xen-xsm/.dir
+.PHONY: all all-y build xen-dir
+all build: all-y xen-foreign xen-dir xen-xsm/.dir
+all-y:
 
 .PHONY: xen-foreign
 xen-foreign:
 	$(MAKE) -C xen-foreign
 
-xen/.dir:
-	@rm -rf xen
-	mkdir -p xen/libelf
-	ln -sf $(XEN_ROOT)/xen/include/public/COPYING xen
-	ln -sf $(wildcard $(XEN_ROOT)/xen/include/public/*.h) xen
-	ln -sf $(addprefix $(XEN_ROOT)/xen/include/public/,arch-x86 arch-arm hvm io xsm) xen
-	ln -sf ../xen-sys/$(XEN_OS) xen/sys
-	ln -sf $(addprefix $(XEN_ROOT)/xen/include/xen/,libelf.h elfstructs.h) xen/libelf/
+xen-dir:
+	mkdir -p xen/libelf acpi
+	find xen/ acpi/ -type l -exec rm '{}' +
+	ln -s $(XEN_ROOT)/xen/include/public/COPYING xen/
+	ln -s $(XEN_ROOT)/xen/include/public/*.h xen/
+	ln -s $(XEN_ROOT)/xen/include/public/*/ xen/
+	ln -s ../xen-sys/$(XEN_OS) xen/sys
+	ln -s $(addprefix $(XEN_ROOT)/xen/include/xen/,libelf.h elfstructs.h) xen/libelf/
 	ln -s ../xen-foreign xen/foreign
-	ln -sf $(XEN_ROOT)/xen/include/acpi acpi
-	touch $@
+	ln -s $(XEN_ROOT)/xen/include/acpi/platform acpi/
+	ln -s $(XEN_ROOT)/xen/include/acpi/ac*.h acpi/
+ifeq ($(CONFIG_X86),y)
+	ln -s $(XEN_ROOT)/xen/include/asm-x86 xen/asm
+	mkdir -p xen/lib/x86
+	ln -s $(filter-out %autogen.h,$(wildcard $(XEN_ROOT)/xen/include/xen/lib/x86/*.h)) xen/lib/x86/
+	ln -s $(XEN_ROOT)/xen/include/xen/lib/x86/Makefile xen/lib/x86/
+endif
+
+all-$(CONFIG_X86): xen-dir
+	$(MAKE) -C xen/lib/x86 all XEN_ROOT=$(XEN_ROOT) PYTHON=$(PYTHON)
 
 # Not xen/xsm as that clashes with link to
 # $(XEN_ROOT)/xen/include/public/xsm above.
@@ -47,10 +63,7 @@ install: all
 	$(INSTALL_DATA) xen/*.h $(DESTDIR)$(includedir)/xen
 	$(INSTALL_DATA) xen/arch-x86/*.h $(DESTDIR)$(includedir)/xen/arch-x86
 	$(INSTALL_DATA) xen/arch-x86/hvm/*.h $(DESTDIR)$(includedir)/xen/arch-x86/hvm
-
-# 	xen/arch-arm doesn't contains headers for now. Uncommented the line
-# 	as soon as a new header is added
-#	$(INSTALL_DATA) xen/arch-arm/*.h $(DESTDIR)$(includedir)/xen/arch-arm
+	$(INSTALL_DATA) xen/arch-arm/*.h $(DESTDIR)$(includedir)/xen/arch-arm
 	$(INSTALL_DATA) xen/arch-arm/hvm/*.h $(DESTDIR)$(includedir)/xen/arch-arm/hvm
 	$(INSTALL_DATA) xen/foreign/*.h $(DESTDIR)$(includedir)/xen/foreign
 	$(INSTALL_DATA) xen/hvm/*.h $(DESTDIR)$(includedir)/xen/hvm
@@ -58,11 +71,18 @@ install: all
 	$(INSTALL_DATA) xen/sys/*.h $(DESTDIR)$(includedir)/xen/sys
 	$(INSTALL_DATA) xen/xsm/*.h $(DESTDIR)$(includedir)/xen/xsm
 
+.PHONY: uninstall
+uninstall:
+	echo "[FIXME] uninstall headers"
+	rm -rf $(DESTDIR)$(includedir)/xen
+
 .PHONY: clean
 clean:
 	rm -rf xen xen-xsm acpi
 	$(MAKE) -C xen-foreign clean
 
+.PHONY: dist
+dist: install
 
 .PHONY: distclean
 distclean: clean

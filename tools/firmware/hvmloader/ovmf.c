@@ -41,9 +41,6 @@
 #define LOWCHUNK_MAXOFFSET      0x0000FFFF
 #define OVMF_INFO_PHYSICAL_ADDRESS 0x00001000
 
-extern unsigned char dsdt_anycpu_qemu_xen[];
-extern int dsdt_anycpu_qemu_xen_len;
-
 #define OVMF_INFO_MAX_TABLES 4
 struct ovmf_info {
     char signature[14]; /* XenHVMOVMF\0\0\0\0 */
@@ -88,7 +85,8 @@ static void ovmf_finish_bios_info(void)
 }
 
 static void ovmf_load(const struct bios_config *config,
-                      void *bios_addr, uint32_t bios_length)
+                      void *bios_addr, uint32_t bios_length,
+                      void *unused_addr)
 {
     xen_pfn_t mfn;
     uint64_t addr = OVMF_END

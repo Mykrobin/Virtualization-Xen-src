@@ -15,15 +15,16 @@
 #include <xen/types.h>
 #include <xen/errno.h>
 #include <xen/init.h>
-#include <xen/nmi.h>
+#include <xen/param.h>
 #include <xen/string.h>
 #include <xen/delay.h>
 #include <xen/xenoprof.h>
-#include <public/xen.h>
+#include <public/xenoprof.h>
 #include <asm/msr.h>
 #include <asm/apic.h>
 #include <asm/regs.h>
 #include <asm/current.h>
+#include <asm/nmi.h>
 
 #include "op_counter.h"
 #include "op_x86_model.h"
@@ -36,6 +37,8 @@ static struct op_msrs cpu_msrs[NR_CPUS];
 static unsigned long saved_lvtpc[NR_CPUS];
 
 static char *cpu_type;
+
+static DEFINE_PER_CPU(struct vcpu *, nmi_cont_vcpu);
 
 static int passive_domain_msr_op_checks(unsigned int msr, int *typep, int *indexp)
 {
@@ -82,17 +85,30 @@ void passive_domain_destroy(struct vcpu *v)
 		model->free_msr(v);
 }
 
+bool nmi_oprofile_send_virq(void)
+{
+	struct vcpu *v = xchg(&this_cpu(nmi_cont_vcpu), NULL);
+
+	if (v)
+		send_guest_vcpu_virq(v, VIRQ_XENOPROF);
+
+	return v;
+}
+
 static int nmi_callback(const struct cpu_user_regs *regs, int cpu)
 {
 	int xen_mode, ovf;
 
 	ovf = model->check_ctrs(cpu, &cpu_msrs[cpu], regs);
 	xen_mode = ring_0(regs);
-	if ( ovf && is_active(current->domain) && !xen_mode )
-		send_guest_vcpu_virq(current, VIRQ_XENOPROF);
+	if (ovf && is_active(current->domain) && !xen_mode &&
+	    !this_cpu(nmi_cont_vcpu)) {
+		this_cpu(nmi_cont_vcpu) = current;
+		trigger_nmi_continuation();
+	}
 
 	if ( ovf == 2 )
-                current->nmi_pending = 1;
+		current->arch.nmi_pending = true;
 	return 1;
 }
 
@@ -323,12 +339,15 @@ static int __init p4_init(char ** cpu_type)
 
 
 static int force_arch_perfmon;
+
 static int force_cpu_type(const char *str)
 {
 	if (!strcmp(str, "arch_perfmon")) {
 		force_arch_perfmon = 1;
 		printk(KERN_INFO "oprofile: forcing architectural perfmon\n");
 	}
+	else
+		return -EINVAL;
 
 	return 0;
 }
@@ -439,7 +458,7 @@ static int __init nmi_init(void)
 			}
 			if (!cpu_type && !arch_perfmon_init(&cpu_type)) {
 				printk("xenoprof: Initialization failed. "
-				       "Intel processor family %d model %d"
+				       "Intel processor family %d model %d "
 				       "is not supported\n", family, _model);
 				return -ENODEV;
 			}

@@ -24,7 +24,7 @@ DEFINE_XEN_GUEST_HANDLE(xsm_op_t);
 /* policy magic number (defined by XSM_MAGIC) */
 typedef u32 xsm_magic_t;
 
-#ifdef CONFIG_FLASK
+#ifdef CONFIG_XSM_FLASK
 #define XSM_MAGIC 0xf97cff8c
 #else
 #define XSM_MAGIC 0x0
@@ -97,9 +97,9 @@ struct xsm_operations {
 
     char *(*show_irq_sid) (int irq);
     int (*map_domain_pirq) (struct domain *d);
-    int (*map_domain_irq) (struct domain *d, int irq, void *data);
+    int (*map_domain_irq) (struct domain *d, int irq, const void *data);
     int (*unmap_domain_pirq) (struct domain *d);
-    int (*unmap_domain_irq) (struct domain *d, int irq, void *data);
+    int (*unmap_domain_irq) (struct domain *d, int irq, const void *data);
     int (*bind_pt_irq) (struct domain *d, struct xen_domctl_bind_pt_irq *bind);
     int (*unbind_pt_irq) (struct domain *d, struct xen_domctl_bind_pt_irq *bind);
     int (*irq_permission) (struct domain *d, int pirq, uint8_t allow);
@@ -109,13 +109,11 @@ struct xsm_operations {
 
 #if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_PCI)
     int (*get_device_group) (uint32_t machine_bdf);
-    int (*test_assign_device) (uint32_t machine_bdf);
     int (*assign_device) (struct domain *d, uint32_t machine_bdf);
     int (*deassign_device) (struct domain *d, uint32_t machine_bdf);
 #endif
 
 #if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_DEVICE_TREE)
-    int (*test_assign_dtdevice) (const char *dtpath);
     int (*assign_dtdevice) (struct domain *d, const char *dtpath);
     int (*deassign_dtdevice) (struct domain *d, const char *dtpath);
 #endif
@@ -129,7 +127,7 @@ struct xsm_operations {
     int (*resource_setup_misc) (void);
 
     int (*page_offline)(uint32_t cmd);
-    int (*tmem_op)(void);
+    int (*hypfs_op)(void);
 
     long (*do_xsm_op) (XEN_GUEST_HANDLE_PARAM(xsm_op_t) op);
 #ifdef CONFIG_COMPAT
@@ -138,14 +136,13 @@ struct xsm_operations {
 
     int (*hvm_param) (struct domain *d, unsigned long op);
     int (*hvm_control) (struct domain *d, unsigned long op);
-    int (*hvm_param_nested) (struct domain *d);
     int (*hvm_param_altp2mhvm) (struct domain *d);
-    int (*hvm_altp2mhvm_op) (struct domain *d);
+    int (*hvm_altp2mhvm_op) (struct domain *d, uint64_t mode, uint32_t op);
     int (*get_vnumainfo) (struct domain *d);
 
     int (*vm_event_control) (struct domain *d, int mode, int op);
 
-#ifdef CONFIG_HAS_MEM_ACCESS
+#ifdef CONFIG_MEM_ACCESS
     int (*mem_access) (struct domain *d);
 #endif
 
@@ -153,7 +150,7 @@ struct xsm_operations {
     int (*mem_paging) (struct domain *d);
 #endif
 
-#ifdef CONFIG_HAS_MEM_SHARING
+#ifdef CONFIG_MEM_SHARING
     int (*mem_sharing) (struct domain *d);
 #endif
 
@@ -162,11 +159,6 @@ struct xsm_operations {
 #ifdef CONFIG_X86
     int (*do_mca) (void);
     int (*shadow_control) (struct domain *d, uint32_t op);
-    int (*hvm_set_pci_intx_level) (struct domain *d);
-    int (*hvm_set_isa_irq_level) (struct domain *d);
-    int (*hvm_set_pci_link_route) (struct domain *d);
-    int (*hvm_inject_msi) (struct domain *d);
-    int (*hvm_ioreq_server) (struct domain *d, int op);
     int (*mem_sharing_op) (struct domain *d, struct domain *cd, int op);
     int (*apic) (struct domain *d, int cmd);
     int (*memtype) (uint32_t access);
@@ -185,7 +177,16 @@ struct xsm_operations {
     int (*ioport_mapping) (struct domain *d, uint32_t s, uint32_t e, uint8_t allow);
     int (*pmu_op) (struct domain *d, unsigned int op);
 #endif
+    int (*dm_op) (struct domain *d);
     int (*xen_version) (uint32_t cmd);
+    int (*domain_resource_map) (struct domain *d);
+#ifdef CONFIG_ARGO
+    int (*argo_enable) (const struct domain *d);
+    int (*argo_register_single_source) (const struct domain *d,
+                                        const struct domain *t);
+    int (*argo_register_any_source) (const struct domain *d);
+    int (*argo_send) (const struct domain *d, const struct domain *t);
+#endif
 };
 
 #ifdef CONFIG_XSM
@@ -469,11 +470,6 @@ static inline int xsm_get_device_group(xsm_default_t def, uint32_t machine_bdf)
     return xsm_ops->get_device_group(machine_bdf);
 }
 
-static inline int xsm_test_assign_device(xsm_default_t def, uint32_t machine_bdf)
-{
-    return xsm_ops->test_assign_device(machine_bdf);
-}
-
 static inline int xsm_assign_device(xsm_default_t def, struct domain *d, uint32_t machine_bdf)
 {
     return xsm_ops->assign_device(d, machine_bdf);
@@ -490,12 +486,6 @@ static inline int xsm_assign_dtdevice(xsm_default_t def, struct domain *d,
                                       const char *dtpath)
 {
     return xsm_ops->assign_dtdevice(d, dtpath);
-}
-
-static inline int xsm_test_assign_dtdevice(xsm_default_t def,
-                                           const char *dtpath)
-{
-    return xsm_ops->test_assign_dtdevice(dtpath);
 }
 
 static inline int xsm_deassign_dtdevice(xsm_default_t def, struct domain *d,
@@ -546,9 +536,9 @@ static inline int xsm_page_offline(xsm_default_t def, uint32_t cmd)
     return xsm_ops->page_offline(cmd);
 }
 
-static inline int xsm_tmem_op(xsm_default_t def)
+static inline int xsm_hypfs_op(xsm_default_t def)
 {
-    return xsm_ops->tmem_op();
+    return xsm_ops->hypfs_op();
 }
 
 static inline long xsm_do_xsm_op (XEN_GUEST_HANDLE_PARAM(xsm_op_t) op)
@@ -573,19 +563,14 @@ static inline int xsm_hvm_control(xsm_default_t def, struct domain *d, unsigned 
     return xsm_ops->hvm_control(d, op);
 }
 
-static inline int xsm_hvm_param_nested (xsm_default_t def, struct domain *d)
-{
-    return xsm_ops->hvm_param_nested(d);
-}
-
 static inline int xsm_hvm_param_altp2mhvm (xsm_default_t def, struct domain *d)
 {
     return xsm_ops->hvm_param_altp2mhvm(d);
 }
 
-static inline int xsm_hvm_altp2mhvm_op (xsm_default_t def, struct domain *d)
+static inline int xsm_hvm_altp2mhvm_op (xsm_default_t def, struct domain *d, uint64_t mode, uint32_t op)
 {
-    return xsm_ops->hvm_altp2mhvm_op(d);
+    return xsm_ops->hvm_altp2mhvm_op(d, mode, op);
 }
 
 static inline int xsm_get_vnumainfo (xsm_default_t def, struct domain *d)
@@ -598,7 +583,7 @@ static inline int xsm_vm_event_control (xsm_default_t def, struct domain *d, int
     return xsm_ops->vm_event_control(d, mode, op);
 }
 
-#ifdef CONFIG_HAS_MEM_ACCESS
+#ifdef CONFIG_MEM_ACCESS
 static inline int xsm_mem_access (xsm_default_t def, struct domain *d)
 {
     return xsm_ops->mem_access(d);
@@ -612,7 +597,7 @@ static inline int xsm_mem_paging (xsm_default_t def, struct domain *d)
 }
 #endif
 
-#ifdef CONFIG_HAS_MEM_SHARING
+#ifdef CONFIG_MEM_SHARING
 static inline int xsm_mem_sharing (xsm_default_t def, struct domain *d)
 {
     return xsm_ops->mem_sharing(d);
@@ -633,31 +618,6 @@ static inline int xsm_do_mca(xsm_default_t def)
 static inline int xsm_shadow_control (xsm_default_t def, struct domain *d, uint32_t op)
 {
     return xsm_ops->shadow_control(d, op);
-}
-
-static inline int xsm_hvm_set_pci_intx_level (xsm_default_t def, struct domain *d)
-{
-    return xsm_ops->hvm_set_pci_intx_level(d);
-}
-
-static inline int xsm_hvm_set_isa_irq_level (xsm_default_t def, struct domain *d)
-{
-    return xsm_ops->hvm_set_isa_irq_level(d);
-}
-
-static inline int xsm_hvm_set_pci_link_route (xsm_default_t def, struct domain *d)
-{
-    return xsm_ops->hvm_set_pci_link_route(d);
-}
-
-static inline int xsm_hvm_inject_msi (xsm_default_t def, struct domain *d)
-{
-    return xsm_ops->hvm_inject_msi(d);
-}
-
-static inline int xsm_hvm_ioreq_server (xsm_default_t def, struct domain *d, int op)
-{
-    return xsm_ops->hvm_ioreq_server(d, op);
 }
 
 static inline int xsm_mem_sharing_op (xsm_default_t def, struct domain *d, struct domain *cd, int op)
@@ -724,20 +684,52 @@ static inline int xsm_pmu_op (xsm_default_t def, struct domain *d, unsigned int 
 
 #endif /* CONFIG_X86 */
 
+static inline int xsm_dm_op(xsm_default_t def, struct domain *d)
+{
+    return xsm_ops->dm_op(d);
+}
+
 static inline int xsm_xen_version (xsm_default_t def, uint32_t op)
 {
     return xsm_ops->xen_version(op);
 }
 
+static inline int xsm_domain_resource_map(xsm_default_t def, struct domain *d)
+{
+    return xsm_ops->domain_resource_map(d);
+}
+
+#ifdef CONFIG_ARGO
+static inline int xsm_argo_enable(const struct domain *d)
+{
+    return xsm_ops->argo_enable(d);
+}
+
+static inline int xsm_argo_register_single_source(const struct domain *d,
+                                                  const struct domain *t)
+{
+    return xsm_ops->argo_register_single_source(d, t);
+}
+
+static inline int xsm_argo_register_any_source(const struct domain *d)
+{
+    return xsm_ops->argo_register_any_source(d);
+}
+
+static inline int xsm_argo_send(const struct domain *d, const struct domain *t)
+{
+    return xsm_ops->argo_send(d, t);
+}
+
+#endif /* CONFIG_ARGO */
+
 #endif /* XSM_NO_WRAPPERS */
 
 #ifdef CONFIG_MULTIBOOT
 extern int xsm_multiboot_init(unsigned long *module_map,
-                              const multiboot_info_t *mbi,
-                              void *(*bootstrap_map)(const module_t *));
+                              const multiboot_info_t *mbi);
 extern int xsm_multiboot_policy_init(unsigned long *module_map,
                                      const multiboot_info_t *mbi,
-                                     void *(*bootstrap_map)(const module_t *),
                                      void **policy_buffer,
                                      size_t *policy_size);
 #endif
@@ -758,7 +750,7 @@ extern int register_xsm(struct xsm_operations *ops);
 extern struct xsm_operations dummy_xsm_ops;
 extern void xsm_fixup_ops(struct xsm_operations *ops);
 
-#ifdef CONFIG_FLASK
+#ifdef CONFIG_XSM_FLASK
 extern void flask_init(const void *policy_buffer, size_t policy_size);
 #else
 static inline void flask_init(const void *policy_buffer, size_t policy_size)
@@ -766,12 +758,12 @@ static inline void flask_init(const void *policy_buffer, size_t policy_size)
 }
 #endif
 
-#ifdef CONFIG_XSM_POLICY
-extern const unsigned char xsm_init_policy[];
-extern const unsigned int xsm_init_policy_size;
+#ifdef CONFIG_XSM_FLASK_POLICY
+extern const unsigned char xsm_flask_init_policy[];
+extern const unsigned int xsm_flask_init_policy_size;
 #endif
 
-#ifdef CONFIG_SILO
+#ifdef CONFIG_XSM_SILO
 extern void silo_init(void);
 #else
 static inline void silo_init(void) {}
@@ -783,8 +775,7 @@ static inline void silo_init(void) {}
 
 #ifdef CONFIG_MULTIBOOT
 static inline int xsm_multiboot_init (unsigned long *module_map,
-                                      const multiboot_info_t *mbi,
-                                      void *(*bootstrap_map)(const module_t *))
+                                      const multiboot_info_t *mbi)
 {
     return 0;
 }

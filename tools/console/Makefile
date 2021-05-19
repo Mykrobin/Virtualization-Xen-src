@@ -11,6 +11,7 @@ LDLIBS += $(SOCKET_LIBS)
 
 LDLIBS_xenconsoled += $(UTIL_LIBS)
 LDLIBS_xenconsoled += -lrt
+CONSOLE_CFLAGS-$(CONFIG_ARM) = -DCONFIG_ARM
 
 BIN      = xenconsoled xenconsole
 
@@ -19,7 +20,7 @@ all: $(BIN)
 
 .PHONY: clean
 clean:
-	$(RM) *.a *.so *.o *.rpm $(BIN) $(DEPS)
+	$(RM) *.a *.so *.o *.rpm $(BIN) $(DEPS_RM)
 	$(RM) client/*.o daemon/*.o
 	$(RM) client/_paths.h
 	$(RM) daemon/_paths.h
@@ -28,7 +29,7 @@ clean:
 distclean: clean
 
 daemon/main.o: daemon/_paths.h
-daemon/io.o: CFLAGS += $(CFLAGS_libxenevtchn) $(CFLAGS_libxengnttab)
+daemon/io.o: CFLAGS += $(CFLAGS_libxenevtchn) $(CFLAGS_libxengnttab) $(CONSOLE_CFLAGS-y)
 xenconsoled: $(patsubst %.c,%.o,$(wildcard daemon/*.c))
 	$(CC) $(LDFLAGS) $^ -o $@ $(LDLIBS) $(LDLIBS_libxenevtchn) $(LDLIBS_libxengnttab) $(LDLIBS_xenconsoled) $(APPEND_LDFLAGS)
 
@@ -49,4 +50,9 @@ install: $(BIN)
 	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC_BIN)
 	$(INSTALL_PROG) xenconsole $(DESTDIR)$(LIBEXEC_BIN)
 
--include $(DEPS)
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(LIBEXEC_BIN)/xenconsole
+	rm -f $(DESTDIR)$(sbindir)/xenconsoled
+
+-include $(DEPS_INCLUDE)

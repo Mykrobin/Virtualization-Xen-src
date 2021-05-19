@@ -3,6 +3,9 @@
 
 import sys, os, re
 
+if sys.version_info < (3, 0):
+    range = xrange
+
 class Fail(Exception):
     pass
 
@@ -15,20 +18,27 @@ class State(object):
         self.output = open_file_or_fd(output, "w", 2)
 
         # State parsed from input
-        self.names = {} # Name => value mapping
-        self.raw_special = set()
-        self.raw_pv = set()
-        self.raw_hvm_shadow = set()
-        self.raw_hvm_hap = set()
+        self.names = {}  # Value => Name mapping
+        self.values = {} # Name => Value mapping
+        self.raw = {
+            '!': set(),
+            'A': set(), 'S': set(), 'H': set(),
+            'a': set(), 's': set(), 'h': set(),
+        }
 
         # State calculated
         self.nr_entries = 0 # Number of words in a featureset
         self.common_1d = 0 # Common features between 1d and e1d
-        self.known = [] # All known features
-        self.special = [] # Features with special semantics
-        self.pv = []
-        self.hvm_shadow = []
-        self.hvm_hap = []
+        self.pv_def = set() # PV default features
+        self.hvm_shadow_def = set() # HVM shadow default features
+        self.hvm_hap_def = set() # HVM HAP default features
+        self.pv_max = set() # PV max features
+        self.hvm_shadow_max = set() # HVM shadow max features
+        self.hvm_hap_max = set() # HVM HAP max features
+        self.bitfields = [] # Text to declare named bitfields in C
+        self.deep_deps = {} # { feature num => dependant features }
+        self.nr_deep_deps = 0 # Number of entries in deep_deps
+        self.deep_features = set() # featureset of keys in deep_deps
 
 def parse_definitions(state):
     """
@@ -71,24 +81,14 @@ def parse_definitions(state):
             this_name = name
         setattr(this, this_name, val)
 
-        # Construct a reverse mapping of value to name
+        # Construct forward and reverse mappings between name and value
         state.names[val] = name
+        state.values[name.lower().replace("_", "-")] = val
 
         for a in attr:
-
-            if a == "!":
-                state.raw_special.add(val)
-            elif a in "ASH":
-                if a == "A":
-                    state.raw_pv.add(val)
-                    state.raw_hvm_shadow.add(val)
-                    state.raw_hvm_hap.add(val)
-                elif attr == "S":
-                    state.raw_hvm_shadow.add(val)
-                    state.raw_hvm_hap.add(val)
-                elif attr == "H":
-                    state.raw_hvm_hap.add(val)
-            else:
+            try:
+                state.raw[a].add(val)
+            except KeyError:
                 raise Fail("Unrecognised attribute '%s' for %s" % (a, name))
 
     if len(state.names) == 0:
@@ -97,13 +97,13 @@ def parse_definitions(state):
 def featureset_to_uint32s(fs, nr):
     """ Represent a featureset as a list of C-compatible uint32_t's """
 
-    bitmap = 0L
+    bitmap = 0
     for f in fs:
-        bitmap |= 1L << f
+        bitmap |= 1 << f
 
     words = []
     while bitmap:
-        words.append(bitmap & ((1L << 32) - 1))
+        words.append(bitmap & ((1 << 32) - 1))
         bitmap >>= 32
 
     assert len(words) <= nr
@@ -111,10 +111,11 @@ def featureset_to_uint32s(fs, nr):
     if len(words) < nr:
         words.extend([0] * (nr - len(words)))
 
-    return [ "0x%08xU" % x for x in words ]
+    return ("0x%08xU" % x for x in words)
 
-def format_uint32s(words, indent):
+def format_uint32s(state, featureset, indent):
     """ Format a list of uint32_t's suitable for a macro definition """
+    words = featureset_to_uint32s(featureset, state.nr_entries)
     spaces = " " * indent
     return spaces + (", \\\n" + spaces).join(words) + ", \\"
 
@@ -127,22 +128,15 @@ def crunch_numbers(state):
     # Features common between 1d and e1d.
     common_1d = (FPU, VME, DE, PSE, TSC, MSR, PAE, MCE, CX8, APIC,
                  MTRR, PGE, MCA, CMOV, PAT, PSE36, MMX, FXSR)
+    state.common_1d = common_1d
 
-    # All known features.  Duplicate the common features in e1d
-    e1d_base = SYSCALL & ~31
-    state.known = featureset_to_uint32s(
-        state.names.keys() + [ e1d_base + (x % 32) for x in common_1d ],
-        nr_entries)
+    state.pv_def =                                state.raw['A']
+    state.hvm_shadow_def = state.pv_def         | state.raw['S']
+    state.hvm_hap_def =    state.hvm_shadow_def | state.raw['H']
 
-    # Fold common back into names
-    for f in common_1d:
-        state.names[e1d_base + (f % 32)] = "E1D_" + state.names[f]
-
-    state.common_1d = featureset_to_uint32s(common_1d, 1)[0]
-    state.special = featureset_to_uint32s(state.raw_special, nr_entries)
-    state.pv = featureset_to_uint32s(state.raw_pv, nr_entries)
-    state.hvm_shadow = featureset_to_uint32s(state.raw_hvm_shadow, nr_entries)
-    state.hvm_hap = featureset_to_uint32s(state.raw_hvm_hap, nr_entries)
+    state.pv_max =                                state.raw['A'] | state.raw['a']
+    state.hvm_shadow_max = state.pv_max         | state.raw['S'] | state.raw['s']
+    state.hvm_hap_max =    state.hvm_shadow_max | state.raw['H'] | state.raw['h']
 
     #
     # Feature dependency information.
@@ -170,8 +164,9 @@ def crunch_numbers(state):
     deps = {
         # FPU is taken to mean support for the x87 regisers as well as the
         # instructions.  MMX is documented to alias the %MM registers over the
-        # x87 %ST registers in hardware.
-        FPU: [MMX],
+        # x87 %ST registers in hardware.  Correct restoring of error pointers
+        # of course makes no sense without there being anything to restore.
+        FPU: [MMX, RSTR_FP_ERR_PTRS],
 
         # The PSE36 feature indicates that reserved bits in a PSE superpage
         # may be used as extra physical address bits.
@@ -181,9 +176,11 @@ def crunch_numbers(state):
         # bit is only representable in the 64bit PTE format offered by PAE.
         PAE: [LM, NX],
 
+        TSC: [TSC_DEADLINE, RDTSCP, TSC_ADJUST, ITSC],
+
         # APIC is special, but X2APIC does depend on APIC being available in
         # the first place.
-        APIC: [X2APIC],
+        APIC: [X2APIC, TSC_DEADLINE, EXTAPIC],
 
         # AMD built MMXExtentions and 3DNow as extentions to MMX.
         MMX: [MMXEXT, _3DNOW],
@@ -195,20 +192,20 @@ def crunch_numbers(state):
         FXSR: [FFXSR, SSE],
 
         # SSE is taken to mean support for the %XMM registers as well as the
-        # instructions.  Several futher instruction sets are built on core
+        # instructions.  Several further instruction sets are built on core
         # %XMM support, without specific inter-dependencies.  Additionally
         # AMD has a special mis-alignment sub-mode.
-        SSE: [SSE2, SSE3, SSSE3, SSE4A, MISALIGNSSE,
-              AESNI, SHA],
+        SSE: [SSE2, MISALIGNSSE],
 
-        # SSE2 was re-specified as core instructions for 64bit.
-        SSE2: [LM],
+        # SSE2 was re-specified as core instructions for 64bit.  Also ISA
+        # extensions dealing with vectors of integers are added here rather
+        # than to SSE.
+        SSE2: [SSE3, LM, AESNI, PCLMULQDQ, SHA, GFNI],
 
-        # SSE4.1 explicitly depends on SSE3 and SSSE3
-        SSE3: [SSE4_1],
+        # Other SSEn each depend on their predecessor versions.  AMD
+        # Lisbon/Magny-Cours processors implemented SSE4A without SSSE3.
+        SSE3: [SSSE3, SSE4A],
         SSSE3: [SSE4_1],
-
-        # SSE4.2 explicitly depends on SSE4.1
         SSE4_1: [SSE4_2],
 
         # AMD specify no relationship between POPCNT and SSE4.2.  Intel
@@ -219,10 +216,6 @@ def crunch_numbers(state):
         #
         # SSE4_2: [POPCNT]
 
-        # The INVPCID instruction depends on PCID infrastructure being
-        # available.
-        PCID: [INVPCID],
-
         # XSAVE is an extra set of instructions for state management, but
         # doesn't constitue new state itself.  Some of the dependent features
         # are instructions built on top of base XSAVE, while others are new
@@ -231,10 +224,20 @@ def crunch_numbers(state):
         XSAVE: [XSAVEOPT, XSAVEC, XGETBV1, XSAVES,
                 AVX, MPX, PKU, LWP],
 
-        # AVX is taken to mean hardware support for VEX encoded instructions,
-        # 256bit registers, and the instructions themselves.  Each of these
-        # subsequent instruction groups may only be VEX encoded.
+        # AVX is taken to mean hardware support for 256bit registers (which in
+        # practice depends on the VEX prefix to encode), and the instructions
+        # themselves.
+        #
+        # AVX is not taken to mean support for the VEX prefix itself (nor XOP
+        # for the XOP prefix).  VEX/XOP-encoded GPR instructions, such as
+        # those from the BMI{1,2}, TBM and LWP sets function fine in the
+        # absence of any enabled xstate.
         AVX: [FMA, FMA4, F16C, AVX2, XOP],
+
+        # This dependency exists solely for the shadow pagetable code.  If the
+        # host doesn't have NX support, the shadow pagetable code can't handle
+        # SMAP correctly for guests.
+        NX: [SMAP],
 
         # CX16 is only encodable in Long Mode.  LAHF_LM indicates that the
         # SAHF/LAHF instructions are reintroduced in Long Mode.  1GB
@@ -245,15 +248,29 @@ def crunch_numbers(state):
         # standard 3DNow in the earlier K6 processors.
         _3DNOW: [_3DNOWEXT],
 
-        # This is just the dependency between AVX512 and AVX2 of XSTATE feature flags.
-        # If want to use AVX512, AVX2 must be supported and enabled.
-        AVX2: [AVX512F],
+        # This is just the dependency between AVX512 and AVX2 of XSTATE
+        # feature flags.  If want to use AVX512, AVX2 must be supported and
+        # enabled.  Certain later extensions, acting on 256-bit vectors of
+        # integers, better depend on AVX2 than AVX.
+        AVX2: [AVX512F, VAES, VPCLMULQDQ, AVX_VNNI],
 
-        # AVX512F is taken to mean hardware support for EVEX encoded instructions,
-        # 512bit registers, and the instructions themselves. All further AVX512 features
-        # are built on top of AVX512F
-        AVX512F: [AVX512DQ, AVX512IFMA, AVX512PF, AVX512ER, AVX512CD,
-                  AVX512BW, AVX512VL, AVX512VBMI],
+        # AVX512F is taken to mean hardware support for 512bit registers
+        # (which in practice depends on the EVEX prefix to encode) as well
+        # as mask registers, and the instructions themselves. All further
+        # AVX512 features are built on top of AVX512F
+        AVX512F: [AVX512DQ, AVX512_IFMA, AVX512PF, AVX512ER, AVX512CD,
+                  AVX512BW, AVX512VL, AVX512_4VNNIW, AVX512_4FMAPS,
+                  AVX512_VNNI, AVX512_VPOPCNTDQ, AVX512_VP2INTERSECT],
+
+        # AVX512 extensions acting on vectors of bytes/words are made
+        # dependents of AVX512BW (as to requiring wider than 16-bit mask
+        # registers), despite the SDM not formally making this connection.
+        AVX512BW: [AVX512_VBMI, AVX512_VBMI2, AVX512_BITALG, AVX512_BF16],
+
+        # Extensions with VEX/EVEX encodings keyed to a separate feature
+        # flag are made dependents of their respective legacy feature.
+        PCLMULQDQ: [VPCLMULQDQ],
+        AESNI: [VAES],
 
         # The features:
         #   * Single Thread Indirect Branch Predictors
@@ -268,6 +285,9 @@ def crunch_numbers(state):
         # as dependent features simplifies Xen's logic, and prevents the guest
         # from seeing implausible configurations.
         IBRSB: [STIBP, SSBD],
+
+        # In principle the TSXLDTRK insns could also be considered independent.
+        RTM: [TSXLDTRK],
     }
 
     deep_features = tuple(sorted(deps.keys()))
@@ -283,8 +303,8 @@ def crunch_numbers(state):
             # To debug, uncomment the following lines:
             # def repl(l):
             #     return "[" + ", ".join((state.names[x] for x in l)) + "]"
-            # print >>sys.stderr, "Feature %s, seen %s, to_process %s " % \
-            #     (state.names[feat], repl(seen), repl(to_process))
+            # sys.stderr.write("Feature %s, seen %s, to_process %s \n" % \
+            #     (state.names[feat], repl(seen), repl(to_process)))
 
             f = to_process.pop(0)
 
@@ -297,11 +317,29 @@ def crunch_numbers(state):
 
         state.deep_deps[feat] = seen[1:]
 
-    state.deep_features = featureset_to_uint32s(deps.keys(), nr_entries)
+    state.deep_features = deps.keys()
     state.nr_deep_deps = len(state.deep_deps.keys())
 
-    for k, v in state.deep_deps.iteritems():
-        state.deep_deps[k] = featureset_to_uint32s(v, nr_entries)
+    # Calculate the bitfield name declarations
+    for word in range(nr_entries):
+
+        names = []
+        for bit in range(32):
+
+            name = state.names.get(word * 32 + bit, "")
+
+            # Prepend an underscore if the name starts with a digit.
+            if name and name[0] in "0123456789":
+                name = "_" + name
+
+            # Don't generate names for features fast-forwarded from other
+            # state
+            if name in ("APIC", "OSXSAVE", "OSPKE"):
+                name = ""
+
+            names.append(name.lower())
+
+        state.bitfields.append("bool " + ":1, ".join(names) + ":1")
 
 
 def write_results(state):
@@ -324,11 +362,17 @@ def write_results(state):
 
 #define INIT_SPECIAL_FEATURES { \\\n%s\n}
 
-#define INIT_PV_FEATURES { \\\n%s\n}
+#define INIT_PV_DEF_FEATURES { \\\n%s\n}
 
-#define INIT_HVM_SHADOW_FEATURES { \\\n%s\n}
+#define INIT_PV_MAX_FEATURES { \\\n%s\n}
 
-#define INIT_HVM_HAP_FEATURES { \\\n%s\n}
+#define INIT_HVM_SHADOW_DEF_FEATURES { \\\n%s\n}
+
+#define INIT_HVM_SHADOW_MAX_FEATURES { \\\n%s\n}
+
+#define INIT_HVM_HAP_DEF_FEATURES { \\\n%s\n}
+
+#define INIT_HVM_HAP_MAX_FEATURES { \\\n%s\n}
 
 #define NR_DEEP_DEPS %sU
 
@@ -336,26 +380,54 @@ def write_results(state):
 
 #define INIT_DEEP_DEPS { \\
 """ % (state.nr_entries,
-       state.common_1d,
-       format_uint32s(state.known, 4),
-       format_uint32s(state.special, 4),
-       format_uint32s(state.pv, 4),
-       format_uint32s(state.hvm_shadow, 4),
-       format_uint32s(state.hvm_hap, 4),
+       next(featureset_to_uint32s(state.common_1d, 1)),
+       format_uint32s(state, state.names.keys(), 4),
+       format_uint32s(state, state.raw['!'], 4),
+       format_uint32s(state, state.pv_def, 4),
+       format_uint32s(state, state.pv_max, 4),
+       format_uint32s(state, state.hvm_shadow_def, 4),
+       format_uint32s(state, state.hvm_shadow_max, 4),
+       format_uint32s(state, state.hvm_hap_def, 4),
+       format_uint32s(state, state.hvm_hap_max, 4),
        state.nr_deep_deps,
-       format_uint32s(state.deep_features, 4),
+       format_uint32s(state, state.deep_features, 4),
        ))
 
     for dep in sorted(state.deep_deps.keys()):
         state.output.write(
             "    { %#xU, /* %s */ { \\\n%s\n    }, }, \\\n"
             % (dep, state.names[dep],
-               format_uint32s(state.deep_deps[dep], 8)
+               format_uint32s(state, state.deep_deps[dep], 8)
            ))
 
     state.output.write(
 """}
 
+#define INIT_FEATURE_NAMES { \\
+""")
+
+    try:
+        _tmp = state.values.iteritems()
+    except AttributeError:
+        _tmp = state.values.items()
+
+    for name, bit in sorted(_tmp):
+        state.output.write(
+            '    { "%s", %sU },\\\n' % (name, bit)
+            )
+
+    state.output.write(
+"""}
+
+""")
+
+    for idx, text in enumerate(state.bitfields):
+        state.output.write(
+            "#define CPUID_BITFIELD_%d \\\n    %s\n\n"
+            % (idx, text))
+
+    state.output.write(
+"""
 #endif /* __XEN_X86__FEATURESET_DATA__ */
 """)
 
@@ -387,7 +459,8 @@ def open_file_or_fd(val, mode, buffering):
         else:
             return open(val, mode, buffering)
 
-    except StandardError, e:
+    except StandardError:
+        e = sys.exc_info()[1]
         if fd != -1:
             raise Fail("Unable to open fd %d: %s: %s" %
                        (fd, e.__class__.__name__, e))
@@ -430,10 +503,13 @@ def main():
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except Fail, e:
-        print >>sys.stderr, "%s:" % (sys.argv[0],), e
+    except Fail:
+        e = sys.exc_info()[1]
+        sys.stderr.write("%s: Fail: %s\n" %
+                         (os.path.abspath(sys.argv[0]), str(e)))
         sys.exit(1)
-    except SystemExit, e:
+    except SystemExit:
+        e = sys.exc_info()[1]
         sys.exit(e.code)
     except KeyboardInterrupt:
         sys.exit(2)

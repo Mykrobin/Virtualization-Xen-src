@@ -15,8 +15,7 @@ PROGRAMS = readnotes lsevtchn
 
 CFLAGS += -Werror
 
-# incorrectly uses libxc internals
-CFLAGS_readnotes.o  := $(CFLAGS_libxenevtchn) $(CFLAGS_libxenctrl) $(CFLAGS_libxenguest) -I$(XEN_ROOT)/tools/libxc $(CFLAGS_libxencall)
+CFLAGS_readnotes.o  := $(CFLAGS_libxenevtchn) $(CFLAGS_libxenctrl) $(CFLAGS_libxenguest)
 CFLAGS_lsevtchn.o   := $(CFLAGS_libxenevtchn) $(CFLAGS_libxenctrl)
 
 .PHONY: all
@@ -36,13 +35,16 @@ install: build
 	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC_BIN)
 	$(INSTALL_PROG) $(PROGRAMS) $(DESTDIR)$(LIBEXEC_BIN)
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(addprefix $(DESTDIR)$(LIBEXECDIR)/, $(PROGRAMS))
 
 .PHONY: clean
 clean:
 	$(RM) *.o $(PROGRAMS)
-	$(RM) $(DEPS)
+	$(RM) $(DEPS_RM)
 
 .PHONY: distclean
 distclean: clean
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)

@@ -1,14 +1,22 @@
-#include <xen/config.h>
+#include <xen/cpu.h>
 #include <xen/cpumask.h>
+#include <xen/init.h>
 #include <xen/mm.h>
+#include <xen/param.h>
 #include <xen/sizes.h>
 #include <xen/smp.h>
 #include <xen/spinlock.h>
 #include <xen/vmap.h>
 #include <xen/warning.h>
+#include <xen/notifier.h>
 #include <asm/cpufeature.h>
 #include <asm/cpuerrata.h>
+#include <asm/insn.h>
 #include <asm/psci.h>
+
+/* Override macros from asm/page.h to make them work with mfn_t */
+#undef virt_to_mfn
+#define virt_to_mfn(va) _mfn(__virt_to_mfn(va))
 
 /* Hardening Branch predictor code for Arm64 */
 #ifdef CONFIG_ARM64_HARDEN_BRANCH_PREDICTOR
@@ -44,7 +52,7 @@ static bool copy_hyp_vect_bpi(unsigned int slot, const char *hyp_vec_start,
     void *dst_remapped;
     const void *dst = __bp_harden_hyp_vecs_start + slot * VECTOR_TABLE_SIZE;
     unsigned int i;
-    mfn_t dst_mfn = _mfn(virt_to_mfn(dst));
+    mfn_t dst_mfn = virt_to_mfn(dst);
 
     BUG_ON(((hyp_vec_end - hyp_vec_start) / 4) > 31);
 
@@ -68,7 +76,7 @@ static bool copy_hyp_vect_bpi(unsigned int slot, const char *hyp_vec_start,
     clean_dcache_va_range(dst_remapped, VECTOR_TABLE_SIZE);
     invalidate_icache();
 
-    vunmap(dst_remapped);
+    vunmap((void *)((vaddr_t)dst_remapped & PAGE_MASK));
 
     return true;
 }
@@ -76,7 +84,8 @@ static bool copy_hyp_vect_bpi(unsigned int slot, const char *hyp_vec_start,
 static bool __maybe_unused
 install_bp_hardening_vec(const struct arm_cpu_capabilities *entry,
                          const char *hyp_vec_start,
-                         const char *hyp_vec_end)
+                         const char *hyp_vec_end,
+                         const char *desc)
 {
     static int last_slot = -1;
     static DEFINE_SPINLOCK(bp_lock);
@@ -90,6 +99,9 @@ install_bp_hardening_vec(const struct arm_cpu_capabilities *entry,
      */
     if ( !entry->matches(entry) )
         return true;
+
+    printk(XENLOG_INFO "CPU%u will %s on exception entry\n",
+           smp_processor_id(), desc);
 
     /*
      * No need to install hardened vector when the processor has
@@ -140,29 +152,39 @@ install_bp_hardening_vec(const struct arm_cpu_capabilities *entry,
     return ret;
 }
 
-extern char __psci_hyp_bp_inval_start[], __psci_hyp_bp_inval_end[];
+extern char __smccc_workaround_1_smc_start[], __smccc_workaround_1_smc_end[];
 
-static int enable_psci_bp_hardening(void *data)
+static int enable_smccc_arch_workaround_1(void *data)
 {
-    bool ret = true;
-    static bool warned = false;
+    struct arm_smccc_res res;
+    const struct arm_cpu_capabilities *entry = data;
 
     /*
-     * The mitigation is using PSCI version function to invalidate the
-     * branch predictor. This function is only available with PSCI 0.2
-     * and later.
+     * Enable callbacks are called on every CPU based on the
+     * capabilities. So double-check whether the CPU matches the
+     * entry.
      */
-    if ( psci_ver >= PSCI_VERSION(0, 2) )
-        ret = install_bp_hardening_vec(data, __psci_hyp_bp_inval_start,
-                                       __psci_hyp_bp_inval_end);
-    else if ( !warned )
-    {
-        ASSERT(system_state < SYS_STATE_active);
-        warning_add("PSCI 0.2 or later is required for the branch predictor hardening.\n");
-        warned = true;
-    }
+    if ( !entry->matches(entry) )
+        return 0;
 
-    return !ret;
+    if ( smccc_ver < SMCCC_VERSION(1, 1) )
+        goto warn;
+
+    arm_smccc_1_1_smc(ARM_SMCCC_ARCH_FEATURES_FID,
+                      ARM_SMCCC_ARCH_WORKAROUND_1_FID, &res);
+    /* The return value is in the lower 32-bits. */
+    if ( (int)res.a0 < 0 )
+        goto warn;
+
+    return !install_bp_hardening_vec(entry,__smccc_workaround_1_smc_start,
+                                     __smccc_workaround_1_smc_end,
+                                     "call ARM_SMCCC_ARCH_WORKAROUND_1");
+
+warn:
+    printk_once("**** No support for ARM_SMCCC_ARCH_WORKAROUND_1. ****\n"
+                "**** Please update your firmware.                ****\n");
+
+    return 0;
 }
 
 #endif /* CONFIG_ARM64_HARDEN_BRANCH_PREDICTOR */
@@ -212,6 +234,134 @@ static int enable_ic_inv_hardening(void *data)
 
 #endif
 
+#ifdef CONFIG_ARM_SSBD
+
+enum ssbd_state ssbd_state = ARM_SSBD_RUNTIME;
+
+static int __init parse_spec_ctrl(const char *s)
+{
+    const char *ss;
+    int rc = 0;
+
+    do {
+        ss = strchr(s, ',');
+        if ( !ss )
+            ss = strchr(s, '\0');
+
+        if ( !strncmp(s, "ssbd=", 5) )
+        {
+            s += 5;
+
+            if ( !cmdline_strcmp(s, "force-disable") )
+                ssbd_state = ARM_SSBD_FORCE_DISABLE;
+            else if ( !cmdline_strcmp(s, "runtime") )
+                ssbd_state = ARM_SSBD_RUNTIME;
+            else if ( !cmdline_strcmp(s, "force-enable") )
+                ssbd_state = ARM_SSBD_FORCE_ENABLE;
+            else
+                rc = -EINVAL;
+        }
+        else
+            rc = -EINVAL;
+
+        s = ss + 1;
+    } while ( *ss );
+
+    return rc;
+}
+custom_param("spec-ctrl", parse_spec_ctrl);
+
+/* Arm64 only for now as for Arm32 the workaround is currently handled in C. */
+#ifdef CONFIG_ARM_64
+void __init arm_enable_wa2_handling(const struct alt_instr *alt,
+                                    const uint32_t *origptr,
+                                    uint32_t *updptr, int nr_inst)
+{
+    BUG_ON(nr_inst != 1);
+
+    /*
+     * Only allow mitigation on guest ARCH_WORKAROUND_2 if the SSBD
+     * state allow it to be flipped.
+     */
+    if ( get_ssbd_state() == ARM_SSBD_RUNTIME )
+        *updptr = aarch64_insn_gen_nop();
+}
+#endif
+
+/*
+ * Assembly code may use the variable directly, so we need to make sure
+ * it fits in a register.
+ */
+DEFINE_PER_CPU_READ_MOSTLY(register_t, ssbd_callback_required);
+
+static bool has_ssbd_mitigation(const struct arm_cpu_capabilities *entry)
+{
+    struct arm_smccc_res res;
+    bool required;
+
+    if ( smccc_ver < SMCCC_VERSION(1, 1) )
+        return false;
+
+    arm_smccc_1_1_smc(ARM_SMCCC_ARCH_FEATURES_FID,
+                      ARM_SMCCC_ARCH_WORKAROUND_2_FID, &res);
+
+    switch ( (int)res.a0 )
+    {
+    case ARM_SMCCC_NOT_SUPPORTED:
+        ssbd_state = ARM_SSBD_UNKNOWN;
+        return false;
+
+    case ARM_SMCCC_NOT_REQUIRED:
+        ssbd_state = ARM_SSBD_MITIGATED;
+        return false;
+
+    case ARM_SMCCC_SUCCESS:
+        required = true;
+        break;
+
+    case 1: /* Mitigation not required on this CPU. */
+        required = false;
+        break;
+
+    default:
+        ASSERT_UNREACHABLE();
+        return false;
+    }
+
+    switch ( ssbd_state )
+    {
+    case ARM_SSBD_FORCE_DISABLE:
+        printk_once("%s disabled from command-line\n", entry->desc);
+
+        arm_smccc_1_1_smc(ARM_SMCCC_ARCH_WORKAROUND_2_FID, 0, NULL);
+        required = false;
+        break;
+
+    case ARM_SSBD_RUNTIME:
+        if ( required )
+        {
+            this_cpu(ssbd_callback_required) = 1;
+            arm_smccc_1_1_smc(ARM_SMCCC_ARCH_WORKAROUND_2_FID, 1, NULL);
+        }
+
+        break;
+
+    case ARM_SSBD_FORCE_ENABLE:
+        printk_once("%s forced from command-line\n", entry->desc);
+
+        arm_smccc_1_1_smc(ARM_SMCCC_ARCH_WORKAROUND_2_FID, 1, NULL);
+        required = true;
+        break;
+
+    default:
+        ASSERT_UNREACHABLE();
+        return false;
+    }
+
+    return required;
+}
+#endif
+
 #define MIDR_RANGE(model, min, max)     \
     .matches = is_affected_midr_range,  \
     .midr_model = model,                \
@@ -224,7 +374,7 @@ static int enable_ic_inv_hardening(void *data)
     .midr_range_min = 0,                \
     .midr_range_max = (MIDR_VARIANT_MASK | MIDR_REVISION_MASK)
 
-static bool_t __maybe_unused
+static bool __maybe_unused
 is_affected_midr_range(const struct arm_cpu_capabilities *entry)
 {
     return MIDR_IS_CPU_MODEL_RANGE(current_cpu_data.midr.bits, entry->midr_model,
@@ -274,26 +424,40 @@ static const struct arm_cpu_capabilities arm_errata[] = {
                    (1 << MIDR_VARIANT_SHIFT) | 2),
     },
 #endif
+#ifdef CONFIG_ARM64_ERRATUM_1286807
+    {
+        /* Cortex-A76 r0p0 - r3p0 */
+        .desc = "ARM erratum 1286807",
+        .capability = ARM64_WORKAROUND_REPEAT_TLBI,
+        MIDR_RANGE(MIDR_CORTEX_A76, 0, 3 << MIDR_VARIANT_SHIFT),
+    },
+    {
+        /* Neoverse-N1 r0p0 - r3p0 */
+        .desc = "ARM erratum 1286807",
+        .capability = ARM64_WORKAROUND_REPEAT_TLBI,
+        MIDR_RANGE(MIDR_NEOVERSE_N1, 0, 3 << MIDR_VARIANT_SHIFT),
+    },
+#endif
 #ifdef CONFIG_ARM64_HARDEN_BRANCH_PREDICTOR
     {
         .capability = ARM_HARDEN_BRANCH_PREDICTOR,
         MIDR_ALL_VERSIONS(MIDR_CORTEX_A57),
-        .enable = enable_psci_bp_hardening,
+        .enable = enable_smccc_arch_workaround_1,
     },
     {
         .capability = ARM_HARDEN_BRANCH_PREDICTOR,
         MIDR_ALL_VERSIONS(MIDR_CORTEX_A72),
-        .enable = enable_psci_bp_hardening,
+        .enable = enable_smccc_arch_workaround_1,
     },
     {
         .capability = ARM_HARDEN_BRANCH_PREDICTOR,
         MIDR_ALL_VERSIONS(MIDR_CORTEX_A73),
-        .enable = enable_psci_bp_hardening,
+        .enable = enable_smccc_arch_workaround_1,
     },
     {
         .capability = ARM_HARDEN_BRANCH_PREDICTOR,
         MIDR_ALL_VERSIONS(MIDR_CORTEX_A75),
-        .enable = enable_psci_bp_hardening,
+        .enable = enable_smccc_arch_workaround_1,
     },
 #endif
 #ifdef CONFIG_ARM32_HARDEN_BRANCH_PREDICTOR
@@ -313,6 +477,49 @@ static const struct arm_cpu_capabilities arm_errata[] = {
         .enable = enable_ic_inv_hardening,
     },
 #endif
+#ifdef CONFIG_ARM_SSBD
+    {
+        .desc = "Speculative Store Bypass Disabled",
+        .capability = ARM_SSBD,
+        .matches = has_ssbd_mitigation,
+    },
+#endif
+#ifdef CONFIG_ARM_ERRATUM_858921
+    {
+        /* Cortex-A73 (all versions) */
+        .desc = "ARM erratum 858921",
+        .capability = ARM_WORKAROUND_858921,
+        MIDR_ALL_VERSIONS(MIDR_CORTEX_A73),
+    },
+#endif
+    {
+        /* Neoverse r0p0 - r2p0 */
+        .desc = "ARM erratum 1165522",
+        .capability = ARM64_WORKAROUND_AT_SPECULATE,
+        MIDR_RANGE(MIDR_NEOVERSE_N1, 0, 2 << MIDR_VARIANT_SHIFT),
+    },
+    {
+        /* Cortex-A76 r0p0 - r2p0 */
+        .desc = "ARM erratum 1165522",
+        .capability = ARM64_WORKAROUND_AT_SPECULATE,
+        MIDR_RANGE(MIDR_CORTEX_A76, 0, 2 << MIDR_VARIANT_SHIFT),
+    },
+    {
+        .desc = "ARM erratum 1319537",
+        .capability = ARM64_WORKAROUND_AT_SPECULATE,
+        MIDR_ALL_VERSIONS(MIDR_CORTEX_A72),
+    },
+    {
+        .desc = "ARM erratum 1319367",
+        .capability = ARM64_WORKAROUND_AT_SPECULATE,
+        MIDR_ALL_VERSIONS(MIDR_CORTEX_A57),
+    },
+    {
+        /* Cortex-A55 (All versions as erratum is open in SDEN v14) */
+        .desc = "ARM erratum 1530923",
+        .capability = ARM64_WORKAROUND_AT_SPECULATE,
+        MIDR_ALL_VERSIONS(MIDR_CORTEX_A55),
+    },
     {},
 };
 
@@ -324,7 +531,66 @@ void check_local_cpu_errata(void)
 void __init enable_errata_workarounds(void)
 {
     enable_cpu_capabilities(arm_errata);
+
+#ifdef CONFIG_ARM64_ERRATUM_832075
+    if ( cpus_have_cap(ARM64_WORKAROUND_DEVICE_LOAD_ACQUIRE) )
+    {
+        printk_once("**** This CPU is affected by the errata 832075.                      ****\n"
+                    "**** Guests without CPU erratum workarounds can deadlock the system! ****\n"
+                    "**** Only trusted guests should be used.                             ****\n");
+
+        /* Taint the machine has being insecure */
+        add_taint(TAINT_MACHINE_UNSECURE);
+    }
+#endif
 }
+
+static int cpu_errata_callback(struct notifier_block *nfb,
+                               unsigned long action,
+                               void *hcpu)
+{
+    int rc = 0;
+
+    switch ( action )
+    {
+    case CPU_STARTING:
+        /*
+         * At CPU_STARTING phase no notifier shall return an error, because the
+         * system is designed with the assumption that starting a CPU cannot
+         * fail at this point. If an error happens here it will cause Xen to hit
+         * the BUG_ON() in notify_cpu_starting(). In future, either this
+         * notifier/enabling capabilities should be fixed to always return
+         * success/void or notify_cpu_starting() and other common code should be
+         * fixed to expect an error at CPU_STARTING phase.
+         */
+        ASSERT(system_state != SYS_STATE_boot);
+        rc = enable_nonboot_cpu_caps(arm_errata);
+        break;
+    default:
+        break;
+    }
+
+    return !rc ? NOTIFY_DONE : notifier_from_errno(rc);
+}
+
+static struct notifier_block cpu_errata_nfb = {
+    .notifier_call = cpu_errata_callback,
+};
+
+static int __init cpu_errata_notifier_init(void)
+{
+    register_cpu_notifier(&cpu_errata_nfb);
+
+    return 0;
+}
+/*
+ * Initialization has to be done at init rather than presmp_init phase because
+ * the callback should execute only after the secondary CPUs are initially
+ * booted (in hotplug scenarios when the system state is not boot). On boot,
+ * the enabling of errata workarounds will be triggered by the boot CPU from
+ * start_xen().
+ */
+__initcall(cpu_errata_notifier_init);
 
 /*
  * Local variables:

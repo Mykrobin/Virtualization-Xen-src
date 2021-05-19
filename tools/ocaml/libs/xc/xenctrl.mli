@@ -22,6 +22,62 @@ type vcpuinfo = {
   cputime : int64;
   cpumap : int32;
 }
+
+type xen_arm_arch_domainconfig = {
+  gic_version: int;
+  nr_spis: int;
+  clock_frequency: int32;
+}
+
+type x86_arch_emulation_flags =
+  | X86_EMU_LAPIC
+  | X86_EMU_HPET
+  | X86_EMU_PM
+  | X86_EMU_RTC
+  | X86_EMU_IOAPIC
+  | X86_EMU_PIC
+  | X86_EMU_VGA
+  | X86_EMU_IOMMU
+  | X86_EMU_PIT
+  | X86_EMU_USE_PIRQ
+  | X86_EMU_VPCI
+
+type x86_arch_misc_flags =
+  | X86_MSR_RELAXED
+
+type xen_x86_arch_domainconfig = {
+  emulation_flags: x86_arch_emulation_flags list;
+  misc_flags: x86_arch_misc_flags list;
+}
+
+type arch_domainconfig =
+  | ARM of xen_arm_arch_domainconfig
+  | X86 of xen_x86_arch_domainconfig
+
+type domain_create_flag =
+  | CDF_HVM
+  | CDF_HAP
+  | CDF_S3_INTEGRITY
+  | CDF_OOS_OFF
+  | CDF_XS_DOMAIN
+  | CDF_IOMMU
+  | CDF_NESTED_VIRT
+
+type domain_create_iommu_opts =
+  | IOMMU_NO_SHAREPT
+
+type domctl_create_config = {
+  ssidref: int32;
+  handle: string;
+  flags: domain_create_flag list;
+  iommu_opts: domain_create_iommu_opts list;
+  max_vcpus: int;
+  max_evtchn_port: int;
+  max_grant_frames: int;
+  max_maptrack_frames: int;
+  arch: arch_domainconfig;
+}
+
 type domaininfo = {
   domid : domid;
   dying : bool;
@@ -39,9 +95,18 @@ type domaininfo = {
   max_vcpu_id : int;
   ssidref : int32;
   handle : int array;
+  arch_config : arch_domainconfig;
 }
 type sched_control = { weight : int; cap : int; }
-type physinfo_cap_flag = CAP_HVM | CAP_DirectIO
+type physinfo_cap_flag =
+  | CAP_HVM
+  | CAP_PV
+  | CAP_DirectIO
+  | CAP_HAP
+  | CAP_Shadow
+  | CAP_IOMMU_HAP_PT_SHARE
+  | CAP_Vmtrace
+
 type physinfo = {
   threads_per_core : int;
   cores_per_socket : int;
@@ -63,19 +128,29 @@ type compile_info = {
 }
 type shutdown_reason = Poweroff | Reboot | Suspend | Crash | Watchdog | Soft_reset
 
-type domain_create_flag = CDF_HVM | CDF_HAP
-
 exception Error of string
 type handle
-external sizeof_core_header : unit -> int = "stub_sizeof_core_header"
-external sizeof_vcpu_guest_context : unit -> int
-  = "stub_sizeof_vcpu_guest_context"
-external sizeof_xen_pfn : unit -> int = "stub_sizeof_xen_pfn"
 external interface_open : unit -> handle = "stub_xc_interface_open"
 external interface_close : handle -> unit = "stub_xc_interface_close"
+
+(** [with_intf f] runs [f] with a global handle that is opened on demand
+ * and kept open. Conceptually, a client should use either
+ * interface_open and interface_close or with_intf although mixing both
+ * is possible *)
 val with_intf : (handle -> 'a) -> 'a
-val domain_create : handle -> int32 -> domain_create_flag list -> string -> domid
-val domain_sethandle : handle -> domid -> string -> unit
+
+(** [get_handle] returns the global handle used by [with_intf] *)
+val get_handle: unit -> handle option
+
+(** [close handle] closes the handle maintained by [with_intf]. This
+ * should only be closed before process exit. It must not be called from
+ * a function called directly or indirectly by with_intf as this
+ * would invalidate the handle that with_intf passes to its argument. *)
+val close_handle: unit -> unit
+
+val domain_create: handle -> ?domid:int -> domctl_create_config -> domid
+
+external domain_sethandle : handle -> domid -> string -> unit = "stub_xc_domain_sethandle"
 external domain_max_vcpus : handle -> domid -> int -> unit
   = "stub_xc_domain_max_vcpus"
 external domain_pause : handle -> domid -> unit = "stub_xc_domain_pause"
@@ -130,9 +205,6 @@ external domain_memory_increase_reservation :
 external map_foreign_range :
   handle -> domid -> int -> nativeint -> Xenmmap.mmap_interface
   = "stub_map_foreign_range"
-external domain_get_pfn_list :
-  handle -> domid -> nativeint -> nativeint array
-  = "stub_xc_domain_get_pfn_list"
 
 external domain_assign_device: handle -> domid -> (int * int * int * int) -> unit
        = "stub_xc_domain_assign_device"
@@ -151,34 +223,7 @@ external version_capabilities : handle -> string
 type featureset_index = Featureset_raw | Featureset_host | Featureset_pv | Featureset_hvm
 external get_cpu_featureset : handle -> featureset_index -> int64 array = "stub_xc_get_cpu_featureset"
 
-type core_magic = Magic_hvm | Magic_pv
-type core_header = {
-  xch_magic : core_magic;
-  xch_nr_vcpus : int;
-  xch_nr_pages : nativeint;
-  xch_index_offset : int64;
-  xch_ctxt_offset : int64;
-  xch_pages_offset : int64;
-}
-external marshall_core_header : core_header -> string
-  = "stub_marshall_core_header"
-val coredump : handle -> domid -> Unix.file_descr -> unit
 external pages_to_kib : int64 -> int64 = "stub_pages_to_kib"
 val pages_to_mib : int64 -> int64
 external watchdog : handle -> int -> int32 -> int
   = "stub_xc_watchdog"
-
-external domain_set_machine_address_size: handle -> domid -> int -> unit
-  = "stub_xc_domain_set_machine_address_size"
-external domain_get_machine_address_size: handle -> domid -> int
-       = "stub_xc_domain_get_machine_address_size"
-
-external domain_cpuid_set: handle -> domid -> (int64 * (int64 option))
-                        -> string option array
-                        -> string option array
-       = "stub_xc_domain_cpuid_set"
-external domain_cpuid_apply_policy: handle -> domid -> unit
-       = "stub_xc_domain_cpuid_apply_policy"
-external cpuid_check: handle -> (int64 * (int64 option)) -> string option array -> (bool * string option array)
-       = "stub_xc_cpuid_check"
-

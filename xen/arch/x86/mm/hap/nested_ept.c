@@ -54,11 +54,6 @@
 #define NEPT_2M_ENTRY_FLAG (1 << 10)
 #define NEPT_4K_ENTRY_FLAG (1 << 9)
 
-bool_t nept_sp_entry(ept_entry_t e)
-{
-    return !!(e.sp);
-}
-
 static bool_t nept_rsv_bits_check(ept_entry_t e, uint32_t level)
 {
     uint64_t rsv_bits = EPT_MUST_RSV_BITS;
@@ -68,7 +63,7 @@ static bool_t nept_rsv_bits_check(ept_entry_t e, uint32_t level)
     case 1:
         break;
     case 2 ... 3:
-        if ( nept_sp_entry(e) )
+        if ( e.sp )
             rsv_bits |=  ((1ull << (9 * (level - 1))) - 1) << PAGE_SHIFT;
         else
             rsv_bits |= EPTE_EMT_MASK | EPTE_IGMT_MASK;
@@ -156,7 +151,6 @@ static uint32_t
 nept_walk_tables(struct vcpu *v, unsigned long l2ga, ept_walk_t *gw)
 {
     int lvl;
-    p2m_type_t p2mt;
     uint32_t rc = 0, ret = 0, gflags;
     struct domain *d = v->domain;
     struct p2m_domain *p2m = d->arch.p2m;
@@ -168,12 +162,12 @@ nept_walk_tables(struct vcpu *v, unsigned long l2ga, ept_walk_t *gw)
 
     for (lvl = 4; lvl > 0; lvl--)
     {
-        lxp = map_domain_gfn(p2m, base_gfn, &lxmfn, &p2mt, P2M_ALLOC, &rc);
+        lxp = map_domain_gfn(p2m, base_gfn, &lxmfn, P2M_ALLOC, &rc);
         if ( !lxp )
             goto map_err;
         gw->lxe[lvl] = lxp[ept_lvl_table_offset(l2ga, lvl)];
         unmap_domain_page(lxp);
-        put_page(mfn_to_page(mfn_x(lxmfn)));
+        put_page(mfn_to_page(lxmfn));
 
         if ( nept_non_present_check(gw->lxe[lvl]) )
             goto non_present;
@@ -181,7 +175,7 @@ nept_walk_tables(struct vcpu *v, unsigned long l2ga, ept_walk_t *gw)
         if ( nept_misconfiguration_check(gw->lxe[lvl], lvl) )
             goto misconfig_err;
 
-        if ( (lvl == 2 || lvl == 3) && nept_sp_entry(gw->lxe[lvl]) )
+        if ( (lvl == 2 || lvl == 3) && gw->lxe[lvl].sp )
         {
             /* Generate a fake l1 table entry so callers don't all
              * have to understand superpages. */
@@ -208,7 +202,7 @@ done:
     goto out;
 
 map_err:
-    if ( rc == _PAGE_PAGED )
+    if ( rc == PFEC_page_paged )
     {
         ret = EPT_TRANSLATE_RETRY;
         goto out;

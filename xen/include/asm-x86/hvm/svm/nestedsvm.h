@@ -46,8 +46,8 @@ struct nestedsvm {
     uint32_t ns_general1_intercepts;
     uint32_t ns_general2_intercepts;
 
-    /* Cached real lbr of the l2 guest */
-    lbrctrl_t ns_lbr_control;
+    /* Cached real lbr and other virtual extentions of the l2 guest */
+    virt_ext_t ns_virt_ext;
 
     /* Cached real MSR permission bitmaps of the l2 guest */
     unsigned long *ns_cached_msrpm;
@@ -94,7 +94,7 @@ struct nestedsvm {
 
 /* True when l1 guest enabled SVM in EFER */
 #define nsvm_efer_svm_enabled(v) \
-    (!!((v)->arch.hvm_vcpu.guest_efer & EFER_SVME))
+    (!!((v)->arch.hvm.guest_efer & EFER_SVME))
 
 int nestedsvm_vmcb_map(struct vcpu *v, uint64_t vmcbaddr);
 void nestedsvm_vmexit_defer(struct vcpu *v,
@@ -104,22 +104,19 @@ nestedsvm_vmexit_n2n1(struct vcpu *v, struct cpu_user_regs *regs);
 enum nestedhvm_vmexits
 nestedsvm_check_intercepts(struct vcpu *v, struct cpu_user_regs *regs,
     uint64_t exitcode);
+void svm_nested_features_on_efer_update(struct vcpu *v);
 
 /* Interface methods */
 void nsvm_vcpu_destroy(struct vcpu *v);
 int nsvm_vcpu_initialise(struct vcpu *v);
 int nsvm_vcpu_reset(struct vcpu *v);
 int nsvm_vcpu_vmrun(struct vcpu *v, struct cpu_user_regs *regs);
-int nsvm_vcpu_vmexit_trap(struct vcpu *v, const struct hvm_trap *trap);
+int nsvm_vcpu_vmexit_event(struct vcpu *v, const struct x86_event *event);
 uint64_t nsvm_vcpu_hostcr3(struct vcpu *v);
-bool_t nsvm_vmcb_guest_intercepts_trap(struct vcpu *v, unsigned int trapnr,
-                                       int errcode);
+bool_t nsvm_vmcb_guest_intercepts_event(
+    struct vcpu *v, unsigned int vector, int errcode);
 bool_t nsvm_vmcb_hap_enabled(struct vcpu *v);
 enum hvm_intblk nsvm_intr_blocked(struct vcpu *v);
-
-/* MSRs */
-int nsvm_rdmsr(struct vcpu *v, unsigned int msr, uint64_t *msr_content);
-int nsvm_wrmsr(struct vcpu *v, unsigned int msr, uint64_t msr_content);
 
 /* Interrupts, vGIF */
 void svm_vmexit_do_clgi(struct cpu_user_regs *regs, struct vcpu *v);

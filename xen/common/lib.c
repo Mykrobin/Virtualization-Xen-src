@@ -1,36 +1,6 @@
-
-#include <xen/ctype.h>
 #include <xen/lib.h>
 #include <xen/types.h>
-#include <xen/init.h>
 #include <asm/byteorder.h>
-
-/* for ctype.h */
-const unsigned char _ctype[] = {
-    _C,_C,_C,_C,_C,_C,_C,_C,                        /* 0-7 */
-    _C,_C|_S,_C|_S,_C|_S,_C|_S,_C|_S,_C,_C,         /* 8-15 */
-    _C,_C,_C,_C,_C,_C,_C,_C,                        /* 16-23 */
-    _C,_C,_C,_C,_C,_C,_C,_C,                        /* 24-31 */
-    _S|_SP,_P,_P,_P,_P,_P,_P,_P,                    /* 32-39 */
-    _P,_P,_P,_P,_P,_P,_P,_P,                        /* 40-47 */
-    _D,_D,_D,_D,_D,_D,_D,_D,                        /* 48-55 */
-    _D,_D,_P,_P,_P,_P,_P,_P,                        /* 56-63 */
-    _P,_U|_X,_U|_X,_U|_X,_U|_X,_U|_X,_U|_X,_U,      /* 64-71 */
-    _U,_U,_U,_U,_U,_U,_U,_U,                        /* 72-79 */
-    _U,_U,_U,_U,_U,_U,_U,_U,                        /* 80-87 */
-    _U,_U,_U,_P,_P,_P,_P,_P,                        /* 88-95 */
-    _P,_L|_X,_L|_X,_L|_X,_L|_X,_L|_X,_L|_X,_L,      /* 96-103 */
-    _L,_L,_L,_L,_L,_L,_L,_L,                        /* 104-111 */
-    _L,_L,_L,_L,_L,_L,_L,_L,                        /* 112-119 */
-    _L,_L,_L,_P,_P,_P,_P,_C,                        /* 120-127 */
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,                /* 128-143 */
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,                /* 144-159 */
-    _S|_SP,_P,_P,_P,_P,_P,_P,_P,_P,_P,_P,_P,_P,_P,_P,_P,   /* 160-175 */
-    _P,_P,_P,_P,_P,_P,_P,_P,_P,_P,_P,_P,_P,_P,_P,_P,       /* 176-191 */
-    _U,_U,_U,_U,_U,_U,_U,_U,_U,_U,_U,_U,_U,_U,_U,_U,       /* 192-207 */
-    _U,_U,_U,_U,_U,_U,_U,_P,_U,_U,_U,_U,_U,_U,_U,_L,       /* 208-223 */
-    _L,_L,_L,_L,_L,_L,_L,_L,_L,_L,_L,_L,_L,_L,_L,_L,       /* 224-239 */
-    _L,_L,_L,_L,_L,_L,_L,_P,_L,_L,_L,_L,_L,_L,_L,_L};      /* 240-255 */
 
 /*
  * A couple of 64 bit operations ported from FreeBSD.
@@ -110,7 +80,8 @@ union uu {
 /*
  * Extract high and low shortwords from longword, and move low shortword of
  * longword to upper half of long, i.e., produce the upper longword of
- * ((quad_t)(x) << (number_of_bits_in_long/2)).  (`x' must actually be u_long.)
+ * ((quad_t)(x) << (number_of_bits_in_long/2)).  (`x' must actually be
+ * unsigned long.)
  *
  * These are used in the multiply code, to split a longword into upper
  * and lower halves, and to reassemble a product as a quad_t, shifted left
@@ -127,10 +98,10 @@ union uu {
 #define B (1 << HALF_BITS) /* digit base */
 
 /* Combine two `digits' to make a single two-digit number. */
-#define COMBINE(a, b) (((u_long)(a) << HALF_BITS) | (b))
+#define COMBINE(a, b) (((unsigned long)(a) << HALF_BITS) | (b))
 
 /* select a type for digits in base B */
-typedef u_long digit;
+typedef unsigned long digit;
 
 /*
  * Shift p[0]..p[len] left `sh' bits, ignoring any bits that
@@ -150,8 +121,8 @@ static void shl(register digit *p, register int len, register int sh)
  * __qdivrem(u, v, rem) returns u/v and, optionally, sets *rem to u%v.
  *
  * We do this in base 2-sup-HALF_BITS, so that all intermediate products
- * fit within u_long.  As a consequence, the maximum length dividend and
- * divisor are 4 `digits' in this base (they are shorter if they have
+ * fit within unsigned long.  As a consequence, the maximum length dividend
+ * and divisor are 4 `digits' in this base (they are shorter if they have
  * leading zeros).
  */
 u64 __qdivrem(u64 uq, u64 vq, u64 *arq)
@@ -159,7 +130,7 @@ u64 __qdivrem(u64 uq, u64 vq, u64 *arq)
     union uu tmp;
     digit *u, *v, *q;
     register digit v1, v2;
-    u_long qhat, rhat, t;
+    unsigned long qhat, rhat, t;
     int m, n, d, j, i;
     digit uspace[5], vspace[5], qspace[5];
 
@@ -210,7 +181,7 @@ u64 __qdivrem(u64 uq, u64 vq, u64 *arq)
     v[4] = LHALF(tmp.ul[L]);
     for (n = 4; v[1] == 0; v++) {
         if (--n == 1) {
-            u_long rbj; /* r*B+u[j] (not root boy jim) */
+            unsigned long rbj; /* r*B+u[j] (not root boy jim) */
             digit q1, q2, q3, q4;
 
             /*
@@ -286,7 +257,8 @@ u64 __qdivrem(u64 uq, u64 vq, u64 *arq)
             rhat = uj1;
             goto qhat_too_big;
         } else {
-            u_long nn = COMBINE(uj0, uj1);
+            unsigned long nn = COMBINE(uj0, uj1);
+
             qhat = nn / v1;
             rhat = nn % v1;
         }
@@ -388,7 +360,7 @@ u64 __umoddi3(u64 a, u64 b)
  *  11 %  5 =  1
  * -11 %  5 = -1
  *  11 % -5 =  1
- * -11 % -5 =  1
+ * -11 % -5 = -1
  */
 s64 __moddi3(s64 a, s64 b)
 {
@@ -448,54 +420,6 @@ uint64_t muldiv64(uint64_t a, uint32_t b, uint32_t c)
     res.l.low = (((rh % c) << 32) + (rl & 0xffffffff)) / c;
     return res.ll;
 #endif
-}
-
-unsigned long long parse_size_and_unit(const char *s, const char **ps)
-{
-    unsigned long long ret;
-    const char *s1;
-
-    ret = simple_strtoull(s, &s1, 0);
-
-    switch ( *s1 )
-    {
-    case 'T': case 't':
-        ret <<= 10;
-        /* fallthrough */
-    case 'G': case 'g':
-        ret <<= 10;
-        /* fallthrough */
-    case 'M': case 'm':
-        ret <<= 10;
-        /* fallthrough */
-    case 'K': case 'k':
-        ret <<= 10;
-        /* fallthrough */
-    case 'B': case 'b':
-        s1++;
-        break;
-    default:
-        ret <<= 10; /* default to kB */
-        break;
-    }
-
-    if ( ps != NULL )
-        *ps = s1;
-
-    return ret;
-}
-
-typedef void (*ctor_func_t)(void);
-extern const ctor_func_t __ctors_start[], __ctors_end[];
-
-void __init init_constructors(void)
-{
-    const ctor_func_t *f;
-    for ( f = __ctors_start; f < __ctors_end; ++f )
-        (*f)();
-
-    /* Putting this here seems as good (or bad) as any other place. */
-    BUILD_BUG_ON(sizeof(size_t) != sizeof(ssize_t));
 }
 
 /*

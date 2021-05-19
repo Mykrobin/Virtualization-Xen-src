@@ -29,7 +29,7 @@
 #include <xen/cpumask.h>
 #include <xen/spinlock.h>
 
-#define ACPI_PROCESSOR_MAX_POWER        8
+#define ACPI_PROCESSOR_MAX_POWER        12
 #define CPUIDLE_NAME_LEN                16
 
 #define ACPI_CSTATE_EM_NONE     0
@@ -87,7 +87,7 @@ struct cpuidle_governor
 extern s8 xen_cpuidle;
 extern struct cpuidle_governor *cpuidle_current_governor;
 
-bool_t cpuidle_using_deep_cstate(void);
+bool cpuidle_using_deep_cstate(void);
 void cpuidle_disable_deep_cstate(void);
 
 extern void cpuidle_wakeup_mwait(cpumask_t *mask);

@@ -30,6 +30,7 @@
 #include <xen/errno.h>
 #include <acpi/actables.h>
 #include <xen/mm.h>
+#include <xen/param.h>
 #include <xen/device_tree.h>
 
 #include <asm/acpi.h>
@@ -53,7 +54,7 @@ acpi_map_gic_cpu_interface(struct acpi_madt_generic_interrupt *processor)
     int i;
     int rc;
     u64 mpidr = processor->arm_mpidr & MPIDR_HWID_MASK;
-    bool_t enabled = !!(processor->flags & ACPI_MADT_ENABLED);
+    bool enabled = processor->flags & ACPI_MADT_ENABLED;
 
     if ( mpidr == MPIDR_INVALID )
     {
@@ -130,7 +131,7 @@ acpi_parse_gic_cpu_interface(struct acpi_subtable_header *header,
     struct acpi_madt_generic_interrupt *processor =
                container_of(header, struct acpi_madt_generic_interrupt, header);
 
-    if ( BAD_MADT_ENTRY(processor, end) )
+    if ( BAD_MADT_GICC_ENTRY(processor, end) )
         return -EINVAL;
 
     acpi_table_print_madt_entry(header);
@@ -180,8 +181,8 @@ static int __init acpi_parse_fadt(struct acpi_table_header *table)
      * we only deal with ACPI 6.0 or newer revision to get GIC and SMP
      * boot protocol configuration data, or we will disable ACPI.
      */
-    if ( table->revision > 6
-         || (table->revision == 6 && fadt->minor_revision >= 0) )
+    if ( table->revision > 5
+         || (table->revision == 5 && fadt->minor_revision >= 1) )
         return 0;
 
     printk("Unsupported FADT revision %d.%d, should be 6.0+, will disable ACPI\n",
@@ -190,19 +191,23 @@ static int __init acpi_parse_fadt(struct acpi_table_header *table)
     return -EINVAL;
 }
 
-static bool_t __initdata param_acpi_off;
-static bool_t __initdata param_acpi_force;
+static bool __initdata param_acpi_off;
+static bool __initdata param_acpi_force;
 
-static void __init parse_acpi_param(char *arg)
+static int __init parse_acpi_param(const char *arg)
 {
     if ( !arg )
-        return;
+        return -EINVAL;
 
     /* Interpret the parameter for use within Xen. */
-    if ( !parse_bool(arg) )
+    if ( !parse_bool(arg, NULL) )
         param_acpi_off = true;
     else if ( !strcmp(arg, "force") ) /* force ACPI to be enabled */
         param_acpi_force = true;
+    else
+        return -EINVAL;
+
+    return 0;
 }
 custom_param("acpi", parse_acpi_param);
 
@@ -234,7 +239,7 @@ static int __init dt_scan_depth1_nodes(const void *fdt, int node,
  */
 int __init acpi_boot_table_init(void)
 {
-    int error;
+    int error = 0;
 
     /*
      * Enable ACPI instead of device tree unless
@@ -242,13 +247,12 @@ int __init acpi_boot_table_init(void)
      * - the device tree is not empty (it has more than just a /chosen node)
      *   and ACPI has not been force enabled (acpi=force)
      */
-    if ( param_acpi_off || ( !param_acpi_force
-                             && device_tree_for_each_node(device_tree_flattened,
-                                                   dt_scan_depth1_nodes, NULL)))
-    {
-        disable_acpi();
-        return 0;
-    }
+    if ( param_acpi_off)
+        goto disable;
+    if ( !param_acpi_force &&
+         device_tree_for_each_node(device_tree_flattened, 0,
+                                   dt_scan_depth1_nodes, NULL) )
+        goto disable;
 
     /*
      * ACPI is disabled at this point. Enable it in order to parse
@@ -260,16 +264,22 @@ int __init acpi_boot_table_init(void)
     error = acpi_table_init();
     if ( error )
     {
-        disable_acpi();
-        return error;
+        printk("%s: Unable to initialize table parser (%d)\n",
+               __FUNCTION__, error);
+        goto disable;
     }
 
-    if ( acpi_table_parse(ACPI_SIG_FADT, acpi_parse_fadt) )
+    error = acpi_table_parse(ACPI_SIG_FADT, acpi_parse_fadt);
+    if ( error )
     {
-        /* disable ACPI if no FADT is found */
-        disable_acpi();
-        printk("Can't find FADT\n");
+        printk("%s: FADT not found (%d)\n", __FUNCTION__, error);
+        goto disable;
     }
 
     return 0;
+
+disable:
+    disable_acpi();
+
+    return error;
 }

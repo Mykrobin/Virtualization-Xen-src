@@ -10,21 +10,21 @@
 #include <stdlib.h>
 #include <string.h>
 
-static evtchn_port_t virq_port      = -1;
+static evtchn_port_t virq_port      = ~0;
 static xenevtchn_handle *xce_handle = NULL;
 static xc_interface *xch            = NULL;
 static struct xs_handle *xs_handle  = NULL;
 
 void cleanup(void)
 {
-    if (virq_port > -1)
+    if (virq_port != ~0)
         xenevtchn_unbind(xce_handle, virq_port);
     if (xce_handle)
         xenevtchn_close(xce_handle);
     if (xch)
         xc_interface_close(xch);
     if (xs_handle)
-        xs_daemon_close(xs_handle);
+        xs_close(xs_handle);
 }
 
 /* Never shrink dom0 below 1 GiB */
@@ -77,7 +77,7 @@ void handle_low_mem(void)
     if (!xs_write(xs_handle, XBT_NULL, 
             "/local/domain/0/memory/target", data, strlen(data)))
     {
-        snprintf(error, BUFSZ,"Failed to write target %s to xenstore", data);
+        snprintf(error, BUFSZ,"Failed to write target %.24s to xenstore", data);
         perror(error);
     }
 }
@@ -102,7 +102,7 @@ int main(int argc, char *argv[])
         return 2;
     }
 
-    xs_handle = xs_daemon_open();
+    xs_handle = xs_open(0);
     if (xs_handle == NULL)
     {
         perror("Failed to open xenstore connection");

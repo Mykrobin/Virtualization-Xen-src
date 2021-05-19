@@ -16,12 +16,16 @@ install: all
 
 .PHONY: clean
 clean:
-	$(RM) -f xenpmd xenpmd.o $(DEPS)
+	$(RM) -f xenpmd xenpmd.o $(DEPS_RM)
 
 .PHONY: distclean
 distclean: clean
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(sbindir)/xenpmd
+
 xenpmd: xenpmd.o Makefile
 	$(CC) $(LDFLAGS) $< -o $@ $(LDLIBS) $(APPEND_LDFLAGS)
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)

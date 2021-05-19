@@ -24,9 +24,7 @@
 #ifndef __ASM_X86_HVM_VIOAPIC_H__
 #define __ASM_X86_HVM_VIOAPIC_H__
 
-#include <xen/config.h>
 #include <xen/types.h>
-#include <xen/smp.h>
 #include <public/hvm/save.h>
 
 #define VIOAPIC_VERSION_ID 0x11 /* IOAPIC version */
@@ -49,18 +47,26 @@
 #define VIOAPIC_REG_RTE0    0x10
 
 struct hvm_vioapic {
-    struct hvm_hw_vioapic hvm_hw_vioapic;
     struct domain *domain;
+    uint32_t nr_pins;
+    unsigned int base_gsi;
+    union {
+        XEN_HVM_VIOAPIC(,);
+        struct hvm_hw_vioapic domU;
+    };
 };
 
-#define domain_vioapic(d) (&(d)->arch.hvm_domain.vioapic->hvm_hw_vioapic)
-#define vioapic_domain(v) (container_of((v), struct hvm_vioapic, \
-                                        hvm_hw_vioapic)->domain)
+#define domain_vioapic(d, i) ((d)->arch.hvm.vioapic[i])
+#define vioapic_domain(v) ((v)->domain)
 
 int vioapic_init(struct domain *d);
 void vioapic_deinit(struct domain *d);
 void vioapic_reset(struct domain *d);
 void vioapic_irq_positive_edge(struct domain *d, unsigned int irq);
 void vioapic_update_EOI(struct domain *d, u8 vector);
+
+int vioapic_get_mask(const struct domain *d, unsigned int gsi);
+int vioapic_get_vector(const struct domain *d, unsigned int gsi);
+int vioapic_get_trigger_mode(const struct domain *d, unsigned int gsi);
 
 #endif /* __ASM_X86_HVM_VIOAPIC_H__ */

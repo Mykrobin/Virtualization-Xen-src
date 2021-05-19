@@ -70,6 +70,30 @@ const char *xen_deny(void)
     return "<denied>";
 }
 
+static const char build_info[] =
+    "debug="
+#ifdef CONFIG_DEBUG
+    "y"
+#else
+    "n"
+#endif
+#ifdef CONFIG_COVERAGE
+# ifdef __clang__
+    " llvmcov=y"
+# else
+    " gcov=y"
+# endif
+#endif
+#ifdef CONFIG_UBSAN
+    " ubsan=y"
+#endif
+    "";
+
+const char *xen_build_info(void)
+{
+    return build_info;
+}
+
 static const void *build_id_p __read_mostly;
 static unsigned int build_id_len __read_mostly;
 
@@ -140,7 +164,7 @@ struct cv_info_pdb70
     char pdb_filename[];
 };
 
-static int __init xen_build_init(void)
+void __init xen_build_init(void)
 {
     const Elf_Note *n = __note_gnu_build_id_start;
     unsigned int sz;
@@ -148,11 +172,11 @@ static int __init xen_build_init(void)
 
     /* --build-id invoked with wrong parameters. */
     if ( __note_gnu_build_id_end <= &n[0] )
-        return -ENODATA;
+        return;
 
     /* Check for full Note header. */
     if ( &n[1] >= __note_gnu_build_id_end )
-        return -ENODATA;
+        return;
 
     sz = (void *)__note_gnu_build_id_end - (void *)n;
 
@@ -160,7 +184,7 @@ static int __init xen_build_init(void)
 
 #ifdef CONFIG_X86
     /* Alternatively we may have a CodeView record from an EFI build. */
-    if ( rc && efi_enabled )
+    if ( rc && efi_enabled(EFI_LOADER) )
     {
         const struct pe_external_debug_directory *dir = (const void *)n;
 
@@ -188,10 +212,7 @@ static int __init xen_build_init(void)
 #endif
     if ( !rc )
         printk(XENLOG_INFO "build-id: %*phN\n", build_id_len, build_id_p);
-
-    return rc;
 }
-__initcall(xen_build_init);
 #endif
 /*
  * Local variables:

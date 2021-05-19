@@ -21,8 +21,12 @@ install: all
 	[ -d $(DESTDIR)$(sbindir) ] || $(INSTALL_DIR) $(DESTDIR)$(sbindir)
 	$(INSTALL_PROG) gdbsx $(DESTDIR)$(sbindir)/gdbsx
 
+.PHONY: uninstall
+uninstall:
+	rm -f $(DESTDIR)$(sbindir)/gdbsx
+
 gdbsx: gx/gx_all.a xg/xg_all.a 
-	$(CC) -o $@ $^
+	$(CC) $(LDFLAGS) -o $@ $^
 
 xg/xg_all.a:
 	$(MAKE) -C xg

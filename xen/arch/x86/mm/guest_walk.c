@@ -31,188 +31,106 @@ asm(".file \"" __OBJECT_FILE__ "\"");
 #include <xen/sched.h>
 #include <asm/page.h>
 #include <asm/guest_pt.h>
+#include <asm/hvm/emulate.h>
 
-extern const uint32_t gw_page_flags[];
-#if GUEST_PAGING_LEVELS == CONFIG_PAGING_LEVELS
-const uint32_t gw_page_flags[] = {
-    /* I/F -  Usr Wr */
-    /* 0   0   0   0 */ _PAGE_PRESENT,
-    /* 0   0   0   1 */ _PAGE_PRESENT|_PAGE_RW,
-    /* 0   0   1   0 */ _PAGE_PRESENT|_PAGE_USER,
-    /* 0   0   1   1 */ _PAGE_PRESENT|_PAGE_RW|_PAGE_USER,
-    /* 0   1   0   0 */ _PAGE_PRESENT,
-    /* 0   1   0   1 */ _PAGE_PRESENT|_PAGE_RW,
-    /* 0   1   1   0 */ _PAGE_PRESENT|_PAGE_USER,
-    /* 0   1   1   1 */ _PAGE_PRESENT|_PAGE_RW|_PAGE_USER,
-    /* 1   0   0   0 */ _PAGE_PRESENT|_PAGE_NX_BIT,
-    /* 1   0   0   1 */ _PAGE_PRESENT|_PAGE_RW|_PAGE_NX_BIT,
-    /* 1   0   1   0 */ _PAGE_PRESENT|_PAGE_USER|_PAGE_NX_BIT,
-    /* 1   0   1   1 */ _PAGE_PRESENT|_PAGE_RW|_PAGE_USER|_PAGE_NX_BIT,
-    /* 1   1   0   0 */ _PAGE_PRESENT|_PAGE_NX_BIT,
-    /* 1   1   0   1 */ _PAGE_PRESENT|_PAGE_RW|_PAGE_NX_BIT,
-    /* 1   1   1   0 */ _PAGE_PRESENT|_PAGE_USER|_PAGE_NX_BIT,
-    /* 1   1   1   1 */ _PAGE_PRESENT|_PAGE_RW|_PAGE_USER|_PAGE_NX_BIT,
-};
-#endif
-
-/* Flags that are needed in a pagetable entry, with the sense of NX inverted */
-static uint32_t mandatory_flags(struct vcpu *v, uint32_t pfec) 
+/*
+ * Modify a guest pagetable entry to set the Accessed and Dirty bits.
+ * Returns true if it actually writes to guest memory.
+ */
+static bool set_ad_bits(guest_intpte_t *guest_p, guest_intpte_t *walk_p,
+                        bool set_dirty)
 {
-    /* Don't demand not-NX if the CPU wouldn't enforce it. */
-    if ( !guest_supports_nx(v) )
-        pfec &= ~PFEC_insn_fetch;
+    guest_intpte_t new, old = *walk_p;
 
-    /* Don't demand R/W if the CPU wouldn't enforce it. */
-    if ( is_hvm_vcpu(v) && unlikely(!hvm_wp_enabled(v)) 
-         && !(pfec & PFEC_user_mode) )
-        pfec &= ~PFEC_write_access;
-
-    return gw_page_flags[(pfec & 0x1f) >> 1] | _PAGE_INVALID_BITS;
-}
-
-/* Modify a guest pagetable entry to set the Accessed and Dirty bits.
- * Returns non-zero if it actually writes to guest memory. */
-static uint32_t set_ad_bits(void *guest_p, void *walk_p, int set_dirty)
-{
-    guest_intpte_t old, new;
-
-    old = *(guest_intpte_t *)walk_p;
     new = old | _PAGE_ACCESSED | (set_dirty ? _PAGE_DIRTY : 0);
-    if ( old != new ) 
+    if ( old != new )
     {
-        /* Write the new entry into the walk, and try to write it back
+        /*
+         * Write the new entry into the walk, and try to write it back
          * into the guest table as well.  If the guest table has changed
-         * under out feet then leave it alone. */
-        *(guest_intpte_t *)walk_p = new;
-        if ( cmpxchg(((guest_intpte_t *)guest_p), old, new) == old ) 
-            return 1;
+         * under our feet then leave it alone.
+         */
+        *walk_p = new;
+        if ( cmpxchg(guest_p, old, new) == old )
+            return true;
     }
-    return 0;
+    return false;
 }
 
-#if GUEST_PAGING_LEVELS >= 4
-static bool_t pkey_fault(struct vcpu *vcpu, uint32_t pfec,
-        uint32_t pte_flags, uint32_t pte_pkey)
-{
-    uint32_t pkru;
-
-    /* When page isn't present,  PKEY isn't checked. */
-    if ( !(pfec & PFEC_page_present) || is_pv_vcpu(vcpu) )
-        return 0;
-
-    /*
-     * PKU:  additional mechanism by which the paging controls
-     * access to user-mode addresses based on the value in the
-     * PKRU register. A fault is considered as a PKU violation if all
-     * of the following conditions are true:
-     * 1.CR4_PKE=1.
-     * 2.EFER_LMA=1.
-     * 3.Page is present with no reserved bit violations.
-     * 4.The access is not an instruction fetch.
-     * 5.The access is to a user page.
-     * 6.PKRU.AD=1 or
-     *      the access is a data write and PKRU.WD=1 and
-     *          either CR0.WP=1 or it is a user access.
-     */
-    if ( !hvm_pku_enabled(vcpu) ||
-         !hvm_long_mode_enabled(vcpu) ||
-         (pfec & PFEC_reserved_bit) ||
-         (pfec & PFEC_insn_fetch) ||
-         !(pte_flags & _PAGE_USER) )
-        return 0;
-
-    pkru = read_pkru();
-    if ( unlikely(pkru) )
-    {
-        bool_t pkru_ad = read_pkru_ad(pkru, pte_pkey);
-        bool_t pkru_wd = read_pkru_wd(pkru, pte_pkey);
-
-        /* Condition 6 */
-        if ( pkru_ad ||
-             (pkru_wd && (pfec & PFEC_write_access) &&
-              (hvm_wp_enabled(vcpu) || (pfec & PFEC_user_mode))) )
-            return 1;
-    }
-
-    return 0;
-}
-#endif
-
-/* Walk the guest pagetables, after the manner of a hardware walker. */
-/* Because the walk is essentially random, it can cause a deadlock 
- * warning in the p2m locking code. Highly unlikely this is an actual
- * deadlock, because who would walk page table in the opposite order? */
-uint32_t
-guest_walk_tables(struct vcpu *v, struct p2m_domain *p2m,
-                  unsigned long va, walk_t *gw, 
-                  uint32_t pfec, mfn_t top_mfn, void *top_map)
+/*
+ * Walk the guest pagetables, after the manner of a hardware walker.
+ *
+ * This is a condensing of the 'Paging' chapters from Intel and AMD software
+ * manuals.  Please refer closely to them.
+ *
+ * A pagetable walk consists of two parts:
+ *   1) to find whether a translation exists, and
+ *   2) if a translation does exist, to check whether the translation's access
+ *      rights permit the access.
+ *
+ * A translation is found by following the pagetable structure (starting at
+ * %cr3) to a leaf entry (an L1 PTE, or a higher level entry with PSE set)
+ * which identifies the physical destination of the access.
+ *
+ * A translation from one level to the next exists if the PTE is both present
+ * and has no reserved bits set.  If the pagewalk counters a situation where a
+ * translation does not exist, the walk stops at that point.
+ *
+ * The access rights (NX, User, RW bits) are collected as the walk progresses.
+ * If a translation exists, the accumulated access rights are compared to the
+ * requested walk, to see whether the access is permitted.
+ */
+bool
+guest_walk_tables(const struct vcpu *v, struct p2m_domain *p2m,
+                  unsigned long va, walk_t *gw, uint32_t walk,
+                  gfn_t top_gfn, mfn_t top_mfn, void *top_map)
 {
     struct domain *d = v->domain;
-    p2m_type_t p2mt;
     guest_l1e_t *l1p = NULL;
     guest_l2e_t *l2p = NULL;
 #if GUEST_PAGING_LEVELS >= 4 /* 64-bit only... */
     guest_l3e_t *l3p = NULL;
     guest_l4e_t *l4p;
+    paddr_t l4gpa;
 #endif
-    unsigned int pkey;
-    uint32_t gflags, mflags, iflags, rc = 0;
-    bool_t smep = 0, smap = 0;
-    bool_t pse1G = 0, pse2M = 0;
+#if GUEST_PAGING_LEVELS >= 3 /* PAE or 64... */
+    paddr_t l3gpa;
+#endif
+    uint32_t gflags, rc;
+    paddr_t l1gpa = 0, l2gpa = 0;
+    unsigned int leaf_level;
     p2m_query_t qt = P2M_ALLOC | P2M_UNSHARE;
+
+#define AR_ACCUM_AND (_PAGE_USER | _PAGE_RW)
+#define AR_ACCUM_OR  (_PAGE_NX_BIT)
+    /* Start with all AND bits set, all OR bits clear. */
+    uint32_t ar, ar_and = ~0u, ar_or = 0;
+
+    bool walk_ok = false;
+
+    /*
+     * TODO - We should ASSERT() that only the following bits are set as
+     * inputs to a guest walk, but a whole load of code currently passes in
+     * other PFEC_ constants.
+     */
+    walk &= (PFEC_implicit | PFEC_insn_fetch | PFEC_user_mode | PFEC_write_access);
+
+    /* Only implicit supervisor data accesses exist. */
+    ASSERT(!(walk & PFEC_implicit) ||
+           !(walk & (PFEC_insn_fetch | PFEC_user_mode)));
 
     perfc_incr(guest_walk);
     memset(gw, 0, sizeof(*gw));
     gw->va = va;
+    gw->pfec = walk & (PFEC_user_mode | PFEC_write_access);
 
-    /* Mandatory bits that must be set in every entry.  We invert NX and
-     * the invalid bits, to calculate as if there were an "X" bit that
-     * allowed access.  We will accumulate, in rc, the set of flags that
-     * are missing/unwanted. */
-    mflags = mandatory_flags(v, pfec);
-    iflags = (_PAGE_NX_BIT | _PAGE_INVALID_BITS);
-
-    if ( is_hvm_domain(d) && !(pfec & PFEC_user_mode) )
-    {
-        struct segment_register seg;
-        const struct cpu_user_regs *regs = guest_cpu_user_regs();
-
-        /* SMEP: kernel-mode instruction fetches from user-mode mappings
-         * should fault.  Unlike NX or invalid bits, we're looking for _all_
-         * entries in the walk to have _PAGE_USER set, so we need to do the
-         * whole walk as if it were a user-mode one and then invert the answer. */
-        smep =  hvm_smep_enabled(v) && (pfec & PFEC_insn_fetch);
-
-        switch ( v->arch.smap_check_policy )
-        {
-        case SMAP_CHECK_HONOR_CPL_AC:
-            hvm_get_segment_register(v, x86_seg_ss, &seg);
-
-            /*
-             * SMAP: kernel-mode data accesses from user-mode mappings
-             * should fault.
-             * A fault is considered as a SMAP violation if the following
-             * conditions come true:
-             *   - X86_CR4_SMAP is set in CR4
-             *   - A user page is accessed
-             *   - CPL = 3 or X86_EFLAGS_AC is clear
-             *   - Page fault in kernel mode
-             */
-            smap = hvm_smap_enabled(v) &&
-                   ((seg.attr.fields.dpl == 3) ||
-                    !(regs->eflags & X86_EFLAGS_AC));
-            break;
-        case SMAP_CHECK_ENABLED:
-            smap = hvm_smap_enabled(v);
-            break;
-        default:
-            ASSERT(v->arch.smap_check_policy == SMAP_CHECK_DISABLED);
-            break;
-        }
-    }
-
-    if ( smep || smap )
-        mflags |= _PAGE_USER;
+    /*
+     * PFEC_insn_fetch is only reported if NX or SMEP are enabled.  Hardware
+     * still distingueses instruction fetches during determination of access
+     * rights.
+     */
+    if ( guest_nx_enabled(v) || guest_smep_enabled(v) )
+        gw->pfec |= (walk & PFEC_insn_fetch);
 
 #if GUEST_PAGING_LEVELS >= 3 /* PAE or 64... */
 #if GUEST_PAGING_LEVELS >= 4 /* 64-bit only... */
@@ -220,240 +138,409 @@ guest_walk_tables(struct vcpu *v, struct p2m_domain *p2m,
     /* Get the l4e from the top level table and check its flags*/
     gw->l4mfn = top_mfn;
     l4p = (guest_l4e_t *) top_map;
-    gw->l4e = l4p[guest_l4_table_offset(va)];
-    gflags = guest_l4e_get_flags(gw->l4e) ^ iflags;
-    if ( !(gflags & _PAGE_PRESENT) ) {
-        rc |= _PAGE_PRESENT;
-        goto out;
-    }
-    if ( gflags & _PAGE_PSE )
+    l4gpa = gfn_to_gaddr(top_gfn) +
+            guest_l4_table_offset(va) * sizeof(gw->l4e);
+    if ( !hvmemul_read_cache(v, l4gpa, &gw->l4e, sizeof(gw->l4e)) )
     {
-        rc |= _PAGE_PSE | _PAGE_INVALID_BIT;
+        gw->l4e = l4p[guest_l4_table_offset(va)];
+        hvmemul_write_cache(v, l4gpa, &gw->l4e, sizeof(gw->l4e));
+    }
+    gflags = guest_l4e_get_flags(gw->l4e);
+    if ( !(gflags & _PAGE_PRESENT) )
+        goto out;
+
+    /* Check for reserved bits. */
+    if ( guest_l4e_rsvd_bits(v, gw->l4e) )
+    {
+        gw->pfec |= PFEC_reserved_bit | PFEC_page_present;
         goto out;
     }
-    rc |= ((gflags & mflags) ^ mflags);
+
+    /* Accumulate l4e access rights. */
+    ar_and &= gflags;
+    ar_or  |= gflags;
 
     /* Map the l3 table */
-    l3p = map_domain_gfn(p2m, 
-                         guest_l4e_get_gfn(gw->l4e), 
+    l3p = map_domain_gfn(p2m,
+                         guest_l4e_get_gfn(gw->l4e),
                          &gw->l3mfn,
-                         &p2mt,
                          qt,
-                         &rc); 
-    if(l3p == NULL)
-        goto out;
-    /* Get the l3e and check its flags*/
-    gw->l3e = l3p[guest_l3_table_offset(va)];
-    pkey = guest_l3e_get_pkey(gw->l3e);
-    gflags = guest_l3e_get_flags(gw->l3e) ^ iflags;
-    if ( !(gflags & _PAGE_PRESENT) ) {
-        rc |= _PAGE_PRESENT;
+                         &rc);
+    if ( l3p == NULL )
+    {
+        gw->pfec |= rc & PFEC_synth_mask;
         goto out;
     }
-    rc |= ((gflags & mflags) ^ mflags);
-    
-    pse1G = !!(gflags & _PAGE_PSE);
 
-    if ( pse1G )
+    /* Get the l3e and check its flags*/
+    l3gpa = gfn_to_gaddr(guest_l4e_get_gfn(gw->l4e)) +
+            guest_l3_table_offset(va) * sizeof(gw->l3e);
+    if ( !hvmemul_read_cache(v, l3gpa, &gw->l3e, sizeof(gw->l3e)) )
     {
-        /* Generate a fake l1 table entry so callers don't all 
-         * have to understand superpages. */
+        gw->l3e = l3p[guest_l3_table_offset(va)];
+        hvmemul_write_cache(v, l3gpa, &gw->l3e, sizeof(gw->l3e));
+    }
+    gflags = guest_l3e_get_flags(gw->l3e);
+    if ( !(gflags & _PAGE_PRESENT) )
+        goto out;
+
+    /* Check for reserved bits, including possibly _PAGE_PSE. */
+    if ( guest_l3e_rsvd_bits(v, gw->l3e) )
+    {
+        gw->pfec |= PFEC_reserved_bit | PFEC_page_present;
+        goto out;
+    }
+
+    /* Accumulate l3e access rights. */
+    ar_and &= gflags;
+    ar_or  |= gflags;
+
+    if ( gflags & _PAGE_PSE )
+    {
+        /*
+         * Generate a fake l1 table entry so callers don't all
+         * have to understand superpages.
+         */
         gfn_t start = guest_l3e_get_gfn(gw->l3e);
-        /* Grant full access in the l1e, since all the guest entry's
-         * access controls are enforced in the l3e. */
+        /*
+         * Grant full access in the l1e, since all the guest entry's
+         * access controls are enforced in the l3e.
+         */
         int flags = (_PAGE_PRESENT|_PAGE_USER|_PAGE_RW|
                      _PAGE_ACCESSED|_PAGE_DIRTY);
-        /* Import cache-control bits. Note that _PAGE_PAT is actually
-         * _PAGE_PSE, and it is always set. We will clear it in case
-         * _PAGE_PSE_PAT (bit 12, i.e. first bit of gfn) is clear. */
+        /*
+         * Import protection key and cache-control bits. Note that _PAGE_PAT
+         * is actually _PAGE_PSE, and it is always set. We will clear it in
+         * case _PAGE_PSE_PAT (bit 12, i.e. first bit of gfn) is clear.
+         */
         flags |= (guest_l3e_get_flags(gw->l3e)
-                  & (_PAGE_PAT|_PAGE_PWT|_PAGE_PCD));
+                  & (_PAGE_PKEY_BITS|_PAGE_PAT|_PAGE_PWT|_PAGE_PCD));
         if ( !(gfn_x(start) & 1) )
             /* _PAGE_PSE_PAT not set: remove _PAGE_PAT from flags. */
             flags &= ~_PAGE_PAT;
-
-        if ( !guest_supports_1G_superpages(v) )
-            rc |= _PAGE_PSE | _PAGE_INVALID_BIT;
-        if ( gfn_x(start) & GUEST_L3_GFN_MASK & ~0x1 )
-            rc |= _PAGE_INVALID_BITS;
 
         /* Increment the pfn by the right number of 4k pages. */
         start = _gfn((gfn_x(start) & ~GUEST_L3_GFN_MASK) +
                      ((va >> PAGE_SHIFT) & GUEST_L3_GFN_MASK));
         gw->l1e = guest_l1e_from_gfn(start, flags);
         gw->l2mfn = gw->l1mfn = INVALID_MFN;
-        goto set_ad;
+        leaf_level = 3;
+        goto leaf;
     }
 
 #else /* PAE only... */
 
     /* Get the l3e and check its flag */
-    gw->l3e = ((guest_l3e_t *) top_map)[guest_l3_table_offset(va)];
-    if ( !(guest_l3e_get_flags(gw->l3e) & _PAGE_PRESENT) ) 
+    l3gpa = gfn_to_gaddr(top_gfn) + ((unsigned long)top_map & ~PAGE_MASK) +
+            guest_l3_table_offset(va) * sizeof(gw->l3e);
+    if ( !hvmemul_read_cache(v, l3gpa, &gw->l3e, sizeof(gw->l3e)) )
     {
-        rc |= _PAGE_PRESENT;
+        gw->l3e = ((guest_l3e_t *)top_map)[guest_l3_table_offset(va)];
+        hvmemul_write_cache(v, l3gpa, &gw->l3e, sizeof(gw->l3e));
+    }
+
+    gflags = guest_l3e_get_flags(gw->l3e);
+    if ( !(gflags & _PAGE_PRESENT) )
+        goto out;
+
+    if ( guest_l3e_rsvd_bits(v, gw->l3e) )
+    {
+        gw->pfec |= PFEC_reserved_bit | PFEC_page_present;
         goto out;
     }
 
 #endif /* PAE or 64... */
 
     /* Map the l2 table */
-    l2p = map_domain_gfn(p2m, 
-                         guest_l3e_get_gfn(gw->l3e), 
+    l2p = map_domain_gfn(p2m,
+                         guest_l3e_get_gfn(gw->l3e),
                          &gw->l2mfn,
-                         &p2mt, 
                          qt,
-                         &rc); 
-    if(l2p == NULL)
+                         &rc);
+    if ( l2p == NULL )
+    {
+        gw->pfec |= rc & PFEC_synth_mask;
         goto out;
-    /* Get the l2e */
-    gw->l2e = l2p[guest_l2_table_offset(va)];
+    }
+
+    l2gpa = gfn_to_gaddr(guest_l3e_get_gfn(gw->l3e));
 
 #else /* 32-bit only... */
 
-    /* Get l2e from the top level table */
     gw->l2mfn = top_mfn;
     l2p = (guest_l2e_t *) top_map;
-    gw->l2e = l2p[guest_l2_table_offset(va)];
+    l2gpa = gfn_to_gaddr(top_gfn);
 
 #endif /* All levels... */
 
-    pkey = guest_l2e_get_pkey(gw->l2e);
-    gflags = guest_l2e_get_flags(gw->l2e) ^ iflags;
-    if ( !(gflags & _PAGE_PRESENT) ) {
-        rc |= _PAGE_PRESENT;
-        goto out;
+    /* Get the l2e */
+    l2gpa += guest_l2_table_offset(va) * sizeof(gw->l2e);
+    if ( !hvmemul_read_cache(v, l2gpa, &gw->l2e, sizeof(gw->l2e)) )
+    {
+        gw->l2e = l2p[guest_l2_table_offset(va)];
+        hvmemul_write_cache(v, l2gpa, &gw->l2e, sizeof(gw->l2e));
     }
+
+    /* Check the l2e flags. */
+    gflags = guest_l2e_get_flags(gw->l2e);
+    if ( !(gflags & _PAGE_PRESENT) )
+        goto out;
 
     /*
      * In 2-level paging without CR0.PSE, there are no reserved bits, and the
      * PAT/PSE bit is ignored.
      */
-    if ( GUEST_PAGING_LEVELS == 2 && !guest_supports_superpages(v) )
+    if ( GUEST_PAGING_LEVELS == 2 && !guest_can_use_l2_superpages(v) )
     {
         gw->l2e.l2 &= ~_PAGE_PSE;
         gflags &= ~_PAGE_PSE;
     }
-
-    rc |= ((gflags & mflags) ^ mflags);
-
-    pse2M = !!(gflags & _PAGE_PSE);
-
-    if ( pse2M )
+    /* else check for reserved bits, including possibly _PAGE_PSE. */
+    else if ( guest_l2e_rsvd_bits(v, gw->l2e) )
     {
-        /* Special case: this guest VA is in a PSE superpage, so there's
+        gw->pfec |= PFEC_reserved_bit | PFEC_page_present;
+        goto out;
+    }
+
+    /* Accumulate l2e access rights. */
+    ar_and &= gflags;
+    ar_or  |= gflags;
+
+    if ( gflags & _PAGE_PSE )
+    {
+        /*
+         * Special case: this guest VA is in a PSE superpage, so there's
          * no guest l1e.  We make one up so that the propagation code
-         * can generate a shadow l1 table.  Start with the gfn of the 
-         * first 4k-page of the superpage. */
+         * can generate a shadow l1 table.  Start with the gfn of the
+         * first 4k-page of the superpage.
+         */
+#if GUEST_PAGING_LEVELS == 2
+        gfn_t start = _gfn(unfold_pse36(gw->l2e.l2) >> PAGE_SHIFT);
+#else
         gfn_t start = guest_l2e_get_gfn(gw->l2e);
-        /* Grant full access in the l1e, since all the guest entry's 
-         * access controls are enforced in the shadow l2e. */
+#endif
+        /*
+         * Grant full access in the l1e, since all the guest entry's
+         * access controls are enforced in the shadow l2e.
+         */
         int flags = (_PAGE_PRESENT|_PAGE_USER|_PAGE_RW|
                      _PAGE_ACCESSED|_PAGE_DIRTY);
-        /* Import cache-control bits. Note that _PAGE_PAT is actually
-         * _PAGE_PSE, and it is always set. We will clear it in case
-         * _PAGE_PSE_PAT (bit 12, i.e. first bit of gfn) is clear. */
+        /*
+         * Import protection key and cache-control bits. Note that _PAGE_PAT
+         * is actually _PAGE_PSE, and it is always set. We will clear it in
+         * case _PAGE_PSE_PAT (bit 12, i.e. first bit of gfn) is clear.
+         */
         flags |= (guest_l2e_get_flags(gw->l2e)
-                  & (_PAGE_PAT|_PAGE_PWT|_PAGE_PCD));
+                  & (_PAGE_PKEY_BITS|_PAGE_PAT|_PAGE_PWT|_PAGE_PCD));
         if ( !(gfn_x(start) & 1) )
             /* _PAGE_PSE_PAT not set: remove _PAGE_PAT from flags. */
             flags &= ~_PAGE_PAT;
 
-        if ( !guest_supports_superpages(v) )
-            rc |= _PAGE_PSE | _PAGE_INVALID_BIT;
-        if ( gfn_x(start) & GUEST_L2_GFN_MASK & ~0x1 )
-            rc |= _PAGE_INVALID_BITS;
-
-        /* Increment the pfn by the right number of 4k pages.  
-         * Mask out PAT and invalid bits. */
+        /* Increment the pfn by the right number of 4k pages. */
         start = _gfn((gfn_x(start) & ~GUEST_L2_GFN_MASK) +
                      guest_l1_table_offset(va));
+#if GUEST_PAGING_LEVELS == 2
+         /* Wider than 32 bits if PSE36 superpage. */
+        gw->el1e = (gfn_x(start) << PAGE_SHIFT) | flags;
+#else
         gw->l1e = guest_l1e_from_gfn(start, flags);
+#endif
         gw->l1mfn = INVALID_MFN;
-    } 
-    else 
-    {
-        /* Not a superpage: carry on and find the l1e. */
-        l1p = map_domain_gfn(p2m, 
-                             guest_l2e_get_gfn(gw->l2e), 
-                             &gw->l1mfn,
-                             &p2mt,
-                             qt,
-                             &rc);
-        if(l1p == NULL)
-            goto out;
-        gw->l1e = l1p[guest_l1_table_offset(va)];
-        pkey = guest_l1e_get_pkey(gw->l1e);
-        gflags = guest_l1e_get_flags(gw->l1e) ^ iflags;
-        if ( !(gflags & _PAGE_PRESENT) ) {
-            rc |= _PAGE_PRESENT;
-            goto out;
-        }
-        rc |= ((gflags & mflags) ^ mflags);
+        leaf_level = 2;
+        goto leaf;
     }
 
-#if GUEST_PAGING_LEVELS >= 4 /* 64-bit only... */
-set_ad:
-    if ( pkey_fault(v, pfec, gflags, pkey) )
-        rc |= _PAGE_PKEY_BITS;
-#endif
-    /* Now re-invert the user-mode requirement for SMEP and SMAP */
-    if ( smep || smap )
-        rc ^= _PAGE_USER;
+    /* Map the l1 table */
+    l1p = map_domain_gfn(p2m,
+                         guest_l2e_get_gfn(gw->l2e),
+                         &gw->l1mfn,
+                         qt,
+                         &rc);
+    if ( l1p == NULL )
+    {
+        gw->pfec |= rc & PFEC_synth_mask;
+        goto out;
+    }
 
-    /* Go back and set accessed and dirty bits only if the walk was a
+    l1gpa = gfn_to_gaddr(guest_l2e_get_gfn(gw->l2e)) +
+            guest_l1_table_offset(va) * sizeof(gw->l1e);
+    if ( !hvmemul_read_cache(v, l1gpa, &gw->l1e, sizeof(gw->l1e)) )
+    {
+        gw->l1e = l1p[guest_l1_table_offset(va)];
+        hvmemul_write_cache(v, l1gpa, &gw->l1e, sizeof(gw->l1e));
+    }
+
+    gflags = guest_l1e_get_flags(gw->l1e);
+    if ( !(gflags & _PAGE_PRESENT) )
+        goto out;
+
+    /* Check for reserved bits. */
+    if ( guest_l1e_rsvd_bits(v, gw->l1e) )
+    {
+        gw->pfec |= PFEC_reserved_bit | PFEC_page_present;
+        goto out;
+    }
+
+    /* Accumulate l1e access rights. */
+    ar_and &= gflags;
+    ar_or  |= gflags;
+
+    leaf_level = 1;
+
+ leaf:
+    gw->pfec |= PFEC_page_present;
+
+    /*
+     * The pagetable walk has returned a successful translation (i.e. All PTEs
+     * are present and have no reserved bits set).  Now check access rights to
+     * see whether the access should succeed.
+     */
+    ar = (ar_and & AR_ACCUM_AND) | (ar_or & AR_ACCUM_OR);
+
+    /*
+     * Sanity check.  If EFER.NX is disabled, _PAGE_NX_BIT is reserved and
+     * should have caused a translation failure before we get here.
+     */
+    if ( ar & _PAGE_NX_BIT )
+        ASSERT(guest_nx_enabled(v));
+
+#if GUEST_PAGING_LEVELS >= 4 /* 64-bit only... */
+    /*
+     * If all access checks are thus far ok, check Protection Key for 64bit
+     * data accesses to user mappings.
+     *
+     * N.B. In the case that the walk ended with a superpage, the fabricated
+     * gw->l1e contains the appropriate leaf pkey.
+     */
+    if ( (ar & _PAGE_USER) && !(walk & PFEC_insn_fetch) &&
+         guest_pku_enabled(v) )
+    {
+        unsigned int pkey = guest_l1e_get_pkey(gw->l1e);
+        unsigned int pkru = read_pkru();
+
+        if ( read_pkru_ad(pkru, pkey) ||
+             ((walk & PFEC_write_access) && read_pkru_wd(pkru, pkey) &&
+              ((walk & PFEC_user_mode) || guest_wp_enabled(v))) )
+        {
+            gw->pfec |= PFEC_prot_key;
+            goto out;
+        }
+    }
+#endif
+
+    if ( (walk & PFEC_insn_fetch) && (ar & _PAGE_NX_BIT) )
+        /* Requested an instruction fetch and found NX? Fail. */
+        goto out;
+
+    if ( walk & PFEC_user_mode ) /* Requested a user acess. */
+    {
+        if ( !(ar & _PAGE_USER) )
+            /* Got a supervisor walk?  Unconditional fail. */
+            goto out;
+
+        if ( (walk & PFEC_write_access) && !(ar & _PAGE_RW) )
+            /* Requested a write and only got a read? Fail. */
+            goto out;
+    }
+    else /* Requested a supervisor access. */
+    {
+        if ( ar & _PAGE_USER ) /* Got a user walk. */
+        {
+            if ( (walk & PFEC_insn_fetch) && guest_smep_enabled(v) )
+                /* User insn fetch and smep? Fail. */
+                goto out;
+
+            if ( !(walk & PFEC_insn_fetch) && guest_smap_enabled(v) &&
+                 ((walk & PFEC_implicit) ||
+                  !(guest_cpu_user_regs()->eflags & X86_EFLAGS_AC)) )
+                /* User data access and smap? Fail. */
+                goto out;
+        }
+
+        if ( (walk & PFEC_write_access) && !(ar & _PAGE_RW) &&
+             guest_wp_enabled(v) )
+            /* Requested a write, got a read, and CR0.WP is set? Fail. */
+            goto out;
+    }
+
+    walk_ok = true;
+
+    /*
+     * Go back and set accessed and dirty bits only if the walk was a
      * success.  Although the PRMs say higher-level _PAGE_ACCESSED bits
      * get set whenever a lower-level PT is used, at least some hardware
-     * walkers behave this way. */
-    if ( rc == 0 ) 
+     * walkers behave this way.
+     */
+    switch ( leaf_level )
     {
-#if GUEST_PAGING_LEVELS == 4 /* 64-bit only... */
-        if ( set_ad_bits(l4p + guest_l4_table_offset(va), &gw->l4e, 0) )
-            paging_mark_dirty(d, mfn_x(gw->l4mfn));
-        if ( set_ad_bits(l3p + guest_l3_table_offset(va), &gw->l3e,
-                         (pse1G && (pfec & PFEC_write_access))) )
-            paging_mark_dirty(d, mfn_x(gw->l3mfn));
-#endif
-        if ( !pse1G ) 
+    default:
+        ASSERT_UNREACHABLE();
+        break;
+
+    case 1:
+        if ( set_ad_bits(&l1p[guest_l1_table_offset(va)].l1, &gw->l1e.l1,
+                         (walk & PFEC_write_access)) )
         {
-            if ( set_ad_bits(l2p + guest_l2_table_offset(va), &gw->l2e,
-                             (pse2M && (pfec & PFEC_write_access))) )
-                paging_mark_dirty(d, mfn_x(gw->l2mfn));            
-            if ( !pse2M ) 
-            {
-                if ( set_ad_bits(l1p + guest_l1_table_offset(va), &gw->l1e, 
-                                 (pfec & PFEC_write_access)) )
-                    paging_mark_dirty(d, mfn_x(gw->l1mfn));
-            }
+            paging_mark_dirty(d, gw->l1mfn);
+            hvmemul_write_cache(v, l1gpa, &gw->l1e, sizeof(gw->l1e));
         }
+        /* Fallthrough */
+    case 2:
+        if ( set_ad_bits(&l2p[guest_l2_table_offset(va)].l2, &gw->l2e.l2,
+                         (walk & PFEC_write_access) && leaf_level == 2) )
+        {
+            paging_mark_dirty(d, gw->l2mfn);
+            hvmemul_write_cache(v, l2gpa, &gw->l2e, sizeof(gw->l2e));
+        }
+        /* Fallthrough */
+#if GUEST_PAGING_LEVELS == 4 /* 64-bit only... */
+    case 3:
+        if ( set_ad_bits(&l3p[guest_l3_table_offset(va)].l3, &gw->l3e.l3,
+                         (walk & PFEC_write_access) && leaf_level == 3) )
+        {
+            paging_mark_dirty(d, gw->l3mfn);
+            hvmemul_write_cache(v, l3gpa, &gw->l3e, sizeof(gw->l3e));
+        }
+
+        if ( set_ad_bits(&l4p[guest_l4_table_offset(va)].l4, &gw->l4e.l4,
+                         false) )
+        {
+            paging_mark_dirty(d, gw->l4mfn);
+            hvmemul_write_cache(v, l4gpa, &gw->l4e, sizeof(gw->l4e));
+        }
+#endif
     }
 
  out:
 #if GUEST_PAGING_LEVELS == 4
-    if ( l3p ) 
+    if ( l3p )
     {
         unmap_domain_page(l3p);
-        put_page(mfn_to_page(mfn_x(gw->l3mfn)));
+        put_page(mfn_to_page(gw->l3mfn));
     }
 #endif
 #if GUEST_PAGING_LEVELS >= 3
-    if ( l2p ) 
+    if ( l2p )
     {
         unmap_domain_page(l2p);
-        put_page(mfn_to_page(mfn_x(gw->l2mfn)));
+        put_page(mfn_to_page(gw->l2mfn));
     }
 #endif
-    if ( l1p ) 
+    if ( l1p )
     {
         unmap_domain_page(l1p);
-        put_page(mfn_to_page(mfn_x(gw->l1mfn)));
+        put_page(mfn_to_page(gw->l1mfn));
     }
 
-    /* If this guest has a restricted physical address space then the
-     * target GFN must fit within it. */
-    if ( !(rc & _PAGE_PRESENT)
-         && gfn_x(guest_l1e_get_gfn(gw->l1e)) >> d->arch.paging.gfn_bits )
-        rc |= _PAGE_INVALID_BITS;
-
-    return rc;
+    return walk_ok;
 }
+
+/*
+ * Local variables:
+ * mode: C
+ * c-file-style: "BSD"
+ * c-basic-offset: 4
+ * tab-width: 4
+ * indent-tabs-mode: nil
+ * End:
+ */

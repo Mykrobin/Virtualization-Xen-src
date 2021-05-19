@@ -6,10 +6,10 @@
  * Copyright (c) 2003-2008, K A Fraser
  */
 
-#include <xen/config.h>
 #include <xen/delay.h>
 #include <xen/init.h>
 #include <xen/mm.h>
+#include <xen/param.h>
 #include <xen/serial.h>
 #include <xen/cache.h>
 
@@ -224,11 +224,10 @@ void serial_putc(int handle, char c)
     spin_unlock_irqrestore(&port->tx_lock, flags);
 }
 
-void serial_puts(int handle, const char *s)
+void serial_puts(int handle, const char *s, size_t nr)
 {
     struct serial_port *port;
     unsigned long flags;
-    char c;
 
     if ( handle == -1 )
         return;
@@ -239,8 +238,10 @@ void serial_puts(int handle, const char *s)
 
     spin_lock_irqsave(&port->tx_lock, flags);
 
-    while ( (c = *s++) != '\0' )
+    for ( ; nr > 0; nr--, s++ )
     {
+        char c = *s;
+
         if ( (c == '\n') && (handle & SERHND_COOKED) )
             __serial_putc(port, '\r' | ((handle & SERHND_HI) ? 0x80 : 0x00));
 
@@ -502,6 +503,15 @@ void __init serial_init_preirq(void)
     for ( i = 0; i < ARRAY_SIZE(com); i++ )
         if ( com[i].driver && com[i].driver->init_preirq )
             com[i].driver->init_preirq(&com[i]);
+}
+
+void __init serial_init_irq(void)
+{
+    unsigned int i;
+
+    for ( i = 0; i < ARRAY_SIZE(com); i++ )
+        if ( com[i].driver && com[i].driver->init_irq )
+            com[i].driver->init_irq(&com[i]);
 }
 
 void __init serial_init_postirq(void)

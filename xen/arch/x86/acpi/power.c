@@ -10,11 +10,10 @@
  * Slimmed with Xen specific support.
  */
 
-#include <xen/config.h>
-#include <asm/io.h>
 #include <xen/acpi.h>
 #include <xen/errno.h>
 #include <xen/iocap.h>
+#include <xen/param.h>
 #include <xen/sched.h>
 #include <asm/acpi.h>
 #include <asm/irq.h>
@@ -24,20 +23,45 @@
 #include <xen/domain.h>
 #include <xen/console.h>
 #include <xen/iommu.h>
+#include <xen/watchdog.h>
 #include <xen/cpu.h>
 #include <public/platform.h>
 #include <asm/tboot.h>
 #include <asm/apic.h>
 #include <asm/io_apic.h>
+#include <asm/microcode.h>
 #include <asm/spec_ctrl.h>
 #include <acpi/cpufreq/cpufreq.h>
 
 uint32_t system_reset_counter = 1;
 
-static char __initdata opt_acpi_sleep[20];
-string_param("acpi_sleep", opt_acpi_sleep);
+static int __init parse_acpi_sleep(const char *s)
+{
+    const char *ss;
+    unsigned int flag = 0;
+    int rc = 0;
 
-static u8 sleep_states[ACPI_S_STATE_COUNT];
+    do {
+        ss = strchr(s, ',');
+        if ( !ss )
+            ss = strchr(s, '\0');
+
+        if ( !cmdline_strcmp(s, "s3_bios") )
+            flag |= 1;
+        else if ( !cmdline_strcmp(s, "s3_mode") )
+            flag |= 2;
+        else
+            rc = -EINVAL;
+
+        s = ss + 1;
+    } while ( *ss );
+
+    acpi_video_flags |= flag;
+
+    return rc;
+}
+custom_param("acpi_sleep", parse_acpi_sleep);
+
 static DEFINE_SPINLOCK(pm_lock);
 
 struct acpi_sleep_info acpi_sinfo;
@@ -123,11 +147,15 @@ static void freeze_domains(void)
     for_each_domain ( d )
         domain_pause(d);
     rcu_read_unlock(&domlist_read_lock);
+
+    scheduler_disable();
 }
 
 static void thaw_domains(void)
 {
     struct domain *d;
+
+    scheduler_enable();
 
     rcu_read_lock(&domlist_read_lock);
     for_each_domain ( d )
@@ -145,17 +173,20 @@ static void acpi_sleep_prepare(u32 state)
     if ( state != ACPI_STATE_S3 )
         return;
 
-    wakeup_vector_va = __acpi_map_table(
-        acpi_sinfo.wakeup_vector, sizeof(uint64_t));
-
     /* TBoot will set resume vector itself (when it is safe to do so). */
     if ( tboot_in_measured_env() )
         return;
+
+    set_fixmap(FIX_ACPI_END, acpi_sinfo.wakeup_vector);
+    wakeup_vector_va = fix_to_virt(FIX_ACPI_END) +
+                       PAGE_OFFSET(acpi_sinfo.wakeup_vector);
 
     if ( acpi_sinfo.vector_width == 32 )
         *(uint32_t *)wakeup_vector_va = bootsym_phys(wakeup_start);
     else
         *(uint64_t *)wakeup_vector_va = bootsym_phys(wakeup_start);
+
+    clear_fixmap(FIX_ACPI_END);
 }
 
 static void acpi_sleep_post(u32 state) {}
@@ -166,7 +197,6 @@ static int enter_state(u32 state)
     unsigned long flags;
     int error;
     struct cpu_info *ci;
-    unsigned long cr4;
 
     if ( (state <= ACPI_STATE_S0) || (state > ACPI_S_STATES_MAX) )
         return -EINVAL;
@@ -175,6 +205,8 @@ static int enter_state(u32 state)
         return -EBUSY;
 
     BUG_ON(system_state != SYS_STATE_active);
+    BUG_ON(!is_idle_vcpu(current));
+    BUG_ON(smp_processor_id() != 0);
     system_state = SYS_STATE_suspend;
 
     printk(XENLOG_INFO "Preparing system for ACPI S%d state.\n", state);
@@ -195,6 +227,7 @@ static int enter_state(u32 state)
 
     acpi_sleep_prepare(state);
 
+    watchdog_disable();
     console_start_sync();
     printk("Entering ACPI S%d state.\n", state);
 
@@ -207,6 +240,7 @@ static int enter_state(u32 state)
         system_state = SYS_STATE_resume;
         device_power_up(error);
         console_end_sync();
+        watchdog_enable();
         error = -EIO;
         goto done;
     }
@@ -237,15 +271,12 @@ static int enter_state(u32 state)
 
     system_state = SYS_STATE_resume;
 
-    /* Restore CR4 and EFER from cached values. */
-    cr4 = read_cr4();
-    write_cr4(cr4 & ~X86_CR4_MCE);
+    /* Restore EFER from cached value. */
     write_efer(read_efer());
 
     device_power_up(SAVED_ALL);
 
-    mcheck_init(&boot_cpu_data, 0);
-    write_cr4(cr4);
+    mcheck_init(&boot_cpu_data, false);
 
     printk(XENLOG_INFO "Finishing wakeup from ACPI S%d state.\n", state);
 
@@ -253,12 +284,22 @@ static int enter_state(u32 state)
         tboot_s3_error(error);
 
     console_end_sync();
+    watchdog_enable();
 
-    microcode_resume_cpu(0);
+    microcode_update_one();
+
+    if ( !recheck_cpu_features(0) )
+        panic("Missing previously available feature(s)\n");
 
     /* Re-enabled default NMI/#MC use of MSR_SPEC_CTRL. */
     ci->spec_ctrl_flags |= (default_spec_ctrl_flags & SCF_ist_wrmsr);
     spec_ctrl_exit_idle(ci);
+
+    if ( boot_cpu_has(X86_FEATURE_SRBDS_CTRL) )
+        wrmsrl(MSR_MCU_OPT_CTRL, default_xen_mcu_opt_ctrl);
+
+    /* (re)initialise SYSCALL/SYSENTER state, amongst other things. */
+    percpu_traps_init();
 
  done:
     spin_debug_enable();
@@ -269,11 +310,10 @@ static int enter_state(u32 state)
     cpufreq_add_cpu(0);
 
  enable_cpu:
-    rcu_barrier();
     mtrr_aps_sync_begin();
     enable_nonboot_cpus();
     mtrr_aps_sync_end();
-    adjust_vtd_irq_affinities();
+    iommu_adjust_irq_affinities();
     acpi_dmar_zap();
     thaw_domains();
     system_state = SYS_STATE_active;
@@ -293,6 +333,12 @@ static long enter_state_helper(void *data)
  */
 int acpi_enter_sleep(struct xenpf_enter_acpi_sleep *sleep)
 {
+    if ( sleep->sleep_state == ACPI_STATE_S3 &&
+         (!acpi_sinfo.wakeup_vector || !acpi_sinfo.vector_width ||
+          (PAGE_OFFSET(acpi_sinfo.wakeup_vector) >
+           PAGE_SIZE - acpi_sinfo.vector_width / 8)) )
+        return -EOPNOTSUPP;
+
     if ( sleep->flags & XENPF_ACPI_SLEEP_EXTENDED )
     {
         if ( !acpi_sinfo.sleep_control.address ||
@@ -453,36 +499,3 @@ acpi_status acpi_enter_sleep_state(u8 sleep_state)
 
     return_ACPI_STATUS(AE_OK);
 }
-
-static int __init acpi_sleep_init(void)
-{
-    int i;
-    char *p = opt_acpi_sleep;
-
-    while ( (p != NULL) && (*p != '\0') )
-    {
-        if ( !strncmp(p, "s3_bios", 7) )
-            acpi_video_flags |= 1;
-        if ( !strncmp(p, "s3_mode", 7) )
-            acpi_video_flags |= 2;
-        p = strchr(p, ',');
-        if ( p != NULL )
-            p += strspn(p, ", \t");
-    }
-
-    printk(XENLOG_INFO "ACPI sleep modes:");
-    for ( i = 0; i < ACPI_S_STATE_COUNT; i++ )
-    {
-        if ( i == ACPI_STATE_S3 )
-        {
-            sleep_states[i] = 1;
-            printk(" S%d", i);
-        }
-        else
-            sleep_states[i] = 0;
-    }
-    printk("\n");
-
-    return 0;
-}
-__initcall(acpi_sleep_init);

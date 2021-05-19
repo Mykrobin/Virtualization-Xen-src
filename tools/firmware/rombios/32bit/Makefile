@@ -15,7 +15,7 @@ all: subdirs-all
 
 .PHONY: clean
 clean: subdirs-clean
-	rm -rf *.o $(TARGET) $(DEPS)
+	rm -rf *.o $(TARGET) $(DEPS_RM)
 
 .PHONY: distclean
 distclean: subdirs-distclean
@@ -32,4 +32,4 @@ $(TARGET): 32bitbios_all.o
 	    exit 11;                                         \
 	  } || :
 
--include $(DEPS)
+-include $(DEPS_INCLUDE)

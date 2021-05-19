@@ -1,105 +1,138 @@
 #ifndef __ARCH_ARM_ATOMIC__
 #define __ARCH_ARM_ATOMIC__
 
-#include <xen/config.h>
 #include <xen/atomic.h>
 #include <xen/prefetch.h>
 #include <asm/system.h>
 
-#define build_atomic_read(name, size, width, type, reg)\
+#define build_atomic_read(name, size, width, type) \
 static inline type name(const volatile type *addr) \
 {                                                  \
     type ret;                                      \
-    asm volatile("ldr" size " %" width "0,%1"      \
-                 : reg (ret)                       \
-                 : "m" (*(volatile type *)addr));  \
+    asm volatile("ldr" size " %" width(0) ",%1"    \
+                 : "=r" (ret)                      \
+                 : "m" (*addr));                   \
     return ret;                                    \
 }
 
-#define build_atomic_write(name, size, width, type, reg) \
+#define build_atomic_write(name, size, width, type)    \
 static inline void name(volatile type *addr, type val) \
 {                                                      \
-    asm volatile("str" size " %"width"1,%0"            \
-                 : "=m" (*(volatile type *)addr)       \
-                 : reg (val));                         \
+    asm volatile("str" size " %" width(1) ",%0"        \
+                 : "=m" (*addr)                        \
+                 : "r" (val));                         \
 }
 
-#define build_add_sized(name, size, width, type, reg) \
+#define build_add_sized(name, size, width, type)                        \
 static inline void name(volatile type *addr, type val)                  \
 {                                                                       \
     type t;                                                             \
-    asm volatile("ldr" size " %"width"1,%0\n"                           \
-                 "add %"width"1,%"width"1,%"width"2\n"                  \
-                 "str" size " %"width"1,%0"                             \
-                 : "=m" (*(volatile type *)addr), "=r" (t)              \
-                 : reg (val));                                          \
+    asm volatile("ldr" size " %" width(1) ",%0\n"                       \
+                 "add %" width(1) ",%" width(1) ",%" width(2) "\n"      \
+                 "str" size " %" width(1) ",%0"                         \
+                 : "+m" (*addr), "=&r" (t)                              \
+                 : "ri" (val));                                         \
 }
 
 #if defined (CONFIG_ARM_32)
-#define BYTE ""
-#define WORD ""
+#define BYTE(n) #n
+#define WORD(n) #n
+#define DWORD(n) "" #n ",%H" #n
+#define PAIR     "d"
 #elif defined (CONFIG_ARM_64)
-#define BYTE "w"
-#define WORD "w"
+#define BYTE(n)  "w" #n
+#define WORD(n)  "w" #n
+#define DWORD(n) "" #n
+#define PAIR     ""
 #endif
 
-build_atomic_read(read_u8_atomic,  "b", BYTE, uint8_t, "=r")
-build_atomic_read(read_u16_atomic, "h", WORD, uint16_t, "=r")
-build_atomic_read(read_u32_atomic, "",  WORD, uint32_t, "=r")
-build_atomic_read(read_int_atomic, "",  WORD, int, "=r")
+build_atomic_read(read_u8_atomic,  "b", BYTE, uint8_t)
+build_atomic_read(read_u16_atomic, "h", WORD, uint16_t)
+build_atomic_read(read_u32_atomic, "",  WORD, uint32_t)
+build_atomic_read(read_u64_atomic, PAIR, DWORD, uint64_t)
+build_atomic_read(read_int_atomic, "",  WORD, int)
 
-build_atomic_write(write_u8_atomic,  "b", BYTE, uint8_t, "r")
-build_atomic_write(write_u16_atomic, "h", WORD, uint16_t, "r")
-build_atomic_write(write_u32_atomic, "",  WORD, uint32_t, "r")
-build_atomic_write(write_int_atomic, "",  WORD, int, "r")
+build_atomic_write(write_u8_atomic,  "b", BYTE, uint8_t)
+build_atomic_write(write_u16_atomic, "h", WORD, uint16_t)
+build_atomic_write(write_u32_atomic, "",  WORD, uint32_t)
+build_atomic_write(write_u64_atomic, PAIR, DWORD, uint64_t)
+build_atomic_write(write_int_atomic, "",  WORD, int)
 
-#if defined (CONFIG_ARM_64)
-build_atomic_read(read_u64_atomic, "", "", uint64_t, "=r")
-build_atomic_write(write_u64_atomic, "", "", uint64_t, "r")
-#elif defined (CONFIG_ARM_32)
-static inline uint64_t read_u64_atomic(const volatile uint64_t *addr)
-{
-    uint64_t val;
+build_add_sized(add_u8_sized, "b", BYTE, uint8_t)
+build_add_sized(add_u16_sized, "h", WORD, uint16_t)
+build_add_sized(add_u32_sized, "", WORD, uint32_t)
 
-    asm volatile ( "ldrd %0,%H0,%1" : "=r" (val) : "m" (*addr) );
+#undef BYTE
+#undef WORD
+#undef DWORD
+#undef PAIR
 
-    return val;
-}
-static inline void write_u64_atomic(volatile uint64_t *addr, uint64_t val)
-{
-    asm volatile ( "strd %1,%H1,%0" : "=m" (*addr) : "r" (val) );
-}
-#endif
+#undef build_atomic_read
+#undef build_atomic_write
+#undef build_add_sized
 
-build_add_sized(add_u8_sized, "b", BYTE, uint8_t, "ri")
-build_add_sized(add_u16_sized, "h", WORD, uint16_t, "ri")
-build_add_sized(add_u32_sized, "", WORD, uint32_t, "ri")
-
+void __bad_atomic_read(const volatile void *p, void *res);
 void __bad_atomic_size(void);
 
+static always_inline void read_atomic_size(const volatile void *p,
+                                           void *res,
+                                           unsigned int size)
+{
+    switch ( size )
+    {
+    case 1:
+        *(uint8_t *)res = read_u8_atomic(p);
+        break;
+    case 2:
+        *(uint16_t *)res = read_u16_atomic(p);
+        break;
+    case 4:
+        *(uint32_t *)res = read_u32_atomic(p);
+        break;
+    case 8:
+        *(uint64_t *)res = read_u64_atomic(p);
+        break;
+    default:
+        __bad_atomic_read(p, res);
+        break;
+    }
+}
+
+static always_inline void write_atomic_size(volatile void *p,
+                                            void *val,
+                                            unsigned int size)
+{
+    switch ( size )
+    {
+    case 1:
+        write_u8_atomic(p, *(uint8_t *)val);
+        break;
+    case 2:
+        write_u16_atomic(p, *(uint16_t *)val);
+        break;
+    case 4:
+        write_u32_atomic(p, *(uint32_t *)val);
+        break;
+    case 8:
+        write_u64_atomic(p, *(uint64_t *)val);
+        break;
+    default:
+        __bad_atomic_size();
+        break;
+    }
+}
+
 #define read_atomic(p) ({                                               \
-    typeof(*p) __x;                                                     \
-    switch ( sizeof(*p) ) {                                             \
-    case 1: __x = (typeof(*p))read_u8_atomic((uint8_t *)p); break;      \
-    case 2: __x = (typeof(*p))read_u16_atomic((uint16_t *)p); break;    \
-    case 4: __x = (typeof(*p))read_u32_atomic((uint32_t *)p); break;    \
-    case 8: __x = (typeof(*p))read_u64_atomic((uint64_t *)p); break;    \
-    default: __x = 0; __bad_atomic_size(); break;                       \
-    }                                                                   \
-    __x;                                                                \
+    union { typeof(*p) val; char c[0]; } x_;                            \
+    read_atomic_size(p, x_.c, sizeof(*p));                              \
+    x_.val;                                                             \
 })
 
-#define write_atomic(p, x) ({                                           \
-    typeof(*p) __x = (x);                                               \
-    switch ( sizeof(*p) ) {                                             \
-    case 1: write_u8_atomic((uint8_t *)p, (uint8_t)__x); break;         \
-    case 2: write_u16_atomic((uint16_t *)p, (uint16_t)__x); break;      \
-    case 4: write_u32_atomic((uint32_t *)p, (uint32_t)__x); break;      \
-    case 8: write_u64_atomic((uint64_t *)p, (uint64_t)__x); break;      \
-    default: __bad_atomic_size(); break;                                \
-    }                                                                   \
-    __x;                                                                \
-})
+#define write_atomic(p, x)                                              \
+    do {                                                                \
+        typeof(*p) x_ = (x);                                            \
+        write_atomic_size(p, &x_, sizeof(*p));                          \
+    } while ( false )
 
 #define add_sized(p, x) ({                                              \
     typeof(*(p)) __x = (x);                                             \

@@ -1,6 +1,9 @@
 #ifndef __RWLOCK_H__
 #define __RWLOCK_H__
 
+#include <xen/percpu.h>
+#include <xen/preempt.h>
+#include <xen/smp.h>
 #include <xen/spinlock.h>
 
 #include <asm/atomic.h>
@@ -19,20 +22,29 @@ typedef struct {
 #define DEFINE_RWLOCK(l) rwlock_t l = RW_LOCK_UNLOCKED
 #define rwlock_init(l) (*(l) = (rwlock_t)RW_LOCK_UNLOCKED)
 
-/*
- * Writer states & reader shift and bias.
- *
- * Writer field is 8 bit to allow for potential optimisation, see
- * _write_unlock().
- */
-#define    _QW_WAITING  1               /* A writer is waiting     */
-#define    _QW_LOCKED   0xff            /* A writer holds the lock */
-#define    _QW_WMASK    0xff            /* Writer mask.*/
-#define    _QR_SHIFT    8               /* Reader count shift      */
+/* Writer states & reader shift and bias. */
+#define    _QW_CPUMASK  0xfffU             /* Writer CPU mask */
+#define    _QW_SHIFT    12                 /* Writer flags shift */
+#define    _QW_WAITING  (1U << _QW_SHIFT)  /* A writer is waiting */
+#define    _QW_LOCKED   (3U << _QW_SHIFT)  /* A writer holds the lock */
+#define    _QW_WMASK    (3U << _QW_SHIFT)  /* Writer mask */
+#define    _QR_SHIFT    14                 /* Reader count shift */
 #define    _QR_BIAS     (1U << _QR_SHIFT)
 
 void queue_read_lock_slowpath(rwlock_t *lock);
 void queue_write_lock_slowpath(rwlock_t *lock);
+
+static inline bool _is_write_locked_by_me(unsigned int cnts)
+{
+    BUILD_BUG_ON(_QW_CPUMASK < NR_CPUS);
+    return (cnts & _QW_WMASK) == _QW_LOCKED &&
+           (cnts & _QW_CPUMASK) == smp_processor_id();
+}
+
+static inline bool _can_read_lock(unsigned int cnts)
+{
+    return !(cnts & _QW_WMASK) || _is_write_locked_by_me(cnts);
+}
 
 /*
  * _read_trylock - try to acquire read lock of a queue rwlock.
@@ -43,14 +55,21 @@ static inline int _read_trylock(rwlock_t *lock)
 {
     u32 cnts;
 
+    preempt_disable();
+    check_lock(&lock->lock.debug, true);
     cnts = atomic_read(&lock->cnts);
-    if ( likely(!(cnts & _QW_WMASK)) )
+    if ( likely(_can_read_lock(cnts)) )
     {
         cnts = (u32)atomic_add_return(_QR_BIAS, &lock->cnts);
-        if ( likely(!(cnts & _QW_WMASK)) )
+        /*
+         * atomic_add_return() is a full barrier so no need for an
+         * arch_lock_acquire_barrier().
+         */
+        if ( likely(_can_read_lock(cnts)) )
             return 1;
         atomic_sub(_QR_BIAS, &lock->cnts);
     }
+    preempt_enable();
     return 0;
 }
 
@@ -62,12 +81,25 @@ static inline void _read_lock(rwlock_t *lock)
 {
     u32 cnts;
 
+    preempt_disable();
     cnts = atomic_add_return(_QR_BIAS, &lock->cnts);
-    if ( likely(!(cnts & _QW_WMASK)) )
+    /*
+     * atomic_add_return() is a full barrier so no need for an
+     * arch_lock_acquire_barrier().
+     */
+    if ( likely(_can_read_lock(cnts)) )
+    {
+        /* The slow path calls check_lock() via spin_lock(). */
+        check_lock(&lock->lock.debug, false);
         return;
+    }
 
     /* The slowpath will decrement the reader count, if necessary. */
     queue_read_lock_slowpath(lock);
+    /*
+     * queue_read_lock_slowpath() is using spinlock and therefore is a
+     * full barrier. So no need for an arch_lock_acquire_barrier().
+     */
 }
 
 static inline void _read_lock_irq(rwlock_t *lock)
@@ -91,10 +123,12 @@ static inline unsigned long _read_lock_irqsave(rwlock_t *lock)
  */
 static inline void _read_unlock(rwlock_t *lock)
 {
+    arch_lock_release_barrier();
     /*
      * Atomically decrement the reader count
      */
     atomic_sub(_QR_BIAS, &lock->cnts);
+    preempt_enable();
 }
 
 static inline void _read_unlock_irq(rwlock_t *lock)
@@ -114,17 +148,36 @@ static inline int _rw_is_locked(rwlock_t *lock)
     return atomic_read(&lock->cnts);
 }
 
+static inline unsigned int _write_lock_val(void)
+{
+    return _QW_LOCKED | smp_processor_id();
+}
+
 /*
  * queue_write_lock - acquire write lock of a queue rwlock.
  * @lock : Pointer to queue rwlock structure.
  */
 static inline void _write_lock(rwlock_t *lock)
 {
-    /* Optimize for the unfair lock case where the fair flag is 0. */
-    if ( atomic_cmpxchg(&lock->cnts, 0, _QW_LOCKED) == 0 )
+    preempt_disable();
+    /*
+     * Optimize for the unfair lock case where the fair flag is 0.
+     *
+     * atomic_cmpxchg() is a full barrier so no need for an
+     * arch_lock_acquire_barrier().
+     */
+    if ( atomic_cmpxchg(&lock->cnts, 0, _write_lock_val()) == 0 )
+    {
+        /* The slow path calls check_lock() via spin_lock(). */
+        check_lock(&lock->lock.debug, false);
         return;
+    }
 
     queue_write_lock_slowpath(lock);
+    /*
+     * queue_write_lock_slowpath() is using spinlock and therefore is a
+     * full barrier. So no need for an arch_lock_acquire_barrier().
+     */
 }
 
 static inline void _write_lock_irq(rwlock_t *lock)
@@ -152,20 +205,29 @@ static inline int _write_trylock(rwlock_t *lock)
 {
     u32 cnts;
 
+    preempt_disable();
+    check_lock(&lock->lock.debug, true);
     cnts = atomic_read(&lock->cnts);
-    if ( unlikely(cnts) )
+    if ( unlikely(cnts) ||
+         unlikely(atomic_cmpxchg(&lock->cnts, 0, _write_lock_val()) != 0) )
+    {
+        preempt_enable();
         return 0;
+    }
 
-    return likely(atomic_cmpxchg(&lock->cnts, 0, _QW_LOCKED) == 0);
+    /*
+     * atomic_cmpxchg() is a full barrier so no need for an
+     * arch_lock_acquire_barrier().
+     */
+    return 1;
 }
 
 static inline void _write_unlock(rwlock_t *lock)
 {
-    /*
-     * If the writer field is atomic, it can be cleared directly.
-     * Otherwise, an atomic subtraction will be used to clear it.
-     */
-    atomic_sub(_QW_LOCKED, &lock->cnts);
+    ASSERT(_is_write_locked_by_me(atomic_read(&lock->cnts)));
+    arch_lock_release_barrier();
+    atomic_and(~(_QW_CPUMASK | _QW_WMASK), &lock->cnts);
+    preempt_enable();
 }
 
 static inline void _write_unlock_irq(rwlock_t *lock)
@@ -261,6 +323,7 @@ static inline void _percpu_read_lock(percpu_rwlock_t **per_cpudata,
     }
 
     /* Indicate this cpu is reading. */
+    preempt_disable();
     this_cpu_ptr(per_cpudata) = percpu_rwlock;
     smp_mb();
     /* Check if a writer is waiting. */
@@ -274,6 +337,11 @@ static inline void _percpu_read_lock(percpu_rwlock_t **per_cpudata,
         this_cpu_ptr(per_cpudata) = percpu_rwlock;
         /* Drop the read lock because we don't need it anymore. */
         read_unlock(&percpu_rwlock->rwlock);
+    }
+    else
+    {
+        /* All other paths have implicit check_lock() calls via read_lock(). */
+        check_lock(&percpu_rwlock->rwlock.lock.debug, false);
     }
 }
 
@@ -296,6 +364,7 @@ static inline void _percpu_read_unlock(percpu_rwlock_t **per_cpudata,
     }
     this_cpu_ptr(per_cpudata) = NULL;
     smp_wmb();
+    preempt_enable();
 }
 
 /* Don't inline percpu write lock as it's a complex function. */

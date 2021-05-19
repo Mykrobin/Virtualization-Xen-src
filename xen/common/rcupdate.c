@@ -34,6 +34,7 @@
 #include <xen/types.h>
 #include <xen/kernel.h>
 #include <xen/init.h>
+#include <xen/param.h>
 #include <xen/spinlock.h>
 #include <xen/smp.h>
 #include <xen/rcupdate.h>
@@ -45,6 +46,8 @@
 #include <xen/cpu.h>
 #include <xen/stop_machine.h>
 
+DEFINE_PER_CPU(unsigned int, rcu_lock_cnt);
+
 /* Global control variables for rcupdate callback mechanism. */
 static struct rcu_ctrlblk {
     long cur;           /* Current batch number.                      */
@@ -52,7 +55,8 @@ static struct rcu_ctrlblk {
     int  next_pending;  /* Is the next batch already waiting?         */
 
     spinlock_t  lock __cacheline_aligned;
-    cpumask_t   cpumask; /* CPUs that need to switch in order    */
+    cpumask_t   cpumask; /* CPUs that need to switch in order ... */
+    cpumask_t   idle_cpumask; /* ... unless they are already idle */
     /* for current batch to proceed.        */
 } __cacheline_aligned rcu_ctrlblk = {
     .cur = -300,
@@ -81,9 +85,58 @@ struct rcu_data {
     struct rcu_head **donetail;
     long            blimit;           /* Upper limit on a processed batch */
     int cpu;
-    struct rcu_head barrier;
     long            last_rs_qlen;     /* qlen during the last resched */
+
+    /* 3) idle CPUs handling */
+    struct timer idle_timer;
+    bool idle_timer_active;
+
+    bool            process_callbacks;
+    bool            barrier_active;
 };
+
+/*
+ * If a CPU with RCU callbacks queued goes idle, when the grace period is
+ * not finished yet, how can we make sure that the callbacks will eventually
+ * be executed? In Linux (2.6.21, the first "tickless idle" Linux kernel),
+ * the periodic timer tick would not be stopped for such CPU. Here in Xen,
+ * we (may) don't even have a periodic timer tick, so we need to use a
+ * special purpose timer.
+ *
+ * Such timer:
+ * 1) is armed only when a CPU with an RCU callback(s) queued goes idle
+ *    before the end of the current grace period (_not_ for any CPUs that
+ *    go idle!);
+ * 2) when it fires, it is only re-armed if the grace period is still
+ *    running;
+ * 3) it is stopped immediately, if the CPU wakes up from idle and
+ *    resumes 'normal' execution.
+ *
+ * About how far in the future the timer should be programmed each time,
+ * it's hard to tell (guess!!). Since this mimics Linux's periodic timer
+ * tick, take values used there as an indication. In Linux 2.6.21, tick
+ * period can be 10ms, 4ms, 3.33ms or 1ms.
+ *
+ * By default, we use 10ms, to enable at least some power saving on the
+ * CPU that is going idle. The user can change this, via a boot time
+ * parameter, but only up to 100ms.
+ */
+#define IDLE_TIMER_PERIOD_MAX     MILLISECS(100)
+#define IDLE_TIMER_PERIOD_DEFAULT MILLISECS(10)
+#define IDLE_TIMER_PERIOD_MIN     MICROSECS(100)
+
+static s_time_t __read_mostly idle_timer_period;
+
+/*
+ * Increment and decrement values for the idle timer handler. The algorithm
+ * works as follows:
+ * - if the timer actually fires, and it finds out that the grace period isn't
+ *   over yet, we add IDLE_TIMER_PERIOD_INCR to the timer's period;
+ * - if the timer actually fires and it finds the grace period over, we
+ *   subtract IDLE_TIMER_PERIOD_DECR from the timer's period.
+ */
+#define IDLE_TIMER_PERIOD_INCR    MILLISECS(10)
+#define IDLE_TIMER_PERIOD_DECR    MICROSECS(100)
 
 static DEFINE_PER_CPU(struct rcu_data, rcu_data);
 
@@ -92,47 +145,98 @@ static int qhimark = 10000;
 static int qlowmark = 100;
 static int rsinterval = 1000;
 
-struct rcu_barrier_data {
-    struct rcu_head head;
-    atomic_t *cpu_count;
-};
+/*
+ * rcu_barrier() handling:
+ * Two counters are used to synchronize rcu_barrier() work:
+ * - cpu_count holds the number of cpus required to finish barrier handling.
+ *   It is decremented by each cpu when it has performed all pending rcu calls.
+ * - pending_count shows whether any rcu_barrier() activity is running and
+ *   it is used to synchronize leaving rcu_barrier() only after all cpus
+ *   have finished their processing. pending_count is initialized to nr_cpus + 1
+ *   and it is decremented by each cpu when it has seen that cpu_count has
+ *   reached 0. The cpu where rcu_barrier() has been called will wait until
+ *   pending_count has been decremented to 1 (so all cpus have seen cpu_count
+ *   reaching 0) and will then set pending_count to 0 indicating there is no
+ *   rcu_barrier() running.
+ * Cpus are synchronized via softirq mechanism. rcu_barrier() is regarded to
+ * be active if pending_count is not zero. In case rcu_barrier() is called on
+ * multiple cpus it is enough to check for pending_count being not zero on entry
+ * and to call process_pending_softirqs() in a loop until pending_count drops to
+ * zero, before starting the new rcu_barrier() processing.
+ */
+static atomic_t cpu_count = ATOMIC_INIT(0);
+static atomic_t pending_count = ATOMIC_INIT(0);
 
 static void rcu_barrier_callback(struct rcu_head *head)
 {
-    struct rcu_barrier_data *data = container_of(
-        head, struct rcu_barrier_data, head);
-    atomic_inc(data->cpu_count);
+    /*
+     * We need a barrier making all previous writes visible to other cpus
+     * before doing the atomic_dec(). This would be something like
+     * smp_mb__before_atomic() limited to writes, which isn't existing.
+     * So we choose the best alternative available which is smp_wmb()
+     * (correct on Arm and only a minor impact on x86, while
+     * smp_mb__before_atomic() would be correct on x86, but with a larger
+     * impact on Arm).
+     */
+    smp_wmb();
+    atomic_dec(&cpu_count);
 }
 
-static int rcu_barrier_action(void *_cpu_count)
+static void rcu_barrier_action(void)
 {
-    struct rcu_barrier_data data = { .cpu_count = _cpu_count };
-
-    ASSERT(!local_irq_is_enabled());
-    local_irq_enable();
+    struct rcu_head head;
 
     /*
      * When callback is executed, all previously-queued RCU work on this CPU
-     * is completed. When all CPUs have executed their callback, data.cpu_count
-     * will have been incremented to include every online CPU.
+     * is completed. When all CPUs have executed their callback, cpu_count
+     * will have been decremented to 0.
      */
-    call_rcu(&data.head, rcu_barrier_callback);
+    call_rcu(&head, rcu_barrier_callback);
 
-    while ( atomic_read(data.cpu_count) != num_online_cpus() )
+    while ( atomic_read(&cpu_count) )
     {
         process_pending_softirqs();
         cpu_relax();
     }
 
-    local_irq_disable();
-
-    return 0;
+    smp_mb__before_atomic();
+    atomic_dec(&pending_count);
 }
 
-int rcu_barrier(void)
+void rcu_barrier(void)
 {
-    atomic_t cpu_count = ATOMIC_INIT(0);
-    return stop_machine_run(rcu_barrier_action, &cpu_count, NR_CPUS);
+    unsigned int n_cpus;
+
+    ASSERT(!in_irq() && local_irq_is_enabled());
+
+    for ( ; ; )
+    {
+        if ( !atomic_read(&pending_count) && get_cpu_maps() )
+        {
+            n_cpus = num_online_cpus();
+
+            if ( atomic_cmpxchg(&pending_count, 0, n_cpus + 1) == 0 )
+                break;
+
+            put_cpu_maps();
+        }
+
+        process_pending_softirqs();
+        cpu_relax();
+    }
+
+    atomic_set(&cpu_count, n_cpus);
+    cpumask_raise_softirq(&cpu_online_map, RCU_SOFTIRQ);
+
+    while ( atomic_read(&pending_count) != 1 )
+    {
+        process_pending_softirqs();
+        cpu_relax();
+    }
+
+    atomic_set(&pending_count, 0);
+
+    put_cpu_maps();
 }
 
 /* Is batch a before batch b ? */
@@ -145,7 +249,7 @@ static void force_quiescent_state(struct rcu_data *rdp,
                                   struct rcu_ctrlblk *rcp)
 {
     cpumask_t cpumask;
-    raise_softirq(SCHEDULE_SOFTIRQ);
+    raise_softirq(RCU_SOFTIRQ);
     if (unlikely(rdp->qlen - rdp->last_rs_qlen > rsinterval)) {
         rdp->last_rs_qlen = rdp->qlen;
         /*
@@ -153,7 +257,7 @@ static void force_quiescent_state(struct rcu_data *rdp,
          * rdp->cpu is the current cpu.
          */
         cpumask_andnot(&cpumask, &rcp->cpumask, cpumask_of(rdp->cpu));
-        cpumask_raise_softirq(&cpumask, SCHEDULE_SOFTIRQ);
+        cpumask_raise_softirq(&cpumask, RCU_SOFTIRQ);
     }
 }
 
@@ -177,7 +281,7 @@ void call_rcu(struct rcu_head *head,
     head->func = func;
     head->next = NULL;
     local_irq_save(flags);
-    rdp = &__get_cpu_var(rcu_data);
+    rdp = &this_cpu(rcu_data);
     *rdp->nxttail = head;
     rdp->nxttail = &head->next;
     if (unlikely(++rdp->qlen > qhimark)) {
@@ -210,7 +314,10 @@ static void rcu_do_batch(struct rcu_data *rdp)
     if (!rdp->donelist)
         rdp->donetail = &rdp->donelist;
     else
+    {
+        rdp->process_callbacks = true;
         raise_softirq(RCU_SOFTIRQ);
+    }
 }
 
 /*
@@ -248,7 +355,16 @@ static void rcu_start_batch(struct rcu_ctrlblk *rcp)
         smp_wmb();
         rcp->cur++;
 
-        cpumask_copy(&rcp->cpumask, &cpu_online_map);
+       /*
+        * Make sure the increment of rcp->cur is visible so, even if a
+        * CPU that is about to go idle, is captured inside rcp->cpumask,
+        * rcu_pending() will return false, which then means cpu_quiet()
+        * will be invoked, before the CPU would actually enter idle.
+        *
+        * This barrier is paired with the one in rcu_idle_enter().
+        */
+        smp_mb();
+        cpumask_andnot(&rcp->cpumask, &cpu_online_map, &rcp->idle_cpumask);
     }
 }
 
@@ -352,7 +468,20 @@ static void __rcu_process_callbacks(struct rcu_ctrlblk *rcp,
 
 static void rcu_process_callbacks(void)
 {
-    __rcu_process_callbacks(&rcu_ctrlblk, &__get_cpu_var(rcu_data));
+    struct rcu_data *rdp = &this_cpu(rcu_data);
+
+    if ( rdp->process_callbacks )
+    {
+        rdp->process_callbacks = false;
+        __rcu_process_callbacks(&rcu_ctrlblk, rdp);
+    }
+
+    if ( atomic_read(&cpu_count) && !rdp->barrier_active )
+    {
+        rdp->barrier_active = true;
+        rcu_barrier_action();
+        rdp->barrier_active = false;
+    }
 }
 
 static int __rcu_pending(struct rcu_ctrlblk *rcp, struct rcu_data *rdp)
@@ -394,11 +523,75 @@ int rcu_needs_cpu(int cpu)
 {
     struct rcu_data *rdp = &per_cpu(rcu_data, cpu);
 
-    return (!!rdp->curlist || rcu_pending(cpu));
+    return (rdp->curlist && !rdp->idle_timer_active) || rcu_pending(cpu);
+}
+
+/*
+ * Timer for making sure the CPU where a callback is queued does
+ * periodically poke rcu_pedning(), so that it will invoke the callback
+ * not too late after the end of the grace period.
+ */
+static void rcu_idle_timer_start(void)
+{
+    struct rcu_data *rdp = &this_cpu(rcu_data);
+
+    /*
+     * Note that we don't check rcu_pending() here. In fact, we don't want
+     * the timer armed on CPUs that are in the process of quiescing while
+     * going idle, unless they really are the ones with a queued callback.
+     */
+    if (likely(!rdp->curlist))
+        return;
+
+    set_timer(&rdp->idle_timer, NOW() + idle_timer_period);
+    rdp->idle_timer_active = true;
+}
+
+static void rcu_idle_timer_stop(void)
+{
+    struct rcu_data *rdp = &this_cpu(rcu_data);
+
+    if (likely(!rdp->idle_timer_active))
+        return;
+
+    rdp->idle_timer_active = false;
+
+    /*
+     * In general, as the CPU is becoming active again, we don't need the
+     * idle timer, and so we want to stop it.
+     *
+     * However, in case we are here because idle_timer has (just) fired and
+     * has woken up the CPU, we skip stop_timer() now. In fact, when a CPU
+     * wakes up from idle, this code always runs before do_softirq() has the
+     * chance to check and deal with TIMER_SOFTIRQ. And if we stop the timer
+     * now, the TIMER_SOFTIRQ handler will see it as inactive, and will not
+     * call rcu_idle_timer_handler().
+     *
+     * Therefore, if we see that the timer is expired already, we leave it
+     * alone. The TIMER_SOFTIRQ handler will then run the timer routine, and
+     * deactivate it.
+     */
+    if ( !timer_is_expired(&rdp->idle_timer) )
+        stop_timer(&rdp->idle_timer);
+}
+
+static void rcu_idle_timer_handler(void* data)
+{
+    perfc_incr(rcu_idle_timer);
+
+    if ( !cpumask_empty(&rcu_ctrlblk.cpumask) )
+        idle_timer_period = min(idle_timer_period + IDLE_TIMER_PERIOD_INCR,
+                                IDLE_TIMER_PERIOD_MAX);
+    else
+        idle_timer_period = max(idle_timer_period - IDLE_TIMER_PERIOD_DECR,
+                                IDLE_TIMER_PERIOD_MIN);
 }
 
 void rcu_check_callbacks(int cpu)
 {
+    struct rcu_data *rdp = &this_cpu(rcu_data);
+
+    rdp->process_callbacks = true;
     raise_softirq(RCU_SOFTIRQ);
 }
 
@@ -415,6 +608,8 @@ static void rcu_move_batch(struct rcu_data *this_rdp, struct rcu_head *list,
 static void rcu_offline_cpu(struct rcu_data *this_rdp,
                             struct rcu_ctrlblk *rcp, struct rcu_data *rdp)
 {
+    kill_timer(&rdp->idle_timer);
+
     /* If the cpu going offline owns the grace period we can block
      * indefinitely waiting for it, so flush it here.
      */
@@ -443,6 +638,7 @@ static void rcu_init_percpu_data(int cpu, struct rcu_ctrlblk *rcp,
     rdp->qs_pending = 0;
     rdp->cpu = cpu;
     rdp->blimit = blimit;
+    init_timer(&rdp->idle_timer, rcu_idle_timer_handler, rdp, cpu);
 }
 
 static int cpu_callback(
@@ -474,7 +670,51 @@ static struct notifier_block cpu_nfb = {
 void __init rcu_init(void)
 {
     void *cpu = (void *)(long)smp_processor_id();
+    static unsigned int __initdata idle_timer_period_ms =
+                                    IDLE_TIMER_PERIOD_DEFAULT / MILLISECS(1);
+    integer_param("rcu-idle-timer-period-ms", idle_timer_period_ms);
+
+    /* We don't allow 0, or anything higher than IDLE_TIMER_PERIOD_MAX */
+    if ( idle_timer_period_ms == 0 ||
+         idle_timer_period_ms > IDLE_TIMER_PERIOD_MAX / MILLISECS(1) )
+    {
+        idle_timer_period_ms = IDLE_TIMER_PERIOD_DEFAULT / MILLISECS(1);
+        printk("WARNING: rcu-idle-timer-period-ms outside of "
+               "(0,%"PRI_stime"]. Resetting it to %u.\n",
+               IDLE_TIMER_PERIOD_MAX / MILLISECS(1), idle_timer_period_ms);
+    }
+    idle_timer_period = MILLISECS(idle_timer_period_ms);
+
+    cpumask_clear(&rcu_ctrlblk.idle_cpumask);
     cpu_callback(&cpu_nfb, CPU_UP_PREPARE, cpu);
     register_cpu_notifier(&cpu_nfb);
     open_softirq(RCU_SOFTIRQ, rcu_process_callbacks);
+}
+
+/*
+ * The CPU is becoming idle, so no more read side critical
+ * sections, and one more step toward grace period.
+ */
+void rcu_idle_enter(unsigned int cpu)
+{
+    ASSERT(!cpumask_test_cpu(cpu, &rcu_ctrlblk.idle_cpumask));
+    cpumask_set_cpu(cpu, &rcu_ctrlblk.idle_cpumask);
+    /*
+     * If some other CPU is starting a new grace period, we'll notice that
+     * by seeing a new value in rcp->cur (different than our quiescbatch).
+     * That will force us all the way until cpu_quiet(), clearing our bit
+     * in rcp->cpumask, even in case we managed to get in there.
+     *
+     * Se the comment before cpumask_andnot() in  rcu_start_batch().
+     */
+    smp_mb();
+
+    rcu_idle_timer_start();
+}
+
+void rcu_idle_exit(unsigned int cpu)
+{
+    rcu_idle_timer_stop();
+    ASSERT(cpumask_test_cpu(cpu, &rcu_ctrlblk.idle_cpumask));
+    cpumask_clear_cpu(cpu, &rcu_ctrlblk.idle_cpumask);
 }

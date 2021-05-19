@@ -10,7 +10,6 @@
 #ifndef __FLUSHTLB_H__
 #define __FLUSHTLB_H__
 
-#include <xen/config.h>
 #include <xen/mm.h>
 #include <xen/percpu.h>
 #include <xen/smp.h>
@@ -22,10 +21,21 @@ extern u32 tlbflush_clock;
 /* Time at which each CPU's TLB was last flushed. */
 DECLARE_PER_CPU(u32, tlbflush_time);
 
-#define tlbflush_current_time() tlbflush_clock
+/* TLB clock is in use. */
+extern bool tlb_clk_enabled;
+
+static inline uint32_t tlbflush_current_time(void)
+{
+    /* Returning 0 from tlbflush_current_time will always force a flush. */
+    return tlb_clk_enabled ? tlbflush_clock : 0;
+}
 
 static inline void page_set_tlbflush_timestamp(struct page_info *page)
 {
+    /* Avoid the write if the TLB clock is disabled. */
+    if ( !tlb_clk_enabled )
+        return;
+
     /*
      * Prevent storing a stale time stamp, which could happen if an update
      * to tlbflush_clock plus a subsequent flush IPI happen between the
@@ -43,7 +53,7 @@ static inline void page_set_tlbflush_timestamp(struct page_info *page)
  * @lastuse_stamp is a timestamp taken when the PFN we are testing was last 
  * used for a purpose that may have caused the CPU's TLB to become tainted.
  */
-static inline int NEED_FLUSH(u32 cpu_stamp, u32 lastuse_stamp)
+static inline bool NEED_FLUSH(u32 cpu_stamp, u32 lastuse_stamp)
 {
     u32 curr_time = tlbflush_current_time();
     /*
@@ -64,13 +74,18 @@ static inline int NEED_FLUSH(u32 cpu_stamp, u32 lastuse_stamp)
  * Filter the given set of CPUs, removing those that definitely flushed their
  * TLB since @page_timestamp.
  */
-#define tlbflush_filter(mask, page_timestamp)                           \
-do {                                                                    \
-    unsigned int cpu;                                                   \
-    for_each_cpu ( cpu, &(mask) )                                       \
-        if ( !NEED_FLUSH(per_cpu(tlbflush_time, cpu), page_timestamp) ) \
-            cpumask_clear_cpu(cpu, &(mask));                            \
-} while ( 0 )
+static inline void tlbflush_filter(cpumask_t *mask, uint32_t page_timestamp)
+{
+    unsigned int cpu;
+
+    /* Short-circuit: there's no need to iterate if the clock is disabled. */
+    if ( !tlb_clk_enabled )
+        return;
+
+    for_each_cpu ( cpu, mask )
+        if ( !NEED_FLUSH(per_cpu(tlbflush_time, cpu), page_timestamp) )
+            __cpumask_clear_cpu(cpu, mask);
+}
 
 void new_tlbflush_clock_period(void);
 
@@ -101,8 +116,26 @@ void switch_cr3_cr4(unsigned long cr3, unsigned long cr4);
 #define FLUSH_CACHE      0x400
  /* VA for the flush has a valid mapping */
 #define FLUSH_VA_VALID   0x800
+ /* Flush CPU state */
+#define FLUSH_VCPU_STATE 0x1000
  /* Flush the per-cpu root page table */
 #define FLUSH_ROOT_PGTBL 0x2000
+#if CONFIG_HVM
+ /* Flush all HVM guests linear TLB (using ASID/VPID) */
+#define FLUSH_HVM_ASID_CORE 0x4000
+#else
+#define FLUSH_HVM_ASID_CORE 0
+#endif
+#if defined(CONFIG_PV) || defined(CONFIG_SHADOW_PAGING)
+/*
+ * Force an IPI to be sent. Note that adding this to the flags passed to
+ * flush_area_mask will prevent using the assisted flush without having any
+ * other side effect.
+ */
+# define FLUSH_FORCE_IPI 0x8000
+#else
+# define FLUSH_FORCE_IPI 0
+#endif
 
 /* Flush local TLBs/caches. */
 unsigned int flush_area_local(const void *va, unsigned int flags);
@@ -128,6 +161,13 @@ void flush_area_mask(const cpumask_t *, const void *va, unsigned int flags);
 #define flush_tlb_one_mask(mask,v)              \
     flush_area_mask(mask, (const void *)(v), FLUSH_TLB|FLUSH_ORDER(0))
 
+/*
+ * Make the common code TLB flush helper force use of an IPI in order to be
+ * on the safe side. Note that not all calls from common code strictly require
+ * this.
+ */
+#define arch_flush_tlb_mask(mask) flush_mask(mask, FLUSH_TLB | FLUSH_FORCE_IPI)
+
 /* Flush all CPUs' TLBs */
 #define flush_tlb_all()                         \
     flush_tlb_mask(&cpu_online_map)
@@ -136,8 +176,8 @@ void flush_area_mask(const cpumask_t *, const void *va, unsigned int flags);
 
 #define flush_root_pgtbl_domain(d)                                       \
 {                                                                        \
-    if ( is_pv_domain(d) && (d)->arch.pv_domain.xpti )                   \
-        flush_mask((d)->domain_dirty_cpumask, FLUSH_ROOT_PGTBL);         \
+    if ( is_pv_domain(d) && (d)->arch.pv.xpti )                          \
+        flush_mask((d)->dirty_cpumask, FLUSH_ROOT_PGTBL);                \
 }
 
 static inline void flush_page_to_ram(unsigned long mfn, bool sync_icache) {}
@@ -156,5 +196,8 @@ static inline int clean_dcache_va_range(const void *p, unsigned long size)
 {
     return clean_and_invalidate_dcache_va_range(p, size);
 }
+
+unsigned int guest_flush_tlb_flags(const struct domain *d);
+void guest_flush_tlb_mask(const struct domain *d, const cpumask_t *mask);
 
 #endif /* __FLUSHTLB_H__ */

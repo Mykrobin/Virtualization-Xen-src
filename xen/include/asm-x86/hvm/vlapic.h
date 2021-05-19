@@ -21,14 +21,12 @@
 #define __ASM_X86_HVM_VLAPIC_H__
 
 #include <xen/tasklet.h>
-#include <asm/msr.h>
-#include <public/hvm/ioreq.h>
 #include <asm/hvm/vpt.h>
 
-#define vcpu_vlapic(x)   (&(x)->arch.hvm_vcpu.vlapic)
-#define vlapic_vcpu(x)   (container_of((x), struct vcpu, arch.hvm_vcpu.vlapic))
+#define vcpu_vlapic(x)   (&(x)->arch.hvm.vlapic)
+#define vlapic_vcpu(x)   (container_of((x), struct vcpu, arch.hvm.vlapic))
 #define const_vlapic_vcpu(x) (container_of((x), const struct vcpu, \
-                              arch.hvm_vcpu.vlapic))
+                              arch.hvm.vlapic))
 #define vlapic_domain(x) (vlapic_vcpu(x)->domain)
 
 #define _VLAPIC_ID(vlapic, id) (vlapic_x2apic_mode(vlapic) \
@@ -50,9 +48,13 @@
 #define vlapic_enabled(vlapic)     (!vlapic_disabled(vlapic))
 
 #define vlapic_base_address(vlapic)                             \
-    ((vlapic)->hw.apic_base_msr & MSR_IA32_APICBASE_BASE)
+    ((vlapic)->hw.apic_base_msr & APIC_BASE_ADDR_MASK)
+/* Only check EXTD bit as EXTD can't be set if it is disabled by hardware */
 #define vlapic_x2apic_mode(vlapic)                              \
-    ((vlapic)->hw.apic_base_msr & MSR_IA32_APICBASE_EXTD)
+    ((vlapic)->hw.apic_base_msr & APIC_BASE_EXTD)
+#define vlapic_xapic_mode(vlapic)                               \
+    (!vlapic_hw_disabled(vlapic) && \
+     !((vlapic)->hw.apic_base_msr & APIC_BASE_EXTD))
 
 /*
  * Generic APIC bitmap vector update & search routines.
@@ -104,8 +106,11 @@ static inline void vlapic_set_reg(
     *((uint32_t *)(&vlapic->regs->data[reg])) = val;
 }
 
+void vlapic_reg_write(struct vcpu *v, unsigned int reg, uint32_t val);
+
 bool_t is_vlapic_lvtpc_enabled(struct vlapic *vlapic);
 
+bool vlapic_test_irq(const struct vlapic *vlapic, uint8_t vec);
 void vlapic_set_irq(struct vlapic *vlapic, uint8_t vec, uint8_t trig);
 
 int vlapic_has_pending_irq(struct vcpu *v);
@@ -116,7 +121,10 @@ void vlapic_destroy(struct vcpu *v);
 
 void vlapic_reset(struct vlapic *vlapic);
 
-bool_t vlapic_msr_set(struct vlapic *vlapic, uint64_t value);
+int guest_wrmsr_apic_base(struct vcpu *v, uint64_t val);
+int guest_rdmsr_x2apic(const struct vcpu *v, uint32_t msr, uint64_t *val);
+int guest_wrmsr_x2apic(struct vcpu *v, uint32_t msr, uint64_t val);
+
 void vlapic_tdt_msr_set(struct vlapic *vlapic, uint64_t value);
 uint64_t vlapic_tdt_msr_get(struct vlapic *vlapic);
 
@@ -139,5 +147,11 @@ struct vlapic *vlapic_lowest_prio(
 bool_t vlapic_match_dest(
     const struct vlapic *target, const struct vlapic *source,
     int short_hand, uint32_t dest, bool_t dest_mode);
+
+static inline void vlapic_sync_pir_to_irr(struct vcpu *v)
+{
+    if ( hvm_funcs.sync_pir_to_irr )
+        alternative_vcall(hvm_funcs.sync_pir_to_irr, v);
+}
 
 #endif /* __ASM_X86_HVM_VLAPIC_H__ */

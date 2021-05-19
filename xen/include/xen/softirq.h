@@ -4,9 +4,10 @@
 /* Low-latency softirqs come first in the following list. */
 enum {
     TIMER_SOFTIRQ = 0,
+    RCU_SOFTIRQ,
+    SCHED_SLAVE_SOFTIRQ,
     SCHEDULE_SOFTIRQ,
     NEW_TLBFLUSH_CLOCK_PERIOD_SOFTIRQ,
-    RCU_SOFTIRQ,
     TASKLET_SOFTIRQ,
     NR_COMMON_SOFTIRQS
 };
@@ -22,9 +23,8 @@ enum {
 
 typedef void (*softirq_handler)(void);
 
-asmlinkage void do_softirq(void);
+void do_softirq(void);
 void open_softirq(int nr, softirq_handler handler);
-void softirq_init(void);
 
 void cpumask_raise_softirq(const cpumask_t *, unsigned int nr);
 void cpu_raise_softirq(unsigned int cpu, unsigned int nr);

@@ -19,7 +19,6 @@ IHDR_FORMAT = "!QIIHHI"
 
 IHDR_MARKER  = 0xffffffffffffffff
 IHDR_IDENT   = 0x58454E46 # "XENF" in ASCII
-IHDR_VERSION = 2
 
 IHDR_OPT_BIT_ENDIAN = 0
 IHDR_OPT_LE = (0 << IHDR_OPT_BIT_ENDIAN)
@@ -32,14 +31,10 @@ DHDR_FORMAT = "IHHII"
 
 DHDR_TYPE_x86_pv  = 0x00000001
 DHDR_TYPE_x86_hvm = 0x00000002
-DHDR_TYPE_x86_pvh = 0x00000003
-DHDR_TYPE_arm     = 0x00000004
 
 dhdr_type_to_str = {
     DHDR_TYPE_x86_pv  : "x86 PV",
     DHDR_TYPE_x86_hvm : "x86 HVM",
-    DHDR_TYPE_x86_pvh : "x86 PVH",
-    DHDR_TYPE_arm     : "ARM",
 }
 
 # Records
@@ -61,6 +56,9 @@ REC_TYPE_x86_pv_vcpu_msrs           = 0x0000000c
 REC_TYPE_verify                     = 0x0000000d
 REC_TYPE_checkpoint                 = 0x0000000e
 REC_TYPE_checkpoint_dirty_pfn_list  = 0x0000000f
+REC_TYPE_static_data_end            = 0x00000010
+REC_TYPE_x86_cpuid_policy           = 0x00000011
+REC_TYPE_x86_msr_policy             = 0x00000012
 
 rec_type_to_str = {
     REC_TYPE_end                        : "End",
@@ -78,28 +76,31 @@ rec_type_to_str = {
     REC_TYPE_x86_pv_vcpu_msrs           : "x86 PV vcpu msrs",
     REC_TYPE_verify                     : "Verify",
     REC_TYPE_checkpoint                 : "Checkpoint",
-    REC_TYPE_checkpoint_dirty_pfn_list  : "Checkpoint dirty pfn list"
+    REC_TYPE_checkpoint_dirty_pfn_list  : "Checkpoint dirty pfn list",
+    REC_TYPE_static_data_end            : "Static data end",
+    REC_TYPE_x86_cpuid_policy           : "x86 CPUID policy",
+    REC_TYPE_x86_msr_policy             : "x86 MSR policy",
 }
 
 # page_data
 PAGE_DATA_FORMAT             = "II"
-PAGE_DATA_PFN_MASK           = (1L << 52) - 1
-PAGE_DATA_PFN_RESZ_MASK      = ((1L << 60) - 1) & ~((1L << 52) - 1)
+PAGE_DATA_PFN_MASK           = (1 << 52) - 1
+PAGE_DATA_PFN_RESZ_MASK      = ((1 << 60) - 1) & ~((1 << 52) - 1)
 
 # flags from xen/public/domctl.h: XEN_DOMCTL_PFINFO_* shifted by 32 bits
 PAGE_DATA_TYPE_SHIFT         = 60
-PAGE_DATA_TYPE_LTABTYPE_MASK = (0x7L << PAGE_DATA_TYPE_SHIFT)
-PAGE_DATA_TYPE_LTAB_MASK     = (0xfL << PAGE_DATA_TYPE_SHIFT)
-PAGE_DATA_TYPE_LPINTAB       = (0x8L << PAGE_DATA_TYPE_SHIFT) # Pinned pagetable
+PAGE_DATA_TYPE_LTABTYPE_MASK = (0x7 << PAGE_DATA_TYPE_SHIFT)
+PAGE_DATA_TYPE_LTAB_MASK     = (0xf << PAGE_DATA_TYPE_SHIFT)
+PAGE_DATA_TYPE_LPINTAB       = (0x8 << PAGE_DATA_TYPE_SHIFT) # Pinned pagetable
 
-PAGE_DATA_TYPE_NOTAB         = (0x0L << PAGE_DATA_TYPE_SHIFT) # Regular page
-PAGE_DATA_TYPE_L1TAB         = (0x1L << PAGE_DATA_TYPE_SHIFT) # L1 pagetable
-PAGE_DATA_TYPE_L2TAB         = (0x2L << PAGE_DATA_TYPE_SHIFT) # L2 pagetable
-PAGE_DATA_TYPE_L3TAB         = (0x3L << PAGE_DATA_TYPE_SHIFT) # L3 pagetable
-PAGE_DATA_TYPE_L4TAB         = (0x4L << PAGE_DATA_TYPE_SHIFT) # L4 pagetable
-PAGE_DATA_TYPE_BROKEN        = (0xdL << PAGE_DATA_TYPE_SHIFT) # Broken
-PAGE_DATA_TYPE_XALLOC        = (0xeL << PAGE_DATA_TYPE_SHIFT) # Allocate-only
-PAGE_DATA_TYPE_XTAB          = (0xfL << PAGE_DATA_TYPE_SHIFT) # Invalid
+PAGE_DATA_TYPE_NOTAB         = (0x0 << PAGE_DATA_TYPE_SHIFT) # Regular page
+PAGE_DATA_TYPE_L1TAB         = (0x1 << PAGE_DATA_TYPE_SHIFT) # L1 pagetable
+PAGE_DATA_TYPE_L2TAB         = (0x2 << PAGE_DATA_TYPE_SHIFT) # L2 pagetable
+PAGE_DATA_TYPE_L3TAB         = (0x3 << PAGE_DATA_TYPE_SHIFT) # L3 pagetable
+PAGE_DATA_TYPE_L4TAB         = (0x4 << PAGE_DATA_TYPE_SHIFT) # L4 pagetable
+PAGE_DATA_TYPE_BROKEN        = (0xd << PAGE_DATA_TYPE_SHIFT) # Broken
+PAGE_DATA_TYPE_XALLOC        = (0xe << PAGE_DATA_TYPE_SHIFT) # Allocate-only
+PAGE_DATA_TYPE_XTAB          = (0xf << PAGE_DATA_TYPE_SHIFT) # Invalid
 
 # x86_pv_info
 X86_PV_INFO_FORMAT        = "BBHI"
@@ -109,19 +110,26 @@ X86_PV_P2M_FRAMES_FORMAT  = "II"
 # x86_pv_vcpu_{basic,extended,xsave,msrs}
 X86_PV_VCPU_HDR_FORMAT    = "II"
 
-# tsc_info
-TSC_INFO_FORMAT           = "IIQII"
+# x86_tsc_info
+X86_TSC_INFO_FORMAT       = "IIQII"
 
 # hvm_params
 HVM_PARAMS_ENTRY_FORMAT   = "QQ"
 HVM_PARAMS_FORMAT         = "II"
 
+# x86_cpuid_policy => xen_cpuid_leaf_t[]
+X86_CPUID_POLICY_FORMAT   = "IIIIII"
+
+# x86_msr_policy => xen_msr_entry_t[]
+X86_MSR_POLICY_FORMAT     = "QII"
+
 class VerifyLibxc(VerifyBase):
-    """ Verify a Libxc v2 stream """
+    """ Verify a Libxc v2 (or later) stream """
 
     def __init__(self, info, read):
         VerifyBase.__init__(self, info, read)
 
+        self.version = 0
         self.squashed_pagedata_records = 0
 
 
@@ -141,24 +149,28 @@ class VerifyLibxc(VerifyBase):
             self.unpack_exact(IHDR_FORMAT)
 
         if marker != IHDR_MARKER:
-            raise StreamError("Bad image marker: Expected 0x%x, got 0x%x"
-                              % (IHDR_MARKER, marker))
+            raise StreamError("Bad image marker: Expected 0x%x, got 0x%x" %
+                              (IHDR_MARKER, marker))
 
         if ident != IHDR_IDENT:
-            raise StreamError("Bad image id: Expected 0x%x, got 0x%x"
-                              % (IHDR_IDENT, ident))
+            raise StreamError("Bad image id: Expected 0x%x, got 0x%x" %
+                              (IHDR_IDENT, ident))
 
-        if version != IHDR_VERSION:
-            raise StreamError("Unknown image version: Expected %d, got %d"
-                              % (IHDR_VERSION, version))
+        if not (2 <= version <= 3):
+            raise StreamError(
+                "Unknown image version: Expected 2 <= ver <= 3, got %d" %
+                (version, ))
+
+        self.version = version
 
         if options & IHDR_OPT_RESZ_MASK:
-            raise StreamError("Reserved bits set in image options field: 0x%x"
-                              % (options & IHDR_OPT_RESZ_MASK))
+            raise StreamError("Reserved bits set in image options field: 0x%x" %
+                              (options & IHDR_OPT_RESZ_MASK))
 
         if res1 != 0 or res2 != 0:
-            raise StreamError("Reserved bits set in image header: 0x%04x:0x%08x"
-                              % (res1, res2))
+            raise StreamError(
+                "Reserved bits set in image header: 0x%04x:0x%08x" %
+                (res1, res2))
 
         if ( (sys.byteorder == "little") and
              ((options & IHDR_OPT_BIT_ENDIAN) != IHDR_OPT_LE) ):
@@ -166,7 +178,8 @@ class VerifyLibxc(VerifyBase):
                 "Stream is not native endianess - unable to validate")
 
         endian = ["little", "big"][options & IHDR_OPT_LE]
-        self.info("Libxc Image Header: %s endian" % (endian, ))
+        self.info("Libxc Image Header: Version %d, %s endian" %
+                  (version, endian))
 
 
     def verify_dhdr(self):
@@ -179,19 +192,19 @@ class VerifyLibxc(VerifyBase):
             raise StreamError("Unrecognised domain type 0x%x" % (gtype, ))
 
         if res1 != 0:
-            raise StreamError("Reserved bits set in domain header 0x%04x"
-                              % (res1, ))
+            raise StreamError("Reserved bits set in domain header 0x%04x" %
+                              (res1, ))
 
         if page_shift != 12:
-            raise StreamError("Page shift expected to be 12.  Got %d"
-                              % (page_shift, ))
+            raise StreamError("Page shift expected to be 12.  Got %d" %
+                              (page_shift, ))
 
         if major == 0:
-            self.info("Domain Header: legacy converted %s"
-                      % (dhdr_type_to_str[gtype], ))
+            self.info("Domain Header: legacy converted %s" %
+                      (dhdr_type_to_str[gtype], ))
         else:
-            self.info("Domain Header: %s from Xen %d.%d"
-                      % (dhdr_type_to_str[gtype], major, minor))
+            self.info("Domain Header: %s from Xen %d.%d" %
+                      (dhdr_type_to_str[gtype], major, minor))
 
 
     def verify_record(self):
@@ -208,23 +221,24 @@ class VerifyLibxc(VerifyBase):
         if rtype != REC_TYPE_page_data:
 
             if self.squashed_pagedata_records > 0:
-                self.info("Squashed %d Page Data records together"
-                          % (self.squashed_pagedata_records, ))
+                self.info("Squashed %d Page Data records together" %
+                          (self.squashed_pagedata_records, ))
                 self.squashed_pagedata_records = 0
 
-            self.info("Libxc Record: %s, length %d"
-                      % (rec_type_to_str[rtype], length))
+            self.info("Libxc Record: %s, length %d" %
+                      (rec_type_to_str[rtype], length))
 
         else:
             self.squashed_pagedata_records += 1
 
         padding = content[length:]
-        if padding != "\x00" * len(padding):
+        if padding != b"\x00" * len(padding):
             raise StreamError("Padding containing non0 bytes found")
 
         if rtype not in record_verifiers:
-            raise RuntimeError("No verification function for libxc record '%s'"
-                               % rec_type_to_str[rtype])
+            raise RuntimeError(
+                "No verification function for libxc record '%s'" %
+                rec_type_to_str[rtype])
         else:
             record_verifiers[rtype](self, content[:length])
 
@@ -243,32 +257,32 @@ class VerifyLibxc(VerifyBase):
         minsz = calcsize(PAGE_DATA_FORMAT)
 
         if len(content) <= minsz:
-            raise RecordError("PAGE_DATA record must be at least %d bytes long"
-                              % (minsz, ))
+            raise RecordError(
+                "PAGE_DATA record must be at least %d bytes long" % (minsz, ))
 
         count, res1 = unpack(PAGE_DATA_FORMAT, content[:minsz])
 
         if res1 != 0:
-            raise StreamError("Reserved bits set in PAGE_DATA record 0x%04x"
-                              % (res1, ))
+            raise StreamError(
+                "Reserved bits set in PAGE_DATA record 0x%04x" % (res1, ))
 
         pfnsz = count * 8
         if (len(content) - minsz) < pfnsz:
-            raise RecordError("PAGE_DATA record must contain a pfn record for "
-                              "each count")
+            raise RecordError(
+                "PAGE_DATA record must contain a pfn record for each count")
 
-        pfns = list(unpack("=%dQ" % (count,), content[minsz:minsz + pfnsz]))
+        pfns = list(unpack("=%dQ" % (count, ), content[minsz:minsz + pfnsz]))
 
         nr_pages = 0
         for idx, pfn in enumerate(pfns):
 
             if pfn & PAGE_DATA_PFN_RESZ_MASK:
-                raise RecordError("Reserved bits set in pfn[%d]: 0x%016x",
-                                  idx, pfn & PAGE_DATA_PFN_RESZ_MASK)
+                raise RecordError("Reserved bits set in pfn[%d]: 0x%016x" %
+                                  (idx, pfn & PAGE_DATA_PFN_RESZ_MASK))
 
             if pfn >> PAGE_DATA_TYPE_SHIFT in (5, 6, 7, 8):
-                raise RecordError("Invalid type value in pfn[%d]: 0x%016x",
-                                  idx, pfn & PAGE_DATA_TYPE_LTAB_MASK)
+                raise RecordError("Invalid type value in pfn[%d]: 0x%016x" %
+                                  (idx, pfn & PAGE_DATA_TYPE_LTAB_MASK))
 
             # We expect page data for each normal page or pagetable
             if PAGE_DATA_TYPE_NOTAB <= (pfn & PAGE_DATA_TYPE_LTABTYPE_MASK) \
@@ -277,8 +291,8 @@ class VerifyLibxc(VerifyBase):
 
         pagesz = nr_pages * 4096
         if len(content) != minsz + pfnsz + pagesz:
-            raise RecordError("Expected %u + %u + %u, got %u"
-                              % (minsz, pfnsz, pagesz, len(content)))
+            raise RecordError("Expected %u + %u + %u, got %u" %
+                              (minsz, pfnsz, pagesz, len(content)))
 
 
     def verify_record_x86_pv_info(self, content):
@@ -286,8 +300,8 @@ class VerifyLibxc(VerifyBase):
 
         expectedsz = calcsize(X86_PV_INFO_FORMAT)
         if len(content) != expectedsz:
-            raise RecordError("x86_pv_info: expected length of %d, got %d"
-                              % (expectedsz, len(content)))
+            raise RecordError("x86_pv_info: expected length of %d, got %d" %
+                              (expectedsz, len(content)))
 
         width, levels, res1, res2 = unpack(X86_PV_INFO_FORMAT, content)
 
@@ -298,8 +312,9 @@ class VerifyLibxc(VerifyBase):
             raise RecordError("Expected levels of 3 or 4, got %d" % (levels, ))
 
         if res1 != 0 or res2 != 0:
-            raise StreamError("Reserved bits set in X86_PV_INFO: 0x%04x 0x%08x"
-                              % (res1, res2))
+            raise StreamError(
+                "Reserved bits set in X86_PV_INFO: 0x%04x 0x%08x" %
+                (res1, res2))
 
         bitness = {4:32, 8:64}[width]
         self.info("  %sbit guest, %d levels of pagetables" % (bitness, levels))
@@ -308,9 +323,13 @@ class VerifyLibxc(VerifyBase):
     def verify_record_x86_pv_p2m_frames(self, content):
         """ x86 PV p2m frames record """
 
+        if len(content) < 8:
+            raise RecordError("x86_pv_p2m_frames: record length must be at"
+                              " least 8 bytes long")
+
         if len(content) % 8 != 0:
-            raise RecordError("Length expected to be a multiple of 8, not %d"
-                              % (len(content), ))
+            raise RecordError("Length expected to be a multiple of 8, not %d" %
+                              (len(content), ))
 
         start, end = unpack("=II", content[:8])
         self.info("  Start pfn 0x%x, End 0x%x" % (start, end))
@@ -320,45 +339,51 @@ class VerifyLibxc(VerifyBase):
         """ Generic for all REC_TYPE_x86_pv_vcpu_{basic,extended,xsave,msrs} """
         minsz = calcsize(X86_PV_VCPU_HDR_FORMAT)
 
-        if len(content) <= minsz:
-            raise RecordError("X86_PV_VCPU_%s record length must be at least %d"
-                              " bytes long" % (name, minsz))
+        if len(content) < minsz:
+            raise RecordError(
+                "X86_PV_VCPU_%s record length must be at least %d bytes long" %
+                (name, minsz))
+
+        if len(content) == minsz:
+            self.info("Warning: X86_PV_VCPU_%s record with zero content" %
+                      (name, ))
 
         vcpuid, res1 = unpack(X86_PV_VCPU_HDR_FORMAT, content[:minsz])
 
         if res1 != 0:
             raise StreamError(
-                "Reserved bits set in x86_pv_vcpu_%s record 0x%04x"
-                              % (name, res1))
+                "Reserved bits set in x86_pv_vcpu_%s record 0x%04x" %
+                (name, res1))
 
-        self.info("  vcpu%d %s context, %d bytes"
-                  % (vcpuid, name, len(content) - minsz))
+        self.info("  vcpu%d %s context, %d bytes" %
+                  (vcpuid, name, len(content) - minsz))
 
 
     def verify_record_shared_info(self, content):
         """ shared info record """
 
-        if len(content) != 4096:
-            raise RecordError("Length expected to be 4906 bytes, not %d"
-                              % (len(content), ))
+        contentsz = len(content)
+        if contentsz != 4096:
+            raise RecordError("Length expected to be 4906 bytes, not %d" %
+                              (contentsz, ))
 
 
     def verify_record_tsc_info(self, content):
         """ tsc info record """
 
-        sz = calcsize(TSC_INFO_FORMAT)
+        sz = calcsize(X86_TSC_INFO_FORMAT)
 
         if len(content) != sz:
             raise RecordError("Length should be %u bytes" % (sz, ))
 
-        mode, khz, nsec, incarn, res1 = unpack(TSC_INFO_FORMAT, content)
+        mode, khz, nsec, incarn, res1 = unpack(X86_TSC_INFO_FORMAT, content)
 
         if res1 != 0:
-            raise StreamError("Reserved bits set in TSC_INFO: 0x%08x"
-                              % (res1, ))
+            raise StreamError("Reserved bits set in X86_TSC_INFO: 0x%08x" %
+                              (res1, ))
 
-        self.info("  Mode %u, %u kHz, %u ns, incarnation %d"
-                  % (mode, khz, nsec, incarn))
+        self.info("  Mode %u, %u kHz, %u ns, incarnation %d" %
+                  (mode, khz, nsec, incarn))
 
 
     def verify_record_hvm_context(self, content):
@@ -380,6 +405,9 @@ class VerifyLibxc(VerifyBase):
 
         if rsvd != 0:
             raise RecordError("Reserved field not zero (0x%04x)" % (rsvd, ))
+
+        if count == 0:
+            self.info("Warning: HVM_PARAMS record with zero content")
 
         sz += count * calcsize(HVM_PARAMS_ENTRY_FORMAT)
 
@@ -405,9 +433,48 @@ class VerifyLibxc(VerifyBase):
         if len(content) != 0:
             raise RecordError("Checkpoint record with non-zero length")
 
+
     def verify_record_checkpoint_dirty_pfn_list(self, content):
         """ checkpoint dirty pfn list """
         raise RecordError("Found checkpoint dirty pfn list record in stream")
+
+
+    def verify_record_static_data_end(self, content):
+        """ static data end record """
+
+        if len(content) != 0:
+            raise RecordError("End record with non-zero length")
+
+        if self.version < 3:
+            raise RecordError("Static data end record found in v2 stream")
+
+
+    def verify_record_x86_cpuid_policy(self, content):
+        """ x86 CPUID policy record """
+
+        if self.version < 3:
+            raise RecordError("x86 CPUID policy record found in v2 stream")
+
+        sz = calcsize(X86_CPUID_POLICY_FORMAT)
+        contentsz = len(content)
+
+        if contentsz < sz or (contentsz % sz) != 0:
+            raise RecordError("Record length %u, expected multiple of %u" %
+                              (contentsz, sz))
+
+
+    def verify_record_x86_msr_policy(self, content):
+        """ x86 MSR policy record """
+
+        if self.version < 3:
+            raise RecordError("x86 MSR policy record found in v2 stream")
+
+        sz = calcsize(X86_MSR_POLICY_FORMAT)
+        contentsz = len(content)
+
+        if contentsz < sz or (contentsz % sz) != 0:
+            raise RecordError("Record length %u, expected multiple of %u" %
+                              (contentsz, sz))
 
 
 record_verifiers = {
@@ -451,4 +518,12 @@ record_verifiers = {
         VerifyLibxc.verify_record_checkpoint,
     REC_TYPE_checkpoint_dirty_pfn_list:
         VerifyLibxc.verify_record_checkpoint_dirty_pfn_list,
+
+    REC_TYPE_static_data_end:
+        VerifyLibxc.verify_record_static_data_end,
+
+    REC_TYPE_x86_cpuid_policy:
+        VerifyLibxc.verify_record_x86_cpuid_policy,
+    REC_TYPE_x86_msr_policy:
+        VerifyLibxc.verify_record_x86_msr_policy,
     }

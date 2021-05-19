@@ -19,6 +19,26 @@ following compile process. Once configure is done, make(1) has to be
 called. Also make(1) recognizes certain arguments. The following sections
 will give an overview.
 
+Xen Hypervisor
+==============
+
+Xen itself is configured via a `kconfig' system borrowed from Linux.
+See docs/misc/kconfig.txt.
+
+Note that unlike with Linux, and contrary to that document, you cannot
+look at Kconfig files, or the default or generated config files etc.,
+to find available configuration options.  This is because it is only
+supported (and security supported) by the Xen Project, to change a
+small subset of the options.  Attempts to change other options will be
+silently overridden.  The only way to find which configuration options
+are available is to run `make menuconfig' or the like.
+
+You can counter-override this behaviour by setting XEN_CONFIG_EXPERT=y
+in your environment.  However, doing this is not supported and the
+resulting configurations do not receive security support.  If you set
+this variable there is nothing stopping you setting dangerously
+experimental combinations of features - not even any warnings.
+
 Options recognized by configure
 ===============================
 
@@ -144,10 +164,6 @@ this detection and the sysv runlevel scripts have to be used.
   --with-systemd=DIR
   --with-systemd-modules-load=DIR
 
-The old backend drivers are disabled because qdisk is now the default.
-This option can be used to build them anyway.
-  --enable-blktap2
-
 Build various stubom components, some are only example code. Its usually
 enough to specify just --enable-stubdom and leave these options alone.
   --enable-ioemu-stubdom
@@ -225,11 +241,6 @@ XEN_BUILD_TIME=hh:mm:ss
 SMBIOS_REL_DATE=mm/dd/yyyy
 VGABIOS_REL_DATE="dd Mon yyyy"
 
-The following variables can be used to tweak some aspects of the
-hypervisor build.
-lto=y
-
-During tools build external repos will be cloned into the source tree.
 This variable can be used to point to a different git binary to be used.
 GIT=
 
@@ -250,6 +261,10 @@ pass RPM_OPT_FLAGS.
 EXTRA_CFLAGS_XEN_TOOLS=
 EXTRA_CFLAGS_QEMU_TRADITIONAL=
 EXTRA_CFLAGS_QEMU_XEN=
+
+Additional CFLAGS may be supplied to the build of the hypervisor by
+using this variable.
+EXTRA_CFLAGS_XEN_CORE=
 
 This variable can be used to use DIR/include and DIR/lib during build.
 This is the same as PREPEND_LIB and PREPEND_INCLUDES. APPEND_LIB and
@@ -279,9 +294,6 @@ This option is enabled by default if XSM is enabled and the compiler
 (checkpolicy) is found.  The location of this executable can be set
 using the environment variable.
 CHECKPOLICY=
-
-Do a build for coverage.
-coverage=y
 
 Use clang instead of GCC.
 clang=y
@@ -353,12 +365,5 @@ make XEN_TARGET_ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
         DESTDIR=/some/path install
 
 
-TODO
-====
-
- - DESTDIR should be empty, not "/"
- - add make uninstall targets
- - replace private path variables as needed (SBINDIR/sbindir)
- - ...
 
 # vim: tw=72 et

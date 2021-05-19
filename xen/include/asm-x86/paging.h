@@ -46,19 +46,36 @@
 #define PG_SH_enable   0
 #define PG_SH_forced   0
 #endif
+#ifdef CONFIG_HVM
 #define PG_HAP_enable  (1U << PG_HAP_shift)
+#else
+#define PG_HAP_enable  0
+#endif
 
 /* common paging mode bits */
 #define PG_mode_shift  10 
+#ifdef CONFIG_HVM
 /* Refcounts based on shadow tables instead of guest tables */
 #define PG_refcounts   (XEN_DOMCTL_SHADOW_ENABLE_REFCOUNT << PG_mode_shift)
-/* Enable log dirty mode */
-#define PG_log_dirty   (XEN_DOMCTL_SHADOW_ENABLE_LOG_DIRTY << PG_mode_shift)
 /* Xen does p2m translation, not guest */
 #define PG_translate   (XEN_DOMCTL_SHADOW_ENABLE_TRANSLATE << PG_mode_shift)
 /* Xen does not steal address space from the domain for its own booking;
  * requires VT or similar mechanisms */
 #define PG_external    (XEN_DOMCTL_SHADOW_ENABLE_EXTERNAL << PG_mode_shift)
+#else
+#define PG_refcounts   0
+#define PG_translate   0
+#define PG_external    0
+#endif
+#if defined(CONFIG_HVM) || !defined(CONFIG_PV_SHIM_EXCLUSIVE)
+/* Enable log dirty mode */
+#define PG_log_dirty   (XEN_DOMCTL_SHADOW_ENABLE_LOG_DIRTY << PG_mode_shift)
+#else
+#define PG_log_dirty   0
+#endif
+
+/* All paging modes. */
+#define PG_MASK (PG_refcounts | PG_log_dirty | PG_translate | PG_external)
 
 #define paging_mode_enabled(_d)   (!!(_d)->arch.paging.mode)
 #define paging_mode_shadow(_d)    (!!((_d)->arch.paging.mode & PG_SH_enable))
@@ -79,28 +96,23 @@
  * These shouldn't be used directly by callers; rather use the functions
  * below which will indirect through this table as appropriate. */
 
-struct sh_emulate_ctxt;
 struct shadow_paging_mode {
 #ifdef CONFIG_SHADOW_PAGING
     void          (*detach_old_tables     )(struct vcpu *v);
-    int           (*x86_emulate_write     )(struct vcpu *v, unsigned long va,
-                                            void *src, u32 bytes,
-                                            struct sh_emulate_ctxt *sh_ctxt);
-    int           (*x86_emulate_cmpxchg   )(struct vcpu *v, unsigned long va,
-                                            unsigned long old, 
-                                            unsigned long new,
-                                            unsigned int bytes,
-                                            struct sh_emulate_ctxt *sh_ctxt);
-    bool_t        (*write_guest_entry     )(struct vcpu *v, intpte_t *p,
+#ifdef CONFIG_PV
+    void          (*write_guest_entry     )(struct vcpu *v, intpte_t *p,
                                             intpte_t new, mfn_t gmfn);
-    bool_t        (*cmpxchg_guest_entry   )(struct vcpu *v, intpte_t *p,
-                                            intpte_t *old, intpte_t new,
+    intpte_t      (*cmpxchg_guest_entry   )(struct vcpu *v, intpte_t *p,
+                                            intpte_t old, intpte_t new,
                                             mfn_t gmfn);
-    mfn_t         (*make_monitor_table    )(struct vcpu *v);
-    void          (*destroy_monitor_table )(struct vcpu *v, mfn_t mmfn);
+#endif
+#ifdef CONFIG_HVM
     int           (*guess_wrmap           )(struct vcpu *v, 
                                             unsigned long vaddr, mfn_t gmfn);
-    void          (*pagetable_dying       )(struct vcpu *v, paddr_t gpa);
+    void          (*pagetable_dying       )(paddr_t gpa);
+    void          (*trace_emul_write_val  )(const void *ptr, unsigned long vaddr,
+                                            const void *src, unsigned int bytes);
+#endif
 #endif
     /* For outsiders to tell what mode we're in */
     unsigned int shadow_levels;
@@ -113,7 +125,8 @@ struct shadow_paging_mode {
 struct paging_mode {
     int           (*page_fault            )(struct vcpu *v, unsigned long va,
                                             struct cpu_user_regs *regs);
-    bool_t        (*invlpg                )(struct vcpu *v, unsigned long va);
+    bool          (*invlpg                )(struct vcpu *v,
+                                            unsigned long linear);
     unsigned long (*gva_to_gfn            )(struct vcpu *v,
                                             struct p2m_domain *p2m,
                                             unsigned long va,
@@ -123,11 +136,12 @@ struct paging_mode {
                                             unsigned long cr3,
                                             paddr_t ga, uint32_t *pfec,
                                             unsigned int *page_order);
-    void          (*update_cr3            )(struct vcpu *v, int do_locking);
+    void          (*update_cr3            )(struct vcpu *v, int do_locking,
+                                            bool noflush);
     void          (*update_paging_modes   )(struct vcpu *v);
-    void          (*write_p2m_entry       )(struct domain *d, unsigned long gfn,
-                                            l1_pgentry_t *p, l1_pgentry_t new,
-                                            unsigned int level);
+    bool          (*flush_tlb             )(bool (*flush_vcpu)(void *ctxt,
+                                                               struct vcpu *v),
+                                            void *ctxt);
 
     unsigned int guest_levels;
 
@@ -138,6 +152,8 @@ struct paging_mode {
 /*****************************************************************************
  * Log dirty code */
 
+#if PG_log_dirty
+
 /* get the dirty bitmap for a specific range of pfns */
 void paging_log_dirty_range(struct domain *d,
                             unsigned long begin_pfn,
@@ -145,19 +161,15 @@ void paging_log_dirty_range(struct domain *d,
                             uint8_t *dirty_bitmap);
 
 /* enable log dirty */
-int paging_log_dirty_enable(struct domain *d, bool_t log_global);
+int paging_log_dirty_enable(struct domain *d, bool log_global);
 
 /* log dirty initialization */
-void paging_log_dirty_init(struct domain *d,
-                           int  (*enable_log_dirty)(struct domain *d,
-                                                    bool_t log_global),
-                           int  (*disable_log_dirty)(struct domain *d),
-                           void (*clean_dirty_bitmap)(struct domain *d));
+void paging_log_dirty_init(struct domain *d, const struct log_dirty_ops *ops);
 
 /* mark a page as dirty */
-void paging_mark_dirty(struct domain *d, unsigned long guest_mfn);
+void paging_mark_dirty(struct domain *d, mfn_t gmfn);
 /* mark a page as dirty with taking guest pfn as parameter */
-void paging_mark_gfn_dirty(struct domain *d, unsigned long pfn);
+void paging_mark_pfn_dirty(struct domain *d, pfn_t pfn);
 
 /* is this guest page dirty? 
  * This is called from inside paging code, with the paging lock held. */
@@ -173,22 +185,36 @@ int paging_mfn_is_dirty(struct domain *d, mfn_t gmfn);
  * TODO2: Abstract out the radix-tree mechanics?
  */
 #define LOGDIRTY_NODE_ENTRIES (1 << PAGETABLE_ORDER)
-#define L1_LOGDIRTY_IDX(pfn) ((pfn) & ((1 << (PAGE_SHIFT+3)) - 1))
-#define L2_LOGDIRTY_IDX(pfn) (((pfn) >> (PAGE_SHIFT+3)) & \
+#define L1_LOGDIRTY_IDX(pfn) (pfn_x(pfn) & ((1 << (PAGE_SHIFT + 3)) - 1))
+#define L2_LOGDIRTY_IDX(pfn) ((pfn_x(pfn) >> (PAGE_SHIFT + 3)) & \
                               (LOGDIRTY_NODE_ENTRIES-1))
-#define L3_LOGDIRTY_IDX(pfn) (((pfn) >> (PAGE_SHIFT+3+PAGETABLE_ORDER)) & \
+#define L3_LOGDIRTY_IDX(pfn) ((pfn_x(pfn) >> (PAGE_SHIFT + 3 + PAGETABLE_ORDER)) & \
                               (LOGDIRTY_NODE_ENTRIES-1))
-#define L4_LOGDIRTY_IDX(pfn) (((pfn) >> (PAGE_SHIFT+3+PAGETABLE_ORDER*2)) & \
+#define L4_LOGDIRTY_IDX(pfn) ((pfn_x(pfn) >> (PAGE_SHIFT + 3 + PAGETABLE_ORDER * 2)) & \
                               (LOGDIRTY_NODE_ENTRIES-1))
 
+#ifdef CONFIG_HVM
 /* VRAM dirty tracking support */
 struct sh_dirty_vram {
     unsigned long begin_pfn;
     unsigned long end_pfn;
+#ifdef CONFIG_SHADOW_PAGING
     paddr_t *sl1ma;
     uint8_t *dirty_bitmap;
     s_time_t last_dirty;
+#endif
 };
+#endif
+
+#else /* !PG_log_dirty */
+
+static inline void paging_log_dirty_init(struct domain *d,
+                                         const struct log_dirty_ops *ops) {}
+static inline void paging_mark_dirty(struct domain *d, mfn_t gmfn) {}
+static inline void paging_mark_pfn_dirty(struct domain *d, pfn_t pfn) {}
+static inline bool paging_mfn_is_dirty(struct domain *d, mfn_t gmfn) { return false; }
+
+#endif /* PG_log_dirty */
 
 /*****************************************************************************
  * Entry points into the paging-assistance code */
@@ -199,18 +225,20 @@ void paging_vcpu_init(struct vcpu *v);
 
 /* Set up the paging-assistance-specific parts of a domain struct at
  * start of day.  Called for every domain from arch_domain_create() */
-int paging_domain_init(struct domain *d, unsigned int domcr_flags);
+int paging_domain_init(struct domain *d);
 
 /* Handler for paging-control ops: operations from user-space to enable
  * and disable ephemeral shadow modes (test mode and log-dirty mode) and
  * manipulate the log-dirty bitmap. */
-int paging_domctl(struct domain *d, xen_domctl_shadow_op_t *sc,
-                  XEN_GUEST_HANDLE_PARAM(void) u_domctl, bool_t resuming);
+int paging_domctl(struct domain *d, struct xen_domctl_shadow_op *sc,
+                  XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl,
+                  bool_t resuming);
 
 /* Helper hypercall for dealing with continuations. */
 long paging_domctl_continuation(XEN_GUEST_HANDLE_PARAM(xen_domctl_t));
 
-/* Call when destroying a domain */
+/* Call when destroying a vcpu/domain */
+void paging_vcpu_teardown(struct vcpu *v);
 int paging_teardown(struct domain *d);
 
 /* Call once all of the references to the domain have gone away */
@@ -244,12 +272,13 @@ paging_fault(unsigned long va, struct cpu_user_regs *regs)
 /* Handle invlpg requests on vcpus. */
 void paging_invlpg(struct vcpu *v, unsigned long va);
 
-/* Translate a guest virtual address to the frame number that the
+/*
+ * Translate a guest virtual address to the frame number that the
  * *guest* pagetables would map it to.  Returns INVALID_GFN if the guest
  * tables don't map this address for this kind of access.
- * pfec[0] is used to determine which kind of access this is when
+ * *pfec is used to determine which kind of access this is when
  * walking the tables.  The caller should set the PFEC_page_present bit
- * in pfec[0]; in the failure case, that bit will be cleared if appropriate.
+ * in *pfec; in the failure case, that bit will be cleared if appropriate.
  *
  * SDM Intel 64 Volume 3, Chapter Paging, PAGE-FAULT EXCEPTIONS:
  * The PFEC_insn_fetch flag is set only when NX or SMEP are enabled.
@@ -279,9 +308,9 @@ static inline unsigned long paging_ga_to_gfn_cr3(struct vcpu *v,
 /* Update all the things that are derived from the guest's CR3.
  * Called when the guest changes CR3; the caller can then use v->arch.cr3
  * as the value to load into the host CR3 to schedule this vcpu */
-static inline void paging_update_cr3(struct vcpu *v)
+static inline void paging_update_cr3(struct vcpu *v, bool noflush)
 {
-    paging_get_hostmode(v)->update_cr3(v, 1);
+    paging_get_hostmode(v)->update_cr3(v, 1, noflush);
 }
 
 /* Update all the things that are derived from the guest's CR0/CR3/CR4.
@@ -292,37 +321,43 @@ static inline void paging_update_paging_modes(struct vcpu *v)
     paging_get_hostmode(v)->update_paging_modes(v);
 }
 
+#ifdef CONFIG_PV
 
-/* Write a new value into the guest pagetable, and update the
- * paging-assistance state appropriately.  Returns 0 if we page-faulted,
- * 1 for success. */
-static inline bool_t paging_write_guest_entry(struct vcpu *v, intpte_t *p,
-                                              intpte_t new, mfn_t gmfn)
+/*
+ * Write a new value into the guest pagetable, and update the
+ * paging-assistance state appropriately.  Returns false if we page-faulted,
+ * true for success.
+ */
+static inline void paging_write_guest_entry(
+    struct vcpu *v, intpte_t *p, intpte_t new, mfn_t gmfn)
 {
 #ifdef CONFIG_SHADOW_PAGING
     if ( unlikely(paging_mode_shadow(v->domain)) && paging_get_hostmode(v) )
-        return paging_get_hostmode(v)->shadow.write_guest_entry(v, p, new,
-                                                                gmfn);
+        paging_get_hostmode(v)->shadow.write_guest_entry(v, p, new, gmfn);
+    else
 #endif
-    return !__copy_to_user(p, &new, sizeof(new));
+        write_atomic(p, new);
 }
 
 
-/* Cmpxchg a new value into the guest pagetable, and update the
- * paging-assistance state appropriately.  Returns 0 if we page-faulted,
- * 1 if not.  N.B. caller should check the value of "old" to see if the
- * cmpxchg itself was successful. */
-static inline bool_t paging_cmpxchg_guest_entry(struct vcpu *v, intpte_t *p,
-                                                intpte_t *old, intpte_t new,
-                                                mfn_t gmfn)
+/*
+ * Cmpxchg a new value into the guest pagetable, and update the
+ * paging-assistance state appropriately.  Returns false if we page-faulted,
+ * true if not.  N.B. caller should check the value of "old" to see if the
+ * cmpxchg itself was successful.
+ */
+static inline intpte_t paging_cmpxchg_guest_entry(
+    struct vcpu *v, intpte_t *p, intpte_t old, intpte_t new, mfn_t gmfn)
 {
 #ifdef CONFIG_SHADOW_PAGING
     if ( unlikely(paging_mode_shadow(v->domain)) && paging_get_hostmode(v) )
         return paging_get_hostmode(v)->shadow.cmpxchg_guest_entry(v, p, old,
                                                                   new, gmfn);
 #endif
-    return !cmpxchg_user(p, *old, new);
+    return cmpxchg(p, old, new);
 }
+
+#endif /* CONFIG_PV */
 
 /* Helper function that writes a pte in such a way that a concurrent read 
  * never sees a half-written entry that has _PAGE_PRESENT set */
@@ -331,25 +366,50 @@ static inline void safe_write_pte(l1_pgentry_t *p, l1_pgentry_t new)
     *p = new;
 }
 
-/* Atomically write a P2M entry and update the paging-assistance state 
- * appropriately. 
- * Arguments: the domain in question, the GFN whose mapping is being updated, 
- * a pointer to the entry to be written, the MFN in which the entry resides, 
- * the new contents of the entry, and the level in the p2m tree at which 
- * we are writing. */
-struct p2m_domain;
-
-void paging_write_p2m_entry(struct p2m_domain *p2m, unsigned long gfn,
-                            l1_pgentry_t *p, l1_pgentry_t new,
-                            unsigned int level);
-
-/* Called from the guest to indicate that the a process is being
- * torn down and its pagetables will soon be discarded */
-void pagetable_dying(struct domain *d, paddr_t gpa);
+/*
+ * Called from the guest to indicate that the a process is being
+ * torn down and its pagetables will soon be discarded.
+ */
+void pagetable_dying(paddr_t gpa);
 
 /* Print paging-assistance info to the console */
 void paging_dump_domain_info(struct domain *d);
 void paging_dump_vcpu_info(struct vcpu *v);
+
+/* Set the pool of shadow pages to the required number of pages.
+ * Input might be rounded up to at minimum amount of pages, plus
+ * space for the p2m table.
+ * Returns 0 for success, non-zero for failure. */
+int paging_set_allocation(struct domain *d, unsigned int pages,
+                          bool *preempted);
+
+/* Is gfn within maxphysaddr for the domain? */
+static inline bool gfn_valid(const struct domain *d, gfn_t gfn)
+{
+    return !(gfn_x(gfn) >> (d->arch.cpuid->extd.maxphysaddr - PAGE_SHIFT));
+}
+
+/* Maxphysaddr supportable by the paging infrastructure. */
+static always_inline unsigned int paging_max_paddr_bits(const struct domain *d)
+{
+    unsigned int bits = paging_mode_hap(d) ? hap_paddr_bits : paddr_bits;
+
+    if ( !IS_ENABLED(CONFIG_BIGMEM) && paging_mode_shadow(d) &&
+         !is_pv_domain(d) )
+    {
+        /* Shadowed superpages store GFNs in 32-bit page_info fields. */
+        bits = min(bits, 32U + PAGE_SHIFT);
+    }
+
+    return bits;
+}
+
+static inline bool paging_flush_tlb(bool (*flush_vcpu)(void *ctxt,
+                                                       struct vcpu *v),
+                                    void *ctxt)
+{
+    return paging_get_hostmode(current)->flush_tlb(flush_vcpu, ctxt);
+}
 
 #endif /* XEN_PAGING_H */
 

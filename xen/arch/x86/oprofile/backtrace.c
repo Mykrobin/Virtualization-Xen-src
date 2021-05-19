@@ -47,7 +47,7 @@ dump_hypervisor_backtrace(struct vcpu *vcpu, const struct frame_head *head,
 static inline int is_32bit_vcpu(struct vcpu *vcpu)
 {
     if (is_hvm_vcpu(vcpu))
-        return !hvm_long_mode_enabled(vcpu);
+        return !hvm_long_mode_active(vcpu);
     else
         return is_pv_32bit_vcpu(vcpu);
 }
@@ -74,11 +74,8 @@ dump_guest_backtrace(struct vcpu *vcpu, const struct frame_head *head,
     }
     else
     {
-        XEN_GUEST_HANDLE(const_frame_head_t) guest_head;
-        XEN_GUEST_HANDLE_PARAM(const_frame_head_t) guest_head_param =
+        XEN_GUEST_HANDLE_PARAM(const_frame_head_t) guest_head =
             const_guest_handle_from_ptr(head, frame_head_t);
-        guest_head = guest_handle_from_param(guest_head_param,
-					     const_frame_head_t);
 
         /* Also check accessibility of one struct frame_head beyond */
         if (!guest_handle_okay(guest_head, 2))
@@ -150,7 +147,7 @@ static int valid_hypervisor_stack(const struct frame_head *head,
 void xenoprof_backtrace(struct vcpu *vcpu, const struct cpu_user_regs *regs,
 			unsigned long depth, int mode)
 {
-    const struct frame_head *head = (void *)regs->ebp;
+    const struct frame_head *head = (void *)regs->rbp;
 
     if (mode > 1) {
         while (depth-- && valid_hypervisor_stack(head, regs))

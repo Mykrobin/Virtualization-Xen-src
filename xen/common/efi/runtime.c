@@ -29,12 +29,6 @@ void efi_rs_leave(struct efi_rs_state *);
 
 #ifndef COMPAT
 
-/*
- * Currently runtime services are not implemented on ARM. To boot Xen with ACPI,
- * set efi_enabled to 1, so that Xen can get the ACPI root pointer from EFI.
- */
-const bool_t efi_enabled = 1;
-
 #ifndef CONFIG_ARM
 # include <asm/i387.h>
 # include <asm/xstate.h>
@@ -62,6 +56,12 @@ UINT64 __read_mostly efi_boot_max_var_store_size;
 UINT64 __read_mostly efi_boot_remain_var_store_size;
 UINT64 __read_mostly efi_boot_max_var_size;
 
+UINT64 __read_mostly efi_apple_properties_addr;
+UINTN __read_mostly efi_apple_properties_len;
+
+/* Bit field representing available EFI features/properties. */
+unsigned int efi_flags;
+
 struct efi __read_mostly efi = {
 	.acpi   = EFI_INVALID_TABLE_ADDR,
 	.acpi20 = EFI_INVALID_TABLE_ADDR,
@@ -71,6 +71,11 @@ struct efi __read_mostly efi = {
 };
 
 const struct efi_pci_rom *__read_mostly efi_pci_roms;
+
+bool efi_enabled(unsigned int feature)
+{
+    return test_bit(feature, &efi_flags);
+}
 
 #ifndef CONFIG_ARM /* TODO - disabled until implemented on ARM */
 
@@ -99,11 +104,11 @@ struct efi_rs_state efi_rs_enter(void)
     {
         struct desc_ptr gdt_desc = {
             .limit = LAST_RESERVED_GDT_BYTE,
-            .base  = (unsigned long)(per_cpu(gdt_table, smp_processor_id()) -
+            .base  = (unsigned long)(per_cpu(gdt, smp_processor_id()) -
                                      FIRST_RESERVED_GDT_ENTRY)
         };
 
-        asm volatile ( "lgdt %0" : : "m" (gdt_desc) );
+        lgdt(&gdt_desc);
     }
 
     switch_cr3_cr4(virt_to_maddr(efi_l4_pgtable), read_cr4());
@@ -125,7 +130,7 @@ void efi_rs_leave(struct efi_rs_state *state)
             .base  = GDT_VIRT_START(curr)
         };
 
-        asm volatile ( "lgdt %0" : : "m" (gdt_desc) );
+        lgdt(&gdt_desc);
     }
     irq_exit();
     efi_rs_on_cpu = NR_CPUS;
@@ -133,7 +138,7 @@ void efi_rs_leave(struct efi_rs_state *state)
     vcpu_restore_fpu_nonlazy(curr, true);
 }
 
-bool_t efi_rs_using_pgtables(void)
+bool efi_rs_using_pgtables(void)
 {
     return efi_l4_pgtable &&
            (smp_processor_id() == efi_rs_on_cpu) &&
@@ -174,7 +179,7 @@ void efi_halt_system(void)
     printk(XENLOG_WARNING "EFI: could not halt system (%#lx)\n", status);
 }
 
-void efi_reset_system(bool_t warm)
+void efi_reset_system(bool warm)
 {
     EFI_STATUS status;
     struct efi_rs_state state = efi_rs_enter();
@@ -189,12 +194,26 @@ void efi_reset_system(bool_t warm)
 }
 
 #endif /* CONFIG_ARM */
-#endif
+
+const CHAR16 *wmemchr(const CHAR16 *s, CHAR16 c, UINTN n)
+{
+    while ( n && *s != c )
+    {
+        --n;
+        ++s;
+    }
+    return n ? s : NULL;
+}
+
+#endif /* COMPAT */
 
 #ifndef CONFIG_ARM /* TODO - disabled until implemented on ARM */
 int efi_get_info(uint32_t idx, union xenpf_efi_info *info)
 {
     unsigned int i, n;
+
+    if ( !efi_enabled(EFI_BOOT) )
+        return -ENOSYS;
 
     switch ( idx )
     {
@@ -203,12 +222,9 @@ int efi_get_info(uint32_t idx, union xenpf_efi_info *info)
         break;
     case XEN_FW_EFI_RT_VERSION:
     {
-        struct efi_rs_state state = efi_rs_enter();
-
-        if ( !state.cr3 )
+        if ( !efi_enabled(EFI_RS) )
             return -EOPNOTSUPP;
         info->version = efi_rs->Hdr.Revision;
-        efi_rs_leave(&state);
         break;
     }
     case XEN_FW_EFI_CONFIG_TABLE:
@@ -268,6 +284,14 @@ int efi_get_info(uint32_t idx, union xenpf_efi_info *info)
             }
         return -ESRCH;
     }
+
+    case XEN_FW_EFI_APPLE_PROPERTIES:
+        if ( !efi_apple_properties_len )
+            return -ENODATA;
+        info->apple_properties.address = efi_apple_properties_addr;
+        info->apple_properties.size = efi_apple_properties_len;
+        break;
+
     default:
         return -EINVAL;
     }
@@ -330,6 +354,12 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
     unsigned long flags;
     EFI_STATUS status = EFI_NOT_STARTED;
     int rc = 0;
+
+    if ( !efi_enabled(EFI_BOOT) )
+        return -ENOSYS;
+
+    if ( !efi_enabled(EFI_RS) )
+        return -EOPNOTSUPP;
 
     switch ( op->function )
     {
@@ -446,7 +476,12 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
         name = xmalloc_array(CHAR16, ++len);
         if ( !name )
            return -ENOMEM;
-        __copy_from_guest(name, op->u.get_variable.name, len);
+        if ( __copy_from_guest(name, op->u.get_variable.name, len) ||
+             wmemchr(name, 0, len) != name + len - 1 )
+        {
+            xfree(name);
+            return -EIO;
+        }
 
         size = op->u.get_variable.size;
         if ( size )
@@ -494,7 +529,12 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
         name = xmalloc_array(CHAR16, ++len);
         if ( !name )
            return -ENOMEM;
-        __copy_from_guest(name, op->u.set_variable.name, len);
+        if ( __copy_from_guest(name, op->u.set_variable.name, len) ||
+             wmemchr(name, 0, len) != name + len - 1 )
+        {
+            xfree(name);
+            return -EIO;
+        }
 
         data = xmalloc_bytes(op->u.set_variable.size);
         if ( !data )
@@ -531,7 +571,7 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
             return -EINVAL;
 
         size = op->u.get_next_variable_name.size;
-        name.raw = xmalloc_bytes(size);
+        name.raw = xzalloc_bytes(size);
         if ( !name.raw )
             return -ENOMEM;
         if ( copy_from_guest(name.raw, op->u.get_next_variable_name.name,
@@ -596,12 +636,11 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
             break;
         }
 
-        state = efi_rs_enter();
-        if ( !state.cr3 || (efi_rs->Hdr.Revision >> 16) < 2 )
-        {
-            efi_rs_leave(&state);
+        if ( !efi_enabled(EFI_RS) || (efi_rs->Hdr.Revision >> 16) < 2 )
             return -EOPNOTSUPP;
-        }
+        state = efi_rs_enter();
+        if ( !state.cr3 )
+            return -EOPNOTSUPP;
         status = efi_rs->QueryVariableInfo(
             op->u.query_variable_info.attr,
             &op->u.query_variable_info.max_store_size,
@@ -615,13 +654,8 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
         if ( op->misc )
             return -EINVAL;
 
-        state = efi_rs_enter();
-        if ( !state.cr3 || (efi_rs->Hdr.Revision >> 16) < 2 )
-        {
-            efi_rs_leave(&state);
+        if ( !efi_enabled(EFI_RS) || (efi_rs->Hdr.Revision >> 16) < 2 )
             return -EOPNOTSUPP;
-        }
-        efi_rs_leave(&state);
         /* XXX fall through for now */
     default:
         return -ENOSYS;

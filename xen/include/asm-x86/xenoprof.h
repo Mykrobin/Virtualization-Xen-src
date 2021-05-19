@@ -22,7 +22,11 @@
 #ifndef __ASM_X86_XENOPROF_H__
 #define __ASM_X86_XENOPROF_H__
 
+struct vcpu;
+
 #ifdef CONFIG_XENOPROF
+
+#include <public/xen.h>
 
 int nmi_reserve_counters(void);
 int nmi_setup_events(void);
@@ -45,7 +49,6 @@ int xenoprof_arch_counter(XEN_GUEST_HANDLE_PARAM(void) arg);
 int compat_oprof_arch_counter(XEN_GUEST_HANDLE_PARAM(void) arg);
 int xenoprof_arch_ibs_counter(XEN_GUEST_HANDLE_PARAM(void) arg);
 
-struct vcpu;
 struct cpu_user_regs;
 
 /* AMD IBS support */
@@ -66,6 +69,8 @@ int passive_domain_do_rdmsr(unsigned int msr, uint64_t *msr_content);
 int passive_domain_do_wrmsr(unsigned int msr, uint64_t msr_content);
 void passive_domain_destroy(struct vcpu *v);
 
+bool nmi_oprofile_send_virq(void);
+
 #else
 
 static inline int passive_domain_do_rdmsr(unsigned int msr,
@@ -81,6 +86,11 @@ static inline int passive_domain_do_wrmsr(unsigned int msr,
 }
 
 static inline void passive_domain_destroy(struct vcpu *v) {}
+
+static inline bool nmi_oprofile_send_virq(void)
+{
+    return false;
+}
 
 #endif /* CONFIG_XENOPROF */
 

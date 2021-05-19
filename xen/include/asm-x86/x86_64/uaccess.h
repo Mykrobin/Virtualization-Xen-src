@@ -1,7 +1,17 @@
 #ifndef __X86_64_UACCESS_H
 #define __X86_64_UACCESS_H
 
-#define COMPAT_ARG_XLAT_VIRT_BASE ((void *)ARG_XLAT_START(current))
+/*
+ * With CONFIG_SPECULATIVE_HARDEN_GUEST_ACCESS (apparent) PV guest accesses
+ * are prohibited to touch the Xen private VA range.  The compat argument
+ * translation area, therefore, can't live within this range.  Domains
+ * (potentially) in need of argument translation (32-bit PV, possibly HVM) get
+ * a secondary mapping installed, which needs to be used for such accesses in
+ * the PV case, and will also be used for HVM to avoid extra conditionals.
+ */
+#define COMPAT_ARG_XLAT_VIRT_BASE ((void *)ARG_XLAT_START(current) + \
+                                   (PERDOMAIN_ALT_VIRT_START - \
+                                    PERDOMAIN_VIRT_START))
 #define COMPAT_ARG_XLAT_SIZE      (2*PAGE_SIZE)
 struct vcpu;
 int setup_compat_arg_xlat(struct vcpu *v);
@@ -56,29 +66,5 @@ extern void *xlat_malloc(unsigned long *xlat_page_current, size_t size);
 #define compat_array_access_ok(addr,count,size) \
     (likely((count) < (~0U / (size))) && \
      compat_access_ok(addr, 0 + (count) * (size)))
-
-#define __put_user_size(x,ptr,size,retval,errret)			\
-do {									\
-	retval = 0;							\
-	switch (size) {							\
-	case 1: __put_user_asm(x,ptr,retval,"b","b","iq",errret);break;	\
-	case 2: __put_user_asm(x,ptr,retval,"w","w","ir",errret);break; \
-	case 4: __put_user_asm(x,ptr,retval,"l","k","ir",errret);break;	\
-	case 8: __put_user_asm(x,ptr,retval,"q","","ir",errret);break;	\
-	default: __put_user_bad();					\
-	}								\
-} while (0)
-
-#define __get_user_size(x,ptr,size,retval,errret)			\
-do {									\
-	retval = 0;							\
-	switch (size) {							\
-	case 1: __get_user_asm(x,ptr,retval,"b","b","=q",errret);break;	\
-	case 2: __get_user_asm(x,ptr,retval,"w","w","=r",errret);break;	\
-	case 4: __get_user_asm(x,ptr,retval,"l","k","=r",errret);break;	\
-	case 8: __get_user_asm(x,ptr,retval,"q","","=r",errret); break;	\
-	default: __get_user_bad();					\
-	}								\
-} while (0)
 
 #endif /* __X86_64_UACCESS_H */

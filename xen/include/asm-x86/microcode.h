@@ -1,36 +1,27 @@
 #ifndef ASM_X86__MICROCODE_H
 #define ASM_X86__MICROCODE_H
 
+#include <xen/types.h>
 #include <xen/percpu.h>
 
-struct cpu_signature;
-struct ucode_cpu_info;
-
-struct microcode_ops {
-    int (*microcode_resume_match)(unsigned int cpu, const void *mc);
-    int (*cpu_request_microcode)(unsigned int cpu, const void *buf,
-                                 size_t size);
-    int (*collect_cpu_info)(unsigned int cpu, struct cpu_signature *csig);
-    int (*apply_microcode)(unsigned int cpu);
-    int (*start_update)(void);
-};
+#include <public/xen.h>
 
 struct cpu_signature {
+    /* CPU signature (CPUID.1.EAX). */
     unsigned int sig;
+
+    /* Platform Flags.  Only applicable to Intel. */
     unsigned int pf;
+
+    /* Microcode Revision. */
     unsigned int rev;
 };
 
-struct ucode_cpu_info {
-    struct cpu_signature cpu_sig;
-    union {
-        struct microcode_intel *mc_intel;
-        struct microcode_amd *mc_amd;
-        void *mc_valid;
-    } mc;
-};
+DECLARE_PER_CPU(struct cpu_signature, cpu_sig);
 
-DECLARE_PER_CPU(struct ucode_cpu_info, ucode_cpu_info);
-extern const struct microcode_ops *microcode_ops;
+void microcode_set_module(unsigned int idx);
+int microcode_update(XEN_GUEST_HANDLE(const_void), unsigned long len);
+int early_microcode_init(void);
+int microcode_update_one(void);
 
 #endif /* ASM_X86__MICROCODE_H */

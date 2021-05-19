@@ -5,9 +5,6 @@
 #include <xen/lib.h>
 #include <public/arch-arm.h>
 
-#define nop() \
-    asm volatile ( "nop" )
-
 #define sev()           asm volatile("sev" : : : "memory")
 #define wfe()           asm volatile("wfe" : : : "memory")
 #define wfi()           asm volatile("wfi" : : : "memory")
@@ -33,6 +30,9 @@
 
 #define smp_wmb()       dmb(ishst)
 
+#define smp_mb__before_atomic()    smp_mb()
+#define smp_mb__after_atomic()     smp_mb()
+
 /*
  * This is used to ensure the compiler did actually allocate the register we
  * asked it for some inline assembly sequences.  Apparently we can't trust
@@ -50,6 +50,13 @@
 #else
 # error "unknown ARM variant"
 #endif
+
+static inline int local_abort_is_enabled(void)
+{
+    unsigned long flags;
+    local_save_flags(flags);
+    return !(flags & PSR_ABT_MASK);
+}
 
 #define arch_fetch_and_add(x, v) __sync_fetch_and_add(x, v)
 

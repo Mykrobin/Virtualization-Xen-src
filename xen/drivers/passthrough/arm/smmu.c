@@ -35,7 +35,6 @@
  */
 
 
-#include <xen/config.h>
 #include <xen/delay.h>
 #include <xen/errno.h>
 #include <xen/err.h>
@@ -198,16 +197,6 @@ typedef paddr_t phys_addr_t;
 
 #define VA_BITS		0	/* Only used for configuring stage-1 input size */
 
-/* The macro ACCESS_ONCE start to be replaced in Linux in favor of
- * {READ, WRITE}_ONCE. Rather than introducing in the common code, keep a
- * version here. We will have to drop it when the SMMU code in Linux will
- * switch to {READ, WRITE}_ONCE.
- */
-#define __ACCESS_ONCE(x) ({ \
-	 __maybe_unused typeof(x) __var = 0; \
-	(volatile typeof(x) *)&(x); })
-#define ACCESS_ONCE(x) (*__ACCESS_ONCE(x))
-
 #define MODULE_DEVICE_TABLE(type, name)
 #define module_param_named(name, value, type, perm)
 #define MODULE_PARM_DESC(_parm, desc)
@@ -225,7 +214,7 @@ struct iommu_domain
 	struct list_head		list;
 };
 
-/* Xen: Describes informations required for a Xen domain */
+/* Xen: Describes information required for a Xen domain */
 struct arm_smmu_xen_domain {
 	spinlock_t			lock;
 	/* List of context (i.e iommu_domain) associated to this domain */
@@ -416,7 +405,7 @@ static struct iommu_group *iommu_group_get(struct device *dev)
 #define ID0_NUMSMRG_SHIFT		0
 #define ID0_NUMSMRG_MASK		0xff
 
-#define ID1_PAGESIZE			(1 << 31)
+#define ID1_PAGESIZE			(1U << 31)
 #define ID1_NUMPAGENDXB_SHIFT		28
 #define ID1_NUMPAGENDXB_MASK		7
 #define ID1_NUMS2CB_SHIFT		16
@@ -449,7 +438,7 @@ static struct iommu_group *iommu_group_get(struct device *dev)
 
 /* Stream mapping registers */
 #define ARM_SMMU_GR0_SMR(n)		(0x800 + ((n) << 2))
-#define SMR_VALID			(1 << 31)
+#define SMR_VALID			(1U << 31)
 #define SMR_MASK_SHIFT			16
 #define SMR_MASK_MASK			0x7fff
 #define SMR_ID_SHIFT			0
@@ -517,7 +506,7 @@ static struct iommu_group *iommu_group_get(struct device *dev)
 #define RESUME_RETRY			(0 << 0)
 #define RESUME_TERMINATE		(1 << 0)
 
-#define TTBCR_EAE			(1 << 31)
+#define TTBCR_EAE			(1U << 31)
 
 #define TTBCR_PASIZE_SHIFT		16
 #define TTBCR_PASIZE_MASK		0x7
@@ -573,7 +562,7 @@ static struct iommu_group *iommu_group_get(struct device *dev)
 #define MAIR_ATTR_IDX_CACHE		1
 #define MAIR_ATTR_IDX_DEV		2
 
-#define FSR_MULTI			(1 << 31)
+#define FSR_MULTI			(1U << 31)
 #define FSR_SS				(1 << 30)
 #define FSR_UUT				(1 << 8)
 #define FSR_ASF				(1 << 7)
@@ -909,8 +898,7 @@ static void arm_smmu_tlb_inv_context(struct arm_smmu_domain *smmu_domain)
 
 static irqreturn_t arm_smmu_context_fault(int irq, void *dev)
 {
-	int flags, ret;
-	u32 fsr, far, fsynr, resume;
+	u32 fsr, far, fsynr;
 	unsigned long iova;
 	struct iommu_domain *domain = dev;
 	struct arm_smmu_domain *smmu_domain = domain->priv;
@@ -924,13 +912,7 @@ static irqreturn_t arm_smmu_context_fault(int irq, void *dev)
 	if (!(fsr & FSR_FAULT))
 		return IRQ_NONE;
 
-	if (fsr & FSR_IGN)
-		dev_err_ratelimited(smmu->dev,
-				    "Unexpected context fault (fsr 0x%x)\n",
-				    fsr);
-
 	fsynr = readl_relaxed(cb_base + ARM_SMMU_CB_FSYNR0);
-	flags = fsynr & FSYNR0_WNR ? IOMMU_FAULT_WRITE : IOMMU_FAULT_READ;
 
 	far = readl_relaxed(cb_base + ARM_SMMU_CB_FAR_LO);
 	iova = far;
@@ -939,25 +921,12 @@ static irqreturn_t arm_smmu_context_fault(int irq, void *dev)
 	iova |= ((unsigned long)far << 32);
 #endif
 
-	if (!report_iommu_fault(domain, smmu->dev, iova, flags)) {
-		ret = IRQ_HANDLED;
-		resume = RESUME_RETRY;
-	} else {
-		dev_err_ratelimited(smmu->dev,
-		    "Unhandled context fault: iova=0x%08lx, fsynr=0x%x, cb=%d\n",
-		    iova, fsynr, cfg->cbndx);
-		ret = IRQ_NONE;
-		resume = RESUME_TERMINATE;
-	}
-
-	/* Clear the faulting FSR */
+	dev_err_ratelimited(smmu->dev,
+	"Unhandled context fault: fsr=0x%x, iova=0x%08lx, fsynr=0x%x, cb=%d\n",
+			    fsr, iova, fsynr, cfg->cbndx);
+ 
 	writel(fsr, cb_base + ARM_SMMU_CB_FSR);
-
-	/* Retry or terminate any stalled transactions */
-	if (fsr & FSR_SS)
-		writel_relaxed(resume, cb_base + ARM_SMMU_CB_RESUME);
-
-	return ret;
+	return IRQ_HANDLED;
 }
 
 static irqreturn_t arm_smmu_global_fault(int irq, void *dev)
@@ -1141,7 +1110,11 @@ static void arm_smmu_init_context_bank(struct arm_smmu_domain *smmu_domain)
 			reg = TTBCR_TG0_64K;
 
 		if (!stage1) {
-			reg |= (64 - smmu->s2_input_size) << TTBCR_T0SZ_SHIFT;
+			/*
+			 * Xen: The IOMMU share the page-tables with the P2M
+			 * which may have restrict the size further.
+			 */
+			reg |= (64 - p2m_ipa_bits) << TTBCR_T0SZ_SHIFT;
 
 			switch (smmu->s2_output_size) {
 			case 32:
@@ -1179,7 +1152,7 @@ static void arm_smmu_init_context_bank(struct arm_smmu_domain *smmu_domain)
 	      (TTBCR_RGN_WBWA << TTBCR_IRGN0_SHIFT);
 
 	if (!stage1)
-		reg |= (TTBCR_SL0_LVL_1 << TTBCR_SL0_SHIFT);
+		reg |= (2 - P2M_ROOT_LEVEL) << TTBCR_SL0_SHIFT;
 
 	writel_relaxed(reg, cb_base + ARM_SMMU_CB_TTBCR);
 
@@ -1191,8 +1164,12 @@ static void arm_smmu_init_context_bank(struct arm_smmu_domain *smmu_domain)
 		writel_relaxed(reg, cb_base + ARM_SMMU_CB_S1_MAIR0);
 	}
 
-	/* SCTLR */
-	reg = SCTLR_CFCFG | SCTLR_CFIE | SCTLR_CFRE | SCTLR_M | SCTLR_EAE_SBOP;
+	/*
+	 * SCTLR
+	 *
+	 * Do not set SCTLR_CFCFG, because of Erratum #842869
+	 */
+	reg = SCTLR_CFIE | SCTLR_CFRE | SCTLR_M | SCTLR_EAE_SBOP;
 	if (stage1)
 		reg |= SCTLR_S1_ASIDPNE;
 #ifdef __BIG_ENDIAN
@@ -2225,14 +2202,9 @@ static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 	size = arm_smmu_id_size_to_bits((id >> ID2_IAS_SHIFT) & ID2_IAS_MASK);
 	smmu->s1_output_size = min_t(unsigned long, PHYS_MASK_SHIFT, size);
 
-	/* Xen: Stage-2 input size has to match p2m_ipa_bits.  */
-	if (size < p2m_ipa_bits) {
-		dev_err(smmu->dev,
-			"P2M IPA size not supported (P2M=%u SMMU=%lu)!\n",
-			p2m_ipa_bits, size);
-		return -ENODEV;
-	}
-	smmu->s2_input_size = p2m_ipa_bits;
+	/* Xen: Set maximum Stage-2 input size supported by the SMMU. */
+	p2m_restrict_ipa_bits(size);
+	smmu->s2_input_size = size;
 #if 0
 	/* Stage-2 input size limited due to pgd allocation (PTRS_PER_PGD) */
 #ifdef CONFIG_64BIT
@@ -2289,7 +2261,7 @@ MODULE_DEVICE_TABLE(of, arm_smmu_of_match);
 
 /*
  * Xen: We don't have refcount for allocated memory so manually free memory
- * when an error occured.
+ * when an error occurred.
  */
 static int arm_smmu_device_dt_probe(struct platform_device *pdev)
 {
@@ -2561,10 +2533,12 @@ static int __must_check arm_smmu_iotlb_flush_all(struct domain *d)
 	return 0;
 }
 
-static int __must_check arm_smmu_iotlb_flush(struct domain *d,
-                                             unsigned long gfn,
-                                             unsigned int page_count)
+static int __must_check arm_smmu_iotlb_flush(struct domain *d, dfn_t dfn,
+					     unsigned long page_count,
+					     unsigned int flush_flags)
 {
+	ASSERT(flush_flags);
+
 	/* ARM SMMU v1 doesn't have flush by VMA and VMID */
 	return arm_smmu_iotlb_flush_all(d);
 }
@@ -2738,6 +2712,17 @@ static int arm_smmu_iommu_domain_init(struct domain *d)
 
 static void __hwdom_init arm_smmu_iommu_hwdom_init(struct domain *d)
 {
+	/* Set to false options not supported on ARM. */
+	if ( iommu_hwdom_inclusive )
+		printk(XENLOG_WARNING
+		"map-inclusive dom0-iommu option is not supported on ARM\n");
+	iommu_hwdom_inclusive = false;
+	if ( iommu_hwdom_reserved == 1 )
+		printk(XENLOG_WARNING
+		"map-reserved dom0-iommu option is not supported on ARM\n");
+	iommu_hwdom_reserved = 0;
+
+	arch_iommu_hwdom_init(d);
 }
 
 static void arm_smmu_iommu_domain_teardown(struct domain *d)
@@ -2748,47 +2733,6 @@ static void arm_smmu_iommu_domain_teardown(struct domain *d)
 	xfree(xen_domain);
 }
 
-static int __must_check arm_smmu_map_page(struct domain *d, unsigned long gfn,
-			unsigned long mfn, unsigned int flags)
-{
-	p2m_type_t t;
-
-	/*
-	 * Grant mappings can be used for DMA requests. The dev_bus_addr
-	 * returned by the hypercall is the MFN (not the IPA). For device
-	 * protected by an IOMMU, Xen needs to add a 1:1 mapping in the domain
-	 * p2m to allow DMA request to work.
-	 * This is only valid when the domain is directed mapped. Hence this
-	 * function should only be used by gnttab code with gfn == mfn.
-	 */
-	BUG_ON(!is_domain_direct_mapped(d));
-	BUG_ON(mfn != gfn);
-
-	/* We only support readable and writable flags */
-	if (!(flags & (IOMMUF_readable | IOMMUF_writable)))
-		return -EINVAL;
-
-	t = (flags & IOMMUF_writable) ? p2m_iommu_map_rw : p2m_iommu_map_ro;
-
-	/*
-	 * The function guest_physmap_add_entry replaces the current mapping
-	 * if there is already one...
-	 */
-	return guest_physmap_add_entry(d, _gfn(gfn), _mfn(mfn), 0, t);
-}
-
-static int __must_check arm_smmu_unmap_page(struct domain *d, unsigned long gfn)
-{
-	/*
-	 * This function should only be used by gnttab code when the domain
-	 * is direct mapped
-	 */
-	if ( !is_domain_direct_mapped(d) )
-		return -EINVAL;
-
-	return guest_physmap_remove_page(d, _gfn(gfn), _mfn(gfn), 0);
-}
-
 static const struct iommu_ops arm_smmu_iommu_ops = {
     .init = arm_smmu_iommu_domain_init,
     .hwdom_init = arm_smmu_iommu_hwdom_init,
@@ -2797,8 +2741,8 @@ static const struct iommu_ops arm_smmu_iommu_ops = {
     .iotlb_flush_all = arm_smmu_iotlb_flush_all,
     .assign_device = arm_smmu_assign_dev,
     .reassign_device = arm_smmu_reassign_dev,
-    .map_page = arm_smmu_map_page,
-    .unmap_page = arm_smmu_unmap_page,
+    .map_page = arm_iommu_map_page,
+    .unmap_page = arm_iommu_unmap_page,
 };
 
 static __init const struct arm_smmu_device *find_smmu(const struct device *dev)

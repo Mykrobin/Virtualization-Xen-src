@@ -31,7 +31,7 @@
 int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *mop)
 {
     int rc;
-    bool_t requested_status = 0;
+    bool requested_status = false;
 
     if ( unlikely(current->domain == d) ) /* no domain_pause() */
         return -EPERM;
@@ -43,7 +43,7 @@ int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *mop)
     switch ( mop->op )
     {
     case XEN_DOMCTL_MONITOR_OP_ENABLE:
-        requested_status = 1;
+        requested_status = true;
         /* fallthrough */
     case XEN_DOMCTL_MONITOR_OP_DISABLE:
         /* sanity check: avoid left-shift undefined behavior */
@@ -67,7 +67,7 @@ int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *mop)
     {
     case XEN_DOMCTL_MONITOR_EVENT_GUEST_REQUEST:
     {
-        bool_t old_status = d->monitor.guest_request_enabled;
+        bool old_status = d->monitor.guest_request_enabled;
 
         if ( unlikely(old_status == requested_status) )
             return -EEXIST;
@@ -75,6 +75,7 @@ int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *mop)
         domain_pause(d);
         d->monitor.guest_request_sync = mop->u.guest_request.sync;
         d->monitor.guest_request_enabled = requested_status;
+        arch_monitor_allow_userspace(d, mop->u.guest_request.allow_userspace);
         domain_unpause(d);
         break;
     }
@@ -87,17 +88,17 @@ int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *mop)
     return 0;
 }
 
-int monitor_traps(struct vcpu *v, bool_t sync, vm_event_request_t *req)
+int monitor_traps(struct vcpu *v, bool sync, vm_event_request_t *req)
 {
     int rc;
     struct domain *d = v->domain;
 
-    rc = vm_event_claim_slot(d, &d->vm_event->monitor);
+    rc = vm_event_claim_slot(d, d->vm_event_monitor);
     switch ( rc )
     {
     case 0:
         break;
-    case -ENOSYS:
+    case -EOPNOTSUPP:
         /*
          * If there was no ring to handle the event, then
          * simply continue executing normally.
@@ -112,6 +113,7 @@ int monitor_traps(struct vcpu *v, bool_t sync, vm_event_request_t *req)
     if ( sync )
     {
         req->flags |= VM_EVENT_FLAG_VCPU_PAUSED;
+        vm_event_sync_event(v, true);
         vm_event_vcpu_pause(v);
         rc = 1;
     }
@@ -123,7 +125,7 @@ int monitor_traps(struct vcpu *v, bool_t sync, vm_event_request_t *req)
     }
 
     vm_event_fill_regs(req);
-    vm_event_put_request(d, &d->vm_event->monitor, req);
+    vm_event_put_request(d, d->vm_event_monitor, req);
 
     return rc;
 }

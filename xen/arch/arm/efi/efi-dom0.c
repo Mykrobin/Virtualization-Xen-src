@@ -22,7 +22,6 @@
  */
 
 #include "efi.h"
-#include "efi-dom0.h"
 #include <xen/sched.h>
 #include <xen/pfn.h>
 #include <xen/libfdt/libfdt.h>
@@ -32,7 +31,6 @@
 #define XZ_EXTERN STATIC
 #include "../../../common/xz/crc32.c"
 
-struct meminfo __initdata acpi_mem;
 /* Constant to indicate "Xen" in unicode u16 format */
 static const CHAR16 xen_efi_fw_vendor[] = {0x0058, 0x0065, 0x006E, 0x0000};
 
@@ -46,7 +44,7 @@ size_t __init estimate_efi_size(int mem_nr_banks)
     int acpi_mem_nr_banks = 0;
 
     if ( !acpi_disabled )
-        acpi_mem_nr_banks = acpi_mem.nr_banks;
+        acpi_mem_nr_banks = bootinfo.acpi.nr_banks;
 
     size = ROUNDUP(est_size + ect_size + fw_vendor_size, 8);
     /* plus 1 for new created tables */
@@ -96,47 +94,46 @@ void __init acpi_create_efi_system_table(struct domain *d,
     tbl_add[TBL_EFIT].size = table_size;
 }
 
+static void __init fill_efi_memory_descriptor(EFI_MEMORY_DESCRIPTOR *desc,
+                                              UINT32 type,
+                                              EFI_PHYSICAL_ADDRESS start,
+                                              UINT64 size)
+{
+    desc->Type = type;
+    desc->PhysicalStart = start;
+    BUG_ON(size & EFI_PAGE_MASK);
+    desc->NumberOfPages = EFI_SIZE_TO_PAGES(size);
+    desc->Attribute = EFI_MEMORY_WB;
+}
+
 void __init acpi_create_efi_mmap_table(struct domain *d,
                                        const struct meminfo *mem,
                                        struct membank tbl_add[])
 {
-    EFI_MEMORY_DESCRIPTOR *memory_map;
-    unsigned int i, offset;
+    EFI_MEMORY_DESCRIPTOR *desc;
+    unsigned int i;
     u8 *base_ptr;
 
     base_ptr = d->arch.efi_acpi_table
                + acpi_get_table_offset(tbl_add, TBL_MMAP);
-    memory_map = (EFI_MEMORY_DESCRIPTOR *)base_ptr;
+    desc = (EFI_MEMORY_DESCRIPTOR *)base_ptr;
 
-    offset = 0;
-    for( i = 0; i < mem->nr_banks; i++, offset++ )
-    {
-        memory_map[offset].Type = EfiConventionalMemory;
-        memory_map[offset].PhysicalStart = mem->bank[i].start;
-        BUG_ON(mem->bank[i].size & EFI_PAGE_MASK);
-        memory_map[offset].NumberOfPages = EFI_SIZE_TO_PAGES(mem->bank[i].size);
-        memory_map[offset].Attribute = EFI_MEMORY_WB;
-    }
+    for ( i = 0; i < mem->nr_banks; i++, desc++ )
+        fill_efi_memory_descriptor(desc, EfiConventionalMemory,
+                                   mem->bank[i].start, mem->bank[i].size);
 
-    for( i = 0; i < acpi_mem.nr_banks; i++, offset++ )
-    {
-        memory_map[offset].Type = EfiACPIReclaimMemory;
-        memory_map[offset].PhysicalStart = acpi_mem.bank[i].start;
-        BUG_ON(acpi_mem.bank[i].size & EFI_PAGE_MASK);
-        memory_map[offset].NumberOfPages = EFI_SIZE_TO_PAGES(acpi_mem.bank[i].size);
-        memory_map[offset].Attribute = EFI_MEMORY_WB;
-    }
+    for ( i = 0; i < bootinfo.acpi.nr_banks; i++, desc++ )
+        fill_efi_memory_descriptor(desc, EfiACPIReclaimMemory,
+                                   bootinfo.acpi.bank[i].start,
+                                   bootinfo.acpi.bank[i].size);
 
-    memory_map[offset].Type = EfiACPIReclaimMemory;
-    memory_map[offset].PhysicalStart = d->arch.efi_acpi_gpa;
-    BUG_ON(d->arch.efi_acpi_len & EFI_PAGE_MASK);
-    memory_map[offset].NumberOfPages = EFI_SIZE_TO_PAGES(d->arch.efi_acpi_len);
-    memory_map[offset].Attribute = EFI_MEMORY_WB;
+    fill_efi_memory_descriptor(desc, EfiACPIReclaimMemory,
+                               d->arch.efi_acpi_gpa, d->arch.efi_acpi_len);
 
     tbl_add[TBL_MMAP].start = d->arch.efi_acpi_gpa
                               + acpi_get_table_offset(tbl_add, TBL_MMAP);
     tbl_add[TBL_MMAP].size = sizeof(EFI_MEMORY_DESCRIPTOR)
-                             * (mem->nr_banks + acpi_mem.nr_banks + 1);
+                             * (mem->nr_banks + bootinfo.acpi.nr_banks + 1);
 }
 
 /* Create /hypervisor/uefi node for efi properties. */

@@ -20,21 +20,13 @@
 #define __ASM_X86_HVM_VCPU_H__
 
 #include <xen/tasklet.h>
-#include <asm/hvm/io.h>
 #include <asm/hvm/vlapic.h>
-#include <asm/hvm/viridian.h>
 #include <asm/hvm/vmx/vmcs.h>
 #include <asm/hvm/vmx/vvmx.h>
 #include <asm/hvm/svm/vmcb.h>
 #include <asm/hvm/svm/nestedsvm.h>
 #include <asm/mtrr.h>
-
-enum hvm_io_completion {
-    HVMIO_no_completion,
-    HVMIO_mmio_completion,
-    HVMIO_pio_completion,
-    HVMIO_realmode_completion
-};
+#include <public/hvm/ioreq.h>
 
 struct hvm_vcpu_asid {
     uint64_t generation;
@@ -42,22 +34,17 @@ struct hvm_vcpu_asid {
 };
 
 /*
- * We may read or write up to m256 as a number of device-model
+ * We may read or write up to m512 as a number of device-model
  * transactions.
  */
 struct hvm_mmio_cache {
     unsigned long gla;
     unsigned int size;
     uint8_t dir;
-    uint8_t pad[3]; /* make buffer[] long-aligned */
-    uint8_t buffer[32];
+    uint8_t buffer[64] __aligned(sizeof(long));
 };
 
 struct hvm_vcpu_io {
-    /* I/O request in flight to device model. */
-    enum hvm_io_completion io_completion;
-    ioreq_t                io_req;
-
     /*
      * HVM emulation:
      *  Linear address @mmio_gla maps to MMIO physical frame @mmio_gpfn.
@@ -78,6 +65,8 @@ struct hvm_vcpu_io {
     /* For retries we shouldn't re-fetch the instruction. */
     unsigned int mmio_insn_bytes;
     unsigned char mmio_insn[16];
+    struct hvmemul_cache *cache;
+
     /*
      * For string instruction emulation we need to be able to signal a
      * necessary retry through other than function return codes.
@@ -90,16 +79,6 @@ struct hvm_vcpu_io {
 
     const struct g2m_ioport *g2m_ioport;
 };
-
-static inline bool hvm_vcpu_io_need_completion(const struct hvm_vcpu_io *vio)
-{
-    return (vio->io_req.state == STATE_IOREQ_READY) &&
-           !vio->io_req.data_is_ptr &&
-           (vio->io_req.type != IOREQ_TYPE_PIO ||
-            vio->io_req.dir != IOREQ_WRITE);
-}
-
-#define VMCX_EADDR    (~0ULL)
 
 struct nestedvcpu {
     bool_t nv_guestmode; /* vcpu in guestmode? */
@@ -119,6 +98,8 @@ struct nestedvcpu {
 
     bool_t nv_flushp2m; /* True, when p2m table must be flushed */
     struct p2m_domain *nv_p2m; /* used p2m table for this vcpu */
+    bool stale_np2m; /* True when p2m_base in VMCx02 is no longer valid */
+    uint64_t np2m_generation;
 
     struct hvm_vcpu_asid nv_n2asid;
 
@@ -136,14 +117,19 @@ struct nestedvcpu {
     unsigned long       guest_cr[5];
 };
 
-#define vcpu_nestedhvm(v) ((v)->arch.hvm_vcpu.nvcpu)
+#define vcpu_nestedhvm(v) ((v)->arch.hvm.nvcpu)
 
 struct altp2mvcpu {
+    /*
+     * #VE information page.  This pointer being non-NULL indicates that a
+     * VMCS's VIRT_EXCEPTION_INFO field is pointing to the page, and an extra
+     * page reference is held.
+     */
+    struct page_info *veinfo_pg;
     uint16_t    p2midx;         /* alternate p2m index */
-    gfn_t       veinfo_gfn;     /* #VE information page gfn */
 };
 
-#define vcpu_altp2m(v) ((v)->arch.hvm_vcpu.avcpu)
+#define vcpu_altp2m(v) ((v)->arch.hvm.avcpu)
 
 struct hvm_vcpu {
     /* Guest control-register and EFER values, just as the guest sees them. */
@@ -166,23 +152,25 @@ struct hvm_vcpu {
     spinlock_t          tm_lock;
     struct list_head    tm_list;
 
-    u8                  flag_dr_dirty;
-    bool_t              debug_state_latch;
-    bool_t              single_step;
+    bool                flag_dr_dirty;
+    bool                debug_state_latch;
+    bool                single_step;
+    struct {
+        bool     enabled;
+        uint16_t p2midx;
+    } fast_single_step;
 
-    bool_t              hcall_preempted;
-    bool_t              hcall_64bit;
+    /* (MFN) hypervisor page table */
+    pagetable_t         monitor_table;
 
     struct hvm_vcpu_asid n1asid;
 
-    u32                 msr_tsc_aux;
     u64                 msr_tsc_adjust;
-    u64                 msr_xss;
 
     union {
-        struct arch_vmx_struct vmx;
-        struct arch_svm_struct svm;
-    } u;
+        struct vmx_vcpu vmx;
+        struct svm_vcpu svm;
+    };
 
     struct tasklet      assert_evtchn_irq_tasklet;
 
@@ -203,14 +191,10 @@ struct hvm_vcpu {
 
     struct hvm_vcpu_io  hvm_io;
 
-    /* Callback into x86_emulate when emulating FPU/MMX/XMM instructions. */
-    void (*fpu_exception_callback)(void *, struct cpu_user_regs *);
-    void *fpu_exception_callback_arg;
-
     /* Pending hw/sw interrupt (.vector = -1 means nothing pending). */
-    struct hvm_trap     inject_trap;
+    struct x86_event     inject_event;
 
-    struct viridian_vcpu viridian;
+    struct viridian_vcpu *viridian;
 };
 
 #endif /* __ASM_X86_HVM_VCPU_H__ */

@@ -6,13 +6,22 @@
 #include <xen/lib.h>
 #include <xen/livepatch_elf.h>
 #include <xen/livepatch.h>
+#include <xen/mm.h>
 #include <xen/vmap.h>
 
 #include <asm/cpufeature.h>
 #include <asm/livepatch.h>
-#include <asm/mm.h>
+
+/* Override macros from asm/page.h to make them work with mfn_t */
+#undef virt_to_mfn
+#define virt_to_mfn(va) _mfn(__virt_to_mfn(va))
 
 void *vmap_of_xen_text;
+
+int arch_livepatch_safety_check(void)
+{
+    return 0;
+}
 
 int arch_livepatch_quiesce(void)
 {
@@ -22,7 +31,7 @@ int arch_livepatch_quiesce(void)
     if ( vmap_of_xen_text )
         return -EINVAL;
 
-    text_mfn = _mfn(virt_to_mfn(_start));
+    text_mfn = virt_to_mfn(_start);
     text_order = get_order_from_bytes(_end - _start);
 
     /*
@@ -84,7 +93,8 @@ void arch_livepatch_revert(const struct livepatch_func *func)
 
 void arch_livepatch_post_action(void)
 {
-    /* arch_livepatch_revive has nuked the instruction cache. */
+    /* Discard any stale instructions that may have been fetched. */
+    isb();
 }
 
 void arch_livepatch_mask(void)
@@ -142,15 +152,15 @@ int arch_livepatch_secure(const void *va, unsigned int pages, enum va_type type)
     switch ( type )
     {
     case LIVEPATCH_VA_RX:
-        flags = PTE_RO; /* R set, NX clear */
+        flags = PAGE_HYPERVISOR_RX;
         break;
 
     case LIVEPATCH_VA_RW:
-        flags = PTE_NX; /* R clear, NX set */
+        flags = PAGE_HYPERVISOR_RW;
         break;
 
     case LIVEPATCH_VA_RO:
-        flags = PTE_NX | PTE_RO; /* R set, NX set */
+        flags = PAGE_HYPERVISOR_RO;
         break;
 
     default:

@@ -42,7 +42,7 @@ static struct node node_memblk_range[NR_NODE_MEMBLKS];
 static nodeid_t memblk_nodeid[NR_NODE_MEMBLKS];
 static __initdata DECLARE_BITMAP(memblk_hotplug, NR_NODE_MEMBLKS);
 
-static inline bool_t node_found(unsigned idx, unsigned pxm)
+static inline bool node_found(unsigned idx, unsigned pxm)
 {
 	return ((pxm2node[idx].pxm == pxm) &&
 		(pxm2node[idx].node != NUMA_NO_NODE));
@@ -66,7 +66,7 @@ nodeid_t setup_node(unsigned pxm)
 {
 	nodeid_t node;
 	unsigned idx;
-	static bool_t warned;
+	static bool warned;
 	static unsigned nodes_found;
 
 	BUILD_BUG_ON(MAX_NUMNODES >= NUMA_NO_NODE);
@@ -89,7 +89,7 @@ nodeid_t setup_node(unsigned pxm)
 	if (!warned) {
 		printk(KERN_WARNING "SRAT: Too many proximity domains (%#x)\n",
 		       pxm);
-		warned = 1;
+		warned = true;
 	}
 
 	return NUMA_NO_NODE;
@@ -188,19 +188,15 @@ static __init int slit_valid(struct acpi_table_slit *slit)
 /* Callback for SLIT parsing */
 void __init acpi_numa_slit_init(struct acpi_table_slit *slit)
 {
-	unsigned long mfn;
+	mfn_t mfn;
+
 	if (!slit_valid(slit)) {
 		printk(KERN_INFO "ACPI: SLIT table looks invalid. "
 		       "Not used.\n");
 		return;
 	}
 	mfn = alloc_boot_pages(PFN_UP(slit->header.length), 1);
-	if (!mfn) {
-		printk(KERN_ERR "ACPI: Unable to allocate memory for "
-		       "saving ACPI SLIT numa information.\n");
-		return;
-	}
-	acpi_slit = mfn_to_virt(mfn);
+	acpi_slit = mfn_to_virt(mfn_x(mfn));
 	memcpy(acpi_slit, slit, slit->header.length);
 }
 
@@ -234,8 +230,10 @@ acpi_numa_x2apic_affinity_init(const struct acpi_srat_x2apic_cpu_affinity *pa)
 	apicid_to_node[pa->apic_id] = node;
 	node_set(node, processor_nodes_parsed);
 	acpi_numa = 1;
-	printk(KERN_INFO "SRAT: PXM %u -> APIC %08x -> Node %u\n",
-	       pxm, pa->apic_id, node);
+
+	if (opt_acpi_verbose)
+		printk(KERN_INFO "SRAT: PXM %u -> APIC %08x -> Node %u\n",
+		       pxm, pa->apic_id, node);
 }
 
 /* Callback for Proximity Domain -> LAPIC mapping */
@@ -267,8 +265,10 @@ acpi_numa_processor_affinity_init(const struct acpi_srat_cpu_affinity *pa)
 	apicid_to_node[pa->apic_id] = node;
 	node_set(node, processor_nodes_parsed);
 	acpi_numa = 1;
-	printk(KERN_INFO "SRAT: PXM %u -> APIC %02x -> Node %u\n",
-	       pxm, pa->apic_id, node);
+
+	if (opt_acpi_verbose)
+		printk(KERN_INFO "SRAT: PXM %u -> APIC %02x -> Node %u\n",
+		       pxm, pa->apic_id, node);
 }
 
 /* Callback for parsing of the Proximity Domain <-> Memory Area mappings */
@@ -315,8 +315,8 @@ acpi_numa_memory_affinity_init(const struct acpi_srat_mem_affinity *ma)
 	if (i < 0)
 		/* everything fine */;
 	else if (memblk_nodeid[i] == node) {
-		bool_t mismatch = !(ma->flags & ACPI_SRAT_MEM_HOT_PLUGGABLE) !=
-		                  !test_bit(i, memblk_hotplug);
+		bool mismatch = !(ma->flags & ACPI_SRAT_MEM_HOT_PLUGGABLE) !=
+		                !test_bit(i, memblk_hotplug);
 
 		printk("%sSRAT: PXM %u (%"PRIx64"-%"PRIx64") overlaps with itself (%"PRIx64"-%"PRIx64")\n",
 		       mismatch ? KERN_ERR : KERN_WARNING, pxm, start, end,
@@ -405,7 +405,7 @@ static int __init nodes_cover_memory(void)
 
 void __init acpi_numa_arch_fixup(void) {}
 
-static u64 __initdata srat_region_mask;
+static uint64_t __initdata srat_region_mask;
 
 static int __init srat_parse_region(struct acpi_subtable_header *header,
 				    const unsigned long end)
@@ -499,7 +499,7 @@ int __init acpi_scan_nodes(u64 start, u64 end)
 	for (i = 0; i < nr_cpu_ids; i++) {
 		if (cpu_to_node[i] == NUMA_NO_NODE)
 			continue;
-		if (!node_isset(cpu_to_node[i], processor_nodes_parsed))
+		if (!nodemask_test(cpu_to_node[i], &processor_nodes_parsed))
 			numa_set_node(i, NUMA_NO_NODE);
 	}
 	numa_init_array();

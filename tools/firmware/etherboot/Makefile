@@ -10,7 +10,7 @@ else
 IPXE_GIT_URL ?= git://git.ipxe.org/ipxe.git
 endif
 
-IPXE_GIT_TAG := 827dd1bfee67daa683935ce65316f7e0f057fe1c
+IPXE_GIT_TAG := 988d2c13cdf0f0b4140685af35ced70ac5b3283c
 
 IPXE_TARBALL_URL ?= $(XEN_EXTFILES_URL)/ipxe-git-$(IPXE_GIT_TAG).tar.gz
 
@@ -18,20 +18,25 @@ D=ipxe
 T=ipxe.tar.gz
 
 ROMS = $(addprefix $D/src/bin/, $(addsuffix .rom, $(ETHERBOOT_NICS)))
+ROM = $D/src/bin/ipxe.bin
 
 .NOTPARALLEL:
 
 .PHONY: all
-all: $(ROMS)
+all: $(ROM)
+
+$(ROM): $(ROMS)
+	cat $^ > $@.tmp
+	mv -f $@.tmp $@
 
 %.rom: $D/src/arch/i386/Makefile
 	$(MAKE) -C $D/src bin/$(*F).rom
 
 $T:
-	if ! $(FETCHER) _$T $(IPXE_TARBALL_URL); then \
+	set -e; if ! $(FETCHER) _$T $(IPXE_TARBALL_URL); then \
 		$(GIT) clone $(IPXE_GIT_URL) $D.git; \
 		(cd $D.git && $(GIT) archive --format=tar --prefix=$D/ \
-		$(IPXE_GIT_TAG) | gzip >../_$T); \
+		$(IPXE_GIT_TAG) | gzip -n >../_$T); \
 		rm -rf $D.git; \
 	fi
 	mv _$T $T

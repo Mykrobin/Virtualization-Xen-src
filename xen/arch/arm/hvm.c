@@ -16,7 +16,6 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
@@ -31,6 +30,57 @@
 #include <public/hvm/hvm_op.h>
 
 #include <asm/hypercall.h>
+
+static int hvm_allow_set_param(const struct domain *d, unsigned int param)
+{
+    switch ( param )
+    {
+        /*
+         * The following parameters are intended for toolstack usage only.
+         * They may not be set by the domain.
+         *
+         * The {STORE,CONSOLE}_EVTCHN values will need to become read/write to
+         * the guest (not just the toolstack) if a new ABI hasn't appeared by
+         * the time migration support is added.
+         */
+    case HVM_PARAM_CALLBACK_IRQ:
+    case HVM_PARAM_STORE_PFN:
+    case HVM_PARAM_STORE_EVTCHN:
+    case HVM_PARAM_CONSOLE_PFN:
+    case HVM_PARAM_CONSOLE_EVTCHN:
+    case HVM_PARAM_MONITOR_RING_PFN:
+        return d == current->domain ? -EPERM : 0;
+
+        /* Writeable only by Xen, hole, deprecated, or out-of-range. */
+    default:
+        return -EINVAL;
+    }
+}
+
+static int hvm_allow_get_param(const struct domain *d, unsigned int param)
+{
+    switch ( param )
+    {
+        /* The following parameters can be read by the guest and toolstack. */
+    case HVM_PARAM_CALLBACK_IRQ:
+    case HVM_PARAM_STORE_PFN:
+    case HVM_PARAM_STORE_EVTCHN:
+    case HVM_PARAM_CONSOLE_PFN:
+    case HVM_PARAM_CONSOLE_EVTCHN:
+        return 0;
+
+        /*
+         * The following parameters are intended for toolstack usage only.
+         * They may not be read by the domain.
+         */
+    case HVM_PARAM_MONITOR_RING_PFN:
+        return d == current->domain ? -EPERM : 0;
+
+        /* Hole, deprecated, or out-of-range. */
+    default:
+        return -EINVAL;
+    }
+}
 
 long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
 {
@@ -47,9 +97,6 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
         if ( copy_from_guest(&a, arg, 1) )
             return -EFAULT;
 
-        if ( a.index >= HVM_NR_PARAMS )
-            return -EINVAL;
-
         d = rcu_lock_domain_by_any_id(a.domid);
         if ( d == NULL )
             return -ESRCH;
@@ -60,11 +107,19 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
 
         if ( op == HVMOP_set_param )
         {
-            d->arch.hvm_domain.params[a.index] = a.value;
+            rc = hvm_allow_set_param(d, a.index);
+            if ( rc )
+                goto param_fail;
+
+            d->arch.hvm.params[a.index] = a.value;
         }
         else
         {
-            a.value = d->arch.hvm_domain.params[a.index];
+            rc = hvm_allow_get_param(d, a.index);
+            if ( rc )
+                goto param_fail;
+
+            a.value = d->arch.hvm.params[a.index];
             rc = copy_to_guest(arg, &a, 1) ? -EFAULT : 0;
         }
 

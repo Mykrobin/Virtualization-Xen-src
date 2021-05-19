@@ -5,26 +5,40 @@
 #include <xen/bitops.h>
 #include <asm/processor.h>
 
-#define read_sreg(name)                                         \
-({  unsigned int __sel;                                         \
-    asm volatile ( "mov %%" STR(name) ",%0" : "=r" (__sel) );   \
-    __sel;                                                      \
-})
+static inline void wbinvd(void)
+{
+    asm volatile ( "wbinvd" ::: "memory" );
+}
 
-#define wbinvd() \
-    asm volatile ( "wbinvd" : : : "memory" )
+static inline void wbnoinvd(void)
+{
+    asm volatile ( "repe; wbinvd" : : : "memory" );
+}
 
-#define clflush(a) \
-    asm volatile ( "clflush (%0)" : : "r"(a) )
+static inline void clflush(const void *p)
+{
+    asm volatile ( "clflush %0" :: "m" (*(const char *)p) );
+}
 
-#define nop() \
-    asm volatile ( "nop" )
+static inline void clflushopt(const void *p)
+{
+    asm volatile ( "data16 clflush %0" :: "m" (*(const char *)p) );
+}
+
+static inline void clwb(const void *p)
+{
+#if defined(HAVE_AS_CLWB)
+    asm volatile ( "clwb %0" :: "m" (*(const char *)p) );
+#elif defined(HAVE_AS_XSAVEOPT)
+    asm volatile ( "data16 xsaveopt %0" :: "m" (*(const char *)p) );
+#else
+    asm volatile ( ".byte 0x66, 0x0f, 0xae, 0x32"
+                   :: "d" (p), "m" (*(const char *)p) );
+#endif
+}
 
 #define xchg(ptr,v) \
     ((__typeof__(*(ptr)))__xchg((unsigned long)(v),(ptr),sizeof(*(ptr))))
-
-struct __xchg_dummy { unsigned long a[100]; };
-#define __xg(x) ((volatile struct __xchg_dummy *)(x))
 
 #include <asm/x86_64/system.h>
 
@@ -39,28 +53,24 @@ static always_inline unsigned long __xchg(
     switch ( size )
     {
     case 1:
-        asm volatile ( "xchgb %b0,%1"
-                       : "=q" (x)
-                       : "m" (*__xg(ptr)), "0" (x)
-                       : "memory" );
+        asm volatile ( "xchg %b[x], %[ptr]"
+                       : [x] "+q" (x), [ptr] "+m" (*(volatile uint8_t *)ptr)
+                       :: "memory" );
         break;
     case 2:
-        asm volatile ( "xchgw %w0,%1"
-                       : "=r" (x)
-                       : "m" (*__xg(ptr)), "0" (x)
-                       : "memory" );
+        asm volatile ( "xchg %w[x], %[ptr]"
+                       : [x] "+r" (x), [ptr] "+m" (*(volatile uint16_t *)ptr)
+                       :: "memory" );
         break;
     case 4:
-        asm volatile ( "xchgl %k0,%1"
-                       : "=r" (x)
-                       : "m" (*__xg(ptr)), "0" (x)
-                       : "memory" );
+        asm volatile ( "xchg %k[x], %[ptr]"
+                       : [x] "+r" (x), [ptr] "+m" (*(volatile uint32_t *)ptr)
+                       :: "memory" );
         break;
     case 8:
-        asm volatile ( "xchgq %0,%1"
-                       : "=r" (x)
-                       : "m" (*__xg(ptr)), "0" (x)
-                       : "memory" );
+        asm volatile ( "xchg %q[x], %[ptr]"
+                       : [x] "+r" (x), [ptr] "+m" (*(volatile uint64_t *)ptr)
+                       :: "memory" );
         break;
     }
     return x;
@@ -79,43 +89,64 @@ static always_inline unsigned long __cmpxchg(
     switch ( size )
     {
     case 1:
-        asm volatile ( "lock; cmpxchgb %b1,%2"
-                       : "=a" (prev)
-                       : "q" (new), "m" (*__xg(ptr)),
-                       "0" (old)
+        asm volatile ( "lock cmpxchg %b[new], %[ptr]"
+                       : "=a" (prev), [ptr] "+m" (*(volatile uint8_t *)ptr)
+                       : [new] "q" (new), "a" (old)
                        : "memory" );
         return prev;
     case 2:
-        asm volatile ( "lock; cmpxchgw %w1,%2"
-                       : "=a" (prev)
-                       : "r" (new), "m" (*__xg(ptr)),
-                       "0" (old)
+        asm volatile ( "lock cmpxchg %w[new], %[ptr]"
+                       : "=a" (prev), [ptr] "+m" (*(volatile uint16_t *)ptr)
+                       : [new] "r" (new), "a" (old)
                        : "memory" );
         return prev;
     case 4:
-        asm volatile ( "lock; cmpxchgl %k1,%2"
-                       : "=a" (prev)
-                       : "r" (new), "m" (*__xg(ptr)),
-                       "0" (old)
+        asm volatile ( "lock cmpxchg %k[new], %[ptr]"
+                       : "=a" (prev), [ptr] "+m" (*(volatile uint32_t *)ptr)
+                       : [new] "r" (new), "a" (old)
                        : "memory" );
         return prev;
     case 8:
-        asm volatile ( "lock; cmpxchgq %1,%2"
-                       : "=a" (prev)
-                       : "r" (new), "m" (*__xg(ptr)),
-                       "0" (old)
+        asm volatile ( "lock cmpxchg %q[new], %[ptr]"
+                       : "=a" (prev), [ptr] "+m" (*(volatile uint64_t *)ptr)
+                       : [new] "r" (new), "a" (old)
                        : "memory" );
         return prev;
     }
     return old;
 }
 
-#define cmpxchgptr(ptr,o,n) ({                                          \
-    const __typeof__(**(ptr)) *__o = (o);                               \
-    __typeof__(**(ptr)) *__n = (n);                                     \
-    ((__typeof__(*(ptr)))__cmpxchg((ptr),(unsigned long)__o,            \
-                                   (unsigned long)__n,sizeof(*(ptr)))); \
-})
+static always_inline unsigned long cmpxchg_local_(
+    void *ptr, unsigned long old, unsigned long new, unsigned int size)
+{
+    unsigned long prev = ~old;
+
+    switch ( size )
+    {
+    case 1:
+        asm volatile ( "cmpxchg %b[new], %[ptr]"
+                       : "=a" (prev), [ptr] "+m" (*(uint8_t *)ptr)
+                       : [new] "q" (new), "a" (old) );
+        break;
+    case 2:
+        asm volatile ( "cmpxchg %w[new], %[ptr]"
+                       : "=a" (prev), [ptr] "+m" (*(uint16_t *)ptr)
+                       : [new] "r" (new), "a" (old) );
+        break;
+    case 4:
+        asm volatile ( "cmpxchg %k[new], %[ptr]"
+                       : "=a" (prev), [ptr] "+m" (*(uint32_t *)ptr)
+                       : [new] "r" (new), "a" (old) );
+        break;
+    case 8:
+        asm volatile ( "cmpxchg %q[new], %[ptr]"
+                       : "=a" (prev), [ptr] "+m" (*(uint64_t *)ptr)
+                       : [new] "r" (new), "a" (old) );
+        break;
+    }
+
+    return prev;
+}
 
 /*
  * Undefined symbol to cause link failure if a wrong size is used with
@@ -129,23 +160,23 @@ static always_inline unsigned long __xadd(
     switch ( size )
     {
     case 1:
-        asm volatile ( "lock; xaddb %b0,%1"
-                       : "+r" (v), "+m" (*__xg(ptr))
+        asm volatile ( "lock xadd %b[v], %[ptr]"
+                       : [v] "+q" (v), [ptr] "+m" (*(volatile uint8_t *)ptr)
                        :: "memory");
         return v;
     case 2:
-        asm volatile ( "lock; xaddw %w0,%1"
-                       : "+r" (v), "+m" (*__xg(ptr))
+        asm volatile ( "lock xadd %w[v], %[ptr]"
+                       : [v] "+r" (v), [ptr] "+m" (*(volatile uint16_t *)ptr)
                        :: "memory");
         return v;
     case 4:
-        asm volatile ( "lock; xaddl %k0,%1"
-                       : "+r" (v), "+m" (*__xg(ptr))
+        asm volatile ( "lock xadd %k[v], %[ptr]"
+                       : [v] "+r" (v), [ptr] "+m" (*(volatile uint32_t *)ptr)
                        :: "memory");
         return v;
     case 8:
-        asm volatile ( "lock; xaddq %q0,%1"
-                       : "+r" (v), "+m" (*__xg(ptr))
+        asm volatile ( "lock xadd %q[v], %[ptr]"
+                       : [v] "+r" (v), [ptr] "+m" (*(volatile uint64_t *)ptr)
                        :: "memory");
 
         return v;
@@ -164,26 +195,33 @@ static always_inline unsigned long __xadd(
     ((typeof(*(ptr)))__xadd(ptr, (typeof(*(ptr)))(v), sizeof(*(ptr))))
 
 /*
+ * Mandatory barriers, for enforced ordering of reads and writes, e.g. for use
+ * with MMIO devices mapped with reduced cacheability.
+ */
+#define mb()            asm volatile ( "mfence" ::: "memory" )
+#define rmb()           asm volatile ( "lfence" ::: "memory" )
+#define wmb()           asm volatile ( "sfence" ::: "memory" )
+
+/*
+ * SMP barriers, for ordering of reads and writes between CPUs, most commonly
+ * used with shared memory.
+ *
  * Both Intel and AMD agree that, from a programmer's viewpoint:
  *  Loads cannot be reordered relative to other loads.
  *  Stores cannot be reordered relative to other stores.
- * 
- * Intel64 Architecture Memory Ordering White Paper
- * <http://developer.intel.com/products/processor/manuals/318147.pdf>
- * 
- * AMD64 Architecture Programmer's Manual, Volume 2: System Programming
- * <http://www.amd.com/us-en/assets/content_type/\
- *  white_papers_and_tech_docs/24593.pdf>
+ *  Loads may be reordered ahead of a unaliasing stores.
+ *
+ * Refer to the vendor system programming manuals for further details.
  */
-#define rmb()           barrier()
-#define wmb()           barrier()
-
-#define smp_mb()        mb()
-#define smp_rmb()       rmb()
-#define smp_wmb()       wmb()
+#define smp_mb()        asm volatile ( "lock addl $0, -4(%%rsp)" ::: "memory" )
+#define smp_rmb()       barrier()
+#define smp_wmb()       barrier()
 
 #define set_mb(var, value) do { xchg(&var, value); } while (0)
-#define set_wmb(var, value) do { var = value; wmb(); } while (0)
+#define set_wmb(var, value) do { var = value; smp_wmb(); } while (0)
+
+#define smp_mb__before_atomic()    do { } while (0)
+#define smp_mb__after_atomic()     do { } while (0)
 
 /**
  * array_index_mask_nospec() - generate a mask that is ~0UL when the

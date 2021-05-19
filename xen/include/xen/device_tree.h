@@ -13,8 +13,8 @@
 #include <asm/byteorder.h>
 #include <asm/device.h>
 #include <public/xen.h>
+#include <public/device_tree_defs.h>
 #include <xen/kernel.h>
-#include <xen/init.h>
 #include <xen/string.h>
 #include <xen/types.h>
 #include <xen/list.h>
@@ -92,6 +92,13 @@ struct dt_device_node {
 
     /* IOMMU specific fields */
     bool is_protected;
+    /*
+     * The main purpose of this list is to link the structure in the list
+     * of devices assigned to domain.
+     *
+     * Boot code (iommu_hardware_setup) re-uses this list to link the structure
+     * in the list of devices for which driver requested deferred probing.
+     */
     struct list_head domain_list;
 
     struct device dev;
@@ -114,35 +121,9 @@ struct dt_phandle_args {
 };
 
 /**
- * IRQ line type.
- *
- * IRQ_TYPE_NONE            - default, unspecified type
- * IRQ_TYPE_EDGE_RISING     - rising edge triggered
- * IRQ_TYPE_EDGE_FALLING    - falling edge triggered
- * IRQ_TYPE_EDGE_BOTH       - rising and falling edge triggered
- * IRQ_TYPE_LEVEL_HIGH      - high level triggered
- * IRQ_TYPE_LEVEL_LOW       - low level triggered
- * IRQ_TYPE_LEVEL_MASK      - Mask to filter out the level bits
- * IRQ_TYPE_SENSE_MASK      - Mask for all the above bits
- * IRQ_TYPE_INVALID         - Use to initialize the type
- */
-#define IRQ_TYPE_NONE           0x00000000
-#define IRQ_TYPE_EDGE_RISING    0x00000001
-#define IRQ_TYPE_EDGE_FALLING   0x00000002
-#define IRQ_TYPE_EDGE_BOTH                           \
-    (IRQ_TYPE_EDGE_FALLING | IRQ_TYPE_EDGE_RISING)
-#define IRQ_TYPE_LEVEL_HIGH     0x00000004
-#define IRQ_TYPE_LEVEL_LOW      0x00000008
-#define IRQ_TYPE_LEVEL_MASK                          \
-    (IRQ_TYPE_LEVEL_LOW | IRQ_TYPE_LEVEL_HIGH)
-#define IRQ_TYPE_SENSE_MASK     0x0000000f
-
-#define IRQ_TYPE_INVALID        0x00000010
-
-/**
  * dt_irq - describe an IRQ in the device tree
  * @irq: IRQ number
- * @type: IRQ type (see IRQ_TYPE_*)
+ * @type: IRQ type (see DT_IRQ_TYPE_*)
  *
  * This structure is returned when an interrupt is mapped.
  */
@@ -151,12 +132,12 @@ struct dt_irq {
     unsigned int type;
 };
 
-/* If type == IRQ_TYPE_NONE, assume we use level triggered */
+/* If type == DT_IRQ_TYPE_NONE, assume we use level triggered */
 static inline bool_t dt_irq_is_level_triggered(const struct dt_irq *irq)
 {
     unsigned int type = irq->type;
 
-    return (type & IRQ_TYPE_LEVEL_MASK) || (type == IRQ_TYPE_NONE);
+    return (type & DT_IRQ_TYPE_LEVEL_MASK) || (type == DT_IRQ_TYPE_NONE);
 }
 
 /**
@@ -184,9 +165,9 @@ typedef int (*device_tree_node_func)(const void *fdt,
 
 extern const void *device_tree_flattened;
 
-int device_tree_for_each_node(const void *fdt,
-                                     device_tree_node_func func,
-                                     void *data);
+int device_tree_for_each_node(const void *fdt, int node,
+                              device_tree_node_func func,
+                              void *data);
 
 /**
  * dt_unflatten_host_device_tree - Unflatten the host device tree
@@ -194,7 +175,7 @@ int device_tree_for_each_node(const void *fdt,
  * Create a hierarchical device tree for the host DTB to be able
  * to retrieve parents.
  */
-void __init dt_unflatten_host_device_tree(void);
+void dt_unflatten_host_device_tree(void);
 
 /**
  * IRQ translation callback
@@ -229,7 +210,7 @@ extern const struct dt_device_node *dt_interrupt_controller;
  *
  * If found, return the interrupt controller device node.
  */
-struct dt_device_node * __init
+struct dt_device_node *
 dt_find_interrupt_controller(const struct dt_device_match *matches);
 
 #define dt_prop_cmp(s1, s2) strcmp((s1), (s2))
@@ -418,6 +399,18 @@ static inline bool_t dt_property_read_bool(const struct dt_device_node *np,
  */
 int dt_property_read_string(const struct dt_device_node *np,
                             const char *propname, const char **out_string);
+
+/**
+ * dt_property_match_string() - Find string in a list and return index
+ * @np: pointer to node containing string list property
+ * @propname: string list property name
+ * @string: pointer to string to search for in string list
+ *
+ * This function searches a string list property and returns the index
+ * of a specific string value.
+ */
+int dt_property_match_string(const struct dt_device_node *np,
+                             const char *propname, const char *string);
 
 /**
  * Checks if the given "compat" string matches one of the strings in
@@ -699,7 +692,7 @@ void dt_set_range(__be32 **cellp, const struct dt_device_node *np,
  * Write a range into a series of cells and update cellp to point to the
  * cell just after.
  */
-void dt_child_set_range(__be32 **cellp, const struct dt_device_node *parent,
+void dt_child_set_range(__be32 **cellp, int addrcells, int sizecells,
                         u64 address, u64 size);
 
 /**
@@ -763,6 +756,25 @@ int dt_parse_phandle_with_args(const struct dt_device_node *np,
                                const char *list_name,
                                const char *cells_name, int index,
                                struct dt_phandle_args *out_args);
+
+/**
+ * dt_count_phandle_with_args() - Find the number of phandles references in a property
+ * @np: pointer to a device tree node containing a list
+ * @list_name: property name that contains a list
+ * @cells_name: property name that specifies phandles' arguments count
+ *
+ * Returns the number of phandle + argument tuples within a property. It
+ * is a typical pattern to encode a list of phandle and variable
+ * arguments into a single property. The number of arguments is encoded
+ * by a property in the phandle-target node. For example, a gpios
+ * property would contain a list of GPIO specifies consisting of a
+ * phandle and 1 or more arguments. The number of arguments are
+ * determined by the #gpio-cells property in the node pointed to by the
+ * phandle.
+ */
+int dt_count_phandle_with_args(const struct dt_device_node *np,
+                               const char *list_name,
+                               const char *cells_name);
 
 #ifdef CONFIG_DEVICE_TREE_DEBUG
 #define dt_dprintk(fmt, args...)  \

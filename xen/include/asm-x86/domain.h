@@ -1,26 +1,25 @@
 #ifndef __ASM_DOMAIN_H__
 #define __ASM_DOMAIN_H__
 
-#include <xen/config.h>
 #include <xen/mm.h>
 #include <xen/radix-tree.h>
 #include <asm/hvm/vcpu.h>
 #include <asm/hvm/domain.h>
 #include <asm/e820.h>
 #include <asm/mce.h>
+#include <asm/vpmu.h>
+#include <asm/x86_emulate.h>
 #include <public/vcpu.h>
 #include <public/hvm/hvm_info_table.h>
 
 #define has_32bit_shinfo(d)    ((d)->arch.has_32bit_shinfo)
-#define is_pv_32bit_domain(d)  ((d)->arch.is_32bit_pv)
-#define is_pv_32bit_vcpu(v)    (is_pv_32bit_domain((v)->domain))
-#define is_pvh_32bit_domain(d) (is_pvh_domain(d) && has_32bit_shinfo(d))
 
-#define is_hvm_pv_evtchn_domain(d) (has_hvm_container_domain(d) && \
-        d->arch.hvm_domain.irq.callback_via_type == HVMIRQ_callback_vector)
+#define is_hvm_pv_evtchn_domain(d) (is_hvm_domain(d) && \
+        (d)->arch.hvm.irq->callback_via_type == HVMIRQ_callback_vector)
 #define is_hvm_pv_evtchn_vcpu(v) (is_hvm_pv_evtchn_domain(v->domain))
 #define is_domain_direct_mapped(d) ((void)(d), 0)
 
+#define VCPU_TRAP_NONE         0
 #define VCPU_TRAP_NMI          1
 #define VCPU_TRAP_MCE          2
 #define VCPU_TRAP_LAST         VCPU_TRAP_MCE
@@ -85,7 +84,7 @@ void cpuid_policy_updated(struct vcpu *v);
  * Initialise a hypercall-transfer page. The given pointer must be mapped
  * in Xen virtual address space (accesses are not validated or checked).
  */
-void hypercall_page_initialise(struct domain *d, void *);
+void init_hypercall_page(struct domain *d, void *);
 
 /************************************************/
 /*          shadow paging extension             */
@@ -99,7 +98,7 @@ struct shadow_domain {
     struct page_list_head freelist;
     unsigned int      total_pages;  /* number of pages allocated */
     unsigned int      free_pages;   /* number of pages on freelists */
-    unsigned int      p2m_pages;    /* number of pages allocates to p2m */
+    unsigned int      p2m_pages;    /* number of pages allocated to p2m */
 
     /* 1-to-1 map for use when HVM vcpus have paging disabled */
     pagetable_t unpaged_pagetable;
@@ -113,36 +112,48 @@ struct shadow_domain {
     bool_t hash_walking;  /* Some function is walking the hash table */
 
     /* Fast MMIO path heuristic */
-    bool_t has_fast_mmio_entries;
+    bool has_fast_mmio_entries;
 
     /* OOS */
     bool_t oos_active;
-    bool_t oos_off;
 
+#ifdef CONFIG_HVM
     /* Has this domain ever used HVMOP_pagetable_dying? */
     bool_t pagetable_dying_op;
+#endif
 
+#ifdef CONFIG_PV
     /* PV L1 Terminal Fault mitigation. */
     struct tasklet pv_l1tf_tasklet;
+#endif /* CONFIG_PV */
 #endif
 };
 
 struct shadow_vcpu {
 #ifdef CONFIG_SHADOW_PAGING
+#ifdef CONFIG_HVM
     /* PAE guests: per-vcpu shadow top-level table */
     l3_pgentry_t l3table[4] __attribute__((__aligned__(32)));
     /* PAE guests: per-vcpu cache of the top-level *guest* entries */
     l3_pgentry_t gl3e[4] __attribute__((__aligned__(32)));
-    /* Non-PAE guests: pointer to guest top-level pagetable */
-    void *guest_vtable;
+
+    /* shadow(s) of guest (MFN) */
+    pagetable_t shadow_table[4];
+#else
+    /* shadow of guest (MFN) */
+    pagetable_t shadow_table[1];
+#endif
+
     /* Last MFN that we emulated a write to as unshadow heuristics. */
     unsigned long last_emulated_mfn_for_unshadow;
     /* MFN of the last shadow that we shot a writeable mapping in */
     unsigned long last_writeable_pte_smfn;
+#ifdef CONFIG_HVM
     /* Last frame number that we emulated a write to. */
     unsigned long last_emulated_frame;
     /* Last MFN that we emulated a write successfully */
     unsigned long last_emulated_mfn;
+#endif
 
     /* Shadow out-of-sync: pages that this vcpu has let go out of sync */
     mfn_t oos[SHADOW_OOS_PAGES];
@@ -153,7 +164,9 @@ struct shadow_vcpu {
         unsigned long off[SHADOW_OOS_FIXUPS];
     } oos_fixup[SHADOW_OOS_PAGES];
 
+#ifdef CONFIG_HVM
     bool_t pagetable_dying;
+#endif
 #endif
 };
 
@@ -164,7 +177,7 @@ struct hap_domain {
     struct page_list_head freelist;
     unsigned int      total_pages;  /* number of pages allocated */
     unsigned int      free_pages;   /* number of pages on freelists */
-    unsigned int      p2m_pages;    /* number of pages allocates to p2m */
+    unsigned int      p2m_pages;    /* number of pages allocated to p2m */
 };
 
 /************************************************/
@@ -181,9 +194,11 @@ struct log_dirty_domain {
     unsigned int   dirty_count;
 
     /* functions which are paging mode specific */
-    int            (*enable_log_dirty   )(struct domain *d, bool_t log_global);
-    int            (*disable_log_dirty  )(struct domain *d);
-    void           (*clean_dirty_bitmap )(struct domain *d);
+    const struct log_dirty_ops {
+        int        (*enable  )(struct domain *d, bool log_global);
+        int        (*disable )(struct domain *d);
+        void       (*clean   )(struct domain *d);
+    } *ops;
 };
 
 struct paging_domain {
@@ -200,9 +215,6 @@ struct paging_domain {
     struct hap_domain       hap;
     /* log dirty support */
     struct log_dirty_domain log_dirty;
-
-    /* Number of valid bits in a gfn. */
-    unsigned int gfn_bits;
 
     /* preemption handling */
     struct {
@@ -228,10 +240,12 @@ struct paging_vcpu {
     const struct paging_mode *mode;
     /* Nested Virtualization: paging mode of nested guest */
     const struct paging_mode *nestedmode;
+#ifdef CONFIG_HVM
     /* HVM guest: last emulate was to a pagetable */
     unsigned int last_write_was_pt:1;
     /* HVM guest: last write emulation succeeds */
     unsigned int last_write_emul_ok:1;
+#endif
     /* Translated guest: virtual TLB */
     struct shadow_vtlb *vtlb;
     spinlock_t          vtlb_lock;
@@ -239,9 +253,6 @@ struct paging_vcpu {
     /* paging support extension */
     struct shadow_vcpu shadow;
 };
-
-#define MAX_CPUID_INPUT 40
-typedef xen_domctl_cpuid_t cpuid_input_t;
 
 #define MAX_NESTEDP2M 10
 
@@ -260,6 +271,8 @@ struct pv_domain
 
     atomic_t nr_l4_pages;
 
+    /* Is a 32-bit PV guest? */
+    bool is_32bit;
     /* XPTI active? */
     bool xpti;
     /* Use PCID feature? */
@@ -273,35 +286,6 @@ struct pv_domain
     struct cpuidmasks *cpuidmasks;
 };
 
-/*
- * PCID values for the address spaces of 64-bit pv domains:
- *
- * We are using 4 PCID values for a 64 bit pv domain subject to XPTI:
- * - hypervisor active and guest in kernel mode   PCID 0
- * - hypervisor active and guest in user mode     PCID 1
- * - guest active and in kernel mode              PCID 2
- * - guest active and in user mode                PCID 3
- *
- * Without XPTI only 2 values are used:
- * - guest in kernel mode                         PCID 0
- * - guest in user mode                           PCID 1
- */
-
-#define PCID_PV_PRIV      0x0000    /* Used for other domains, too. */
-#define PCID_PV_USER      0x0001
-#define PCID_PV_XPTI      0x0002    /* To be ORed to above values. */
-
-/*
- * Return additional PCID specific cr3 bits.
- *
- * Note that X86_CR3_NOFLUSH will not be readable in cr3. Anyone consuming
- * v->arch.cr3 should mask away X86_CR3_NOFLUSH and X86_CR3_PCIDMASK in case
- * the value is used to address the root page table.
- */
-#define get_pcid_bits(v, is_xpti)                                       \
-    (X86_CR3_NOFLUSH | ((is_xpti) ? PCID_PV_XPTI : 0) |                 \
-     (((v)->arch.flags & TF_kernel_mode) ? PCID_PV_PRIV : PCID_PV_USER))
-
 struct monitor_write_data {
     struct {
         unsigned int msr : 1;
@@ -309,6 +293,8 @@ struct monitor_write_data {
         unsigned int cr3 : 1;
         unsigned int cr4 : 1;
     } do_write;
+
+    bool cr3_noflush;
 
     uint32_t msr;
     uint64_t value;
@@ -321,7 +307,9 @@ struct arch_domain
 {
     struct page_info *perdomain_l3_pg;
 
+#ifdef CONFIG_PV32
     unsigned int hv_compat_vstart;
+#endif
 
     /* Maximum physical-address bitwidth supported by this guest. */
     unsigned int physaddr_bitsize;
@@ -331,13 +319,9 @@ struct arch_domain
     uint32_t pci_cf8;
     uint8_t cmos_idx;
 
-    bool_t s3_integrity;
-
-    struct list_head pdev_list;
-
     union {
-        struct pv_domain pv_domain;
-        struct hvm_domain hvm_domain;
+        struct pv_domain pv;
+        struct hvm_domain hvm;
     };
 
     struct paging_domain paging;
@@ -347,17 +331,16 @@ struct arch_domain
     int page_alloc_unlock_level;
 
     /* Continuable domain_relinquish_resources(). */
-    enum {
-        RELMEM_not_started,
-        RELMEM_shared,
-        RELMEM_xen,
-        RELMEM_l4,
-        RELMEM_l3,
-        RELMEM_l2,
-        RELMEM_done,
-    } relmem;
+    unsigned int rel_priv;
     struct page_list_head relmem_list;
 
+    const struct arch_csw {
+        void (*from)(struct vcpu *);
+        void (*to)(struct vcpu *);
+        void noreturn (*tail)(void);
+    } *ctxt_switch;
+
+#ifdef CONFIG_HVM
     /* nestedhvm: translate l2 guest physical to host physical */
     struct p2m_domain *nested_p2m[MAX_NESTEDP2M];
     mm_lock_t nested_p2m_lock;
@@ -367,25 +350,17 @@ struct arch_domain
     struct p2m_domain *altp2m_p2m[MAX_ALTP2M];
     mm_lock_t altp2m_list_lock;
     uint64_t *altp2m_eptp;
+    uint64_t *altp2m_visible_eptp;
+#endif
 
     /* NB. protected by d->event_lock and by irq_desc[irq].lock */
     struct radix_tree_root irq_pirq;
 
-    /* Is a 32-bit PV (non-HVM) guest? */
-    bool_t is_32bit_pv;
     /* Is shared-info page in 32-bit format? */
     bool_t has_32bit_shinfo;
 
-    /* Domain cannot handle spurious page faults? */
-    bool_t suppress_spurious_page_faults;
-
     /* Is PHYSDEVOP_eoi to automatically unmask the event channel? */
     bool_t auto_unmask;
-
-    /* Values snooped from updates to cpuids[] (below). */
-    u8 x86;                  /* CPU family */
-    u8 x86_vendor;           /* CPU vendor */
-    u8 x86_model;            /* CPU model */
 
     /*
      * The width of the FIP/FDP register in the FPU that needs to be
@@ -402,7 +377,9 @@ struct arch_domain
      */
     uint8_t x87_fip_width;
 
-    cpuid_input_t *cpuids;
+    /* CPUID and MSR policy objects. */
+    struct cpuid_policy *cpuid;
+    struct msr_policy *msr;
 
     struct PITState vpit;
 
@@ -410,7 +387,6 @@ struct arch_domain
     int tsc_mode;            /* see include/asm-x86/time.h */
     bool_t vtsc;             /* tsc is emulated (may change after migrate) */
     s_time_t vtsc_last;      /* previous TSC value (guarantee monotonicity) */
-    spinlock_t vtsc_lock;
     uint64_t vtsc_offset;    /* adjustment for save/restore/migrate */
     uint32_t tsc_khz;        /* cached guest khz for certain emulated or
                                 hardware TSC scaling cases */
@@ -420,10 +396,6 @@ struct arch_domain
                                      hardware TSC scaling cases */
     uint32_t incarnation;    /* incremented every restore or live migrate
                                 (possibly other cases in the future */
-#if !defined(NDEBUG) || defined(CONFIG_PERF_COUNTERS)
-    uint64_t vtsc_kerncount;
-    uint64_t vtsc_usercount;
-#endif
 
     /* Pseudophysical e820 map (XENMEM_memory_map).  */
     spinlock_t e820_lock;
@@ -441,46 +413,96 @@ struct arch_domain
 
     /* Arch-specific monitor options */
     struct {
-        unsigned int write_ctrlreg_enabled       : 4;
-        unsigned int write_ctrlreg_sync          : 4;
-        unsigned int write_ctrlreg_onchangeonly  : 4;
-        unsigned int singlestep_enabled          : 1;
-        unsigned int software_breakpoint_enabled : 1;
-        unsigned int debug_exception_enabled     : 1;
-        unsigned int debug_exception_sync        : 1;
-        unsigned int cpuid_enabled               : 1;
+        unsigned int write_ctrlreg_enabled                                 : 4;
+        unsigned int write_ctrlreg_sync                                    : 4;
+        unsigned int write_ctrlreg_onchangeonly                            : 4;
+        unsigned int singlestep_enabled                                    : 1;
+        unsigned int software_breakpoint_enabled                           : 1;
+        unsigned int debug_exception_enabled                               : 1;
+        unsigned int debug_exception_sync                                  : 1;
+        unsigned int cpuid_enabled                                         : 1;
+        unsigned int descriptor_access_enabled                             : 1;
+        unsigned int guest_request_userspace_enabled                       : 1;
+        unsigned int emul_unimplemented_enabled                            : 1;
+        /*
+         * By default all events are sent.
+         * This is used to filter out pagefaults.
+         */
+        unsigned int inguest_pagefault_disabled                            : 1;
+        unsigned int control_register_values                               : 1;
         struct monitor_msr_bitmap *msr_bitmap;
+        uint64_t write_ctrlreg_mask[4];
     } monitor;
 
     /* Mem_access emulation control */
     bool_t mem_access_emulate_each_rep;
 
+    /* Don't unconditionally inject #GP for unhandled MSRs. */
+    bool msr_relaxed;
+
     /* Emulated devices enabled bitmap. */
     uint32_t emulation_flags;
 } __cacheline_aligned;
 
-#define has_vlapic(d)      (!!((d)->arch.emulation_flags & XEN_X86_EMU_LAPIC))
-#define has_vhpet(d)       (!!((d)->arch.emulation_flags & XEN_X86_EMU_HPET))
-#define has_vpm(d)         (!!((d)->arch.emulation_flags & XEN_X86_EMU_PM))
-#define has_vrtc(d)        (!!((d)->arch.emulation_flags & XEN_X86_EMU_RTC))
-#define has_vioapic(d)     (!!((d)->arch.emulation_flags & XEN_X86_EMU_IOAPIC))
-#define has_vpic(d)        (!!((d)->arch.emulation_flags & XEN_X86_EMU_PIC))
-#define has_vvga(d)        (!!((d)->arch.emulation_flags & XEN_X86_EMU_VGA))
-#define has_viommu(d)      (!!((d)->arch.emulation_flags & XEN_X86_EMU_IOMMU))
-#define has_vpit(d)        (!!((d)->arch.emulation_flags & XEN_X86_EMU_PIT))
+#ifdef CONFIG_HVM
+#define X86_EMU_LAPIC    XEN_X86_EMU_LAPIC
+#define X86_EMU_HPET     XEN_X86_EMU_HPET
+#define X86_EMU_PM       XEN_X86_EMU_PM
+#define X86_EMU_RTC      XEN_X86_EMU_RTC
+#define X86_EMU_IOAPIC   XEN_X86_EMU_IOAPIC
+#define X86_EMU_PIC      XEN_X86_EMU_PIC
+#define X86_EMU_VGA      XEN_X86_EMU_VGA
+#define X86_EMU_IOMMU    XEN_X86_EMU_IOMMU
+#define X86_EMU_USE_PIRQ XEN_X86_EMU_USE_PIRQ
+#define X86_EMU_VPCI     XEN_X86_EMU_VPCI
+#else
+#define X86_EMU_LAPIC    0
+#define X86_EMU_HPET     0
+#define X86_EMU_PM       0
+#define X86_EMU_RTC      0
+#define X86_EMU_IOAPIC   0
+#define X86_EMU_PIC      0
+#define X86_EMU_VGA      0
+#define X86_EMU_IOMMU    0
+#define X86_EMU_USE_PIRQ 0
+#define X86_EMU_VPCI     0
+#endif
 
-#define has_arch_pdevs(d)    (!list_empty(&(d)->arch.pdev_list))
+#define X86_EMU_PIT     XEN_X86_EMU_PIT
+
+/* This must match XEN_X86_EMU_ALL in xen.h */
+#define X86_EMU_ALL             (X86_EMU_LAPIC | X86_EMU_HPET |         \
+                                 X86_EMU_PM | X86_EMU_RTC |             \
+                                 X86_EMU_IOAPIC | X86_EMU_PIC |         \
+                                 X86_EMU_VGA | X86_EMU_IOMMU |          \
+                                 X86_EMU_PIT | X86_EMU_USE_PIRQ |       \
+                                 X86_EMU_VPCI)
+
+#define has_vlapic(d)      (!!((d)->arch.emulation_flags & X86_EMU_LAPIC))
+#define has_vhpet(d)       (!!((d)->arch.emulation_flags & X86_EMU_HPET))
+#define has_vpm(d)         (!!((d)->arch.emulation_flags & X86_EMU_PM))
+#define has_vrtc(d)        (!!((d)->arch.emulation_flags & X86_EMU_RTC))
+#define has_vioapic(d)     (!!((d)->arch.emulation_flags & X86_EMU_IOAPIC))
+#define has_vpic(d)        (!!((d)->arch.emulation_flags & X86_EMU_PIC))
+#define has_vvga(d)        (!!((d)->arch.emulation_flags & X86_EMU_VGA))
+#define has_viommu(d)      (!!((d)->arch.emulation_flags & X86_EMU_IOMMU))
+#define has_vpit(d)        (!!((d)->arch.emulation_flags & X86_EMU_PIT))
+#define has_pirq(d)        (!!((d)->arch.emulation_flags & X86_EMU_USE_PIRQ))
+#define has_vpci(d)        (!!((d)->arch.emulation_flags & X86_EMU_VPCI))
 
 #define gdt_ldt_pt_idx(v) \
       ((v)->vcpu_id >> (PAGETABLE_ORDER - GDT_LDT_VCPU_SHIFT))
-#define gdt_ldt_ptes(d, v) \
-    ((d)->arch.pv_domain.gdt_ldt_l1tab[gdt_ldt_pt_idx(v)] + \
+#define pv_gdt_ptes(v) \
+    ((v)->domain->arch.pv.gdt_ldt_l1tab[gdt_ldt_pt_idx(v)] + \
      (((v)->vcpu_id << GDT_LDT_VCPU_SHIFT) & (L1_PAGETABLE_ENTRIES - 1)))
+#define pv_ldt_ptes(v) (pv_gdt_ptes(v) + 16)
 
 struct pv_vcpu
 {
     /* map_domain_page() mapping cache. */
     struct mapcache_vcpu mapcache;
+
+    unsigned int vgc_flags;
 
     struct trap_info *trap_ctxt;
 
@@ -508,14 +530,30 @@ struct pv_vcpu
     bool_t syscall32_disables_events;
     bool_t sysenter_disables_events;
 
-    /* Segment base addresses. */
+    /*
+     * 64bit segment bases.
+     *
+     * FS and the active GS are always stale when the vCPU is in context, as
+     * the guest can change them behind Xen's back with MOV SREG, or
+     * WR{FS,GS}BASE on capable hardware.
+     *
+     * The inactive GS base is never stale, as guests can't use SWAPGS to
+     * access it - all modification is performed by Xen either directly
+     * (hypercall, #GP emulation), or indirectly (toggle_guest_mode()).
+     *
+     * The vCPU context switch path is optimised based on this fact, so any
+     * path updating or swapping the inactive base must update the cached
+     * value as well.
+     *
+     * Which GS base is active and inactive depends on whether the vCPU is in
+     * user or kernel context.
+     */
     unsigned long fs_base;
     unsigned long gs_base_kernel;
     unsigned long gs_base_user;
 
     /* Bounce information for propagating an exception to guest OS. */
     struct trap_bounce trap_bounce;
-    struct trap_bounce int80_bounce;
 
     /* I/O-port access bitmap. */
     XEN_GUEST_HANDLE(uint8) iobmp; /* Guest kernel vaddr of the bitmap. */
@@ -524,23 +562,16 @@ struct pv_vcpu
     unsigned int iopl;        /* Current IOPL for this VCPU, shifted left by
                                * 12 to match the eflags register. */
 
-    /* Current LDT details. */
-    unsigned long shadow_ldt_mapcnt;
-    spinlock_t shadow_ldt_lock;
-
-    /* data breakpoint extension MSRs */
-    uint32_t dr_mask[4];
+    /*
+     * %dr7 bits the guest has set, but aren't loaded into hardware, and are
+     * completely emulated.
+     */
+    uint32_t dr7_emul;
 
     /* Deferred VA-based update state. */
     bool_t need_update_runstate_area;
     struct vcpu_time_info pending_system_time;
 };
-
-typedef enum __packed {
-    SMAP_CHECK_HONOR_CPL_AC,    /* honor the guest's CPL and AC */
-    SMAP_CHECK_ENABLED,         /* enable the check */
-    SMAP_CHECK_DISABLED,        /* disable the check */
-} smap_check_policy_t;
 
 struct arch_vcpu
 {
@@ -550,27 +581,36 @@ struct arch_vcpu
      */
 
     void              *fpu_ctxt;
-    unsigned long      vgc_flags;
     struct cpu_user_regs user_regs;
-    unsigned long      debugreg[8];
+
+    /* Debug registers. */
+    unsigned long dr[4];
+    unsigned long dr7; /* Ideally int, but __vmread() needs long. */
+    unsigned int dr6;
 
     /* other state */
 
     unsigned long      flags; /* TF_ */
 
-    void (*schedule_tail) (struct vcpu *);
-
-    void (*ctxt_switch_from) (struct vcpu *);
-    void (*ctxt_switch_to) (struct vcpu *);
-
     struct vpmu_struct vpmu;
+
+    struct {
+        bool    pending;
+        uint8_t old_mask;
+    } async_exception_state[VCPU_TRAP_LAST];
+#define async_exception_state(t) async_exception_state[(t)-1]
+    uint8_t async_exception_mask;
 
     /* Virtual Machine Extensions */
     union {
-        struct pv_vcpu pv_vcpu;
-        struct hvm_vcpu hvm_vcpu;
+        struct pv_vcpu pv;
+        struct hvm_vcpu hvm;
     };
 
+    /*
+     * guest_table{,_user} hold a ref to the page, and also a type-count
+     * unless shadow refcounts are in use
+     */
     pagetable_t guest_table_user;       /* (MFN) x86/64 user-space pagetable */
     pagetable_t guest_table;            /* (MFN) guest notion of cr3 */
     struct page_info *old_guest_table;  /* partially destructed pagetable */
@@ -578,10 +618,7 @@ struct arch_vcpu
                                         /* former, if any */
     bool old_guest_table_partial;       /* Are we dropping a type ref, or just
                                          * finishing up a partial de-validation? */
-    /* guest_table holds a ref to the page, and also a type-count unless
-     * shadow refcounts are in use */
-    pagetable_t shadow_table[4];        /* (MFN) shadow(s) of guest */
-    pagetable_t monitor_table;          /* (MFN) hypervisor PT (for HVM) */
+
     unsigned long cr3;                  /* (MA) value to install in HW CR3 */
 
     /*
@@ -607,20 +644,9 @@ struct arch_vcpu
     /* Restore all FPU state (lazy and non-lazy state) on context switch? */
     bool fully_eager_fpu;
 
-    /* Has the guest enabled CPUID faulting? */
-    bool cpuid_faulting;
-
-    /*
-     * The SMAP check policy when updating runstate_guest(v) and the
-     * secondary system time.
-     */
-    smap_check_policy_t smap_check_policy;
-
     struct vmce vmce;
 
     struct paging_vcpu paging;
-
-    uint32_t spec_ctrl;
 
     uint32_t gdbsx_vcpu_event;
 
@@ -628,48 +654,30 @@ struct arch_vcpu
     XEN_GUEST_HANDLE(vcpu_time_info_t) time_info_guest;
 
     struct arch_vm_event *vm_event;
+
+    struct vcpu_msrs *msrs;
+
+    struct {
+        bool next_interrupt_enabled;
+    } monitor;
 };
 
-smap_check_policy_t smap_policy_change(struct vcpu *v,
-                                       smap_check_policy_t new_policy);
+struct guest_memory_policy
+{
+    bool nested_guest_mode;
+};
 
-/* Shorthands to improve code legibility. */
-#define hvm_vmx         hvm_vcpu.u.vmx
-#define hvm_svm         hvm_vcpu.u.svm
+void update_guest_memory_policy(struct vcpu *v,
+                                struct guest_memory_policy *policy);
 
-bool_t update_runstate_area(struct vcpu *);
-bool_t update_secondary_system_time(struct vcpu *,
-                                    struct vcpu_time_info *);
+void domain_cpu_policy_changed(struct domain *d);
+
+bool update_runstate_area(struct vcpu *);
+bool update_secondary_system_time(struct vcpu *,
+                                  struct vcpu_time_info *);
 
 void vcpu_show_execution_state(struct vcpu *);
 void vcpu_show_registers(const struct vcpu *);
-
-/*
- * Bits which a PV guest can toggle in its view of cr4.  Some are loaded into
- * hardware, while some are fully emulated.
- */
-#define PV_CR4_GUEST_MASK \
-    (X86_CR4_TSD | X86_CR4_DE | X86_CR4_FSGSBASE | X86_CR4_OSXSAVE)
-
-/* Bits which a PV guest may observe from the real hardware settings. */
-#define PV_CR4_GUEST_VISIBLE_MASK \
-    (X86_CR4_PAE | X86_CR4_MCE | X86_CR4_OSFXSR | X86_CR4_OSXMMEXCPT)
-
-/* Given a new cr4 value, construct the resulting guest-visible cr4 value. */
-unsigned long pv_fixup_guest_cr4(const struct vcpu *v, unsigned long cr4);
-
-/* Create a cr4 value to load into hardware, based on vcpu settings. */
-unsigned long pv_make_cr4(const struct vcpu *v);
-
-void domain_cpuid(const struct domain *d,
-                  unsigned int  input,
-                  unsigned int  sub_input,
-                  unsigned int  *eax,
-                  unsigned int  *ebx,
-                  unsigned int  *ecx,
-                  unsigned int  *edx);
-
-#define domain_max_vcpus(d) (is_hvm_domain(d) ? HVM_MAX_VCPUS : MAX_VIRT_CPUS)
 
 static inline struct vcpu_guest_context *alloc_vcpu_guest_context(void)
 {
@@ -685,6 +693,68 @@ void arch_vcpu_regs_init(struct vcpu *v);
 
 struct vcpu_hvm_context;
 int arch_set_info_hvm_guest(struct vcpu *v, const struct vcpu_hvm_context *ctx);
+
+#ifdef CONFIG_PV
+void pv_inject_event(const struct x86_event *event);
+#else
+static inline void pv_inject_event(const struct x86_event *event)
+{
+    ASSERT_UNREACHABLE();
+}
+#endif
+
+static inline void pv_inject_hw_exception(unsigned int vector, int errcode)
+{
+    const struct x86_event event = {
+        .vector = vector,
+        .type = X86_EVENTTYPE_HW_EXCEPTION,
+        .error_code = errcode,
+    };
+
+    pv_inject_event(&event);
+}
+
+static inline void pv_inject_page_fault(int errcode, unsigned long cr2)
+{
+    const struct x86_event event = {
+        .vector = TRAP_page_fault,
+        .type = X86_EVENTTYPE_HW_EXCEPTION,
+        .error_code = errcode,
+        .cr2 = cr2,
+    };
+
+    pv_inject_event(&event);
+}
+
+static inline void pv_inject_sw_interrupt(unsigned int vector)
+{
+    const struct x86_event event = {
+        .vector = vector,
+        .type = X86_EVENTTYPE_SW_INTERRUPT,
+        .error_code = X86_EVENT_NO_EC,
+    };
+
+    pv_inject_event(&event);
+}
+
+#define PV32_VM_ASSIST_MASK ((1UL << VMASST_TYPE_4gb_segments)        | \
+                             (1UL << VMASST_TYPE_4gb_segments_notify) | \
+                             (1UL << VMASST_TYPE_writable_pagetables) | \
+                             (1UL << VMASST_TYPE_pae_extended_cr3)    | \
+                             (1UL << VMASST_TYPE_architectural_iopl)  | \
+                             (1UL << VMASST_TYPE_runstate_update_flag))
+/*
+ * Various of what PV32_VM_ASSIST_MASK has isn't really applicable to 64-bit,
+ * but we can't make such requests fail all of the sudden.
+ */
+#define PV64_VM_ASSIST_MASK (PV32_VM_ASSIST_MASK                      | \
+                             (1UL << VMASST_TYPE_m2p_strict))
+#define HVM_VM_ASSIST_MASK  (1UL << VMASST_TYPE_runstate_update_flag)
+
+#define arch_vm_assist_valid_mask(d) \
+    (is_hvm_domain(d) ? HVM_VM_ASSIST_MASK \
+                      : is_pv_32bit_domain(d) ? PV32_VM_ASSIST_MASK \
+                                              : PV64_VM_ASSIST_MASK)
 
 #endif /* __ASM_DOMAIN_H__ */
 

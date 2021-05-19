@@ -17,16 +17,17 @@
  * GNU General Public License for more details.
  */
 
-#include <xen/types.h>
-#include <xen/sched.h>
-#include <asm/current.h>
-#include <asm/guest_access.h>
+#include <xen/guest_access.h>
 #include <xen/lib.h>
+#include <xen/sched.h>
+#include <xen/types.h>
+
+#include <asm/current.h>
 
 #include "decode.h"
 
 static void update_dabt(struct hsr_dabt *dabt, int reg,
-                        uint8_t size, bool_t sign)
+                        uint8_t size, bool sign)
 {
     dabt->reg = reg;
     dabt->size = size;
@@ -41,14 +42,14 @@ static int decode_thumb2(register_t pc, struct hsr_dabt *dabt, uint16_t hw1)
     if ( raw_copy_from_guest(&hw2, (void *__user)(pc + 2), sizeof (hw2)) )
         return -EFAULT;
 
-    rt = (hw2 >> 12) & 0x7;
+    rt = (hw2 >> 12) & 0xf;
 
     switch ( (hw1 >> 9) & 0xf )
     {
     case 12:
     {
-        bool_t sign = !!(hw1 & (1 << 8));
-        bool_t load = !!(hw1 & (1 << 4));
+        bool sign = (hw1 & (1u << 8));
+        bool load = (hw1 & (1u << 4));
 
         if ( (hw1 & 0x0110) == 0x0100 )
             /* NEON instruction */
@@ -101,16 +102,16 @@ static int decode_thumb(register_t pc, struct hsr_dabt *dabt)
         switch ( opB & 0x3 )
         {
         case 0: /* Non-signed word */
-            update_dabt(dabt, reg, 2, 0);
+            update_dabt(dabt, reg, 2, false);
             break;
         case 1: /* Non-signed halfword */
-            update_dabt(dabt, reg, 1, 0);
+            update_dabt(dabt, reg, 1, false);
             break;
         case 2: /* Non-signed byte */
-            update_dabt(dabt, reg, 0, 0);
+            update_dabt(dabt, reg, 0, false);
             break;
         case 3: /* Signed byte */
-            update_dabt(dabt, reg, 0, 1);
+            update_dabt(dabt, reg, 0, true);
             break;
         }
 
@@ -118,19 +119,19 @@ static int decode_thumb(register_t pc, struct hsr_dabt *dabt)
     }
     case 6:
         /* Load/Store word immediate offset */
-        update_dabt(dabt, instr & 7, 2, 0);
+        update_dabt(dabt, instr & 7, 2, false);
         break;
     case 7:
         /* Load/Store byte immediate offset */
-        update_dabt(dabt, instr & 7, 0, 0);
+        update_dabt(dabt, instr & 7, 0, false);
         break;
     case 8:
         /* Load/Store halfword immediate offset */
-        update_dabt(dabt, instr & 7, 1, 0);
+        update_dabt(dabt, instr & 7, 1, false);
         break;
     case 9:
         /* Load/Store word sp offset */
-        update_dabt(dabt, (instr >> 8) & 7, 2, 0);
+        update_dabt(dabt, (instr >> 8) & 7, 2, false);
         break;
     case 14:
         if ( instr & (1 << 11) )

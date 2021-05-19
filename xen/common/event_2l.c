@@ -7,12 +7,12 @@
  * Version 2 or later.  See the file COPYING for more details.
  */
 
-#include <xen/config.h>
+#include "event_channel.h"
+
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/sched.h>
-#include <xen/event.h>
 
 #include <asm/guest_atomics.h>
 
@@ -64,8 +64,10 @@ static void evtchn_2l_unmask(struct domain *d, struct evtchn *evtchn)
     }
 }
 
-static bool_t evtchn_2l_is_pending(struct domain *d, evtchn_port_t port)
+static bool evtchn_2l_is_pending(const struct domain *d,
+                                 const struct evtchn *evtchn)
 {
+    evtchn_port_t port = evtchn->port;
     unsigned int max_ports = BITS_PER_EVTCHN_WORD(d) * BITS_PER_EVTCHN_WORD(d);
 
     ASSERT(port < max_ports);
@@ -73,8 +75,10 @@ static bool_t evtchn_2l_is_pending(struct domain *d, evtchn_port_t port)
             guest_test_bit(d, port, &shared_info(d, evtchn_pending)));
 }
 
-static bool_t evtchn_2l_is_masked(struct domain *d, evtchn_port_t port)
+static bool evtchn_2l_is_masked(const struct domain *d,
+                                const struct evtchn *evtchn)
 {
+    evtchn_port_t port = evtchn->port;
     unsigned int max_ports = BITS_PER_EVTCHN_WORD(d) * BITS_PER_EVTCHN_WORD(d);
 
     ASSERT(port < max_ports);
@@ -104,7 +108,6 @@ static const struct evtchn_port_ops evtchn_port_ops_2l =
 void evtchn_2l_init(struct domain *d)
 {
     d->evtchn_port_ops = &evtchn_port_ops_2l;
-    d->max_evtchns = BITS_PER_EVTCHN_WORD(d) * BITS_PER_EVTCHN_WORD(d);
 }
 
 /*

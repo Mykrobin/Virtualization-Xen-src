@@ -1,11 +1,13 @@
 XEN_ROOT = $(CURDIR)/..
+
+export PKG_CONFIG_DIR = $(CURDIR)/pkg-config
+
 include $(XEN_ROOT)/tools/Rules.mk
 
 SUBDIRS-y :=
-SUBDIRS-y += include
 SUBDIRS-y += libs
-SUBDIRS-y += libxc
 SUBDIRS-y += flask
+SUBDIRS-y += fuzz
 SUBDIRS-y += xenstore
 SUBDIRS-y += misc
 SUBDIRS-y += examples
@@ -15,12 +17,9 @@ SUBDIRS-$(CONFIG_XCUTILS) += xcutils
 SUBDIRS-$(CONFIG_X86) += firmware
 SUBDIRS-y += console
 SUBDIRS-y += xenmon
-SUBDIRS-y += xenstat
-SUBDIRS-$(CONFIG_Linux) += memshr 
-SUBDIRS-$(CONFIG_BLKTAP2) += blktap2
-SUBDIRS-$(CONFIG_NetBSD) += xenbackendd
+SUBDIRS-y += xentop
 SUBDIRS-y += libfsimage
-SUBDIRS-$(CONFIG_Linux) += libvchan
+SUBDIRS-$(CONFIG_Linux) += vchan
 
 # do not recurse in to a dir we are about to delete
 ifneq "$(MAKECMDGOALS)" "distclean"
@@ -29,22 +28,20 @@ SUBDIRS-$(CONFIG_QEMU_XEN) += qemu-xen-dir
 endif
 
 SUBDIRS-y += xenpmd
-SUBDIRS-y += libxl
+SUBDIRS-$(CONFIG_GOLANG) += golang
+SUBDIRS-y += xl
 SUBDIRS-y += helpers
 SUBDIRS-$(CONFIG_X86) += xenpaging
 SUBDIRS-$(CONFIG_X86) += debugger/gdbsx
 SUBDIRS-$(CONFIG_X86) += debugger/kdd
 SUBDIRS-$(CONFIG_TESTS) += tests
 
-# These don't cross-compile
-ifeq ($(XEN_COMPILE_ARCH),$(XEN_TARGET_ARCH))
 SUBDIRS-y += python
 SUBDIRS-y += pygrub
 SUBDIRS-$(OCAML_TOOLS) += ocaml
-endif
 
 ifeq ($(CONFIG_RUMP),y)
-SUBDIRS-y := include libxc xenstore
+SUBDIRS-y := libs
 endif
 
 # For the sake of linking, set the sys-root
@@ -59,61 +56,32 @@ endif
 build all: subdirs-all
 
 .PHONY: install
-install: subdirs-install
+install:
 	$(INSTALL_DIR) -m 700 $(DESTDIR)$(XEN_DUMP_DIR)
 	$(INSTALL_DIR) $(DESTDIR)$(XEN_LOG_DIR)
 	$(INSTALL_DIR) $(DESTDIR)$(XEN_RUN_DIR)
 	$(INSTALL_DIR) $(DESTDIR)$(XEN_LIB_DIR)
 	$(INSTALL_DIR) $(DESTDIR)$(XEN_RUN_STORED)
+	$(INSTALL_DIR) $(DESTDIR)$(PKG_INSTALLDIR)
+	$(MAKE) subdirs-install
 
 .PHONY: uninstall
 uninstall: D=$(DESTDIR)
 uninstall:
 	[ -d $(D)$(XEN_CONFIG_DIR) ] && mv -f $(D)$(XEN_CONFIG_DIR) $(D)$(XEN_CONFIG_DIR).old-`date +%s` || true
-	rm -rf $(D)$(CONFIG_DIR)/init.d/xendomains $(D)$(CONFIG_DIR)/init.d/xend
-	rm -rf $(D)$(CONFIG_DIR)/init.d/xencommons $(D)$(CONFIG_DIR)/init.d/xen-watchdog
-	rm -f  $(D)$(CONFIG_DIR)/udev/rules.d/xen-backend.rules
-	rm -f  $(D)$(CONFIG_DIR)/udev/rules.d/xend.rules
-	rm -f  $(D)$(SYSCONFIG_DIR)/xendomains
-	rm -f  $(D)$(sbindir)/xendomains
-	rm -f  $(D)$(SYSCONFIG_DIR)/xencommons
-	rm -rf $(D)$(XEN_LIB_DIR)
-	rm -rf $(D)$(XEN_LIB_STORED)
-	rm -rf $(D)$(XEN_RUN_STORED)
-	rm -rf $(D)$(bindir)/cpuperf-perfcntr $(D)$(bindir)/cpuperf-xen
-	rm -rf $(D)$(bindir)/xc_shadow
-	rm -rf $(D)$(bindir)/pygrub
-	rm -rf $(D)$(bindir)/setsize $(D)$(bindir)/tbctl
-	rm -rf $(D)$(bindir)/xsls
-	rm -rf $(D)$(bindir)/xenstore* $(D)$(bindir)/xentrace*
-	rm -rf $(D)$(bindir)/xen-detect $(D)$(bindir)/xencons
-	rm -rf $(D)$(bindir)/xenpvnetboot $(D)$(bindir)/qemu-*-xen
-	rm -rf $(D)$(includedir)/xenctrl* $(D)$(includedir)/xenguest.h
-	rm -rf $(D)$(includedir)/xs_lib.h $(D)$(includedir)/xs.h
-	rm -rf $(D)$(includedir)/xenstore-compat/xs_lib.h $(D)$(includedir)/xenstore-compat/xs.h
-	rm -rf $(D)$(includedir)/xenstore_lib.h $(D)$(includedir)/xenstore.h
-	rm -rf $(D)$(includedir)/xen
-	rm -rf $(D)$(includedir)/_libxl* $(D)$(includedir)/libxl*
-	rm -rf $(D)$(includedir)/xenstat.h $(D)$(includedir)/xentoollog.h
-	rm -rf $(D)$(libdir)/libxenctrl* $(D)$(libdir)/libxenguest*
-	rm -rf $(D)$(libdir)/libxenstore* $(D)$(libdir)/libxlutil*
-	rm -rf $(D)$(libdir)/python/xen $(D)$(libdir)/python/grub
-	rm -rf $(D)$(LIBEXEC)
-	rm -rf $(D)$(sbindir)/setmask
-	rm -rf $(D)$(sbindir)/xen* $(D)$(sbindir)/netfix $(D)$(sbindir)/xm
-	rm -rf $(D)$(SHAREDIR)/doc/xen
+	rm -rf $(D)$(libdir)/xen
 	rm -rf $(D)$(SHAREDIR)/xen
 	rm -rf $(D)$(SHAREDIR)/qemu-xen
-	rm -rf $(D)$(MAN1DIR)/xen*
-	rm -rf $(D)$(MAN8DIR)/xen*
+	$(MAKE) subdirs-uninstall
 
 .PHONY: clean
 clean: subdirs-clean
+	rm -rf pkg-config
 
 .PHONY: distclean
-distclean: subdirs-distclean
+distclean: subdirs-distclean clean
 	rm -rf qemu-xen-traditional-dir qemu-xen-traditional-dir-remote
-	rm -rf qemu-xen-dir qemu-xen-dir-remote
+	rm -rf qemu-xen-dir qemu-xen-dir-remote qemu-xen-build
 	rm -rf ../config/Tools.mk config.h config.log config.status \
 		config.cache autom4te.cache
 
@@ -212,6 +180,9 @@ subdir-clean-qemu-xen-traditional-dir:
 	set -e; if test -d qemu-xen-traditional-dir/.; then \
 		$(MAKE) -C qemu-xen-traditional-dir clean; \
 	fi
+subdir-uninstall-qemu-xen-traditional-dir:
+	rm -f $(D)$(bindir)/qemu-nbd*
+	rm -f $(D)$(bindir)/qemu-img*
 
 # External target: qemu-xen
 qemu-xen-dir-find:
@@ -238,12 +209,14 @@ QEMU_XEN_ENABLE_DEBUG :=
 endif
 
 subdir-all-qemu-xen-dir: qemu-xen-dir-find
+	unset MAKELEVEL; \
 	if test -d $(QEMU_UPSTREAM_LOC) ; then \
 		source=$(QEMU_UPSTREAM_LOC); \
 	else \
-		source=.; \
+		source=$(XEN_ROOT)/tools/qemu-xen-dir; \
 	fi; \
-	cd qemu-xen-dir; \
+	mkdir -p qemu-xen-build; \
+	cd qemu-xen-build; \
 	if $$source/scripts/tracetool.py --check-backend --backend log ; then \
 		enable_trace_backend='--enable-trace-backend=log'; \
 	elif $$source/scripts/tracetool.py --check-backend --backend stderr ; then \
@@ -251,56 +224,53 @@ subdir-all-qemu-xen-dir: qemu-xen-dir-find
 	else \
 		enable_trace_backend='' ; \
 	fi ; \
+	if [ "$(CONFIG_9PFS)" = "y" ]; then \
+		virtfs='--enable-virtfs' ; \
+	elif [ "$(CONFIG_9PFS)" = "n" ]; then \
+		virtfs='--disable-virtfs' ; \
+	else \
+		virtfs='' ; \
+	fi ; \
+	PKG_CONFIG_PATH=$(XEN_ROOT)/tools/pkg-config$${PKG_CONFIG_PATH:+:$${PKG_CONFIG_PATH}} \
 	$$source/configure --enable-xen --target-list=i386-softmmu \
 		$(QEMU_XEN_ENABLE_DEBUG) \
 		$$enable_trace_backend \
-		--prefix=$(LIBEXEC) \
+		--prefix=$(prefix) \
 		--libdir=$(LIBEXEC_LIB) \
 		--includedir=$(LIBEXEC_INC) \
-		--source-path=$$source \
 		--extra-cflags="-DXC_WANT_COMPAT_EVTCHN_API=1 \
 		-DXC_WANT_COMPAT_GNTTAB_API=1 \
 		-DXC_WANT_COMPAT_MAP_FOREIGN_API=1 \
-		-I$(XEN_ROOT)/tools/include \
-		-I$(XEN_ROOT)/tools/libs/toollog/include \
-		-I$(XEN_ROOT)/tools/libs/evtchn/include \
-		-I$(XEN_ROOT)/tools/libs/gnttab/include \
-		-I$(XEN_ROOT)/tools/libs/foreignmemory/include \
-		-I$(XEN_ROOT)/tools/libxc/include \
-		-I$(XEN_ROOT)/tools/xenstore/include \
-		-I$(XEN_ROOT)/tools/xenstore/compat/include \
+		-DXC_WANT_COMPAT_DEVICEMODEL_API=1 \
 		$(EXTRA_CFLAGS_QEMU_XEN)" \
-		--extra-ldflags="-L$(XEN_ROOT)/tools/libxc \
-		-L$(XEN_ROOT)/tools/xenstore \
-		-L$(XEN_ROOT)/tools/libs/evtchn \
-		-L$(XEN_ROOT)/tools/libs/gnttab \
-		-L$(XEN_ROOT)/tools/libs/foreignmemory \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/toollog \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/evtchn \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/gnttab \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/call \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/foreignmemory \
-		$(QEMU_UPSTREAM_RPATH)" \
+		--extra-ldflags="$(QEMU_UPSTREAM_RPATH)" \
 		--bindir=$(LIBEXEC_BIN) \
 		--datadir=$(SHAREDIR)/qemu-xen \
 		--localstatedir=$(localstatedir) \
+		--docdir=$(LIBEXEC)/share/doc \
+		--mandir=$(LIBEXEC)/share/man \
+		--libexecdir=$(LIBEXEC)/libexec \
+		--firmwarepath=$(LIBEXEC)/share/qemu-firmware \
 		--disable-kvm \
 		--disable-docs \
 		--disable-guest-agent \
 		--python=$(PYTHON) \
 		$(CONFIG_QEMUU_EXTRA_ARGS) \
 		--cpu=$(IOEMU_CPU_ARCH) \
-		$(IOEMU_CONFIGURE_CROSS); \
+		$(IOEMU_CONFIGURE_CROSS) \
+		$$virtfs; \
 	$(MAKE) all
 
 subdir-install-qemu-xen-dir: subdir-all-qemu-xen-dir
-	cd qemu-xen-dir; \
+	cd qemu-xen-build; \
 	$(MAKE) install
 
 subdir-clean-qemu-xen-dir:
-	set -e; if test -d qemu-xen-dir/.; then \
-		$(MAKE) -C qemu-xen-dir clean; \
+	set -e; if test -d qemu-xen-build/.; then \
+		$(MAKE) -C qemu-xen-build clean; \
 	fi
+
+subdir-uninstall-qemu-xen-dir: ;
 
 subdir-clean-debugger/gdbsx subdir-distclean-debugger/gdbsx: .phony
 	$(MAKE) -C debugger/gdbsx clean
@@ -311,12 +281,17 @@ subdir-install-debugger/gdbsx: .phony
 subdir-all-debugger/gdbsx: .phony
 	$(MAKE) -C debugger/gdbsx all
 
+subdir-uninstall-debugger/gdbsx: .phony
+	$(MAKE) -C debugger/gdbsx uninstall
 
 subdir-clean-debugger/kdd subdir-distclean-debugger/kdd: .phony
 	$(MAKE) -C debugger/kdd clean
 
 subdir-install-debugger/kdd: .phony
 	$(MAKE) -C debugger/kdd install
+
+subdir-uninstall-debugger/kdd: .phony
+	$(MAKE) -C debugger/kdd uninstall
 
 subdir-all-debugger/kdd: .phony
 	$(MAKE) -C debugger/kdd all

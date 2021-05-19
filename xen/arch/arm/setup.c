@@ -17,10 +17,10 @@
  * GNU General Public License for more details.
  */
 
-#include <xen/config.h>
 #include <xen/compile.h>
 #include <xen/device_tree.h>
 #include <xen/domain_page.h>
+#include <xen/grant_table.h>
 #include <xen/types.h>
 #include <xen/string.h>
 #include <xen/serial.h>
@@ -30,12 +30,14 @@
 #include <xen/init.h>
 #include <xen/irq.h>
 #include <xen/mm.h>
+#include <xen/param.h>
 #include <xen/softirq.h>
 #include <xen/keyhandler.h>
 #include <xen/cpu.h>
 #include <xen/pfn.h>
 #include <xen/virtual_region.h>
 #include <xen/vmap.h>
+#include <xen/trace.h>
 #include <xen/libfdt/libfdt.h>
 #include <xen/acpi.h>
 #include <xen/warning.h>
@@ -49,6 +51,7 @@
 #include <asm/platform.h>
 #include <asm/procinfo.h>
 #include <asm/setup.h>
+#include <asm/tee/tee.h>
 #include <xsm/xsm.h>
 #include <asm/acpi.h>
 
@@ -57,7 +60,7 @@ struct bootinfo __initdata bootinfo;
 struct cpuinfo_arm __read_mostly boot_cpu_data;
 
 #ifdef CONFIG_ACPI
-bool_t __read_mostly acpi_disabled;
+bool __read_mostly acpi_disabled;
 #endif
 
 #ifdef CONFIG_ARM_32
@@ -65,8 +68,15 @@ static unsigned long opt_xenheap_megabytes __initdata;
 integer_param("xenheap_megabytes", opt_xenheap_megabytes);
 #endif
 
+domid_t __read_mostly max_init_domid;
+
 static __used void init_done(void)
 {
+    discard_initial_modules();
+
+    /* Must be done past setting system_state. */
+    unregister_init_virtual_region();
+
     free_init_memory();
     startup_cpu_idle_loop();
 }
@@ -124,6 +134,18 @@ static void __init processor_id(void)
            cpu_has_simd ? " AdvancedSIMD" : "",
            cpu_has_gicv3 ? " GICv3-SysReg" : "");
 
+    /* Warn user if we find unknown floating-point features */
+    if ( cpu_has_fp && (boot_cpu_feature64(fp) >= 2) )
+        printk(XENLOG_WARNING "WARNING: Unknown Floating-point ID:%d, "
+               "this may result in corruption on the platform\n",
+               boot_cpu_feature64(fp));
+
+    /* Warn user if we find unknown AdvancedSIMD features */
+    if ( cpu_has_simd && (boot_cpu_feature64(simd) >= 2) )
+        printk(XENLOG_WARNING "WARNING: Unknown AdvancedSIMD ID:%d, "
+               "this may result in corruption on the platform\n",
+               boot_cpu_feature64(simd));
+
     printk("  Debug Features: %016"PRIx64" %016"PRIx64"\n",
            boot_cpu_data.dbg64.bits[0], boot_cpu_data.dbg64.bits[1]);
     printk("  Auxiliary Features: %016"PRIx64" %016"PRIx64"\n",
@@ -173,12 +195,11 @@ static void __init processor_id(void)
     }
 
     processor_setup();
-
-    check_local_cpu_errata();
 }
 
-void dt_unreserved_regions(paddr_t s, paddr_t e,
-                                  void (*cb)(paddr_t, paddr_t), int first)
+static void __init dt_unreserved_regions(paddr_t s, paddr_t e,
+                                         void (*cb)(paddr_t, paddr_t),
+                                         int first)
 {
     int i, nr = fdt_num_mem_rsv(device_tree_flattened);
 
@@ -200,15 +221,49 @@ void dt_unreserved_regions(paddr_t s, paddr_t e,
         }
     }
 
+    /*
+     * i is the current bootmodule we are evaluating across all possible
+     * kinds.
+     *
+     * When retrieving the corresponding reserved-memory addresses
+     * below, we need to index the bootinfo.reserved_mem bank starting
+     * from 0, and only counting the reserved-memory modules. Hence,
+     * we need to use i - nr.
+     */
+    for ( ; i - nr < bootinfo.reserved_mem.nr_banks; i++ )
+    {
+        paddr_t r_s = bootinfo.reserved_mem.bank[i - nr].start;
+        paddr_t r_e = r_s + bootinfo.reserved_mem.bank[i - nr].size;
+
+        if ( s < r_e && r_s < e )
+        {
+            dt_unreserved_regions(r_e, e, cb, i + 1);
+            dt_unreserved_regions(s, r_s, cb, i + 1);
+            return;
+        }
+    }
+
     cb(s, e);
 }
 
-struct bootmodule *add_boot_module(bootmodule_kind kind,
-                                   paddr_t start, paddr_t size,
-                                   const char *cmdline)
+void __init fw_unreserved_regions(paddr_t s, paddr_t e,
+                                  void (*cb)(paddr_t, paddr_t), int first)
+{
+    if ( acpi_disabled )
+        dt_unreserved_regions(s, e, cb, first);
+    else
+        cb(s, e);
+}
+
+
+
+struct bootmodule __init *add_boot_module(bootmodule_kind kind,
+                                          paddr_t start, paddr_t size,
+                                          bool domU)
 {
     struct bootmodules *mods = &bootinfo.modules;
     struct bootmodule *mod;
+    unsigned int i;
 
     if ( mods->nr_mods == MAX_MODULES )
     {
@@ -216,19 +271,31 @@ struct bootmodule *add_boot_module(bootmodule_kind kind,
                boot_module_kind_as_string(kind), start, start + size);
         return NULL;
     }
+    for ( i = 0 ; i < mods->nr_mods ; i++ )
+    {
+        mod = &mods->module[i];
+        if ( mod->kind == kind && mod->start == start )
+        {
+            if ( !domU )
+                mod->domU = false;
+            return mod;
+        }
+    }
 
     mod = &mods->module[mods->nr_mods++];
     mod->kind = kind;
     mod->start = start;
     mod->size = size;
-    if ( cmdline )
-        safe_strcpy(mod->cmdline, cmdline);
-    else
-        mod->cmdline[0] = 0;
+    mod->domU = domU;
 
     return mod;
 }
 
+/*
+ * boot_module_find_by_kind can only be used to return Xen modules (e.g
+ * XSM, DTB) or Dom0 modules. This is not suitable for looking up guest
+ * modules.
+ */
 struct bootmodule * __init boot_module_find_by_kind(bootmodule_kind kind)
 {
     struct bootmodules *mods = &bootinfo.modules;
@@ -237,7 +304,83 @@ struct bootmodule * __init boot_module_find_by_kind(bootmodule_kind kind)
     for (i = 0 ; i < mods->nr_mods ; i++ )
     {
         mod = &mods->module[i];
-        if ( mod->kind == kind )
+        if ( mod->kind == kind && !mod->domU )
+            return mod;
+    }
+    return NULL;
+}
+
+void __init add_boot_cmdline(const char *name, const char *cmdline,
+                             bootmodule_kind kind, paddr_t start, bool domU)
+{
+    struct bootcmdlines *cmds = &bootinfo.cmdlines;
+    struct bootcmdline *cmd;
+
+    if ( cmds->nr_mods == MAX_MODULES )
+    {
+        printk("Ignoring %s cmdline (too many)\n", name);
+        return;
+    }
+
+    cmd = &cmds->cmdline[cmds->nr_mods++];
+    cmd->kind = kind;
+    cmd->domU = domU;
+    cmd->start = start;
+
+    ASSERT(strlen(name) <= DT_MAX_NAME);
+    safe_strcpy(cmd->dt_name, name);
+
+    if ( strlen(cmdline) > BOOTMOD_MAX_CMDLINE )
+        panic("module %s command line too long\n", name);
+    safe_strcpy(cmd->cmdline, cmdline);
+}
+
+/*
+ * boot_cmdline_find_by_kind can only be used to return Xen modules (e.g
+ * XSM, DTB) or Dom0 modules. This is not suitable for looking up guest
+ * modules.
+ */
+struct bootcmdline * __init boot_cmdline_find_by_kind(bootmodule_kind kind)
+{
+    struct bootcmdlines *cmds = &bootinfo.cmdlines;
+    struct bootcmdline *cmd;
+    int i;
+
+    for ( i = 0 ; i < cmds->nr_mods ; i++ )
+    {
+        cmd = &cmds->cmdline[i];
+        if ( cmd->kind == kind && !cmd->domU )
+            return cmd;
+    }
+    return NULL;
+}
+
+struct bootcmdline * __init boot_cmdline_find_by_name(const char *name)
+{
+    struct bootcmdlines *mods = &bootinfo.cmdlines;
+    struct bootcmdline *mod;
+    unsigned int i;
+
+    for (i = 0 ; i < mods->nr_mods ; i++ )
+    {
+        mod = &mods->cmdline[i];
+        if ( strcmp(mod->dt_name, name) == 0 )
+            return mod;
+    }
+    return NULL;
+}
+
+struct bootmodule * __init boot_module_find_by_addr_and_kind(bootmodule_kind kind,
+                                                             paddr_t start)
+{
+    struct bootmodules *mods = &bootinfo.modules;
+    struct bootmodule *mod;
+    unsigned int i;
+
+    for (i = 0 ; i < mods->nr_mods ; i++ )
+    {
+        mod = &mods->module[i];
+        if ( mod->kind == kind && mod->start == start )
             return mod;
     }
     return NULL;
@@ -252,6 +395,7 @@ const char * __init boot_module_kind_as_string(bootmodule_kind kind)
     case BOOTMOD_KERNEL:  return "Kernel";
     case BOOTMOD_RAMDISK: return "Ramdisk";
     case BOOTMOD_XSM:     return "XSM";
+    case BOOTMOD_GUEST_DTB:     return "DTB";
     case BOOTMOD_UNKNOWN: return "Unknown";
     default: BUG();
     }
@@ -270,10 +414,11 @@ void __init discard_initial_modules(void)
         if ( mi->module[i].kind == BOOTMOD_XEN )
             continue;
 
-        if ( !mfn_valid(paddr_to_pfn(s)) || !mfn_valid(paddr_to_pfn(e)))
+        if ( !mfn_valid(maddr_to_mfn(s)) ||
+             !mfn_valid(maddr_to_mfn(e)) )
             continue;
 
-        dt_unreserved_regions(s, e, init_domheap_pages, 0);
+        fw_unreserved_regions(s, e, init_domheap_pages, 0);
     }
 
     mi->nr_mods = 0;
@@ -281,6 +426,20 @@ void __init discard_initial_modules(void)
     remove_early_mappings();
 }
 
+/* Relocate the FDT in Xen heap */
+static void * __init relocate_fdt(paddr_t dtb_paddr, size_t dtb_size)
+{
+    void *fdt = xmalloc_bytes(dtb_size);
+
+    if ( !fdt )
+        panic("Unable to allocate memory for relocating the Device-Tree.\n");
+
+    copy_from_paddr(fdt, dtb_paddr, dtb_size);
+
+    return fdt;
+}
+
+#ifdef CONFIG_ARM_32
 /*
  * Returns the end address of the highest region in the range s..e
  * with required size and alignment that does not conflict with the
@@ -295,7 +454,7 @@ static paddr_t __init consider_modules(paddr_t s, paddr_t e,
 {
     const struct bootmodules *mi = &bootinfo.modules;
     int i;
-    int nr_rsvd;
+    int nr;
 
     s = (s+align-1) & ~(align-1);
     e = e & ~(align-1);
@@ -321,9 +480,9 @@ static paddr_t __init consider_modules(paddr_t s, paddr_t e,
 
     /* Now check any fdt reserved areas. */
 
-    nr_rsvd = fdt_num_mem_rsv(device_tree_flattened);
+    nr = fdt_num_mem_rsv(device_tree_flattened);
 
-    for ( ; i < mi->nr_mods + nr_rsvd; i++ )
+    for ( ; i < mi->nr_mods + nr; i++ )
     {
         paddr_t mod_s, mod_e;
 
@@ -345,8 +504,34 @@ static paddr_t __init consider_modules(paddr_t s, paddr_t e,
             return consider_modules(s, mod_s, size, align, i+1);
         }
     }
+
+    /*
+     * i is the current bootmodule we are evaluating, across all
+     * possible kinds of bootmodules.
+     *
+     * When retrieving the corresponding reserved-memory addresses, we
+     * need to index the bootinfo.reserved_mem bank starting from 0, and
+     * only counting the reserved-memory modules. Hence, we need to use
+     * i - nr.
+     */
+    nr += mi->nr_mods;
+    for ( ; i - nr < bootinfo.reserved_mem.nr_banks; i++ )
+    {
+        paddr_t r_s = bootinfo.reserved_mem.bank[i - nr].start;
+        paddr_t r_e = r_s + bootinfo.reserved_mem.bank[i - nr].size;
+
+        if ( s < r_e && r_s < e )
+        {
+            r_e = consider_modules(r_e, e, size, align, i + 1);
+            if ( r_e )
+                return r_e;
+
+            return consider_modules(s, r_s, size, align, i + 1);
+        }
+    }
     return e;
 }
+#endif
 
 /*
  * Return the end of the non-module region starting at s. In other
@@ -382,72 +567,18 @@ static paddr_t __init next_module(paddr_t s, paddr_t *end)
     return lowest;
 }
 
-
-/**
- * get_xen_paddr - get physical address to relocate Xen to
- *
- * Xen is relocated to as near to the top of RAM as possible and
- * aligned to a XEN_PADDR_ALIGN boundary.
- */
-static paddr_t __init get_xen_paddr(void)
-{
-    struct meminfo *mi = &bootinfo.mem;
-    paddr_t min_size;
-    paddr_t paddr = 0, last_end;
-    int i;
-
-    min_size = (_end - _start + (XEN_PADDR_ALIGN-1)) & ~(XEN_PADDR_ALIGN-1);
-
-    last_end = mi->bank[0].start;
-
-    /* Find the highest bank with enough space. */
-    for ( i = 0; i < mi->nr_banks; i++ )
-    {
-        const struct membank *bank = &mi->bank[i];
-        paddr_t s, e;
-
-        /* We can only deal with contiguous memory at the moment */
-        if ( last_end != bank->start )
-            break;
-
-        last_end = bank->start + bank->size;
-
-        if ( bank->size >= min_size )
-        {
-            e = consider_modules(bank->start, bank->start + bank->size,
-                                 min_size, XEN_PADDR_ALIGN, 0);
-            if ( !e )
-                continue;
-
-#ifdef CONFIG_ARM_32
-            /* Xen must be under 4GB */
-            if ( e > 0x100000000ULL )
-                e = 0x100000000ULL;
-            if ( e < bank->start )
-                continue;
-#endif
-
-            s = e - min_size;
-
-            if ( s > paddr )
-                paddr = s;
-        }
-    }
-
-    if ( !paddr )
-        panic("Not enough memory to relocate Xen");
-
-    printk("Placing Xen at 0x%"PRIpaddr"-0x%"PRIpaddr"\n",
-           paddr, paddr + min_size);
-
-    return paddr;
-}
-
-static void init_pdx(void)
+static void __init init_pdx(void)
 {
     paddr_t bank_start, bank_size, bank_end;
 
-    u64 mask = pdx_init_mask(bootinfo.mem.bank[0].start);
+    /*
+     * Arm does not have any restrictions on the bits to compress. Pass 0 to
+     * let the common code further restrict the mask.
+     *
+     * If the logic changes in pfn_pdx_hole_setup we might have to
+     * update this function too.
+     */
+    uint64_t mask = pdx_init_mask(0x0);
     int bank;
 
     for ( bank = 0 ; bank < bootinfo.mem.nr_banks; bank++ )
@@ -481,19 +612,21 @@ static void init_pdx(void)
 }
 
 #ifdef CONFIG_ARM_32
-static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
+static void __init setup_mm(void)
 {
     paddr_t ram_start, ram_end, ram_size;
     paddr_t s, e;
     unsigned long ram_pages;
     unsigned long heap_pages, xenheap_pages, domheap_pages;
-    unsigned long dtb_pages;
-    unsigned long boot_mfn_start, boot_mfn_end;
     int i;
-    void *fdt;
+    const uint32_t ctr = READ_CP32(CTR);
 
     if ( !bootinfo.mem.nr_banks )
-        panic("No memory bank");
+        panic("No memory bank\n");
+
+    /* We only supports instruction caches implementing the IVIPT extension. */
+    if ( ((ctr >> CTR_L1Ip_SHIFT) & CTR_L1Ip_MASK) == CTR_L1Ip_AIVIVT )
+        panic("AIVIVT instruction cache not supported\n");
 
     init_pdx();
 
@@ -548,7 +681,7 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
     } while ( !opt_xenheap_megabytes && xenheap_pages > 32<<(20-PAGE_SHIFT) );
 
     if ( ! e )
-        panic("Not not enough space for xenheap");
+        panic("Not not enough space for xenheap\n");
 
     domheap_pages = heap_pages - xenheap_pages;
 
@@ -558,21 +691,6 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
     printk("Dom heap: %lu pages\n", domheap_pages);
 
     setup_xenheap_mappings((e >> PAGE_SHIFT) - xenheap_pages, xenheap_pages);
-
-    /*
-     * Need a single mapped page for populating bootmem_region_list
-     * and enough mapped pages for copying the DTB.
-     */
-    dtb_pages = (dtb_size + PAGE_SIZE-1) >> PAGE_SHIFT;
-    boot_mfn_start = xenheap_mfn_end - dtb_pages - 1;
-    boot_mfn_end = xenheap_mfn_end;
-
-    init_boot_pages(pfn_to_paddr(boot_mfn_start), pfn_to_paddr(boot_mfn_end));
-
-    /* Copy the DTB. */
-    fdt = mfn_to_virt(alloc_boot_pages(dtb_pages, 1));
-    copy_from_paddr(fdt, dtb_paddr, dtb_size);
-    device_tree_flattened = fdt;
 
     /* Add non-xenheap memory */
     for ( i = 0; i < bootinfo.mem.nr_banks; i++ )
@@ -600,14 +718,14 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
                 e = bank_end;
 
             /* Avoid the xenheap */
-            if ( s < pfn_to_paddr(xenheap_mfn_start+xenheap_pages)
-                 && pfn_to_paddr(xenheap_mfn_start) < e )
+            if ( s < mfn_to_maddr(mfn_add(xenheap_mfn_start, xenheap_pages))
+                 && mfn_to_maddr(xenheap_mfn_start) < e )
             {
-                e = pfn_to_paddr(xenheap_mfn_start);
-                n = pfn_to_paddr(xenheap_mfn_start+xenheap_pages);
+                e = mfn_to_maddr(xenheap_mfn_start);
+                n = mfn_to_maddr(mfn_add(xenheap_mfn_start, xenheap_pages));
             }
 
-            dt_unreserved_regions(s, e, init_boot_pages, 0);
+            fw_unreserved_regions(s, e, init_boot_pages, 0);
 
             s = n;
         }
@@ -617,20 +735,17 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
     setup_frametable_mappings(ram_start, ram_end);
     max_page = PFN_DOWN(ram_end);
 
-    /* Add xenheap memory that was not already added to the boot
-       allocator. */
-    init_xenheap_pages(pfn_to_paddr(xenheap_mfn_start),
-                       pfn_to_paddr(boot_mfn_start));
+    /* Add xenheap memory that was not already added to the boot allocator. */
+    init_xenheap_pages(mfn_to_maddr(xenheap_mfn_start),
+                       mfn_to_maddr(xenheap_mfn_end));
 }
 #else /* CONFIG_ARM_64 */
-static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
+static void __init setup_mm(void)
 {
     paddr_t ram_start = ~0;
     paddr_t ram_end = 0;
     paddr_t ram_size = 0;
     int bank;
-    unsigned long dtb_pages;
-    void *fdt;
 
     init_pdx();
 
@@ -663,9 +778,7 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
             if ( e > bank_end )
                 e = bank_end;
 
-            xenheap_mfn_end = e;
-
-            dt_unreserved_regions(s, e, init_boot_pages, 0);
+            fw_unreserved_regions(s, e, init_boot_pages, 0);
             s = n;
         }
     }
@@ -673,63 +786,43 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
     total_pages += ram_size >> PAGE_SHIFT;
 
     xenheap_virt_end = XENHEAP_VIRT_START + ram_end - ram_start;
-    xenheap_mfn_start = ram_start >> PAGE_SHIFT;
-    xenheap_mfn_end = ram_end >> PAGE_SHIFT;
-
-    /*
-     * Need enough mapped pages for copying the DTB.
-     */
-    dtb_pages = (dtb_size + PAGE_SIZE-1) >> PAGE_SHIFT;
-
-    /* Copy the DTB. */
-    fdt = mfn_to_virt(alloc_boot_pages(dtb_pages, 1));
-    copy_from_paddr(fdt, dtb_paddr, dtb_size);
-    device_tree_flattened = fdt;
+    xenheap_mfn_start = maddr_to_mfn(ram_start);
+    xenheap_mfn_end = maddr_to_mfn(ram_end);
 
     setup_frametable_mappings(ram_start, ram_end);
     max_page = PFN_DOWN(ram_end);
 }
 #endif
 
-size_t __read_mostly cacheline_bytes;
-
-/* Very early check of the CPU cache properties */
-void __init setup_cache(void)
-{
-    uint32_t ccsid;
-
-    /* Read the cache size ID register for the level-0 data cache */
-    WRITE_SYSREG32(0, CSSELR_EL1);
-    ccsid = READ_SYSREG32(CCSIDR_EL1);
-
-    /* Low 3 bits are log2(cacheline size in words) - 2. */
-    cacheline_bytes = 1U << (4 + (ccsid & 0x7));
-}
+size_t __read_mostly dcache_line_bytes;
 
 /* C entry point for boot CPU */
 void __init start_xen(unsigned long boot_phys_offset,
-                      unsigned long fdt_paddr,
-                      unsigned long cpuid)
+                      unsigned long fdt_paddr)
 {
     size_t fdt_size;
     int cpus, i;
-    paddr_t xen_paddr;
     const char *cmdline;
     struct bootmodule *xen_bootmodule;
     struct domain *dom0;
-    struct xen_arch_domainconfig config;
+    struct xen_domctl_createdomain dom0_cfg = {
+        .flags = XEN_DOMCTL_CDF_hvm | XEN_DOMCTL_CDF_hap,
+        .max_evtchn_port = -1,
+        .max_grant_frames = gnttab_dom0_frames(),
+        .max_maptrack_frames = -1,
+    };
+    int rc;
 
-    setup_cache();
+    dcache_line_bytes = read_dcache_line_bytes();
 
     percpu_init_areas();
     set_processor_id(0); /* needed early, for smp_processor_id() */
 
-    set_current((struct vcpu *)0xfffff000); /* debug sanity */
-    idle_vcpu[0] = current;
-
     setup_virtual_regions(NULL, NULL);
     /* Initialize traps early allow us to get backtrace when an error occurred */
     init_traps();
+
+    setup_pagetables(boot_phys_offset);
 
     smp_clear_cpu_maps();
 
@@ -737,8 +830,14 @@ void __init start_xen(unsigned long boot_phys_offset,
     if ( !device_tree_flattened )
         panic("Invalid device tree blob at physical address %#lx.\n"
               "The DTB must be 8-byte aligned and must not exceed 2 MB in size.\n\n"
-              "Please check your bootloader.",
+              "Please check your bootloader.\n",
               fdt_paddr);
+
+    /* Register Xen's load address as a boot module. */
+    xen_bootmodule = add_boot_module(BOOTMOD_XEN,
+                             (paddr_t)(uintptr_t)(_start + boot_phys_offset),
+                             (paddr_t)(uintptr_t)(_end - _start), false);
+    BUG_ON(!xen_bootmodule);
 
     fdt_size = boot_fdt_info(device_tree_flattened, fdt_paddr);
 
@@ -746,30 +845,32 @@ void __init start_xen(unsigned long boot_phys_offset,
     printk("Command line: %s\n", cmdline);
     cmdline_parse(cmdline);
 
-    /* Register Xen's load address as a boot module. */
-    xen_bootmodule = add_boot_module(BOOTMOD_XEN,
-                             (paddr_t)(uintptr_t)(_start + boot_phys_offset),
-                             (paddr_t)(uintptr_t)(_end - _start + 1), NULL);
-    BUG_ON(!xen_bootmodule);
-
-    xen_paddr = get_xen_paddr();
-    setup_pagetables(boot_phys_offset, xen_paddr);
-
-    /* Update Xen's address now that we have relocated. */
-    printk("Update BOOTMOD_XEN from %"PRIpaddr"-%"PRIpaddr" => %"PRIpaddr"-%"PRIpaddr"\n",
-           xen_bootmodule->start, xen_bootmodule->start + xen_bootmodule->size,
-           xen_paddr, xen_paddr + xen_bootmodule->size);
-    xen_bootmodule->start = xen_paddr;
-
-    setup_mm(fdt_paddr, fdt_size);
+    setup_mm();
 
     /* Parse the ACPI tables for possible boot-time configuration */
     acpi_boot_table_init();
 
     end_boot_allocator();
 
+    /*
+     * The memory subsystem has been initialized, we can now switch from
+     * early_boot -> boot.
+     */
+    system_state = SYS_STATE_boot;
+
     vm_init();
-    dt_unflatten_host_device_tree();
+
+    if ( acpi_disabled )
+    {
+        printk("Booting using Device Tree\n");
+        device_tree_flattened = relocate_fdt(fdt_paddr, fdt_size);
+        dt_unflatten_host_device_tree();
+    }
+    else
+    {
+        printk("Booting using ACPI\n");
+        device_tree_flattened = NULL;
+    }
 
     init_IRQ();
 
@@ -783,8 +884,6 @@ void __init start_xen(unsigned long boot_phys_offset,
     console_init_preirq();
     console_init_ring();
 
-    system_state = SYS_STATE_boot;
-
     processor_id();
 
     smp_init_cpus();
@@ -792,13 +891,15 @@ void __init start_xen(unsigned long boot_phys_offset,
     printk(XENLOG_INFO "SMP: Allowing %u CPUs\n", cpus);
     nr_cpu_ids = cpus;
 
+    /*
+     * Some errata relies on SMCCC version which is detected by psci_init()
+     * (called from smp_init_cpus()).
+     */
+    check_local_cpu_errata();
+
     init_xen_time();
 
     gic_init();
-
-    p2m_vmid_allocator_init();
-
-    softirq_init();
 
     tasklet_subsys_init();
 
@@ -817,12 +918,12 @@ void __init start_xen(unsigned long boot_phys_offset,
 
     rcu_init();
 
-    arch_init_memory();
+    setup_system_domains();
 
     local_irq_enable();
     local_abort_enable();
 
-    smp_prepare_cpus(cpus);
+    smp_prepare_cpus();
 
     initialize_keytable();
 
@@ -843,9 +944,16 @@ void __init start_xen(unsigned long boot_phys_offset,
     printk("Brought up %ld CPUs\n", (long)num_online_cpus());
     /* TODO: smp_cpus_done(); */
 
-    setup_virt_paging();
+    /*
+     * The IOMMU subsystem must be initialized before P2M as we need
+     * to gather requirements regarding the maximum IPA bits supported by
+     * each IOMMU device.
+     */
+    rc = iommu_setup();
+    if ( !iommu_enabled && rc != -ENODEV )
+        panic("Couldn't configure correctly all the IOMMUs.\n");
 
-    iommu_setup();
+    setup_virt_paging();
 
     do_initcalls();
 
@@ -858,21 +966,30 @@ void __init start_xen(unsigned long boot_phys_offset,
 
     /* Create initial domain 0. */
     /* The vGIC for DOM0 is exactly emulating the hardware GIC */
-    config.gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE;
-    config.nr_spis = gic_number_lines() - 32;
+    dom0_cfg.arch.gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE;
+    /*
+     * Xen vGIC supports a maximum of 992 interrupt lines.
+     * 32 are substracted to cover local IRQs.
+     */
+    dom0_cfg.arch.nr_spis = min(gic_number_lines(), (unsigned int) 992) - 32;
+    if ( gic_number_lines() > 992 )
+        printk(XENLOG_WARNING "Maximum number of vGIC IRQs exceeded.\n");
+    dom0_cfg.arch.tee_type = tee_get_type();
+    dom0_cfg.max_vcpus = dom0_max_vcpus();
 
-    dom0 = domain_create(0, 0, 0, &config);
+    if ( iommu_enabled )
+        dom0_cfg.flags |= XEN_DOMCTL_CDF_iommu;
+
+    dom0 = domain_create(0, &dom0_cfg, true);
     if ( IS_ERR(dom0) || (alloc_dom0_vcpu0(dom0) == NULL) )
-            panic("Error creating domain 0");
-
-    dom0->is_privileged = 1;
-    dom0->target = NULL;
+        panic("Error creating domain 0\n");
 
     if ( construct_dom0(dom0) != 0)
-            panic("Could not set up DOM0 guest OS");
+        panic("Could not set up DOM0 guest OS\n");
 
-    /* Scrub RAM that is still free and so may go to an unprivileged domain. */
-    scrub_heap_pages();
+    heap_init_late();
+
+    init_trace_bufs();
 
     init_constructors();
 
@@ -883,8 +1000,8 @@ void __init start_xen(unsigned long boot_phys_offset,
 
     system_state = SYS_STATE_active;
 
-    /* Must be done past setting system_state. */
-    unregister_init_virtual_region();
+    if ( acpi_disabled )
+        create_domUs();
 
     domain_unpause_by_systemcontroller(dom0);
 

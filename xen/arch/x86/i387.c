@@ -8,7 +8,6 @@
  *  Gareth Hughes <gareth@valinux.com>, May 2000
  */
 
-#include <xen/config.h>
 #include <xen/sched.h>
 #include <asm/current.h>
 #include <asm/processor.h>
@@ -24,7 +23,7 @@
 /* Restore x87 extended state */
 static inline void fpu_xrstor(struct vcpu *v, uint64_t mask)
 {
-    bool_t ok;
+    bool ok;
 
     ASSERT(v->arch.xsave_area);
     /*
@@ -44,20 +43,18 @@ static inline void fpu_fxrstor(struct vcpu *v)
     const typeof(v->arch.xsave_area->fpu_sse) *fpu_ctxt = v->arch.fpu_ctxt;
 
     /*
-     * AMD CPUs don't save/restore FDP/FIP/FOP unless an exception
+     * Some CPUs don't save/restore FDP/FIP/FOP unless an exception
      * is pending. Clear the x87 state here by setting it to fixed
      * values. The hypervisor data segment can be sometimes 0 and
      * sometimes new user value. Both should be ok. Use the FPU saved
      * data block as a safe address because it should be in L1.
      */
-    if ( !(fpu_ctxt->fsw & ~fpu_ctxt->fcw & 0x003f) &&
-         boot_cpu_data.x86_vendor == X86_VENDOR_AMD )
-    {
+    if ( cpu_bug_fpu_ptrs &&
+         !(fpu_ctxt->fsw & ~fpu_ctxt->fcw & 0x003f) )
         asm volatile ( "fnclex\n\t"
                        "ffree %%st(7)\n\t" /* clear stack tag */
                        "fildl %0"          /* load to clear state */
                        : : "m" (*fpu_ctxt) );
-    }
 
     /*
      * FXRSTOR can fault if passed a corrupted data block. We handle this
@@ -137,7 +134,7 @@ static inline uint64_t vcpu_xsave_mask(const struct vcpu *v)
 /* Save x87 extended state */
 static inline void fpu_xsave(struct vcpu *v)
 {
-    bool_t ok;
+    bool ok;
     uint64_t mask = vcpu_xsave_mask(v);
 
     ASSERT(mask);
@@ -170,11 +167,11 @@ static inline void fpu_fxsave(struct vcpu *v)
                        : "=m" (*fpu_ctxt) : "R" (fpu_ctxt) );
 
         /*
-         * AMD CPUs don't save/restore FDP/FIP/FOP unless an exception
-         * is pending.
+         * Some CPUs don't save/restore FDP/FIP/FOP unless an exception is
+         * pending.  In this case, the restore side will arrange safe values,
+         * and there is no point trying to collect FCS/FDS in addition.
          */
-        if ( !(fpu_ctxt->fsw & 0x0080) &&
-             boot_cpu_data.x86_vendor == X86_VENDOR_AMD )
+        if ( cpu_bug_fpu_ptrs && !(fpu_ctxt->fsw & 0x0080) )
             return;
 
         /*
@@ -234,7 +231,7 @@ void vcpu_restore_fpu_nonlazy(struct vcpu *v, bool need_stts)
         v->fpu_dirtied = 1;
 
         /* Xen doesn't need TS set, but the guest might. */
-        need_stts = is_pv_vcpu(v) && (v->arch.pv_vcpu.ctrlreg[0] & X86_CR0_TS);
+        need_stts = is_pv_vcpu(v) && (v->arch.pv.ctrlreg[0] & X86_CR0_TS);
     }
     else
     {
@@ -275,10 +272,10 @@ void vcpu_restore_fpu_lazy(struct vcpu *v)
  * On each context switch, save the necessary FPU info of VCPU being switch 
  * out. It dispatches saving operation based on CPU's capability.
  */
-static bool_t _vcpu_save_fpu(struct vcpu *v)
+static bool _vcpu_save_fpu(struct vcpu *v)
 {
     if ( !v->fpu_dirtied && !v->arch.nonlazy_xstate_used )
-        return 0;
+        return false;
 
     ASSERT(!is_idle_vcpu(v));
 
@@ -292,7 +289,7 @@ static bool_t _vcpu_save_fpu(struct vcpu *v)
 
     v->fpu_dirtied = 0;
 
-    return 1;
+    return true;
 }
 
 void vcpu_save_fpu(struct vcpu *v)
@@ -336,6 +333,49 @@ int vcpu_init_fpu(struct vcpu *v)
     }
 
     return rc;
+}
+
+void vcpu_setup_fpu(struct vcpu *v, struct xsave_struct *xsave_area,
+                    const void *data, unsigned int fcw_default)
+{
+    /*
+     * For the entire function please note that vcpu_init_fpu() (above) points
+     * v->arch.fpu_ctxt into v->arch.xsave_area when XSAVE is available. Hence
+     * accesses through both pointers alias one another, and the shorter form
+     * is used here.
+     */
+    typeof(xsave_area->fpu_sse) *fpu_sse = v->arch.fpu_ctxt;
+
+    ASSERT(!xsave_area || xsave_area == v->arch.xsave_area);
+
+    v->fpu_initialised = !!data;
+
+    if ( data )
+    {
+        memcpy(fpu_sse, data, sizeof(*fpu_sse));
+        if ( xsave_area )
+            xsave_area->xsave_hdr.xstate_bv = XSTATE_FP_SSE;
+    }
+    else if ( xsave_area && fcw_default == FCW_DEFAULT )
+    {
+        xsave_area->xsave_hdr.xstate_bv = 0;
+        fpu_sse->mxcsr = MXCSR_DEFAULT;
+    }
+    else
+    {
+        memset(fpu_sse, 0, sizeof(*fpu_sse));
+        fpu_sse->fcw = fcw_default;
+        fpu_sse->mxcsr = MXCSR_DEFAULT;
+        if ( v->arch.xsave_area )
+        {
+            v->arch.xsave_area->xsave_hdr.xstate_bv &= ~XSTATE_FP_SSE;
+            if ( fcw_default != FCW_DEFAULT )
+                v->arch.xsave_area->xsave_hdr.xstate_bv |= X86_XCR0_FP;
+        }
+    }
+
+    if ( xsave_area )
+        xsave_area->xsave_hdr.xcomp_bv = 0;
 }
 
 /* Free FPU's context save area */

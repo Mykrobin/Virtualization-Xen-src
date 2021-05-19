@@ -75,14 +75,14 @@ static inline paddr_t shadow_l4e_get_paddr(shadow_l4e_t sl4e)
 #endif
 
 static inline mfn_t shadow_l1e_get_mfn(shadow_l1e_t sl1e)
-{ return _mfn(l1e_get_pfn(sl1e)); }
+{ return l1e_get_mfn(sl1e); }
 static inline mfn_t shadow_l2e_get_mfn(shadow_l2e_t sl2e)
-{ return _mfn(l2e_get_pfn(sl2e)); }
+{ return l2e_get_mfn(sl2e); }
 static inline mfn_t shadow_l3e_get_mfn(shadow_l3e_t sl3e)
-{ return _mfn(l3e_get_pfn(sl3e)); }
+{ return l3e_get_mfn(sl3e); }
 #if SHADOW_PAGING_LEVELS >= 4
 static inline mfn_t shadow_l4e_get_mfn(shadow_l4e_t sl4e)
-{ return _mfn(l4e_get_pfn(sl4e)); }
+{ return l4e_get_mfn(sl4e); }
 #endif
 
 static inline u32 shadow_l1e_get_flags(shadow_l1e_t sl1e)
@@ -115,14 +115,14 @@ static inline shadow_l4e_t shadow_l4e_empty(void)
 #endif
 
 static inline shadow_l1e_t shadow_l1e_from_mfn(mfn_t mfn, u32 flags)
-{ return l1e_from_pfn(mfn_x(mfn), flags); }
+{ return l1e_from_mfn(mfn, flags); }
 static inline shadow_l2e_t shadow_l2e_from_mfn(mfn_t mfn, u32 flags)
-{ return l2e_from_pfn(mfn_x(mfn), flags); }
+{ return l2e_from_mfn(mfn, flags); }
 static inline shadow_l3e_t shadow_l3e_from_mfn(mfn_t mfn, u32 flags)
-{ return l3e_from_pfn(mfn_x(mfn), flags); }
+{ return l3e_from_mfn(mfn, flags); }
 #if SHADOW_PAGING_LEVELS >= 4
 static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
-{ return l4e_from_pfn(mfn_x(mfn), flags); }
+{ return l4e_from_mfn(mfn, flags); }
 #endif
 
 #define shadow_l1_table_offset(a) l1_table_offset(a)
@@ -248,8 +248,6 @@ static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
 #define sh_unhook_64b_mappings     INTERNAL_NAME(sh_unhook_64b_mappings)
 #define sh_paging_mode             INTERNAL_NAME(sh_paging_mode)
 #define sh_detach_old_tables       INTERNAL_NAME(sh_detach_old_tables)
-#define sh_x86_emulate_write       INTERNAL_NAME(sh_x86_emulate_write)
-#define sh_x86_emulate_cmpxchg     INTERNAL_NAME(sh_x86_emulate_cmpxchg)
 #define sh_audit_l1_table          INTERNAL_NAME(sh_audit_l1_table)
 #define sh_audit_fl1_table         INTERNAL_NAME(sh_audit_fl1_table)
 #define sh_audit_l2_table          INTERNAL_NAME(sh_audit_l2_table)
@@ -263,15 +261,6 @@ static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
 #define sh_safe_not_to_sync        INTERNAL_NAME(sh_safe_not_to_sync)
 #define sh_rm_write_access_from_sl1p INTERNAL_NAME(sh_rm_write_access_from_sl1p)
 #endif
-
-/* sh_make_monitor_table depends only on the number of shadow levels */
-#define sh_make_monitor_table \
-        SHADOW_SH_NAME(sh_make_monitor_table, SHADOW_PAGING_LEVELS)
-#define sh_destroy_monitor_table \
-        SHADOW_SH_NAME(sh_destroy_monitor_table, SHADOW_PAGING_LEVELS)
-
-mfn_t sh_make_monitor_table(struct vcpu *v);
-void sh_destroy_monitor_table(struct vcpu *v, mfn_t mmfn);
 
 #if SHADOW_PAGING_LEVELS == 3
 #define MFN_FITS_IN_HVM_CR3(_MFN) !(mfn_x(_MFN) >> 20)
@@ -292,55 +281,78 @@ void sh_destroy_monitor_table(struct vcpu *v, mfn_t mmfn);
  * pagetables.
  *
  * This is only feasible for PAE and 64bit Xen: 32-bit non-PAE PTEs don't
- * have reserved bits that we can use for this.
+ * have reserved bits that we can use for this.  And even there it can only
+ * be used if we can be certain the processor doesn't use all 52 address bits.
  */
 
 #define SH_L1E_MAGIC 0xffffffff00000001ULL
-static inline int sh_l1e_is_magic(shadow_l1e_t sl1e)
+
+static inline bool sh_have_pte_rsvd_bits(void)
 {
-    return ((sl1e.l1 & SH_L1E_MAGIC) == SH_L1E_MAGIC);
+    return paddr_bits < PADDR_BITS && !cpu_has_hypervisor;
+}
+
+static inline bool sh_l1e_is_magic(shadow_l1e_t sl1e)
+{
+    return (sl1e.l1 & SH_L1E_MAGIC) == SH_L1E_MAGIC;
 }
 
 /* Guest not present: a single magic value */
-static inline shadow_l1e_t sh_l1e_gnp(void)
+static inline shadow_l1e_t sh_l1e_gnp_raw(void)
 {
     return (shadow_l1e_t){ -1ULL };
 }
 
-static inline int sh_l1e_is_gnp(shadow_l1e_t sl1e)
+static inline shadow_l1e_t sh_l1e_gnp(void)
 {
-    return (sl1e.l1 == sh_l1e_gnp().l1);
+    /*
+     * On systems with no reserved physical address bits we can't engage the
+     * fast fault path.
+     */
+    return sh_have_pte_rsvd_bits() ? sh_l1e_gnp_raw()
+                                   : shadow_l1e_empty();
 }
 
-/* MMIO: an invalid PTE that contains the GFN of the equivalent guest l1e.
+static inline bool sh_l1e_is_gnp(shadow_l1e_t sl1e)
+{
+    return sl1e.l1 == sh_l1e_gnp_raw().l1;
+}
+
+/*
+ * MMIO: an invalid PTE that contains the GFN of the equivalent guest l1e.
  * We store 28 bits of GFN in bits 4:32 of the entry.
  * The present bit is set, and the U/S and R/W bits are taken from the guest.
- * Bit 3 is always 0, to differentiate from gnp above.  */
+ * Bit 3 is always 0, to differentiate from gnp above.
+ */
 #define SH_L1E_MMIO_MAGIC       0xffffffff00000001ULL
 #define SH_L1E_MMIO_MAGIC_MASK  0xffffffff00000009ULL
 #define SH_L1E_MMIO_GFN_MASK    0x00000000fffffff0ULL
-#define SH_L1E_MMIO_GFN_SHIFT   4
 
 static inline shadow_l1e_t sh_l1e_mmio(gfn_t gfn, u32 gflags)
 {
-    return (shadow_l1e_t) { (SH_L1E_MMIO_MAGIC
-                             | (gfn_x(gfn) << SH_L1E_MMIO_GFN_SHIFT)
-                             | (gflags & (_PAGE_USER|_PAGE_RW))) };
+    unsigned long gfn_val = MASK_INSR(gfn_x(gfn), SH_L1E_MMIO_GFN_MASK);
+
+    if ( !sh_have_pte_rsvd_bits() ||
+         gfn_x(gfn) != MASK_EXTR(gfn_val, SH_L1E_MMIO_GFN_MASK) )
+        return shadow_l1e_empty();
+
+    return (shadow_l1e_t) { (SH_L1E_MMIO_MAGIC | gfn_val |
+                             (gflags & (_PAGE_USER | _PAGE_RW))) };
 }
 
-static inline int sh_l1e_is_mmio(shadow_l1e_t sl1e)
+static inline bool sh_l1e_is_mmio(shadow_l1e_t sl1e)
 {
-    return ((sl1e.l1 & SH_L1E_MMIO_MAGIC_MASK) == SH_L1E_MMIO_MAGIC);
+    return (sl1e.l1 & SH_L1E_MMIO_MAGIC_MASK) == SH_L1E_MMIO_MAGIC;
 }
 
 static inline gfn_t sh_l1e_mmio_get_gfn(shadow_l1e_t sl1e)
 {
-    return _gfn((sl1e.l1 & SH_L1E_MMIO_GFN_MASK) >> SH_L1E_MMIO_GFN_SHIFT);
+    return _gfn(MASK_EXTR(sl1e.l1, SH_L1E_MMIO_GFN_MASK));
 }
 
-static inline u32 sh_l1e_mmio_get_flags(shadow_l1e_t sl1e)
+static inline uint32_t sh_l1e_mmio_get_flags(shadow_l1e_t sl1e)
 {
-    return (u32)((sl1e.l1 & (_PAGE_USER|_PAGE_RW)));
+    return sl1e.l1 & (_PAGE_USER | _PAGE_RW);
 }
 
 #else

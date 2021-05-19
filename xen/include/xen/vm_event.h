@@ -26,11 +26,34 @@
 #include <xen/sched.h>
 #include <public/vm_event.h>
 
+struct vm_event_domain
+{
+    spinlock_t lock;
+    /* The ring has 64 entries */
+    unsigned char foreign_producers;
+    unsigned char target_producers;
+    /* shared ring page */
+    void *ring_page;
+    struct page_info *ring_pg_struct;
+    /* front-end ring */
+    vm_event_front_ring_t front_ring;
+    /* event channel port (vcpu0 only) */
+    int xen_port;
+    /* vm_event bit for vcpu->pause_flags */
+    int pause_flag;
+    /* list of vcpus waiting for room in the ring */
+    struct waitqueue_head wq;
+    /* the number of vCPUs blocked */
+    unsigned int blocked;
+    /* The last vcpu woken up */
+    unsigned int last_vcpu_wake_up;
+};
+
 /* Clean up on domain destruction */
 void vm_event_cleanup(struct domain *d);
 
 /* Returns whether a ring has been set up */
-bool_t vm_event_check_ring(struct vm_event_domain *ved);
+bool vm_event_check_ring(struct vm_event_domain *ved);
 
 /* Returns 0 on success, -ENOSYS if there is no ring, -EBUSY if there is no
  * available space and the caller is a foreign domain. If the guest itself
@@ -46,17 +69,17 @@ bool_t vm_event_check_ring(struct vm_event_domain *ved);
  * succeed.
  */
 int __vm_event_claim_slot(struct domain *d, struct vm_event_domain *ved,
-                          bool_t allow_sleep);
+                          bool allow_sleep);
 static inline int vm_event_claim_slot(struct domain *d,
                                       struct vm_event_domain *ved)
 {
-    return __vm_event_claim_slot(d, ved, 1);
+    return __vm_event_claim_slot(d, ved, true);
 }
 
 static inline int vm_event_claim_slot_nosleep(struct domain *d,
                                               struct vm_event_domain *ved)
 {
-    return __vm_event_claim_slot(d, ved, 0);
+    return __vm_event_claim_slot(d, ved, false);
 }
 
 void vm_event_cancel_slot(struct domain *d, struct vm_event_domain *ved);
@@ -64,19 +87,15 @@ void vm_event_cancel_slot(struct domain *d, struct vm_event_domain *ved);
 void vm_event_put_request(struct domain *d, struct vm_event_domain *ved,
                           vm_event_request_t *req);
 
-int vm_event_get_response(struct domain *d, struct vm_event_domain *ved,
-                          vm_event_response_t *rsp);
-
-void vm_event_resume(struct domain *d, struct vm_event_domain *ved);
-
-int vm_event_domctl(struct domain *d, xen_domctl_vm_event_op_t *vec,
-                    XEN_GUEST_HANDLE_PARAM(void) u_domctl);
+int vm_event_domctl(struct domain *d, struct xen_domctl_vm_event_op *vec);
 
 void vm_event_vcpu_pause(struct vcpu *v);
 void vm_event_vcpu_unpause(struct vcpu *v);
 
 void vm_event_fill_regs(vm_event_request_t *req);
 void vm_event_set_registers(struct vcpu *v, vm_event_response_t *rsp);
+
+void vm_event_monitor_next_interrupt(struct vcpu *v);
 
 #endif /* __VM_EVENT_H__ */
 

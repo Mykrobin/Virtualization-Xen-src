@@ -29,7 +29,7 @@
 #include <asm/io_apic.h>
 
 /* Disable vt-d protected memory registers. */
-void disable_pmr(struct iommu *iommu)
+void disable_pmr(struct vtd_iommu *iommu)
 {
     u32 val;
     unsigned long flags;
@@ -51,7 +51,7 @@ void disable_pmr(struct iommu *iommu)
 
 void print_iommu_regs(struct acpi_drhd_unit *drhd)
 {
-    struct iommu *iommu = drhd->iommu;
+    struct vtd_iommu *iommu = drhd->iommu;
     u64 cap;
 
     printk("---- print_iommu_regs ----\n");
@@ -87,7 +87,7 @@ static u32 get_level_index(unsigned long gmfn, int level)
     return gmfn & LEVEL_MASK;
 }
 
-void print_vtd_entries(struct iommu *iommu, int bus, int devfn, u64 gmfn)
+void print_vtd_entries(struct vtd_iommu *iommu, int bus, int devfn, u64 gmfn)
 {
     struct context_entry *ctxt_entry;
     struct root_entry *root_entry;
@@ -95,9 +95,9 @@ void print_vtd_entries(struct iommu *iommu, int bus, int devfn, u64 gmfn)
     u64 *l, val;
     u32 l_index, level;
 
-    printk("print_vtd_entries: iommu %p dev %04x:%02x:%02x.%u gmfn %"PRIx64"\n",
-           iommu, iommu->intel->drhd->segment, bus,
-           PCI_SLOT(devfn), PCI_FUNC(devfn), gmfn);
+    printk("print_vtd_entries: iommu #%u dev %pp gmfn %"PRI_gfn"\n",
+           iommu->index, &PCI_SBDF3(iommu->drhd->segment, bus, devfn),
+           gmfn);
 
     if ( iommu->root_maddr == 0 )
     {
@@ -112,12 +112,11 @@ void print_vtd_entries(struct iommu *iommu, int bus, int devfn, u64 gmfn)
         return;
     }
 
-    printk("    root_entry = %p\n", root_entry);
-    printk("    root_entry[%x] = %"PRIx64"\n", bus, root_entry[bus].val);
+    printk("    root_entry[%02x] = %"PRIx64"\n", bus, root_entry[bus].val);
     if ( !root_present(root_entry[bus]) )
     {
         unmap_vtd_domain_page(root_entry);
-        printk("    root_entry[%x] not present\n", bus);
+        printk("    root_entry[%02x] not present\n", bus);
         return;
     }
 
@@ -130,14 +129,13 @@ void print_vtd_entries(struct iommu *iommu, int bus, int devfn, u64 gmfn)
         return;
     }
 
-    printk("    context = %p\n", ctxt_entry);
     val = ctxt_entry[devfn].lo;
-    printk("    context[%x] = %"PRIx64"_%"PRIx64"\n",
+    printk("    context[%02x] = %"PRIx64"_%"PRIx64"\n",
            devfn, ctxt_entry[devfn].hi, val);
     if ( !context_present(ctxt_entry[devfn]) )
     {
         unmap_vtd_domain_page(ctxt_entry);
-        printk("    ctxt_entry[%x] not present\n", devfn);
+        printk("    ctxt_entry[%02x] not present\n", devfn);
         return;
     }
 
@@ -153,22 +151,19 @@ void print_vtd_entries(struct iommu *iommu, int bus, int devfn, u64 gmfn)
     do
     {
         l = map_vtd_domain_page(val);
-        printk("    l%d = %p\n", level, l);
         if ( l == NULL )
         {
-            printk("    l%d == NULL\n", level);
+            printk("    l%u == NULL\n", level);
             break;
         }
         l_index = get_level_index(gmfn, level);
-        printk("    l%d_index = %x\n", level, l_index);
-
         pte.val = l[l_index];
         unmap_vtd_domain_page(l);
-        printk("    l%d[%x] = %"PRIx64"\n", level, l_index, pte.val);
+        printk("    l%u[%03x] = %"PRIx64"\n", level, l_index, pte.val);
 
         if ( !dma_pte_present(pte) )
         {
-            printk("    l%d[%x] not present\n", level, l_index);
+            printk("    l%u[%03x] not present\n", level, l_index);
             break;
         }
         if ( dma_pte_superpage(pte) )
@@ -180,7 +175,7 @@ void print_vtd_entries(struct iommu *iommu, int bus, int devfn, u64 gmfn)
 void vtd_dump_iommu_info(unsigned char key)
 {
     struct acpi_drhd_unit *drhd;
-    struct iommu *iommu;
+    struct vtd_iommu *iommu;
     int i;
 
     for_each_drhd_unit ( drhd )
@@ -209,10 +204,11 @@ void vtd_dump_iommu_info(unsigned char key)
         if ( status & DMA_GSTS_IRES )
         {
             /* Dump interrupt remapping table. */
-            u64 iremap_maddr = dmar_readq(iommu->reg, DMAR_IRTA_REG);
-            int nr_entry = 1 << ((iremap_maddr & 0xF) + 1);
+            uint64_t irta = dmar_readq(iommu->reg, DMAR_IRTA_REG);
+            uint64_t iremap_maddr = irta & PAGE_MASK;
+            unsigned int nr_entry = 1 << ((irta & 0xF) + 1);
             struct iremap_entry *iremap_entries = NULL;
-            int print_cnt = 0;
+            unsigned int print_cnt = 0;
 
             printk("  Interrupt remapping table (nr_entry=%#x. "
                 "Only dump P=1 entries here):\n", nr_entry);
@@ -255,9 +251,9 @@ void vtd_dump_iommu_info(unsigned char key)
             }
             if ( iremap_entries )
                 unmap_vtd_domain_page(iremap_entries);
-            if ( iommu_ir_ctrl(iommu)->iremap_num != print_cnt )
-                printk("Warning: Print %d IRTE (actually have %d)!\n",
-                        print_cnt, iommu_ir_ctrl(iommu)->iremap_num);
+            if ( iommu->intremap.num != print_cnt )
+                printk("Warning: Print %u IRTE (actually have %u)!\n",
+                        print_cnt, iommu->intremap.num);
 
         }
     }
@@ -268,13 +264,12 @@ void vtd_dump_iommu_info(unsigned char key)
         int apic;
         union IO_APIC_reg_01 reg_01;
         struct IO_APIC_route_remap_entry *remap;
-        struct ir_ctrl *ir_ctrl;
 
         for ( apic = 0; apic < nr_ioapics; apic++ )
         {
             iommu = ioapic_to_iommu(mp_ioapics[apic].mpc_apicid);
-            ir_ctrl = iommu_ir_ctrl(iommu);
-            if ( !ir_ctrl || !ir_ctrl->iremap_maddr || !ir_ctrl->iremap_num )
+
+            if ( !iommu->intremap.maddr || !iommu->intremap.num )
                 continue;
 
             printk( "\nRedirection table of IOAPIC %x:\n", apic);
