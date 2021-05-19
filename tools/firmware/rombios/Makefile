@@ -13,7 +13,7 @@ clean: subdirs-clean
 	rm -f  as86-sym.txt ld86-sym.txt 
 	rm -f  rombios*.txt rombios*.sym usage biossums
 	rm -f  BIOS-bochs-*
-	rm -f  $(DEPS_RM)
+	rm -f  $(DEPS)
 
 .PHONY: distclean
 distclean: clean
@@ -31,4 +31,4 @@ BIOS-bochs-latest: rombios.c biossums 32bitgateway.c tcgbios.c
 biossums: biossums.c
 	gcc -o biossums biossums.c
 
--include $(DEPS_INCLUDE)
+-include $(DEPS)

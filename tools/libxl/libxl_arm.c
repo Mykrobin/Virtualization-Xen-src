@@ -25,12 +25,12 @@
 #define DT_IRQ_TYPE_LEVEL_HIGH     0x00000004
 #define DT_IRQ_TYPE_LEVEL_LOW      0x00000008
 
-static const char *gicv_to_string(libxl_gic_version gic_version)
+static const char *gicv_to_string(uint8_t gic_version)
 {
     switch (gic_version) {
-    case LIBXL_GIC_VERSION_V2:
+    case XEN_DOMCTL_CONFIG_GIC_V2:
         return "V2";
-    case LIBXL_GIC_VERSION_V3:
+    case XEN_DOMCTL_CONFIG_GIC_V3:
         return "V3";
     default:
         return "unknown";
@@ -43,37 +43,10 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
 {
     uint32_t nr_spis = 0;
     unsigned int i;
-    uint32_t vuart_irq;
-    bool vuart_enabled = false;
-
-    /*
-     * If pl011 vuart is enabled then increment the nr_spis to allow allocation
-     * of SPI VIRQ for pl011.
-     */
-    if (d_config->b_info.arch_arm.vuart == LIBXL_VUART_TYPE_SBSA_UART) {
-        nr_spis += (GUEST_VPL011_SPI - 32) + 1;
-        vuart_irq = GUEST_VPL011_SPI;
-        vuart_enabled = true;
-    }
 
     for (i = 0; i < d_config->b_info.num_irqs; i++) {
         uint32_t irq = d_config->b_info.irqs[i];
         uint32_t spi;
-
-        /*
-         * This check ensures the if user has requested pass-through of a certain irq
-         * which conflicts with vpl011 irq then it flags an error to indicate to the
-         * user that the specific HW irq cannot be used as it is dedicated for vpl011.
-         * 
-         * TODO:
-         * The vpl011 irq should be assigned such that it never conflicts with user
-         * specified irqs thereby preventing its pass-through. This TODO is for
-         * implementing that logic in future.
-         */
-        if (vuart_enabled && irq == vuart_irq) {
-            LOG(ERROR, "Physical IRQ %u conflicting with pl011 SPI\n", irq);
-            return ERROR_FAIL;
-        }
 
         if (irq < 32)
             continue;
@@ -110,7 +83,6 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
 
 int libxl__arch_domain_save_config(libxl__gc *gc,
                                    libxl_domain_config *d_config,
-                                   libxl__domain_build_state *state,
                                    const xc_domain_configuration_t *xc_config)
 {
     switch (xc_config->gic_version) {
@@ -124,8 +96,6 @@ int libxl__arch_domain_save_config(libxl__gc *gc,
         LOG(ERROR, "Unexpected gic version %u", xc_config->gic_version);
         return ERROR_FAIL;
     }
-
-    state->clock_frequency = xc_config->clock_frequency;
 
     return 0;
 }
@@ -413,8 +383,7 @@ static int make_psci_node(libxl__gc *gc, void *fdt)
     res = fdt_begin_node(fdt, "psci");
     if (res) return res;
 
-    res = fdt_property_compat(gc, fdt, 3, "arm,psci-1.0",
-                              "arm,psci-0.2", "arm,psci");
+    res = fdt_property_compat(gc, fdt, 2, "arm,psci-0.2","arm,psci");
     if (res) return res;
 
     res = fdt_property_string(fdt, "method", "hvc");
@@ -528,6 +497,14 @@ static int make_gicv3_node(libxl__gc *gc, void *fdt)
     res = fdt_property(fdt, "interrupt-controller", NULL, 0);
     if (res) return res;
 
+    res = fdt_property_cell(fdt, "redistributor-stride",
+                            GUEST_GICV3_RDIST_STRIDE);
+    if (res) return res;
+
+    res = fdt_property_cell(fdt, "#redistributor-regions",
+                            GUEST_GICV3_RDIST_REGIONS);
+    if (res) return res;
+
     res = fdt_property_regs(gc, fdt, ROOT_ADDRESS_CELLS, ROOT_SIZE_CELLS,
                             2,
                             gicd_base, gicd_size,
@@ -606,38 +583,6 @@ static int make_hypervisor_node(libxl__gc *gc, void *fdt,
 
     res = fdt_property_interrupts(gc, fdt, &intr, 1);
     if (res) return res;
-
-    res = fdt_end_node(fdt);
-    if (res) return res;
-
-    return 0;
-}
-
-static int make_vpl011_uart_node(libxl__gc *gc, void *fdt,
-                                 const struct arch_info *ainfo,
-                                 struct xc_dom_image *dom)
-{
-    int res;
-    gic_interrupt intr;
-
-    res = fdt_begin_node(fdt, "sbsa-pl011");
-    if (res) return res;
-
-    res = fdt_property_compat(gc, fdt, 1, "arm,sbsa-uart");
-    if (res) return res;
-
-    res = fdt_property_regs(gc, fdt, ROOT_ADDRESS_CELLS, ROOT_SIZE_CELLS,
-                            1,
-                            GUEST_PL011_BASE, GUEST_PL011_SIZE);
-    if (res) return res;
-
-    set_interrupt(intr, GUEST_VPL011_SPI, 0xf, DT_IRQ_TYPE_LEVEL_HIGH);
-
-    res = fdt_property_interrupts(gc, fdt, &intr, 1);
-    if (res) return res;
-
-    /* Use a default baud rate of 115200. */
-    fdt_property_u32(fdt, "current-speed", 115200);
 
     res = fdt_end_node(fdt);
     if (res) return res;
@@ -849,6 +794,9 @@ static int libxl__prepare_dtb(libxl__gc *gc, libxl_domain_build_info *info,
     const libxl_version_info *vers;
     const struct arch_info *ainfo;
 
+    /* convenience aliases */
+    xc_domain_configuration_t *xc_config = &state->config;
+
     vers = libxl_get_version_info(CTX);
     if (vers == NULL) return ERROR_FAIL;
 
@@ -857,8 +805,7 @@ static int libxl__prepare_dtb(libxl__gc *gc, libxl_domain_build_info *info,
 
     LOG(DEBUG, "constructing DTB for Xen version %d.%d guest",
         vers->xen_version_major, vers->xen_version_minor);
-    LOG(DEBUG, " - vGIC version: %s",
-        gicv_to_string(info->arch_arm.gic_version));
+    LOG(DEBUG, " - vGIC version: %s", gicv_to_string(xc_config->gic_version));
 
     if (info->device_tree) {
         LOG(DEBUG, " - Partial device tree provided: %s", info->device_tree);
@@ -917,33 +864,30 @@ next_resize:
         FDT( fdt_begin_node(fdt, "") );
 
         FDT( make_root_properties(gc, vers, fdt) );
-        FDT( make_chosen_node(gc, fdt, !!dom->modules[0].blob, state, info) );
+        FDT( make_chosen_node(gc, fdt, !!dom->ramdisk_blob, state, info) );
         FDT( make_cpus_node(gc, fdt, info->max_vcpus, ainfo) );
         FDT( make_psci_node(gc, fdt) );
 
         FDT( make_memory_nodes(gc, fdt, dom) );
 
-        switch (info->arch_arm.gic_version) {
-        case LIBXL_GIC_VERSION_V2:
+        switch (xc_config->gic_version) {
+        case XEN_DOMCTL_CONFIG_GIC_V2:
             FDT( make_gicv2_node(gc, fdt,
                                  GUEST_GICD_BASE, GUEST_GICD_SIZE,
                                  GUEST_GICC_BASE, GUEST_GICC_SIZE) );
             break;
-        case LIBXL_GIC_VERSION_V3:
+        case XEN_DOMCTL_CONFIG_GIC_V3:
             FDT( make_gicv3_node(gc, fdt) );
             break;
         default:
             LOG(ERROR, "Unknown GIC version %s",
-                gicv_to_string(info->arch_arm.gic_version));
+                gicv_to_string(xc_config->gic_version));
             rc = ERROR_FAIL;
             goto out;
         }
 
-        FDT( make_timer_node(gc, fdt, ainfo, state->clock_frequency) );
+        FDT( make_timer_node(gc, fdt, ainfo, xc_config->clock_frequency) );
         FDT( make_hypervisor_node(gc, fdt, vers) );
-
-        if (info->arch_arm.vuart == LIBXL_VUART_TYPE_SBSA_UART)
-            FDT( make_vpl011_uart_node(gc, fdt, ainfo, dom) );
 
         if (pfdt)
             FDT( copy_partial_fdt(gc, fdt, pfdt) );
@@ -1040,16 +984,15 @@ static void finalise_one_node(libxl__gc *gc, void *fdt, const char *uname,
 }
 
 int libxl__arch_domain_finalise_hw_description(libxl__gc *gc,
-                                               uint32_t domid,
-                                               libxl_domain_config *d_config,
+                                               libxl_domain_build_info *info,
                                                struct xc_dom_image *dom)
 {
     void *fdt = dom->devicetree_blob;
     int i;
     const uint64_t bankbase[] = GUEST_RAM_BANK_BASES;
 
-    const struct xc_dom_seg *ramdisk = dom->modules[0].blob ?
-        &dom->modules[0].seg : NULL;
+    const struct xc_dom_seg *ramdisk = dom->ramdisk_blob ?
+        &dom->ramdisk_seg : NULL;
 
     if (ramdisk) {
         int chosen, res;
@@ -1095,33 +1038,6 @@ int libxl__arch_domain_finalise_hw_description(libxl__gc *gc,
     return 0;
 }
 
-int libxl__arch_build_dom_finish(libxl__gc *gc,
-                                 libxl_domain_build_info *info,
-                                 struct xc_dom_image *dom,
-                                 libxl__domain_build_state *state)
-{
-    int rc = 0, ret;
-
-    if (info->arch_arm.vuart != LIBXL_VUART_TYPE_SBSA_UART) {
-        rc = 0;
-        goto out;
-    }
-
-    ret = xc_dom_vuart_init(CTX->xch,
-                            XEN_DOMCTL_VUART_TYPE_VPL011,
-                            dom->guest_domid,
-                            dom->console_domid,
-                            dom->vuart_gfn,
-                            &state->vuart_port);
-    if (ret < 0) {
-        rc = ERROR_FAIL;
-        LOG(ERROR, "xc_dom_vuart_init failed\n");
-    }
-
-out:
-    return rc;
-}
-
 int libxl__arch_vnuma_build_vmemrange(libxl__gc *gc,
                                       uint32_t domid,
                                       libxl_domain_build_info *info,
@@ -1133,6 +1049,14 @@ int libxl__arch_vnuma_build_vmemrange(libxl__gc *gc,
 int libxl__arch_domain_map_irq(libxl__gc *gc, uint32_t domid, int irq)
 {
     return xc_domain_bind_pt_spi_irq(CTX->xch, domid, irq, irq);
+}
+
+int libxl__arch_domain_construct_memmap(libxl__gc *gc,
+                                        libxl_domain_config *d_config,
+                                        uint32_t domid,
+                                        struct xc_dom_image *dom)
+{
+    return 0;
 }
 
 void libxl__arch_domain_build_info_acpi_setdefault(

@@ -16,6 +16,7 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 
 #include <asm/system.h>
@@ -30,7 +31,7 @@ static const char *handler[]= {
         "Error"
 };
 
-void do_bad_mode(struct cpu_user_regs *regs, int reason)
+asmlinkage void do_bad_mode(struct cpu_user_regs *regs, int reason)
 {
     union hsr hsr = { .bits = regs->hsr };
 

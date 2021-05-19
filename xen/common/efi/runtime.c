@@ -29,6 +29,12 @@ void efi_rs_leave(struct efi_rs_state *);
 
 #ifndef COMPAT
 
+/*
+ * Currently runtime services are not implemented on ARM. To boot Xen with ACPI,
+ * set efi_enabled to 1, so that Xen can get the ACPI root pointer from EFI.
+ */
+const bool_t efi_enabled = 1;
+
 #ifndef CONFIG_ARM
 # include <asm/i387.h>
 # include <asm/xstate.h>
@@ -56,12 +62,6 @@ UINT64 __read_mostly efi_boot_max_var_store_size;
 UINT64 __read_mostly efi_boot_remain_var_store_size;
 UINT64 __read_mostly efi_boot_max_var_size;
 
-UINT64 __read_mostly efi_apple_properties_addr;
-UINTN __read_mostly efi_apple_properties_len;
-
-/* Bit field representing available EFI features/properties. */
-unsigned int efi_flags;
-
 struct efi __read_mostly efi = {
 	.acpi   = EFI_INVALID_TABLE_ADDR,
 	.acpi20 = EFI_INVALID_TABLE_ADDR,
@@ -71,11 +71,6 @@ struct efi __read_mostly efi = {
 };
 
 const struct efi_pci_rom *__read_mostly efi_pci_roms;
-
-bool efi_enabled(unsigned int feature)
-{
-    return test_bit(feature, &efi_flags);
-}
 
 #ifndef CONFIG_ARM /* TODO - disabled until implemented on ARM */
 
@@ -108,7 +103,7 @@ struct efi_rs_state efi_rs_enter(void)
                                      FIRST_RESERVED_GDT_ENTRY)
         };
 
-        lgdt(&gdt_desc);
+        asm volatile ( "lgdt %0" : : "m" (gdt_desc) );
     }
 
     switch_cr3_cr4(virt_to_maddr(efi_l4_pgtable), read_cr4());
@@ -130,7 +125,7 @@ void efi_rs_leave(struct efi_rs_state *state)
             .base  = GDT_VIRT_START(curr)
         };
 
-        lgdt(&gdt_desc);
+        asm volatile ( "lgdt %0" : : "m" (gdt_desc) );
     }
     irq_exit();
     efi_rs_on_cpu = NR_CPUS;
@@ -138,7 +133,7 @@ void efi_rs_leave(struct efi_rs_state *state)
     vcpu_restore_fpu_nonlazy(curr, true);
 }
 
-bool efi_rs_using_pgtables(void)
+bool_t efi_rs_using_pgtables(void)
 {
     return efi_l4_pgtable &&
            (smp_processor_id() == efi_rs_on_cpu) &&
@@ -179,7 +174,7 @@ void efi_halt_system(void)
     printk(XENLOG_WARNING "EFI: could not halt system (%#lx)\n", status);
 }
 
-void efi_reset_system(bool warm)
+void efi_reset_system(bool_t warm)
 {
     EFI_STATUS status;
     struct efi_rs_state state = efi_rs_enter();
@@ -200,9 +195,6 @@ void efi_reset_system(bool warm)
 int efi_get_info(uint32_t idx, union xenpf_efi_info *info)
 {
     unsigned int i, n;
-
-    if ( !efi_enabled(EFI_BOOT) )
-        return -ENOSYS;
 
     switch ( idx )
     {
@@ -276,14 +268,6 @@ int efi_get_info(uint32_t idx, union xenpf_efi_info *info)
             }
         return -ESRCH;
     }
-
-    case XEN_FW_EFI_APPLE_PROPERTIES:
-        if ( !efi_apple_properties_len )
-            return -ENODATA;
-        info->apple_properties.address = efi_apple_properties_addr;
-        info->apple_properties.size = efi_apple_properties_len;
-        break;
-
     default:
         return -EINVAL;
     }
@@ -346,12 +330,6 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
     unsigned long flags;
     EFI_STATUS status = EFI_NOT_STARTED;
     int rc = 0;
-
-    if ( !efi_enabled(EFI_BOOT) )
-        return -ENOSYS;
-
-    if ( !efi_enabled(EFI_RS) )
-        return -EOPNOTSUPP;
 
     switch ( op->function )
     {

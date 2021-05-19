@@ -19,8 +19,8 @@
 static int tmemc_freeze_pools(domid_t cli_id, int arg)
 {
     struct client *client;
-    bool freeze = arg == XEN_SYSCTL_TMEM_OP_FREEZE;
-    bool destroy = arg == XEN_SYSCTL_TMEM_OP_DESTROY;
+    bool_t freeze = (arg == XEN_SYSCTL_TMEM_OP_FREEZE) ? 1 : 0;
+    bool_t destroy = (arg == XEN_SYSCTL_TMEM_OP_DESTROY) ? 1 : 0;
     char *s;
 
     s = destroy ? "destroyed" : ( freeze ? "frozen" : "thawed" );
@@ -96,12 +96,12 @@ static int tmemc_flush_mem(domid_t cli_id, uint32_t kb)
 #define BSIZE 1024
 
 static int tmemc_list_client(struct client *c, tmem_cli_va_param_t buf,
-                             int off, uint32_t len, bool use_long)
+                             int off, uint32_t len, bool_t use_long)
 {
     char info[BSIZE];
     int i, n = 0, sum = 0;
     struct tmem_pool *p;
-    bool s;
+    bool_t s;
 
     n = scnprintf(info,BSIZE,"C=CI:%d,ww:%d,co:%d,fr:%d,"
         "Tc:%"PRIu64",Ge:%ld,Pp:%ld,Gp:%ld%c",
@@ -149,7 +149,7 @@ static int tmemc_list_client(struct client *c, tmem_cli_va_param_t buf,
 }
 
 static int tmemc_list_shared(tmem_cli_va_param_t buf, int off, uint32_t len,
-                             bool use_long)
+                              bool_t use_long)
 {
     char info[BSIZE];
     int i, n = 0, sum = 0;
@@ -188,7 +188,7 @@ static int tmemc_list_shared(tmem_cli_va_param_t buf, int off, uint32_t len,
 }
 
 static int tmemc_list_global_perf(tmem_cli_va_param_t buf, int off,
-                                  uint32_t len, bool use_long)
+                                  uint32_t len, bool_t use_long)
 {
     char info[BSIZE];
     int n = 0, sum = 0;
@@ -204,7 +204,7 @@ static int tmemc_list_global_perf(tmem_cli_va_param_t buf, int off,
 }
 
 static int tmemc_list_global(tmem_cli_va_param_t buf, int off, uint32_t len,
-                             bool use_long)
+                              bool_t use_long)
 {
     char info[BSIZE];
     int n = 0, sum = off;
@@ -238,7 +238,7 @@ static int tmemc_list_global(tmem_cli_va_param_t buf, int off, uint32_t len,
 }
 
 static int tmemc_list(domid_t cli_id, tmem_cli_va_param_t buf, uint32_t len,
-                      bool use_long)
+                               bool_t use_long)
 {
     struct client *client;
     int off = 0;
@@ -402,101 +402,6 @@ static int tmemc_get_pool(int cli_id,
     return rc ? : idx;
 }
 
-static int tmemc_set_pools(int cli_id,
-                           XEN_GUEST_HANDLE(xen_tmem_pool_info_t) pools,
-                           uint32_t len)
-{
-    unsigned int i;
-    int rc = 0;
-    unsigned int nr = len / sizeof(xen_tmem_pool_info_t);
-    struct client *client = tmem_client_from_cli_id(cli_id);
-
-    if ( len % sizeof(xen_tmem_pool_info_t) )
-        return -EINVAL;
-
-    if ( nr > MAX_POOLS_PER_DOMAIN )
-        return -E2BIG;
-
-    if ( !guest_handle_okay(pools, nr) )
-        return -EINVAL;
-
-    if ( !client )
-    {
-        client = client_create(cli_id);
-        if ( !client )
-            return -ENOMEM;
-    }
-    for ( i = 0; i < nr; i++ )
-    {
-        xen_tmem_pool_info_t pool;
-
-        if ( __copy_from_guest_offset(&pool, pools, i, 1 ) )
-            return -EFAULT;
-
-        if ( pool.n_pages )
-            return -EINVAL;
-
-        rc = do_tmem_new_pool(cli_id, pool.id, pool.flags.raw,
-                              pool.uuid[0], pool.uuid[1]);
-        if ( rc < 0 )
-            break;
-
-        pool.id = rc;
-        if ( __copy_to_guest_offset(pools, i, &pool, 1) )
-            return -EFAULT;
-    }
-
-    /* And how many we have processed. */
-    return rc ? : i;
-}
-
-static int tmemc_auth_pools(int cli_id,
-                            XEN_GUEST_HANDLE(xen_tmem_pool_info_t) pools,
-                            uint32_t len)
-{
-    unsigned int i;
-    int rc = 0;
-    unsigned int nr = len / sizeof(xen_tmem_pool_info_t);
-    struct client *client = tmem_client_from_cli_id(cli_id);
-
-    if ( len % sizeof(xen_tmem_pool_info_t) )
-        return -EINVAL;
-
-    if ( nr > MAX_POOLS_PER_DOMAIN )
-        return -E2BIG;
-
-    if ( !guest_handle_okay(pools, nr) )
-        return -EINVAL;
-
-    if ( !client )
-    {
-        client = client_create(cli_id);
-        if ( !client )
-            return -ENOMEM;
-    }
-
-    for ( i = 0; i < nr; i++ )
-    {
-        xen_tmem_pool_info_t pool;
-
-        if ( __copy_from_guest_offset(&pool, pools, i, 1 ) )
-            return -EFAULT;
-
-        if ( pool.n_pages )
-            return -EINVAL;
-
-        rc = tmemc_shared_pool_auth(cli_id, pool.uuid[0], pool.uuid[1],
-                                    pool.flags.u.auth);
-
-        if ( rc < 0 )
-            break;
-
-    }
-
-    /* And how many we have processed. */
-    return rc ? : i;
-}
-
 int tmem_control(struct xen_sysctl_tmem_op *op)
 {
     int ret;
@@ -532,12 +437,6 @@ int tmem_control(struct xen_sysctl_tmem_op *op)
         break;
     case XEN_SYSCTL_TMEM_OP_GET_POOLS:
         ret = tmemc_get_pool(op->cli_id, op->u.pool, op->len);
-        break;
-    case XEN_SYSCTL_TMEM_OP_SET_POOLS: /* TMEM_RESTORE_NEW */
-        ret = tmemc_set_pools(op->cli_id, op->u.pool, op->len);
-        break;
-    case XEN_SYSCTL_TMEM_OP_SET_AUTH: /* TMEM_AUTH */
-        ret = tmemc_auth_pools(op->cli_id, op->u.pool, op->len);
         break;
     default:
         ret = do_tmem_control(op);

@@ -1,4 +1,5 @@
 
+#include <xen/config.h>
 #include <xen/version.h>
 #include <xen/init.h>
 #include <xen/sched.h>
@@ -10,6 +11,7 @@
 #include <xen/console.h>
 #include <xen/sched.h>
 #include <xen/shutdown.h>
+#include <xen/nmi.h>
 #include <xen/guest_access.h>
 #include <xen/watchdog.h>
 #include <xen/hypercall.h>
@@ -17,12 +19,13 @@
 #include <asm/flushtlb.h>
 #include <asm/traps.h>
 #include <asm/event.h>
-#include <asm/nmi.h>
 #include <asm/msr.h>
 #include <asm/page.h>
+#include <asm/shadow.h>
 #include <asm/shared.h>
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/support.h>
+#include <public/callback.h>
 
 
 static void print_xen_info(void)
@@ -49,7 +52,7 @@ static void read_registers(struct cpu_user_regs *regs, unsigned long crs[8])
     regs->gs = read_sreg(gs);
     crs[5] = rdfsbase();
     crs[6] = rdgsbase();
-    crs[7] = rdgsshadow();
+    rdmsrl(MSR_SHADOW_GS_BASE, crs[7]);
 }
 
 static void _show_registers(
@@ -100,7 +103,7 @@ void show_registers(const struct cpu_user_regs *regs)
     enum context context;
     struct vcpu *v = system_state >= SYS_STATE_smp_boot ? current : NULL;
 
-    if ( guest_mode(regs) && is_hvm_vcpu(v) )
+    if ( guest_mode(regs) && has_hvm_container_vcpu(v) )
     {
         struct segment_register sreg;
         context = CTXT_hvm_guest;
@@ -193,47 +196,47 @@ void show_page_walk(unsigned long addr)
     l4e = l4t[l4_table_offset(addr)];
     unmap_domain_page(l4t);
     mfn = l4e_get_pfn(l4e);
-    pfn = mfn_valid(_mfn(mfn)) && machine_to_phys_mapping_valid ?
+    pfn = mfn_valid(mfn) && machine_to_phys_mapping_valid ?
           get_gpfn_from_mfn(mfn) : INVALID_M2P_ENTRY;
     printk(" L4[0x%03lx] = %"PRIpte" %016lx\n",
            l4_table_offset(addr), l4e_get_intpte(l4e), pfn);
     if ( !(l4e_get_flags(l4e) & _PAGE_PRESENT) ||
-         !mfn_valid(_mfn(mfn)) )
+         !mfn_valid(mfn) )
         return;
 
     l3t = map_domain_page(_mfn(mfn));
     l3e = l3t[l3_table_offset(addr)];
     unmap_domain_page(l3t);
     mfn = l3e_get_pfn(l3e);
-    pfn = mfn_valid(_mfn(mfn)) && machine_to_phys_mapping_valid ?
+    pfn = mfn_valid(mfn) && machine_to_phys_mapping_valid ?
           get_gpfn_from_mfn(mfn) : INVALID_M2P_ENTRY;
     printk(" L3[0x%03lx] = %"PRIpte" %016lx%s\n",
            l3_table_offset(addr), l3e_get_intpte(l3e), pfn,
            (l3e_get_flags(l3e) & _PAGE_PSE) ? " (PSE)" : "");
     if ( !(l3e_get_flags(l3e) & _PAGE_PRESENT) ||
          (l3e_get_flags(l3e) & _PAGE_PSE) ||
-         !mfn_valid(_mfn(mfn)) )
+         !mfn_valid(mfn) )
         return;
 
     l2t = map_domain_page(_mfn(mfn));
     l2e = l2t[l2_table_offset(addr)];
     unmap_domain_page(l2t);
     mfn = l2e_get_pfn(l2e);
-    pfn = mfn_valid(_mfn(mfn)) && machine_to_phys_mapping_valid ?
+    pfn = mfn_valid(mfn) && machine_to_phys_mapping_valid ?
           get_gpfn_from_mfn(mfn) : INVALID_M2P_ENTRY;
-    printk(" L2[0x%03lx] = %"PRIpte" %016lx%s\n",
+    printk(" L2[0x%03lx] = %"PRIpte" %016lx %s\n",
            l2_table_offset(addr), l2e_get_intpte(l2e), pfn,
-           (l2e_get_flags(l2e) & _PAGE_PSE) ? " (PSE)" : "");
+           (l2e_get_flags(l2e) & _PAGE_PSE) ? "(PSE)" : "");
     if ( !(l2e_get_flags(l2e) & _PAGE_PRESENT) ||
          (l2e_get_flags(l2e) & _PAGE_PSE) ||
-         !mfn_valid(_mfn(mfn)) )
+         !mfn_valid(mfn) )
         return;
 
     l1t = map_domain_page(_mfn(mfn));
     l1e = l1t[l1_table_offset(addr)];
     unmap_domain_page(l1t);
     mfn = l1e_get_pfn(l1e);
-    pfn = mfn_valid(_mfn(mfn)) && machine_to_phys_mapping_valid ?
+    pfn = mfn_valid(mfn) && machine_to_phys_mapping_valid ?
           get_gpfn_from_mfn(mfn) : INVALID_M2P_ENTRY;
     printk(" L1[0x%03lx] = %"PRIpte" %016lx\n",
            l1_table_offset(addr), l1e_get_intpte(l1e), pfn);
@@ -256,10 +259,132 @@ void do_double_fault(struct cpu_user_regs *regs)
 
     printk("CPU:    %d\n", cpu);
     _show_registers(regs, crs, CTXT_hypervisor, NULL);
-    show_code(regs);
     show_stack_overflow(cpu, regs);
 
     panic("DOUBLE FAULT -- system shutdown");
+}
+
+void toggle_guest_mode(struct vcpu *v)
+{
+    if ( is_pv_32bit_vcpu(v) )
+        return;
+
+    /* %fs/%gs bases can only be stale if WR{FS,GS}BASE are usable. */
+    if ( read_cr4() & X86_CR4_FSGSBASE )
+    {
+        if ( v->arch.flags & TF_kernel_mode )
+            v->arch.pv_vcpu.gs_base_kernel = __rdgsbase();
+        else
+            v->arch.pv_vcpu.gs_base_user = __rdgsbase();
+    }
+    asm volatile ( "swapgs" );
+
+    toggle_guest_pt(v);
+}
+
+void toggle_guest_pt(struct vcpu *v)
+{
+    const struct domain *d = v->domain;
+    struct cpu_info *cpu_info = get_cpu_info();
+    unsigned long cr3;
+
+    if ( is_pv_32bit_vcpu(v) )
+        return;
+
+    v->arch.flags ^= TF_kernel_mode;
+    update_cr3(v);
+    if ( d->arch.pv_domain.xpti )
+    {
+        cpu_info->root_pgt_changed = true;
+        cpu_info->pv_cr3 = __pa(this_cpu(root_pgt)) |
+                           (d->arch.pv_domain.pcid
+                            ? get_pcid_bits(v, true) : 0);
+    }
+
+    /*
+     * Don't flush user global mappings from the TLB. Don't tick TLB clock.
+     *
+     * In shadow mode, though, update_cr3() may need to be accompanied by a
+     * TLB flush (for just the incoming PCID), as the top level page table may
+     * have changed behind our backs. To be on the safe side, suppress the
+     * no-flush unconditionally in this case. The XPTI CR3 write, if enabled,
+     * will then need to be a flushing one too.
+     */
+    cr3 = v->arch.cr3;
+    if ( shadow_mode_enabled(d) )
+    {
+        cr3 &= ~X86_CR3_NOFLUSH;
+        cpu_info->pv_cr3 &= ~X86_CR3_NOFLUSH;
+    }
+    write_cr3(cr3);
+
+    if ( !(v->arch.flags & TF_kernel_mode) )
+        return;
+
+    if ( v->arch.pv_vcpu.need_update_runstate_area &&
+         update_runstate_area(v) )
+        v->arch.pv_vcpu.need_update_runstate_area = 0;
+
+    if ( v->arch.pv_vcpu.pending_system_time.version &&
+         update_secondary_system_time(v,
+                                      &v->arch.pv_vcpu.pending_system_time) )
+        v->arch.pv_vcpu.pending_system_time.version = 0;
+}
+
+unsigned long do_iret(void)
+{
+    struct cpu_user_regs *regs = guest_cpu_user_regs();
+    struct iret_context iret_saved;
+    struct vcpu *v = current;
+
+    if ( unlikely(copy_from_user(&iret_saved, (void *)regs->rsp,
+                                 sizeof(iret_saved))) )
+    {
+        gprintk(XENLOG_ERR,
+                "Fault while reading IRET context from guest stack\n");
+        goto exit_and_crash;
+    }
+
+    /* Returning to user mode? */
+    if ( (iret_saved.cs & 3) == 3 )
+    {
+        if ( unlikely(pagetable_is_null(v->arch.guest_table_user)) )
+        {
+            gprintk(XENLOG_ERR,
+                    "Guest switching to user mode with no user page tables\n");
+            goto exit_and_crash;
+        }
+        toggle_guest_mode(v);
+    }
+
+    if ( VM_ASSIST(v->domain, architectural_iopl) )
+        v->arch.pv_vcpu.iopl = iret_saved.rflags & X86_EFLAGS_IOPL;
+
+    regs->rip    = iret_saved.rip;
+    regs->cs     = iret_saved.cs | 3; /* force guest privilege */
+    regs->rflags = ((iret_saved.rflags & ~(X86_EFLAGS_IOPL|X86_EFLAGS_VM))
+                    | X86_EFLAGS_IF);
+    regs->rsp    = iret_saved.rsp;
+    regs->ss     = iret_saved.ss | 3; /* force guest privilege */
+
+    if ( !(iret_saved.flags & VGCF_in_syscall) )
+    {
+        regs->entry_vector &= ~TRAP_syscall;
+        regs->r11 = iret_saved.r11;
+        regs->rcx = iret_saved.rcx;
+    }
+
+    /* Restore upcall mask from supplied EFLAGS.IF. */
+    vcpu_info(v, evtchn_upcall_mask) = !(iret_saved.rflags & X86_EFLAGS_IF);
+
+    async_exception_cleanup(v);
+
+    /* Saved %rax gets written back to regs->rax in entry.S. */
+    return iret_saved.rax;
+
+ exit_and_crash:
+    domain_crash(v->domain);
+    return 0;
 }
 
 static unsigned int write_stub_trampoline(
@@ -303,16 +428,12 @@ void subarch_percpu_traps_init(void)
     unsigned char *stub_page;
     unsigned int offset;
 
-    /* IST_MAX IST pages + at least 1 guard page + primary stack. */
-    BUILD_BUG_ON((IST_MAX + 1) * PAGE_SIZE + PRIMARY_STACK_SIZE > STACK_SIZE);
+    /* IST_MAX IST pages + 1 syscall page + 1 guard page + primary stack. */
+    BUILD_BUG_ON((IST_MAX + 2) * PAGE_SIZE + PRIMARY_STACK_SIZE > STACK_SIZE);
 
     stub_page = map_domain_page(_mfn(this_cpu(stubs.mfn)));
 
-    /*
-     * Trampoline for SYSCALL entry from 64-bit mode.  The VT-x HVM vcpu
-     * context switch logic relies on the SYSCALL trampoline being at the
-     * start of the stubs.
-     */
+    /* Trampoline for SYSCALL entry from 64-bit mode. */
     wrmsrl(MSR_LSTAR, stub_va);
     offset = write_stub_trampoline(stub_page + (stub_va & ~PAGE_MASK),
                                    stub_va, stack_bottom,
@@ -340,14 +461,213 @@ void subarch_percpu_traps_init(void)
     unmap_domain_page(stub_page);
 
     /* Common SYSCALL parameters. */
-    wrmsrl(MSR_STAR, XEN_MSR_STAR);
-    wrmsrl(MSR_SYSCALL_MASK, XEN_SYSCALL_MASK);
+    wrmsr(MSR_STAR, 0, ((unsigned int)FLAT_RING3_CS32 << 16) | __HYPERVISOR_CS);
+    wrmsr(MSR_SYSCALL_MASK, XEN_SYSCALL_MASK, 0U);
 }
+
+void init_int80_direct_trap(struct vcpu *v)
+{
+    struct trap_info *ti = &v->arch.pv_vcpu.trap_ctxt[0x80];
+    struct trap_bounce *tb = &v->arch.pv_vcpu.int80_bounce;
+
+    tb->cs    = ti->cs;
+    tb->eip   = ti->address;
+
+    if ( null_trap_bounce(v, tb) )
+        tb->flags = 0;
+    else
+        tb->flags = TBF_EXCEPTION | (TI_GET_IF(ti) ? TBF_INTERRUPT : 0);
+}
+
+static long register_guest_callback(struct callback_register *reg)
+{
+    long ret = 0;
+    struct vcpu *v = current;
+
+    if ( !is_canonical_address(reg->address) )
+        return -EINVAL;
+
+    switch ( reg->type )
+    {
+    case CALLBACKTYPE_event:
+        v->arch.pv_vcpu.event_callback_eip    = reg->address;
+        break;
+
+    case CALLBACKTYPE_failsafe:
+        v->arch.pv_vcpu.failsafe_callback_eip = reg->address;
+        if ( reg->flags & CALLBACKF_mask_events )
+            set_bit(_VGCF_failsafe_disables_events,
+                    &v->arch.vgc_flags);
+        else
+            clear_bit(_VGCF_failsafe_disables_events,
+                      &v->arch.vgc_flags);
+        break;
+
+    case CALLBACKTYPE_syscall:
+        v->arch.pv_vcpu.syscall_callback_eip  = reg->address;
+        if ( reg->flags & CALLBACKF_mask_events )
+            set_bit(_VGCF_syscall_disables_events,
+                    &v->arch.vgc_flags);
+        else
+            clear_bit(_VGCF_syscall_disables_events,
+                      &v->arch.vgc_flags);
+        break;
+
+    case CALLBACKTYPE_syscall32:
+        v->arch.pv_vcpu.syscall32_callback_eip = reg->address;
+        v->arch.pv_vcpu.syscall32_disables_events =
+            !!(reg->flags & CALLBACKF_mask_events);
+        break;
+
+    case CALLBACKTYPE_sysenter:
+        v->arch.pv_vcpu.sysenter_callback_eip = reg->address;
+        v->arch.pv_vcpu.sysenter_disables_events =
+            !!(reg->flags & CALLBACKF_mask_events);
+        break;
+
+    case CALLBACKTYPE_nmi:
+        ret = register_guest_nmi_callback(reg->address);
+        break;
+
+    default:
+        ret = -ENOSYS;
+        break;
+    }
+
+    return ret;
+}
+
+static long unregister_guest_callback(struct callback_unregister *unreg)
+{
+    long ret;
+
+    switch ( unreg->type )
+    {
+    case CALLBACKTYPE_event:
+    case CALLBACKTYPE_failsafe:
+    case CALLBACKTYPE_syscall:
+    case CALLBACKTYPE_syscall32:
+    case CALLBACKTYPE_sysenter:
+        ret = -EINVAL;
+        break;
+
+    case CALLBACKTYPE_nmi:
+        ret = unregister_guest_nmi_callback();
+        break;
+
+    default:
+        ret = -ENOSYS;
+        break;
+    }
+
+    return ret;
+}
+
+
+long do_callback_op(int cmd, XEN_GUEST_HANDLE_PARAM(const_void) arg)
+{
+    long ret;
+
+    switch ( cmd )
+    {
+    case CALLBACKOP_register:
+    {
+        struct callback_register reg;
+
+        ret = -EFAULT;
+        if ( copy_from_guest(&reg, arg, 1) )
+            break;
+
+        ret = register_guest_callback(&reg);
+    }
+    break;
+
+    case CALLBACKOP_unregister:
+    {
+        struct callback_unregister unreg;
+
+        ret = -EFAULT;
+        if ( copy_from_guest(&unreg, arg, 1) )
+            break;
+
+        ret = unregister_guest_callback(&unreg);
+    }
+    break;
+
+    default:
+        ret = -ENOSYS;
+        break;
+    }
+
+    return ret;
+}
+
+long do_set_callbacks(unsigned long event_address,
+                      unsigned long failsafe_address,
+                      unsigned long syscall_address)
+{
+    struct callback_register event = {
+        .type = CALLBACKTYPE_event,
+        .address = event_address,
+    };
+    struct callback_register failsafe = {
+        .type = CALLBACKTYPE_failsafe,
+        .address = failsafe_address,
+    };
+    struct callback_register syscall = {
+        .type = CALLBACKTYPE_syscall,
+        .address = syscall_address,
+    };
+
+    register_guest_callback(&event);
+    register_guest_callback(&failsafe);
+    register_guest_callback(&syscall);
+
+    return 0;
+}
+
+static void hypercall_page_initialise_ring3_kernel(void *hypercall_page)
+{
+    char *p;
+    int i;
+
+    /* Fill in all the transfer points with template machine code. */
+    for ( i = 0; i < (PAGE_SIZE / 32); i++ )
+    {
+        if ( i == __HYPERVISOR_iret )
+            continue;
+
+        p = (char *)(hypercall_page + (i * 32));
+        *(u8  *)(p+ 0) = 0x51;    /* push %rcx */
+        *(u16 *)(p+ 1) = 0x5341;  /* push %r11 */
+        *(u8  *)(p+ 3) = 0xb8;    /* mov  $<i>,%eax */
+        *(u32 *)(p+ 4) = i;
+        *(u16 *)(p+ 8) = 0x050f;  /* syscall */
+        *(u16 *)(p+10) = 0x5b41;  /* pop  %r11 */
+        *(u8  *)(p+12) = 0x59;    /* pop  %rcx */
+        *(u8  *)(p+13) = 0xc3;    /* ret */
+    }
+
+    /*
+     * HYPERVISOR_iret is special because it doesn't return and expects a
+     * special stack frame. Guests jump at this transfer point instead of
+     * calling it.
+     */
+    p = (char *)(hypercall_page + (__HYPERVISOR_iret * 32));
+    *(u8  *)(p+ 0) = 0x51;    /* push %rcx */
+    *(u16 *)(p+ 1) = 0x5341;  /* push %r11 */
+    *(u8  *)(p+ 3) = 0x50;    /* push %rax */
+    *(u8  *)(p+ 4) = 0xb8;    /* mov  $__HYPERVISOR_iret,%eax */
+    *(u32 *)(p+ 5) = __HYPERVISOR_iret;
+    *(u16 *)(p+ 9) = 0x050f;  /* syscall */
+}
+
+#include "compat/traps.c"
 
 void hypercall_page_initialise(struct domain *d, void *hypercall_page)
 {
     memset(hypercall_page, 0xCC, PAGE_SIZE);
-    if ( is_hvm_domain(d) )
+    if ( has_hvm_container_domain(d) )
         hvm_hypercall_page_initialise(d, hypercall_page);
     else if ( !is_pv_32bit_domain(d) )
         hypercall_page_initialise_ring3_kernel(hypercall_page);

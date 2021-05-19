@@ -133,8 +133,7 @@
     rdmsr
 
     /* Stash the value from hardware. */
-    mov VCPU_arch_msr(%rbx), %rdx
-    mov %eax, VCPUMSR_spec_ctrl_raw(%rdx)
+    mov %eax, VCPU_arch_spec_ctrl(%rbx)
     xor %edx, %edx
 
     /* Clear SPEC_CTRL shadowing *before* loading Xen's value. */
@@ -221,39 +220,44 @@
 
 /* Use after a VMEXIT from an HVM guest. */
 #define SPEC_CTRL_ENTRY_FROM_HVM                                        \
-    ALTERNATIVE "", DO_OVERWRITE_RSB, X86_FEATURE_SC_RSB_HVM;           \
-    ALTERNATIVE "", DO_SPEC_CTRL_ENTRY_FROM_HVM,                        \
-        X86_FEATURE_SC_MSR_HVM
+    ALTERNATIVE __stringify(ASM_NOP40),                                 \
+        DO_OVERWRITE_RSB, X86_FEATURE_SC_RSB_HVM;                       \
+    ALTERNATIVE __stringify(ASM_NOP36),                                 \
+        DO_SPEC_CTRL_ENTRY_FROM_HVM, X86_FEATURE_SC_MSR_HVM
 
 /* Use after an entry from PV context (syscall/sysenter/int80/int82/etc). */
 #define SPEC_CTRL_ENTRY_FROM_PV                                         \
-    ALTERNATIVE "", DO_OVERWRITE_RSB, X86_FEATURE_SC_RSB_PV;            \
-    ALTERNATIVE "", __stringify(DO_SPEC_CTRL_ENTRY maybexen=0),         \
-        X86_FEATURE_SC_MSR_PV
+    ALTERNATIVE __stringify(ASM_NOP40),                                 \
+        DO_OVERWRITE_RSB, X86_FEATURE_SC_RSB_PV;                        \
+    ALTERNATIVE __stringify(ASM_NOP25),                                 \
+        __stringify(DO_SPEC_CTRL_ENTRY maybexen=0), X86_FEATURE_SC_MSR_PV
 
 /* Use in interrupt/exception context.  May interrupt Xen or PV context. */
 #define SPEC_CTRL_ENTRY_FROM_INTR                                       \
-    ALTERNATIVE "", DO_OVERWRITE_RSB, X86_FEATURE_SC_RSB_PV;            \
-    ALTERNATIVE "", __stringify(DO_SPEC_CTRL_ENTRY maybexen=1),         \
-        X86_FEATURE_SC_MSR_PV
+    ALTERNATIVE __stringify(ASM_NOP40),                                 \
+        DO_OVERWRITE_RSB, X86_FEATURE_SC_RSB_PV;                        \
+    ALTERNATIVE __stringify(ASM_NOP33),                                 \
+        __stringify(DO_SPEC_CTRL_ENTRY maybexen=1), X86_FEATURE_SC_MSR_PV
 
 /* Use when exiting to Xen context. */
 #define SPEC_CTRL_EXIT_TO_XEN                                           \
-    ALTERNATIVE "",                                                     \
+    ALTERNATIVE __stringify(ASM_NOP17),                                 \
         DO_SPEC_CTRL_EXIT_TO_XEN, X86_FEATURE_SC_MSR_PV
 
 /* Use when exiting to PV guest context. */
 #define SPEC_CTRL_EXIT_TO_PV                                            \
-    ALTERNATIVE "",                                                     \
+    ALTERNATIVE __stringify(ASM_NOP24),                                 \
         DO_SPEC_CTRL_EXIT_TO_GUEST, X86_FEATURE_SC_MSR_PV;              \
-    ALTERNATIVE "", __stringify(verw CPUINFO_verw_sel(%rsp)),           \
+    ALTERNATIVE __stringify(ASM_NOP8),                                  \
+        __stringify(verw CPUINFO_verw_sel(%rsp)),                       \
         X86_FEATURE_SC_VERW_PV
 
 /* Use when exiting to HVM guest context. */
 #define SPEC_CTRL_EXIT_TO_HVM                                           \
-    ALTERNATIVE "",                                                     \
+    ALTERNATIVE __stringify(ASM_NOP24),                                 \
         DO_SPEC_CTRL_EXIT_TO_GUEST, X86_FEATURE_SC_MSR_HVM;             \
-    ALTERNATIVE "", __stringify(verw CPUINFO_verw_sel(%rsp)),           \
+    ALTERNATIVE __stringify(ASM_NOP8),                                  \
+        __stringify(verw CPUINFO_verw_sel(%rsp)),                       \
         X86_FEATURE_SC_VERW_HVM
 
 /*

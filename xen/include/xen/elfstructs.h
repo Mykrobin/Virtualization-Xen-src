@@ -361,7 +361,7 @@ typedef struct {
 
 #define	ELF64_R_SYM(info)	((info) >> 32)
 #define	ELF64_R_TYPE(info)	((info) & 0xFFFFFFFF)
-#define ELF64_R_INFO(s,t) 	(((s) << 32) + (uint32_t)(t))
+#define ELF64_R_INFO(s,t) 	(((s) << 32) + (u_int32_t)(t))
 
 /*
  * Relocation types for x86_64 and ARM 64. We list only the ones Live Patch
@@ -555,7 +555,6 @@ typedef struct {
 
 #if defined(ELFSIZE) && (ELFSIZE == 32)
 #define PRIxElfAddr	"08x"
-#define PRIuElfWord	"8u"
 
 #define Elf_Ehdr	Elf32_Ehdr
 #define Elf_Phdr	Elf32_Phdr
@@ -583,7 +582,6 @@ typedef struct {
 #define AuxInfo		Aux32Info
 #elif defined(ELFSIZE) && (ELFSIZE == 64)
 #define PRIxElfAddr	PRIx64
-#define PRIuElfWord	PRIu64
 
 #define Elf_Ehdr	Elf64_Ehdr
 #define Elf_Phdr	Elf64_Phdr

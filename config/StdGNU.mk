@@ -35,3 +35,7 @@ UTIL_LIBS = -lutil
 SONAME_LDFLAG = -soname
 SHLIB_LDFLAGS = -shared
 
+ifeq ($(lto),y)
+CFLAGS += -flto
+LDFLAGS-$(clang) += -plugin LLVMgold.so
+endif

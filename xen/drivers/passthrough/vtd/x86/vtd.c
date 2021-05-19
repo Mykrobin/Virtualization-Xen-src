@@ -66,7 +66,7 @@ void flush_all_cache()
 static int _hvm_dpci_isairq_eoi(struct domain *d,
                                 struct hvm_pirq_dpci *pirq_dpci, void *arg)
 {
-    struct hvm_irq *hvm_irq = hvm_domain_irq(d);
+    struct hvm_irq *hvm_irq = &d->arch.hvm_domain.irq;
     unsigned int isairq = (long)arg;
     const struct dev_intx_gsi_link *digl;
 
@@ -129,7 +129,7 @@ void __hwdom_init vtd_set_hwdom_mapping(struct domain *d)
         unsigned long pfn = pdx_to_pfn(i);
 
         if ( pfn > (0xffffffffUL >> PAGE_SHIFT) ?
-             (!mfn_valid(_mfn(pfn)) ||
+             (!mfn_valid(pfn) ||
               !page_is_ram_type(pfn, RAM_TYPE_CONVENTIONAL)) :
              iommu_inclusive_mapping ?
              page_is_ram_type(pfn, RAM_TYPE_UNUSABLE) :

@@ -71,9 +71,9 @@ class xen
     tmem_op
 # XEN_SYSCTL_tmem_op command of tmem (part of sysctl)
     tmem_control
-# XEN_SYSCTL_scheduler_op with XEN_DOMCTL_SCHEDOP_getinfo, XEN_SYSCTL_sched_id, XEN_DOMCTL_SCHEDOP_getvcpuinfo
+# XEN_SYSCTL_scheduler_op with XEN_DOMCTL_SCHEDOP_getinfo, XEN_SYSCTL_sched_id
     getscheduler
-# XEN_SYSCTL_scheduler_op with XEN_DOMCTL_SCHEDOP_putinfo, XEN_DOMCTL_SCHEDOP_putvcpuinfo
+# XEN_SYSCTL_scheduler_op with XEN_DOMCTL_SCHEDOP_putinfo
     setscheduler
 }
 
@@ -85,8 +85,8 @@ class xen2
     resource_op
 # XEN_SYSCTL_psr_cmt_op
     psr_cmt_op
-# XEN_SYSCTL_psr_alloc
-    psr_alloc
+# XEN_SYSCTL_psr_cat_op
+    psr_cat_op
 # XENPF_get_symbol
     get_symbol
 # PMU control
@@ -99,10 +99,6 @@ class xen2
     get_cpu_featureset
 # XEN_SYSCTL_livepatch_op
     livepatch_op
-# XEN_SYSCTL_coverage_op
-    coverage_op
-# XEN_SYSCTL_set_parameter
-    set_parameter
 }
 
 # Classes domain and domain2 consist of operations that a domain performs on
@@ -246,12 +242,8 @@ class domain2
     mem_paging
 # XENMEM_sharing_op
     mem_sharing
-# XEN_DOMCTL_psr_alloc
-    psr_alloc
-# XEN_DOMCTL_set_gnttab_limits
-    set_gnttab_limits
-# XENMEM_resource_map
-    resource_map
+# XEN_DOMCTL_psr_cat_op
+    psr_cat_op
 }
 
 # Similar to class domain, but primarily contains domctls related to HVM domains
@@ -265,9 +257,20 @@ class hvm
     setparam
 # HVMOP_get_param
     getparam
+# HVMOP_set_pci_intx_level (also needs hvmctl)
+    pcilevel
+# HVMOP_set_isa_irq_level
+    irqlevel
+# HVMOP_set_pci_link_route
+    pciroute
     bind_irq
-# HVMOP_get_mem_type,
-# HVMOP_set_mem_access, HVMOP_get_mem_access, HVMOP_pagetable_dying
+# XEN_DOMCTL_pin_mem_cacheattr
+    cacheattr
+# HVMOP_track_dirty_vram
+    trackdirtyvram
+# HVMOP_modified_memory, HVMOP_get_mem_type, HVMOP_set_mem_type,
+# HVMOP_set_mem_access, HVMOP_get_mem_access, HVMOP_pagetable_dying,
+# HVMOP_inject_trap
     hvmctl
 # XEN_DOMCTL_mem_sharing_op and XENMEM_sharing_op_{share,add_physmap} with:
 #  source = the domain making the hypercall
@@ -275,6 +278,8 @@ class hvm
     mem_sharing
 # XEN_DOMCTL_audit_p2m
     audit_p2m
+# HVMOP_inject_msi
+    send_irq
 # checked in XENMEM_sharing_op_{share,add_physmap} with:
 #  source = domain whose memory is being shared
 #  target = client domain
@@ -288,8 +293,6 @@ class hvm
 # HVMOP_altp2m_destroy_p2m HVMOP_altp2m_switch_p2m
 # HVMOP_altp2m_set_mem_access HVMOP_altp2m_change_gfn
     altp2mhvm_op
-# DMOP
-    dm
 }
 
 # Class event describes event channels.  Interdomain event channels have their
@@ -359,6 +362,8 @@ class mmu
     map_write
 # XEN_DOMCTL_getpageframeinfo3
     pageinfo
+# XEN_DOMCTL_getmemlist
+    pagelist
 # XENMEM_{increase,decrease}_reservation, XENMEM_populate_physmap
     adjust
 # XENMEM_{current,maximum}_reservation, XENMEM_maximum_gpfn
@@ -422,27 +427,11 @@ class resource
 #  source = domain making the hypercall
 #  target = domain which will no longer have access to the resource
     remove
-# checked when using some core Xen devices (target xen_t)
-#  source = domain which will have access to the resource
-#  target = xen_t
-    use
 # checked when adding a resource to a domain:
 #  source = domain which will have access to the resource
 #  target = resource's security label
-# Requires an active IOMMU capable of interrupt remapping in order to
-# enforce isolation.
-    use_iommu
-# checked when adding a resource to a domain when an IOMMU is available
-# but it is not capable of interrupt mapping:
-#  source = domain which will have access to the resource
-#  target = resource's security label
-# Enable this to allow some less secure systems to still work.
-    use_iommu_nointremap
-# checked when adding a resource to a domain when no IOMMU present:
-#  source = domain which will have access to the resource
-#  target = resource's security label
-# Enable this to allow resource use without an active IOMMU.
-    use_noiommu
+# also checked when using some core Xen devices (target xen_t)
+    use
 # PHYSDEVOP_map_pirq and ioapic writes for dom0, when acting on real IRQs
 #  For GSI interrupts, the IRQ's label is indexed by the IRQ number
 #  For MSI interrupts, the label of the PCI device is used

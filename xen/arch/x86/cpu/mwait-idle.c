@@ -581,40 +581,6 @@ static const struct cpuidle_state atom_cstates[] = {
 	{}
 };
 
-static const struct cpuidle_state tangier_cstates[] = {
-	{
-		.name = "C1-TNG",
-		.flags = MWAIT2flg(0x00),
-		.exit_latency = 1,
-		.target_residency = 4,
-	},
-	{
-		.name = "C4-TNG",
-		.flags = MWAIT2flg(0x30) | CPUIDLE_FLAG_TLB_FLUSHED,
-		.exit_latency = 100,
-		.target_residency = 400,
-	},
-	{
-		.name = "C6-TNG",
-		.flags = MWAIT2flg(0x52) | CPUIDLE_FLAG_TLB_FLUSHED,
-		.exit_latency = 140,
-		.target_residency = 560,
-	},
-	{
-		.name = "C7-TNG",
-		.flags = MWAIT2flg(0x60) | CPUIDLE_FLAG_TLB_FLUSHED,
-		.exit_latency = 1200,
-		.target_residency = 4000,
-	},
-	{
-		.name = "C9-TNG",
-		.flags = MWAIT2flg(0x64) | CPUIDLE_FLAG_TLB_FLUSHED,
-		.exit_latency = 10000,
-		.target_residency = 20000,
-	},
-	{}
-};
-
 static const struct cpuidle_state avn_cstates[] = {
 	{
 		.name = "C1-AVN",
@@ -841,10 +807,6 @@ static const struct idle_cpu idle_cpu_atom = {
 	.state_table = atom_cstates,
 };
 
-static const struct idle_cpu idle_cpu_tangier = {
-	.state_table = tangier_cstates,
-};
-
 static const struct idle_cpu idle_cpu_lincroft = {
 	.state_table = atom_cstates,
 	.auto_demotion_disable_flags = ATM_LNC_C6_AUTO_DEMOTE,
@@ -934,7 +896,6 @@ static const struct x86_cpu_id intel_idle_ids[] __initconstrel = {
 	ICPU(0x2d, snb),
 	ICPU(0x36, atom),
 	ICPU(0x37, byt),
-	ICPU(0x4a, tangier),
 	ICPU(0x4c, cht),
 	ICPU(0x3a, ivb),
 	ICPU(0x3e, ivt),
@@ -953,9 +914,7 @@ static const struct x86_cpu_id intel_idle_ids[] __initconstrel = {
 	ICPU(0x9e, skl),
 	ICPU(0x55, skx),
 	ICPU(0x57, knl),
-	ICPU(0x85, knl),
 	ICPU(0x5c, bxt),
-	ICPU(0x7a, bxt),
 	ICPU(0x5f, dnv),
 	{}
 };
@@ -1101,7 +1060,6 @@ static void __init mwait_idle_state_table_update(void)
 		ivt_idle_state_table_update();
 		break;
 	case 0x5c: /* BXT */
-	case 0x7a:
 		bxt_idle_state_table_update();
 		break;
 	case 0x5e: /* SKL-H */

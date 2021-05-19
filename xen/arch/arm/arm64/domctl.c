@@ -4,6 +4,7 @@
  * Copyright (c) 2013, Citrix Systems
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
@@ -14,8 +15,6 @@
 
 static long switch_mode(struct domain *d, enum domain_type type)
 {
-    struct vcpu *v;
-
     if ( d == NULL )
         return -EINVAL;
     if ( d->tot_pages != 0 )
@@ -24,10 +23,6 @@ static long switch_mode(struct domain *d, enum domain_type type)
         return 0;
 
     d->arch.type = type;
-
-    if ( is_64bit_domain(d) )
-        for_each_vcpu(d, v)
-            vcpu_switch_to_aarch64_mode(v);
 
     return 0;
 }

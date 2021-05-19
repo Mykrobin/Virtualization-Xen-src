@@ -90,7 +90,7 @@ void libxl__colo_save_setup(libxl__egc *egc, libxl__colo_save_state *css)
     STATE_AO_GC(dss->ao);
 
     if (dss->type != LIBXL_DOMAIN_TYPE_HVM) {
-        LOGD(ERROR, dss->domid, "COLO only supports hvm now");
+        LOG(ERROR, "COLO only supports hvm now");
         goto out;
     }
 
@@ -101,8 +101,6 @@ void libxl__colo_save_setup(libxl__egc *egc, libxl__colo_save_state *css)
     css->qdisk_setuped = false;
     css->qdisk_used = false;
     libxl__ev_child_init(&css->child);
-    css->cps.is_userspace_proxy =
-        libxl_defbool_val(dss->remus->userspace_colo_proxy);
 
     if (dss->remus->netbufscript)
         css->colo_proxy_script = libxl__strdup(gc, dss->remus->netbufscript);
@@ -110,27 +108,13 @@ void libxl__colo_save_setup(libxl__egc *egc, libxl__colo_save_state *css)
         css->colo_proxy_script = GCSPRINTF("%s/colo-proxy-setup",
                                            libxl__xen_script_dir_path());
 
+    cds->device_kind_flags = (1 << LIBXL__DEVICE_KIND_VIF) |
+                             (1 << LIBXL__DEVICE_KIND_VBD);
     cds->ops = colo_ops;
     cds->callback = colo_save_setup_done;
     cds->ao = ao;
     cds->domid = dss->domid;
     cds->concrete_data = css;
-
-    /* If enable userspace proxy mode, we don't need VIF */
-    if (css->cps.is_userspace_proxy) {
-        cds->device_kind_flags = (1 << LIBXL__DEVICE_KIND_VBD);
-
-        /* Use this args we can connect to qemu colo-compare */
-        cds->nics = libxl__device_list(gc, &libxl__nic_devtype,
-                                       cds->domid, &cds->num_nics);
-        if (cds->num_nics > 0) {
-            css->cps.checkpoint_host = cds->nics[0].colo_checkpoint_host;
-            css->cps.checkpoint_port = cds->nics[0].colo_checkpoint_port;
-        }
-    } else {
-        cds->device_kind_flags = (1 << LIBXL__DEVICE_KIND_VIF) |
-                                 (1 << LIBXL__DEVICE_KIND_VBD);
-    }
 
     css->srs.ao = ao;
     css->srs.fd = css->recv_fd;
@@ -138,7 +122,8 @@ void libxl__colo_save_setup(libxl__egc *egc, libxl__colo_save_state *css)
     libxl__stream_read_start(egc, &css->srs);
     css->cps.ao = ao;
     if (colo_proxy_setup(&css->cps)) {
-        LOGD(ERROR, cds->domid, "COLO: failed to setup colo proxy for guest");
+        LOG(ERROR, "COLO: failed to setup colo proxy for guest with domid %u",
+            cds->domid);
         goto out;
     }
 
@@ -171,7 +156,8 @@ static void colo_save_setup_done(libxl__egc *egc,
         return;
     }
 
-    LOGD(ERROR, dss->domid, "COLO: failed to setup device for guest");
+    LOG(ERROR, "COLO: failed to setup device for guest with domid %u",
+        dss->domid);
     cds->callback = colo_save_setup_failed;
     libxl__checkpoint_devices_teardown(egc, cds);
 }
@@ -185,9 +171,8 @@ static void colo_save_setup_failed(libxl__egc *egc,
     STATE_AO_GC(cds->ao);
 
     if (rc)
-        LOGD(ERROR, cds->domid,
-             "COLO: failed to teardown device after setup failed"
-             " for guest, rc %d", rc);
+        LOG(ERROR, "COLO: failed to teardown device after setup failed"
+            " for guest with domid %u, rc %d", cds->domid, rc);
 
     cleanup_device_subkind(cds);
     dss->callback(egc, dss, rc);
@@ -207,9 +192,8 @@ void libxl__colo_save_teardown(libxl__egc *egc,
 
     EGC_GC;
 
-    LOGD(WARN, dss->domid,
-         "COLO: Domain suspend terminated with rc %d,"
-         " teardown COLO devices...", rc);
+    LOG(WARN, "COLO: Domain suspend terminated with rc %d,"
+        " teardown COLO devices...", rc);
 
     libxl__stream_read_abort(egc, &css->srs, 1);
 
@@ -284,7 +268,7 @@ static void colo_suspend_primary_vm_done(libxl__egc *egc,
     EGC_GC;
 
     if (rc) {
-        LOGD(ERROR, dss->domid, "cannot suspend primary vm");
+        LOG(ERROR, "cannot suspend primary vm");
         goto out;
     }
 
@@ -310,7 +294,7 @@ static void colo_postsuspend_cb(libxl__egc *egc,
     EGC_GC;
 
     if (rc) {
-        LOGD(ERROR, dss->domid, "postsuspend fails");
+        LOG(ERROR, "postsuspend fails");
         goto out;
     }
 
@@ -342,15 +326,13 @@ static void colo_read_svm_suspended_done(libxl__egc *egc,
     EGC_GC;
 
     if (id != CHECKPOINT_SVM_SUSPENDED) {
-        LOGD(ERROR, dss->domid, "invalid section: %d, expected: %d", id,
+        LOG(ERROR, "invalid section: %d, expected: %d", id,
             CHECKPOINT_SVM_SUSPENDED);
         goto out;
     }
 
-    if (!css->paused &&
-        libxl__qmp_query_xen_replication_status(gc, dss->domid)) {
-        LOGD(ERROR, dss->domid,
-             "replication error occurs when primary vm is running");
+    if (!css->paused && libxl__qmp_get_replication_error(gc, dss->domid)) {
+        LOG(ERROR, "replication error occurs when primary vm is running");
         goto out;
     }
 
@@ -423,7 +405,7 @@ static void colo_read_svm_ready_done(libxl__egc *egc,
     EGC_GC;
 
     if (id != CHECKPOINT_SVM_READY) {
-        LOGD(ERROR, dss->domid, "invalid section: %d, expected: %d", id,
+        LOG(ERROR, "invalid section: %d, expected: %d", id,
             CHECKPOINT_SVM_READY);
         goto out;
     }
@@ -450,28 +432,28 @@ static void colo_preresume_cb(libxl__egc *egc,
     EGC_GC;
 
     if (rc) {
-        LOGD(ERROR, dss->domid, "preresume fails");
+        LOG(ERROR, "preresume fails");
         goto out;
     }
 
     if (css->qdisk_used && !css->qdisk_setuped) {
         if (libxl__qmp_start_replication(gc, dss->domid, true)) {
-            LOGD(ERROR, dss->domid, "starting replication fails");
+            LOG(ERROR, "starting replication fails");
             goto out;
         }
         css->qdisk_setuped = true;
     }
 
     if (!css->paused) {
-        if (libxl__qmp_colo_do_checkpoint(gc, dss->domid)) {
-            LOGD(ERROR, dss->domid, "doing checkpoint fails");
+        if (libxl__qmp_do_checkpoint(gc, dss->domid)) {
+            LOG(ERROR, "doing checkpoint fails");
             goto out;
         }
     }
 
     /* Resumes the domain and the device model */
     if (libxl__domain_resume(gc, dss->domid, /* Fast Suspend */1)) {
-        LOGD(ERROR, dss->domid, "cannot resume primary vm");
+        LOG(ERROR, "cannot resume primary vm");
         goto out;
     }
 
@@ -482,7 +464,7 @@ static void colo_preresume_cb(libxl__egc *egc,
     if (css->paused) {
         rc = libxl_domain_unpause(CTX, dss->domid);
         if (rc) {
-            LOGD(ERROR, dss->domid, "cannot unpause primary vm");
+            LOG(ERROR, "cannot unpause primary vm");
             goto out;
         }
         css->paused = false;
@@ -509,7 +491,7 @@ static void colo_read_svm_resumed_done(libxl__egc *egc,
     EGC_GC;
 
     if (id != CHECKPOINT_SVM_RESUMED) {
-        LOGD(ERROR, dss->domid, "invalid section: %d, expected: %d", id,
+        LOG(ERROR, "invalid section: %d, expected: %d", id,
             CHECKPOINT_SVM_RESUMED);
         goto out;
     }
@@ -571,7 +553,7 @@ static void colo_proxy_async_call_done(libxl__egc *egc,
     EGC_GC;
 
     if (status) {
-        LOGD(ERROR, dss->domid, "failed to wait for new checkpoint");
+        LOG(ERROR, "failed to wait for new checkpoint");
         colo_start_new_checkpoint(egc, &dss->cds, ERROR_FAIL);
         return;
     }
@@ -613,7 +595,7 @@ static void colo_device_commit_cb(libxl__egc *egc,
     EGC_GC;
 
     if (rc) {
-        LOGD(ERROR, dss->domid, "commit fails");
+        LOG(ERROR, "commit fails");
         goto out;
     }
 
@@ -662,7 +644,7 @@ static void colo_common_write_stream_done(libxl__egc *egc,
 
     if (rc < 0) {
         /* TODO: it may be a internal error, but we don't know */
-        LOGD(ERROR, dss->domid, "sending data fails");
+        LOG(ERROR, "sending data fails");
         ok = 0;
         goto out;
     }
@@ -693,7 +675,7 @@ static void colo_common_read_stream_done(libxl__egc *egc,
 
     if (rc < 0) {
         /* TODO: it may be a internal error, but we don't know */
-        LOGD(ERROR, dss->domid, "reading data fails");
+        LOG(ERROR, "reading data fails");
         ok = 0;
         goto out;
     }

@@ -12,14 +12,6 @@ config HAS_CADENCE_UART
 	  This selects the Xilinx Zynq Cadence UART. If you have a Xilinx Zynq
 	  based board, say Y.
 
-config HAS_MVEBU
-	bool
-	default y
-	depends on ARM_64
-	help
-	  This selects the Marvell MVEBU UART. If you have a ARMADA 3700
-	  based board, say Y.
-
 config HAS_PL011
 	bool
 	default y
@@ -47,10 +39,10 @@ config HAS_OMAP
 config HAS_SCIF
 	bool
 	default y
-	depends on ARM
+	depends on ARM_32
 	help
 	  This selects the SuperH SCI(F) UART. If you have a SuperH based board,
-	  or Renesas R-Car Gen 2/3 based board say Y.
+	  say Y.
 
 config HAS_EHCI
 	bool

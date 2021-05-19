@@ -4,7 +4,6 @@
 #include <xen/mm.h>
 #include <xen/radix-tree.h>
 #include <xen/rwlock.h>
-#include <xen/mem_access.h>
 #include <public/vm_event.h> /* for vm_event_response_t */
 #include <public/memory.h>
 #include <xen/p2m-common.h>
@@ -21,9 +20,7 @@ extern void memory_type_changed(struct domain *);
 
 /* Per-p2m-table state */
 struct p2m_domain {
-    /*
-     * Lock that protects updates to the p2m.
-     */
+    /* Lock that protects updates to the p2m */
     rwlock_t lock;
 
     /* Pages used to construct the p2m */
@@ -33,7 +30,7 @@ struct p2m_domain {
     struct page_info *root;
 
     /* Current VMID in use */
-    uint16_t vmid;
+    uint8_t vmid;
 
     /* Current Translation Table Base Register for the p2m */
     uint64_t vttbr;
@@ -75,10 +72,10 @@ struct p2m_domain {
      * If true, and an access fault comes in and there is no vm_event listener,
      * pause domain. Otherwise, remove access restrictions.
      */
-    bool access_required;
+    bool_t access_required;
 
     /* Defines if mem_access is in use for the domain. */
-    bool mem_access_enabled;
+    bool_t mem_access_enabled;
 
     /*
      * Default P2M access type for each page in the the domain: new pages,
@@ -142,10 +139,21 @@ typedef enum {
                              p2m_to_mask(p2m_map_foreign)))
 
 static inline
+bool p2m_mem_access_emulate_check(struct vcpu *v,
+                                  const vm_event_response_t *rsp)
+{
+    /* Not supported on ARM. */
+    return 0;
+}
+
+static inline
 void p2m_altp2m_check(struct vcpu *v, uint16_t idx)
 {
     /* Not supported on ARM. */
 }
+
+/* Initialise vmid allocator */
+void p2m_vmid_allocator_init(void);
 
 /* Second stage paging setup, to be called on all CPUs */
 void setup_virt_paging(void);
@@ -196,8 +204,6 @@ static inline int p2m_is_write_locked(struct p2m_domain *p2m)
 {
     return rw_is_write_locked(&p2m->lock);
 }
-
-void p2m_tlb_flush_sync(struct p2m_domain *p2m);
 
 /* Look up the MFN corresponding to a domain's GFN. */
 mfn_t p2m_lookup(struct domain *d, gfn_t gfn, p2m_type_t *t);
@@ -261,6 +267,19 @@ static inline int guest_physmap_add_page(struct domain *d,
 
 mfn_t gfn_to_mfn(struct domain *d, gfn_t gfn);
 
+/*
+ * Populate-on-demand
+ */
+
+/*
+ * Call when decreasing memory reservation to handle PoD entries properly.
+ * Will return '1' if all entries were handled and nothing more need be done.
+ */
+int
+p2m_pod_decrease_reservation(struct domain *d,
+                             xen_pfn_t gpfn,
+                             unsigned int order);
+
 /* Look up a GFN and take a reference count on the backing page. */
 typedef unsigned int p2m_query_t;
 #define P2M_ALLOC    (1u<<0)   /* Populate PoD and paged-out entries */
@@ -271,7 +290,7 @@ static inline struct page_info *get_page_from_gfn(
 {
     struct page_info *page;
     p2m_type_t p2mt;
-    mfn_t mfn = p2m_lookup(d, _gfn(gfn), &p2mt);
+    unsigned long mfn = mfn_x(p2m_lookup(d, _gfn(gfn), &p2mt));
 
     if (t)
         *t = p2mt;
@@ -301,7 +320,7 @@ static inline struct page_info *get_page_from_gfn(
 }
 
 int get_page_type(struct page_info *page, unsigned long type);
-bool is_iomem_page(mfn_t mfn);
+int is_iomem_page(unsigned long mfn);
 static inline int get_page_and_type(struct page_info *page,
                                     struct domain *domain,
                                     unsigned long type)
@@ -320,36 +339,22 @@ static inline int get_page_and_type(struct page_info *page,
 /* get host p2m table */
 #define p2m_get_hostp2m(d) (&(d)->arch.p2m)
 
-static inline bool p2m_vm_event_sanity_check(struct domain *d)
+/* vm_event and mem_access are supported on any ARM guest */
+static inline bool_t p2m_mem_access_sanity_check(struct domain *d)
 {
-    return true;
+    return 1;
+}
+
+static inline bool_t p2m_vm_event_sanity_check(struct domain *d)
+{
+    return 1;
 }
 
 /*
- * Return the start of the next mapping based on the order of the
- * current one.
+ * Send mem event based on the access. Boolean return value indicates if trap
+ * needs to be injected into guest.
  */
-static inline gfn_t gfn_next_boundary(gfn_t gfn, unsigned int order)
-{
-    /*
-     * The order corresponds to the order of the mapping (or invalid
-     * range) in the page table. So we need to align the GFN before
-     * incrementing.
-     */
-    gfn = _gfn(gfn_x(gfn) & ~((1UL << order) - 1));
-
-    return gfn_add(gfn, 1UL << order);
-}
-
-static inline int set_foreign_p2m_entry(struct domain *d, unsigned long gfn,
-                                        mfn_t mfn)
-{
-    /*
-     * NOTE: If this is implemented then proper reference counting of
-     *       foreign entries will need to be implemented.
-     */
-    return -EOPNOTSUPP;
-}
+bool_t p2m_mem_access_check(paddr_t gpa, vaddr_t gla, const struct npfec npfec);
 
 #endif /* _XEN_P2M_H */
 

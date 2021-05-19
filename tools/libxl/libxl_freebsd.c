@@ -121,7 +121,7 @@ static int libxl__hotplug_nic(libxl__gc *gc, libxl__device *dev,
 
     rc = libxl__nic_type(gc, dev, &nictype);
     if (rc) {
-        LOGD(ERROR, dev->domid, "error when fetching nic type");
+        LOG(ERROR, "error when fetching nic type");
         rc = ERROR_FAIL;
         goto out;
     }
@@ -143,8 +143,7 @@ static int libxl__hotplug_nic(libxl__gc *gc, libxl__device *dev,
     script = libxl__xs_read(gc, XBT_NULL,
                             GCSPRINTF("%s/%s", be_path, "script"));
     if (!script) {
-        LOGEVD(ERROR, errno, dev->domid,
-               "unable to read script from %s", be_path);
+        LOGEV(ERROR, errno, "unable to read script from %s", be_path);
         rc = ERROR_FAIL;
         goto out;
     }
@@ -173,8 +172,7 @@ static int libxl__hotplug_disk(libxl__gc *gc, libxl__device *dev,
     script = libxl__xs_read(gc, XBT_NULL,
                             GCSPRINTF("%s/%s", be_path, "script"));
     if (!script) {
-        LOGEVD(ERROR, errno, dev->domid,
-               "unable to read script from %s", be_path);
+        LOGEV(ERROR, errno, "unable to read script from %s", be_path);
         rc = ERROR_FAIL;
         goto out;
     }

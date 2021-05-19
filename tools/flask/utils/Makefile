@@ -37,7 +37,7 @@ flask-set-bool: set-bool.o
 clean: 
 	rm -f *.o *.opic *.so
 	rm -f $(CLIENTS)
-	$(RM) $(DEPS_RM)
+	$(RM) $(DEPS)
 
 .PHONY: distclean
 distclean: clean
@@ -55,8 +55,4 @@ install: all
 	$(INSTALL_DIR) $(DESTDIR)$(sbindir)
 	$(INSTALL_PROG) $(CLIENTS) $(DESTDIR)$(sbindir)
 
-.PHONY: uninstall
-uninstall:
-	rm -f $(addprefix $(DESTDIR)$(sbindir)/, $(CLIENTS))
-
--include $(DEPS_INCLUDE)
+-include $(DEPS)

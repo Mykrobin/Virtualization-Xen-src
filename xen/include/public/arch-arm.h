@@ -61,15 +61,15 @@
  *
  * All memory which is shared with other entities in the system
  * (including the hypervisor and other guests) must reside in memory
- * which is mapped as Normal Inner Write-Back Outer Write-Back Inner-Shareable.
- * This applies to:
+ * which is mapped as Normal Inner-cacheable. This applies to:
  *  - hypercall arguments passed via a pointer to guest memory.
  *  - memory shared via the grant table mechanism (including PV I/O
  *    rings etc).
  *  - memory shared with the hypervisor (struct shared_info, struct
  *    vcpu_info, the grant table, etc).
  *
- * Any cache allocation hints are acceptable.
+ * Any Inner cache allocation strategy (Write-Back, Write-Through etc)
+ * is acceptable. There is no restriction on the Outer-cacheability.
  */
 
 /*
@@ -274,7 +274,6 @@ DEFINE_XEN_GUEST_HANDLE(vcpu_guest_core_regs_t);
 
 typedef uint64_t xen_pfn_t;
 #define PRI_xen_pfn PRIx64
-#define PRIu_xen_pfn PRIu64
 
 /* Maximum number of virtual CPUs in legacy multi-processor guests. */
 /* Only one. All other VCPUS must use VCPUOP_register_vcpu_info */
@@ -291,7 +290,7 @@ struct vcpu_guest_context {
 
     struct vcpu_guest_core_regs user_regs;  /* Core CPU registers */
 
-    uint64_t sctlr;
+    uint32_t sctlr;
     uint64_t ttbcr, ttbr0, ttbr1;
 };
 typedef struct vcpu_guest_context vcpu_guest_context_t;
@@ -374,7 +373,7 @@ typedef uint64_t xen_callback_t;
 #define PSR_GUEST32_INIT  (PSR_ABT_MASK|PSR_FIQ_MASK|PSR_IRQ_MASK|PSR_MODE_SVC)
 #define PSR_GUEST64_INIT (PSR_ABT_MASK|PSR_FIQ_MASK|PSR_IRQ_MASK|PSR_MODE_EL1h)
 
-#define SCTLR_GUEST_INIT    xen_mk_ullong(0x00c50078)
+#define SCTLR_GUEST_INIT    0x00c50078
 
 /*
  * Virtual machine platform (memory layout, interrupts)
@@ -401,6 +400,7 @@ typedef uint64_t xen_callback_t;
 #define GUEST_GICV3_GICD_BASE      xen_mk_ullong(0x03001000)
 #define GUEST_GICV3_GICD_SIZE      xen_mk_ullong(0x00010000)
 
+#define GUEST_GICV3_RDIST_STRIDE   xen_mk_ullong(0x00020000)
 #define GUEST_GICV3_RDIST_REGIONS  1
 
 #define GUEST_GICV3_GICR0_BASE     xen_mk_ullong(0x03020000) /* vCPU0..127 */
@@ -409,10 +409,6 @@ typedef uint64_t xen_callback_t;
 /* ACPI tables physical address */
 #define GUEST_ACPI_BASE 0x20000000ULL
 #define GUEST_ACPI_SIZE 0x02000000ULL
-
-/* PL011 mappings */
-#define GUEST_PL011_BASE    0x22000000ULL
-#define GUEST_PL011_SIZE    0x00001000ULL
 
 /*
  * 16MB == 4096 pages reserved for guest to use as a region to map its
@@ -447,8 +443,6 @@ typedef uint64_t xen_callback_t;
 #define GUEST_TIMER_PHYS_S_PPI  29
 #define GUEST_TIMER_PHYS_NS_PPI 30
 #define GUEST_EVTCHN_PPI        31
-
-#define GUEST_VPL011_SPI        32
 
 /* PSCI functions */
 #define PSCI_cpu_suspend 0

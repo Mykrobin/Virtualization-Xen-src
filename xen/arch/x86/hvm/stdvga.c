@@ -27,6 +27,7 @@
  *  can have side effects.
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/sched.h>
 #include <xen/domain_page.h>
@@ -590,7 +591,7 @@ void stdvga_init(struct domain *d)
         if ( pg == NULL )
             break;
         s->vram_page[i] = pg;
-        clear_domain_page(page_to_mfn(pg));
+        clear_domain_page(_mfn(page_to_mfn(pg)));
     }
 
     if ( i == ARRAY_SIZE(s->vram_page) )

@@ -1,6 +1,7 @@
 #ifndef __ARCH_ARM_ATOMIC__
 #define __ARCH_ARM_ATOMIC__
 
+#include <xen/config.h>
 #include <xen/atomic.h>
 #include <xen/prefetch.h>
 #include <asm/system.h>
@@ -30,7 +31,7 @@ static inline void name(volatile type *addr, type val)                  \
     asm volatile("ldr" size " %"width"1,%0\n"                           \
                  "add %"width"1,%"width"1,%"width"2\n"                  \
                  "str" size " %"width"1,%0"                             \
-                 : "+m" (*addr), "=&r" (t)                              \
+                 : "=m" (*(volatile type *)addr), "=r" (t)              \
                  : reg (val));                                          \
 }
 

@@ -10,6 +10,7 @@
  * Slimmed with Xen specific support.
  */
 
+#include <xen/config.h>
 #include <asm/io.h>
 #include <xen/acpi.h>
 #include <xen/errno.h>
@@ -243,7 +244,7 @@ static int enter_state(u32 state)
 
     device_power_up(SAVED_ALL);
 
-    mcheck_init(&boot_cpu_data, false);
+    mcheck_init(&boot_cpu_data, 0);
     write_cr4(cr4);
 
     printk(XENLOG_INFO "Finishing wakeup from ACPI S%d state.\n", state);
@@ -254,9 +255,6 @@ static int enter_state(u32 state)
     console_end_sync();
 
     microcode_resume_cpu(0);
-
-    if ( !recheck_cpu_features(0) )
-        panic("Missing previously available feature(s).");
 
     /* Re-enabled default NMI/#MC use of MSR_SPEC_CTRL. */
     ci->spec_ctrl_flags |= (default_spec_ctrl_flags & SCF_ist_wrmsr);

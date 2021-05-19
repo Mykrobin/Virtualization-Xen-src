@@ -77,18 +77,6 @@ operations (primarily domain creation).
 
 Default: C</var/lock/xl>
 
-=item B<max_grant_frames=NUMBER>
-
-Sets the default value for the C<max_grant_frames> domain config value.
-
-Default: C<32> on hosts up to 16TB of memory, C<64> on hosts larger than 16TB
-
-=item B<max_maptrack_frames=NUMBER>
-
-Sets the default value for the C<max_maptrack_frames> domain config value.
-
-Default: C<1024>
-
 =item B<vif.default.script="PATH">
 
 Configures the default hotplug script used by virtual network devices.
@@ -166,6 +154,9 @@ while the guest is populated.
 Note that to enable tmem type guests, one needs to provide C<tmem> on the
 Xen hypervisor argument and as well on the Linux kernel command line.
 
+Note that the claim call is not attempted if C<superpages> option is
+used in the guest config (see xl.cfg(5)).
+
 Default: C<1>
 
 =over 4
@@ -194,7 +185,7 @@ massively huge guests).
 Global masks that are applied when creating guests and pinning vcpus
 to indicate which cpus they are allowed to run on.  Specifically,
 C<vm.cpumask> applies to all guest types, C<vm.hvm.cpumask> applies to
-both HVM and PVH guests and C<vm.pv.cpumask> applies to PV guests.
+HVM guests and C<vm.pv.cpumask> applies to PV guests.
 
 The hard affinity of guest's vcpus are logical-AND'ed with respective
 masks. If the resulting affinity mask is empty, operation will fail.

@@ -2,8 +2,7 @@
  * Compatibility hypercall routines.
  */
 
-        .file "x86_64/compat/entry.S"
-
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/softirq.h>
 #include <asm/asm_defns.h>
@@ -13,10 +12,10 @@
 #include <public/xen.h>
 #include <irq_vectors.h>
 
-ENTRY(entry_int82)
+ENTRY(compat_hypercall)
         ASM_CLAC
         pushq $0
-        movl  $HYPERCALL_VECTOR, 4(%rsp)
+        movl  $TRAP_syscall, 4(%rsp)
         SAVE_ALL compat=1 /* DPL1 gate, restricted to 32bit PV guests only. */
 
         SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
@@ -24,10 +23,17 @@ ENTRY(entry_int82)
 
         CR4_PV32_RESTORE
 
+        cmpb  $0,untrusted_msi(%rip)
+UNLIKELY_START(ne, msi_check)
+        movl  $HYPERCALL_VECTOR,%edi
+        call  check_for_unexpected_msi
+        LOAD_C_CLOBBERED compat=1 ax=0
+UNLIKELY_END(msi_check)
+
         GET_CURRENT(bx)
 
         mov   %rsp, %rdi
-        call  do_entry_int82
+        call  pv_hypercall
 
 /* %rbx: struct vcpu */
 ENTRY(compat_test_all_events)
@@ -45,11 +51,11 @@ ENTRY(compat_test_all_events)
         testb $TBF_EXCEPTION, TRAPBOUNCE_flags(%rdx)
         jnz   .Lcompat_process_trapbounce
 
-        cmpb  $0, VCPU_mce_pending(%rbx)
-        jne   compat_process_mce
+        testb $1,VCPU_mce_pending(%rbx)
+        jnz   compat_process_mce
 .Lcompat_test_guest_nmi:
-        cmpb  $0, VCPU_nmi_pending(%rbx)
-        jne   compat_process_nmi
+        testb $1,VCPU_nmi_pending(%rbx)
+        jnz   compat_process_nmi
 compat_test_guest_events:
         movq  VCPU_vcpu_info(%rbx),%rax
         movzwl COMPAT_VCPUINFO_upcall_pending(%rax),%eax
@@ -89,9 +95,9 @@ compat_process_mce:
         testb $1 << VCPU_TRAP_MCE,VCPU_async_exception_mask(%rbx)
         jnz   .Lcompat_test_guest_nmi
         sti
-        movb  $0, VCPU_mce_pending(%rbx)
-        call  set_guest_machinecheck_trapbounce
-        test  %al, %al
+        movb $0,VCPU_mce_pending(%rbx)
+        call set_guest_machinecheck_trapbounce
+        testl %eax,%eax
         jz    compat_test_all_events
         movzbl VCPU_async_exception_mask(%rbx),%edx # save mask for the
         movb %dl,VCPU_mce_old_mask(%rbx)            # iret hypercall
@@ -103,11 +109,11 @@ compat_process_mce:
 /* %rbx: struct vcpu */
 compat_process_nmi:
         testb $1 << VCPU_TRAP_NMI,VCPU_async_exception_mask(%rbx)
-        jnz   compat_test_guest_events
+        jnz  compat_test_guest_events
         sti
-        movb  $0, VCPU_nmi_pending(%rbx)
+        movb  $0,VCPU_nmi_pending(%rbx)
         call  set_guest_nmi_trapbounce
-        test  %al, %al
+        testl %eax,%eax
         jz    compat_test_all_events
         movzbl VCPU_async_exception_mask(%rbx),%edx # save mask for the
         movb %dl,VCPU_nmi_old_mask(%rbx)            # iret hypercall
@@ -124,10 +130,13 @@ ENTRY(compat_restore_all_guest)
         ASSERT_INTERRUPTS_DISABLED
         mov   $~(X86_EFLAGS_IOPL|X86_EFLAGS_NT|X86_EFLAGS_VM),%r11d
         and   UREGS_eflags(%rsp),%r11d
-
-.macro alt_cr4_pv32
+.Lcr4_orig:
+        .skip .Lcr4_alt_end - .Lcr4_alt, 0x90
+.Lcr4_orig_end:
+        .pushsection .altinstr_replacement, "ax"
+.Lcr4_alt:
         testb $3,UREGS_cs(%rsp)
-        jpe   2f
+        jpe   .Lcr4_alt_end
         mov   CPUINFO_cr4-CPUINFO_guest_cpu_user_regs(%rsp), %rax
         and   $~XEN_CR4_PV32_BITS, %rax
 1:
@@ -145,17 +154,21 @@ ENTRY(compat_restore_all_guest)
          */
         cmp   %rax, CPUINFO_cr4-CPUINFO_guest_cpu_user_regs(%rsp)
         jne   1b
-2:
-.endm
-	ALTERNATIVE_2 "", \
-            alt_cr4_pv32, X86_FEATURE_XEN_SMEP, \
-            alt_cr4_pv32, X86_FEATURE_XEN_SMAP
-
+.Lcr4_alt_end:
+        .section .altinstructions, "a"
+        altinstruction_entry .Lcr4_orig, .Lcr4_orig, X86_FEATURE_ALWAYS, \
+                             (.Lcr4_orig_end - .Lcr4_orig), 0
+        altinstruction_entry .Lcr4_orig, .Lcr4_alt, X86_FEATURE_XEN_SMEP, \
+                             (.Lcr4_orig_end - .Lcr4_orig), \
+                             (.Lcr4_alt_end - .Lcr4_alt)
+        altinstruction_entry .Lcr4_orig, .Lcr4_alt, X86_FEATURE_XEN_SMAP, \
+                             (.Lcr4_orig_end - .Lcr4_orig), \
+                             (.Lcr4_alt_end - .Lcr4_alt)
+        .popsection
         or    $X86_EFLAGS_IF,%r11
         mov   %r11d,UREGS_eflags(%rsp)
 
-        mov VCPU_arch_msr(%rbx), %rax
-        mov VCPUMSR_spec_ctrl_raw(%rax), %eax
+        mov VCPU_arch_spec_ctrl(%rbx), %eax
 
         /* WARNING! `ret`, `call *`, `jmp *` not safe beyond this point. */
         SPEC_CTRL_EXIT_TO_PV    /* Req: a=spec_ctrl %rsp=regs/cpuinfo, Clob: cd */
@@ -224,7 +237,7 @@ ENTRY(cstar_enter)
 .Lcstar_cr3_okay:
         sti
 
-        movq  STACK_CPUINFO_FIELD(current_vcpu)(%rbx), %rbx
+        __GET_CURRENT(bx)
         movq  VCPU_domain(%rbx),%rcx
         cmpb  $0,DOMAIN_is_32bit_pv(%rcx)
         je    switch_to_kernel

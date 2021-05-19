@@ -441,7 +441,8 @@ struct qinval_entry {
                     sdata   : 32;
             }lo;
             struct {
-                u64 saddr;
+                u64 res_1   : 2,
+                    saddr   : 62;
             }hi;
         }inv_wait_dsc;
     }q;

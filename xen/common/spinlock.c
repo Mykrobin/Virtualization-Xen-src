@@ -1,4 +1,5 @@
 #include <xen/lib.h>
+#include <xen/config.h>
 #include <xen/irq.h>
 #include <xen/smp.h>
 #include <xen/time.h>
@@ -44,13 +45,7 @@ static void check_lock(struct lock_debug *debug)
     if ( unlikely(debug->irq_safe != irq_safe) )
     {
         int seen = cmpxchg(&debug->irq_safe, -1, irq_safe);
-
-        if ( seen == !irq_safe )
-        {
-            printk("CHECKLOCK FAILURE: prev irqsafe: %d, curr irqsafe %d\n",
-                   seen, irq_safe);
-            BUG();
-        }
+        BUG_ON(seen == !irq_safe);
     }
 }
 
@@ -135,7 +130,7 @@ static always_inline u16 observe_head(spinlock_tickets_t *t)
     return read_atomic(&t->head);
 }
 
-void inline _spin_lock_cb(spinlock_t *lock, void (*cb)(void *), void *data)
+void _spin_lock(spinlock_t *lock)
 {
     spinlock_tickets_t tickets = SPINLOCK_TICKET_INC;
     LOCK_PROFILE_VAR;
@@ -146,18 +141,11 @@ void inline _spin_lock_cb(spinlock_t *lock, void (*cb)(void *), void *data)
     while ( tickets.tail != observe_head(&lock->tickets) )
     {
         LOCK_PROFILE_BLOCK;
-        if ( unlikely(cb) )
-            cb(data);
         arch_lock_relax();
     }
     LOCK_PROFILE_GOT;
     preempt_disable();
     arch_lock_acquire_barrier();
-}
-
-void _spin_lock(spinlock_t *lock)
-{
-     _spin_lock_cb(lock, NULL, NULL);
 }
 
 void _spin_lock_irq(spinlock_t *lock)
@@ -386,7 +374,7 @@ void spinlock_profile_reset(unsigned char key)
 }
 
 typedef struct {
-    struct xen_sysctl_lockprof_op *pc;
+    xen_sysctl_lockprof_op_t *pc;
     int                      rc;
 } spinlock_profile_ucopy_t;
 
@@ -394,7 +382,7 @@ static void spinlock_profile_ucopy_elem(struct lock_profile *data,
     int32_t type, int32_t idx, void *par)
 {
     spinlock_profile_ucopy_t *p = par;
-    struct xen_sysctl_lockprof_data elem;
+    xen_sysctl_lockprof_data_t elem;
 
     if ( p->rc )
         return;
@@ -417,7 +405,7 @@ static void spinlock_profile_ucopy_elem(struct lock_profile *data,
 }
 
 /* Dom0 control of lock profiling */
-int spinlock_profile_control(struct xen_sysctl_lockprof_op *pc)
+int spinlock_profile_control(xen_sysctl_lockprof_op_t *pc)
 {
     int rc = 0;
     spinlock_profile_ucopy_t par;

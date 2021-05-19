@@ -31,7 +31,7 @@ ENTRY(__high_start)
         test    %ebx,%ebx
         jnz     start_secondary
 
-        /* Pass off the Multiboot info structure to C land (if applicable). */
+        /* Pass off the Multiboot info structure to C land. */
         mov     multiboot_ptr(%rip),%edi
         call    __start_xen
         BUG     /* __start_xen() shouldn't return. */
@@ -55,13 +55,13 @@ GLOBAL(stack_start)
         .align PAGE_SIZE, 0
 GLOBAL(boot_cpu_gdt_table)
         .quad 0x0000000000000000     /* unused */
-        .quad 0x00af9b000000ffff     /* 0xe008 ring 0 code, 64-bit mode   */
-        .quad 0x00cf93000000ffff     /* 0xe010 ring 0 data                */
+        .quad 0x00af9a000000ffff     /* 0xe008 ring 0 code, 64-bit mode   */
+        .quad 0x00cf92000000ffff     /* 0xe010 ring 0 data                */
         .quad 0x0000000000000000     /* reserved                          */
-        .quad 0x00cffb000000ffff     /* 0xe023 ring 3 code, compatibility */
-        .quad 0x00cff3000000ffff     /* 0xe02b ring 3 data                */
-        .quad 0x00affb000000ffff     /* 0xe033 ring 3 code, 64-bit mode   */
-        .quad 0x00cf9b000000ffff     /* 0xe038 ring 0 code, compatibility */
+        .quad 0x00cffa000000ffff     /* 0xe023 ring 3 code, compatibility */
+        .quad 0x00cff2000000ffff     /* 0xe02b ring 3 data                */
+        .quad 0x00affa000000ffff     /* 0xe033 ring 3 code, 64-bit mode   */
+        .quad 0x00cf9a000000ffff     /* 0xe038 ring 0 code, compatibility */
         .fill (PER_CPU_GDT_ENTRY - __HYPERVISOR_CS32 / 8 - 1), 8, 0
         .quad 0x0000910000000000     /* per-CPU entry (limit == cpu)      */
 
@@ -70,17 +70,18 @@ GLOBAL(boot_cpu_gdt_table)
 /*     (compatibility) machine->physical mapping table lives there.       */
 GLOBAL(boot_cpu_compat_gdt_table)
         .quad 0x0000000000000000     /* unused */
-        .quad 0x00af9b000000ffff     /* 0xe008 ring 0 code, 64-bit mode   */
-        .quad 0x00cf93000000ffff     /* 0xe010 ring 0 data                */
-        .quad 0x00cfbb000000ffff     /* 0xe019 ring 1 code, compatibility */
-        .quad 0x00cfb3000000ffff     /* 0xe021 ring 1 data                */
-        .quad 0x00cffb000000ffff     /* 0xe02b ring 3 code, compatibility */
-        .quad 0x00cff3000000ffff     /* 0xe033 ring 3 data                */
-        .quad 0x00cf9b000000ffff     /* 0xe038 ring 0 code, compatibility */
+        .quad 0x00af9a000000ffff     /* 0xe008 ring 0 code, 64-bit mode   */
+        .quad 0x00cf92000000ffff     /* 0xe010 ring 0 data                */
+        .quad 0x00cfba000000ffff     /* 0xe019 ring 1 code, compatibility */
+        .quad 0x00cfb2000000ffff     /* 0xe021 ring 1 data                */
+        .quad 0x00cffa000000ffff     /* 0xe02b ring 3 code, compatibility */
+        .quad 0x00cff2000000ffff     /* 0xe033 ring 3 data                */
+        .quad 0x00cf9a000000ffff     /* 0xe038 ring 0 code, compatibility */
         .fill (PER_CPU_GDT_ENTRY - __HYPERVISOR_CS32 / 8 - 1), 8, 0
         .quad 0x0000910000000000     /* per-CPU entry (limit == cpu)      */
         .align PAGE_SIZE, 0
 
+GLOBAL(__page_tables_start)
 /*
  * Mapping of first 2 megabytes of memory. This is mapped with 4kB mappings
  * to avoid type conflicts with fixed-range MTRRs covering the lowest megabyte
@@ -90,9 +91,9 @@ GLOBAL(boot_cpu_compat_gdt_table)
 l1_identmap:
         pfn = 0
         .rept L1_PAGETABLE_ENTRIES
-        /* VGA hole (0xa0000-0xc0000) should be mapped UC-. */
+        /* VGA hole (0xa0000-0xc0000) should be mapped UC. */
         .if pfn >= 0xa0 && pfn < 0xc0
-        .quad (pfn << PAGE_SHIFT) | PAGE_HYPERVISOR_UCMINUS | MAP_SMALL_PAGES
+        .quad (pfn << PAGE_SHIFT) | PAGE_HYPERVISOR_NOCACHE | MAP_SMALL_PAGES
         .else
         .quad (pfn << PAGE_SHIFT) | PAGE_HYPERVISOR | MAP_SMALL_PAGES
         .endif
@@ -101,18 +102,11 @@ l1_identmap:
         .size l1_identmap, . - l1_identmap
 
 /*
- * __page_tables_start does not cover l1_identmap because it (l1_identmap)
- * contains 1-1 mappings. This means that frame addresses of these mappings
- * are static and should not be updated at runtime.
- */
-GLOBAL(__page_tables_start)
-
-/*
  * Space for mapping the first 4GB of memory, with the first 16 megabytes
  * actualy mapped (mostly using superpages).  Uses 4x 4k pages.
  */
 GLOBAL(l2_identmap)
-        .quad sym_offs(l1_identmap) + __PAGE_HYPERVISOR
+        .quad sym_phys(l1_identmap) + __PAGE_HYPERVISOR
         idx = 1
         .rept 7
         .quad (idx << L2_PAGETABLE_SHIFT) | PAGE_HYPERVISOR | _PAGE_PSE
@@ -127,10 +121,9 @@ GLOBAL(l2_identmap)
  * page.
  */
 GLOBAL(l2_xenmap)
-        .quad 0
-        idx = 1
-        .rept 7
-        .quad sym_offs(__image_base__) + (idx << L2_PAGETABLE_SHIFT) + (PAGE_HYPERVISOR | _PAGE_PSE)
+        idx = 0
+        .rept 8
+        .quad sym_phys(__image_base__) + (idx << L2_PAGETABLE_SHIFT) + (PAGE_HYPERVISOR | _PAGE_PSE)
         idx = idx + 1
         .endr
         .fill L2_PAGETABLE_ENTRIES - 8, 8, 0
@@ -141,7 +134,7 @@ l2_fixmap:
         idx = 0
         .rept L2_PAGETABLE_ENTRIES
         .if idx == l2_table_offset(FIXADDR_TOP - 1)
-        .quad sym_offs(l1_fixmap) + __PAGE_HYPERVISOR
+        .quad sym_phys(l1_fixmap) + __PAGE_HYPERVISOR
         .else
         .quad 0
         .endif
@@ -153,7 +146,7 @@ l2_fixmap:
 l3_identmap:
         idx = 0
         .rept 4
-        .quad sym_offs(l2_identmap) + (idx << PAGE_SHIFT) + __PAGE_HYPERVISOR
+        .quad sym_phys(l2_identmap) + (idx << PAGE_SHIFT) + __PAGE_HYPERVISOR
         idx = idx + 1
         .endr
         .fill L3_PAGETABLE_ENTRIES - 4, 8, 0
@@ -164,9 +157,9 @@ l3_xenmap:
         idx = 0
         .rept L3_PAGETABLE_ENTRIES
         .if idx == l3_table_offset(XEN_VIRT_START)
-        .quad sym_offs(l2_xenmap) + __PAGE_HYPERVISOR
+        .quad sym_phys(l2_xenmap) + __PAGE_HYPERVISOR
         .elseif idx == l3_table_offset(FIXADDR_TOP - 1)
-        .quad sym_offs(l2_fixmap) + __PAGE_HYPERVISOR
+        .quad sym_phys(l2_fixmap) + __PAGE_HYPERVISOR
         .else
         .quad 0
         .endif
@@ -176,13 +169,13 @@ l3_xenmap:
 
 /* Top-level master (and idle-domain) page directory. */
 GLOBAL(idle_pg_table)
-        .quad sym_offs(l3_bootmap) + __PAGE_HYPERVISOR
+        .quad sym_phys(l3_bootmap) + __PAGE_HYPERVISOR
         idx = 1
         .rept L4_PAGETABLE_ENTRIES - 1
         .if idx == l4_table_offset(DIRECTMAP_VIRT_START)
-        .quad sym_offs(l3_identmap) + __PAGE_HYPERVISOR
+        .quad sym_phys(l3_identmap) + __PAGE_HYPERVISOR
         .elseif idx == l4_table_offset(XEN_VIRT_START)
-        .quad sym_offs(l3_xenmap) + __PAGE_HYPERVISOR
+        .quad sym_phys(l3_xenmap) + __PAGE_HYPERVISOR
         .else
         .quad 0
         .endif
@@ -192,14 +185,21 @@ GLOBAL(idle_pg_table)
 
 GLOBAL(__page_tables_end)
 
-/* Init pagetables. Enough page directories to map into 4GB. */
-        .section .init.data, "aw", @progbits
+/* Init pagetables.  Enough page directories to map into the bottom 1GB. */
+        .section .init.data, "a", @progbits
         .align PAGE_SIZE, 0
 
 GLOBAL(l2_bootmap)
-        .fill 4 * L2_PAGETABLE_ENTRIES, 8, 0
+        .quad sym_phys(l1_identmap) + __PAGE_HYPERVISOR
+        idx = 1
+        .rept 7
+        .quad (idx << L2_PAGETABLE_SHIFT) | __PAGE_HYPERVISOR | _PAGE_PSE
+        idx = idx + 1
+        .endr
+        .fill L2_PAGETABLE_ENTRIES - 8, 8, 0
         .size l2_bootmap, . - l2_bootmap
 
 GLOBAL(l3_bootmap)
-        .fill L3_PAGETABLE_ENTRIES, 8, 0
+        .quad sym_phys(l2_bootmap) + __PAGE_HYPERVISOR
+        .fill L3_PAGETABLE_ENTRIES - 1, 8, 0
         .size l3_bootmap, . - l3_bootmap

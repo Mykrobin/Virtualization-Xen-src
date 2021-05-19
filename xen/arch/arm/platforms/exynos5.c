@@ -18,6 +18,7 @@
  */
 
 #include <asm/p2m.h>
+#include <xen/config.h>
 #include <xen/device_tree.h>
 #include <xen/domain_page.h>
 #include <xen/mm.h>
@@ -27,7 +28,7 @@
 #include <asm/platform.h>
 #include <asm/io.h>
 
-static bool secure_firmware;
+static bool_t secure_firmware;
 
 #define EXYNOS_ARM_CORE0_CONFIG     0x2000
 #define EXYNOS_ARM_CORE_CONFIG(_nr) (EXYNOS_ARM_CORE0_CONFIG + (0x80 * (_nr)))
@@ -62,7 +63,7 @@ static int exynos5_init_time(void)
     dprintk(XENLOG_INFO, "mct_base_addr: %016llx size: %016llx\n",
             mct_base_addr, size);
 
-    mct = ioremap_nocache(mct_base_addr, size);
+    mct = ioremap_attr(mct_base_addr, size, PAGE_HYPERVISOR_NOCACHE);
     if ( !mct )
     {
         dprintk(XENLOG_ERR, "Unable to map MCT\n");
@@ -82,12 +83,12 @@ static int exynos5_init_time(void)
 static int exynos5250_specific_mapping(struct domain *d)
 {
     /* Map the chip ID */
-    map_mmio_regions(d, gaddr_to_gfn(EXYNOS5_PA_CHIPID), 1,
-                     maddr_to_mfn(EXYNOS5_PA_CHIPID));
+    map_mmio_regions(d, _gfn(paddr_to_pfn(EXYNOS5_PA_CHIPID)), 1,
+                     _mfn(paddr_to_pfn(EXYNOS5_PA_CHIPID)));
 
     /* Map the PWM region */
-    map_mmio_regions(d, gaddr_to_gfn(EXYNOS5_PA_TIMER), 2,
-                     maddr_to_mfn(EXYNOS5_PA_TIMER));
+    map_mmio_regions(d, _gfn(paddr_to_pfn(EXYNOS5_PA_TIMER)), 2,
+                     _mfn(paddr_to_pfn(EXYNOS5_PA_TIMER)));
 
     return 0;
 }
@@ -108,7 +109,7 @@ static int __init exynos5_smp_init(void)
         /* Have to use sysram_ns_base_addr + 0x1c for boot address */
         compatible = "samsung,exynos4210-sysram-ns";
         sysram_offset = 0x1c;
-        secure_firmware = true;
+        secure_firmware = 1;
         printk("Running under secure firmware.\n");
     }
     else

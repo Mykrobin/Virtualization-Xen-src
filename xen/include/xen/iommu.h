@@ -20,7 +20,6 @@
 #define _IOMMU_H_
 
 #include <xen/init.h>
-#include <xen/page-defs.h>
 #include <xen/spinlock.h>
 #include <xen/pci.h>
 #include <public/hvm/ioreq.h>
@@ -38,8 +37,25 @@ extern bool_t amd_iommu_perdev_intremap;
 
 extern unsigned int iommu_dev_iotlb_timeout;
 
+#define IOMMU_PAGE_SIZE(sz) (1UL << PAGE_SHIFT_##sz)
+#define IOMMU_PAGE_MASK(sz) (~(u64)0 << PAGE_SHIFT_##sz)
+#define IOMMU_PAGE_ALIGN(sz, addr)  (((addr) + ~PAGE_MASK_##sz) & PAGE_MASK_##sz)
+
+#define PAGE_SHIFT_4K       (12)
+#define PAGE_SIZE_4K        IOMMU_PAGE_SIZE(4K)
+#define PAGE_MASK_4K        IOMMU_PAGE_MASK(4K)
+#define PAGE_ALIGN_4K(addr) IOMMU_PAGE_ALIGN(4K, addr)
+
+#define PAGE_SHIFT_64K          (16)
+#define PAGE_SIZE_64K           IOMMU_PAGE_SIZE(64K)
+#define PAGE_MASK_64K           IOMMU_PAGE_MASK(64K)
+#define PAGE_ALIGN_64K(addr)    IOMMU_PAGE_ALIGN(64K, addr)
+
 int iommu_setup(void);
 
+int iommu_add_device(struct pci_dev *pdev);
+int iommu_enable_device(struct pci_dev *pdev);
+int iommu_remove_device(struct pci_dev *pdev);
 int iommu_domain_init(struct domain *d);
 void iommu_hwdom_init(struct domain *d);
 void iommu_domain_destroy(struct domain *d);
@@ -96,8 +112,8 @@ void pt_pci_init(void);
 
 struct pirq;
 int hvm_do_IRQ_dpci(struct domain *, struct pirq *);
-int pt_irq_create_bind(struct domain *, const struct xen_domctl_bind_pt_irq *);
-int pt_irq_destroy_bind(struct domain *, const struct xen_domctl_bind_pt_irq *);
+int pt_irq_create_bind(struct domain *, xen_domctl_bind_pt_irq_t *);
+int pt_irq_destroy_bind(struct domain *, xen_domctl_bind_pt_irq_t *);
 
 void hvm_dpci_isairq_eoi(struct domain *d, unsigned int isairq);
 struct hvm_irq_dpci *domain_get_irq_dpci(const struct domain *);
@@ -139,7 +155,6 @@ typedef int iommu_grdm_t(xen_pfn_t start, xen_ulong_t nr, u32 id, void *ctxt);
 struct iommu_ops {
     int (*init)(struct domain *d);
     void (*hwdom_init)(struct domain *d);
-    int (*quarantine_init)(struct domain *d);
     int (*add_device)(u8 devfn, device_t *dev);
     int (*enable_device)(device_t *dev);
     int (*remove_device)(u8 devfn, device_t *dev);

@@ -12,4 +12,6 @@ CFLAGS += -marm
 # Use only if calling $(LD) directly.
 LDFLAGS_DIRECT += -EL
 
+CONFIG_LOAD_ADDRESS ?= 0x80000000
+
 IOEMU_CPU_ARCH ?= arm

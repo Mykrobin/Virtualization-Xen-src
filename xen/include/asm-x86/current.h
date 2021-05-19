@@ -7,6 +7,7 @@
 #ifndef __X86_CURRENT_H__
 #define __X86_CURRENT_H__
 
+#include <xen/config.h>
 #include <xen/percpu.h>
 #include <public/xen.h>
 #include <asm/page.h>
@@ -16,9 +17,9 @@
  *
  * 7 - Primary stack (with a struct cpu_info at the top)
  * 6 - Primary stack
- * 5 - Optionally not present (MEMORY_GUARD)
- * 4 - Unused; optionally not present (MEMORY_GUARD)
- * 3 - Unused; optionally not present (MEMORY_GUARD)
+ * 5 - Optionally not preset (MEMORY_GUARD)
+ * 4 - unused
+ * 3 - Syscall trampolines
  * 2 - MCE IST stack
  * 1 - NMI IST stack
  * 0 - Double Fault IST stack
@@ -133,6 +134,16 @@ unsigned long get_stack_dump_bottom (unsigned long sp);
             : : "r" (guest_cpu_user_regs()), "i" (__fn) : "memory" );   \
         unreachable();                                                  \
     })
+
+/*
+ * Schedule tail *should* be a terminal function pointer, but leave a bugframe
+ * around just incase it returns, to save going back into the context
+ * switching code and leaving a far more subtle crash to diagnose.
+ */
+#define schedule_tail(vcpu) do {                \
+        (((vcpu)->arch.schedule_tail)(vcpu));   \
+        BUG();                                  \
+    } while (0)
 
 /*
  * Which VCPU's state is currently running on each CPU?

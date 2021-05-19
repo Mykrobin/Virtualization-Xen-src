@@ -3,7 +3,6 @@
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/mm.h>
-#include <xen/stdbool.h>
 #include <asm/flushtlb.h>
 #include <asm/invpcid.h>
 #include <asm/io.h>
@@ -239,7 +238,7 @@ static void mtrr_wrmsr(unsigned int msr, uint64_t msr_content)
  * \param changed pointer which indicates whether the MTRR needed to be changed
  * \param msrwords pointer to the MSR values which the MSR should have
  */
-static void set_fixed_range(int msr, bool *changed, unsigned int *msrwords)
+static void set_fixed_range(int msr, int * changed, unsigned int * msrwords)
 {
 	uint64_t msr_content, val;
 
@@ -248,7 +247,7 @@ static void set_fixed_range(int msr, bool *changed, unsigned int *msrwords)
 
 	if (msr_content != val) {
 		mtrr_wrmsr(msr, val);
-		*changed = true;
+		*changed = TRUE;
 	}
 }
 
@@ -304,10 +303,10 @@ static void generic_get_mtrr(unsigned int reg, unsigned long *base,
  * Checks and updates the fixed-range MTRRs if they differ from the saved set
  * \param frs pointer to fixed-range MTRR values, saved by get_fixed_ranges()
  */
-static bool set_fixed_ranges(mtrr_type *frs)
+static int set_fixed_ranges(mtrr_type * frs)
 {
 	unsigned long long *saved = (unsigned long long *) frs;
-	bool changed = false;
+	int changed = FALSE;
 	int block=-1, range;
 
 	while (fixed_range_blocks[++block].ranges)
@@ -318,13 +317,13 @@ static bool set_fixed_ranges(mtrr_type *frs)
 	return changed;
 }
 
-/*  Set the MSR pair relating to a var range. Returns true if
+/*  Set the MSR pair relating to a var range. Returns TRUE if
     changes are made  */
-static bool set_mtrr_var_ranges(unsigned int index, struct mtrr_var_range *vr)
+static int set_mtrr_var_ranges(unsigned int index, struct mtrr_var_range *vr)
 {
 	uint32_t lo, hi, base_lo, base_hi, mask_lo, mask_hi;
 	uint64_t msr_content;
-	bool changed = false;
+	int changed = FALSE;
 
 	rdmsrl(MSR_IA32_MTRR_PHYSBASE(index), msr_content);
 	lo = (uint32_t)msr_content;
@@ -339,7 +338,7 @@ static bool set_mtrr_var_ranges(unsigned int index, struct mtrr_var_range *vr)
 
 	if ((base_lo != lo) || (base_hi != hi)) {
 		mtrr_wrmsr(MSR_IA32_MTRR_PHYSBASE(index), vr->base);
-		changed = true;
+		changed = TRUE;
 	}
 
 	rdmsrl(MSR_IA32_MTRR_PHYSMASK(index), msr_content);
@@ -355,7 +354,7 @@ static bool set_mtrr_var_ranges(unsigned int index, struct mtrr_var_range *vr)
 
 	if ((mask_lo != lo) || (mask_hi != hi)) {
 		mtrr_wrmsr(MSR_IA32_MTRR_PHYSMASK(index), vr->mask);
-		changed = true;
+		changed = TRUE;
 	}
 	return changed;
 }
@@ -403,7 +402,7 @@ static DEFINE_SPINLOCK(set_atomicity_lock);
 
 static bool prepare_set(void)
 {
-	unsigned long cr4;
+	unsigned long cr0, cr4;
 
 	/*  Note that this is not ideal, since the cache is only flushed/disabled
 	   for this CPU while the MTRRs are changed, but changing this requires
@@ -412,7 +411,8 @@ static bool prepare_set(void)
 	spin_lock(&set_atomicity_lock);
 
 	/*  Enter the no-fill (CD=1, NW=0) cache mode and flush caches. */
-	write_cr0(read_cr0() | X86_CR0_CD);
+	cr0 = read_cr0() | 0x40000000;	/* set CD flag */
+	write_cr0(cr0);
 	wbinvd();
 
 	cr4 = read_cr4();
@@ -436,11 +436,10 @@ static void post_set(bool pge)
 {
 	/* Intel (P6) standard MTRRs */
 	mtrr_wrmsr(MSR_MTRRdefType, deftype);
-
+		
 	/*  Enable caches  */
-	write_cr0(read_cr0() & ~X86_CR0_CD);
+	write_cr0(read_cr0() & 0xbfffffff);
 
-	/*  Reenable CR4.PGE (also flushes the TLB) */
 	if (pge)
 		write_cr4(read_cr4() | X86_CR4_PGE);
 	else if (use_invpcid)
@@ -481,7 +480,7 @@ static void generic_set_mtrr(unsigned int reg, unsigned long base,
     <base> The base address of the region.
     <size> The size of the region. If this is 0 the region is disabled.
     <type> The type of the region.
-    <do_safe> If true, do the change safely. If false, safety measures should
+    <do_safe> If TRUE, do the change safely. If FALSE, safety measures should
     be done externally.
     [RETURNS] Nothing.
 */
@@ -560,10 +559,15 @@ static int generic_have_wrcomb(void)
 	return (config & (1ULL << 10));
 }
 
+int positive_have_wrcomb(void)
+{
+	return 1;
+}
+
 /* generic structure...
  */
 const struct mtrr_ops generic_mtrr_ops = {
-	.use_intel_if      = true,
+	.use_intel_if      = 1,
 	.set_all	   = generic_set_all,
 	.get               = generic_get_mtrr,
 	.get_free_region   = generic_get_free_region,

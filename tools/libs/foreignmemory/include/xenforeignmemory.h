@@ -108,76 +108,12 @@ void *xenforeignmemory_map(xenforeignmemory_handle *fmem, uint32_t dom,
                            const xen_pfn_t arr[/*pages*/], int err[/*pages*/]);
 
 /*
- * Almost like the previous one but also accepts two additional parameters:
- *
- * @addr is used as a hint address for foreign map placement (see mmap(2)).
- * @flags is a set of additional flags as for mmap(2). Not all of the flag
- * combinations are possible due to implementation details on different
- * platforms.
- */
-void *xenforeignmemory_map2(xenforeignmemory_handle *fmem, uint32_t dom,
-                            void *addr, int prot, int flags, size_t pages,
-                            const xen_pfn_t arr[/*pages*/], int err[/*pages*/]);
-
-/*
  * Unmap a mapping previous created with xenforeignmemory_map().
  *
  * Returns 0 on success on failure sets errno and returns -1.
  */
 int xenforeignmemory_unmap(xenforeignmemory_handle *fmem,
                            void *addr, size_t pages);
-
-/**
- * This function restricts the use of this handle to the specified
- * domain.
- *
- * @parm fmem handle to the open foreignmemory interface
- * @parm domid the domain id
- * @return 0 on success, -1 on failure.
- */
-int xenforeignmemory_restrict(xenforeignmemory_handle *fmem,
-                              domid_t domid);
-
-typedef struct xenforeignmemory_resource_handle xenforeignmemory_resource_handle;
-
-/**
- * This function maps a guest resource.
- *
- * @parm fmem handle to the open foreignmemory interface
- * @parm domid the domain id
- * @parm type the resource type
- * @parm id the type-specific resource identifier
- * @parm frame base frame index within the resource
- * @parm nr_frames number of frames to map
- * @parm paddr pointer to an address passed through to mmap(2)
- * @parm prot passed through to mmap(2)
- * @parm POSIX-only flags passed through to mmap(2)
- * @return pointer to foreignmemory resource handle on success, NULL on
- *         failure
- *
- * *paddr is used, on entry, as a hint address for foreign map placement
- * (see mmap(2)) so should be set to NULL if no specific placement is
- * required. On return *paddr contains the address where the resource is
- * mapped.
- * As for xenforeignmemory_map2() flags is a set of additional flags
- * for mmap(2). Not all of the flag combinations are possible due to
- * implementation details on different platforms.
- */
-xenforeignmemory_resource_handle *xenforeignmemory_map_resource(
-    xenforeignmemory_handle *fmem, domid_t domid, unsigned int type,
-    unsigned int id, unsigned long frame, unsigned long nr_frames,
-    void **paddr, int prot, int flags);
-
-/**
- * This function releases a previously acquired resource.
- *
- * @parm fmem handle to the open foreignmemory interface
- * @parm fres handle to the acquired resource
- *
- * Returns 0 on success on failure sets errno and returns -1.
- */
-int xenforeignmemory_unmap_resource(
-    xenforeignmemory_handle *fmem, xenforeignmemory_resource_handle *fres);
 
 #endif
 

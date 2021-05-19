@@ -36,7 +36,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/mman.h>
-#include <poll.h>
+#include <sys/poll.h>
 
 #include <xenctrl.h>
 #include <xenevtchn.h>
@@ -56,13 +56,6 @@
 /* From xen/include/asm-x86/processor.h */
 #define X86_TRAP_DEBUG  1
 #define X86_TRAP_INT3   3
-
-/* From xen/include/asm-x86/x86-defns.h */
-#define X86_CR4_PGE        0x00000080 /* enable global pages */
-
-#ifndef ARRAY_SIZE
-#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
-#endif
 
 typedef struct vm_event {
     domid_t domain_id;
@@ -321,24 +314,6 @@ static void get_request(vm_event_t *vm_event, vm_event_request_t *req)
 }
 
 /*
- * X86 control register names
- */
-static const char* get_x86_ctrl_reg_name(uint32_t index)
-{
-    static const char* names[] = {
-        [VM_EVENT_X86_CR0]  = "CR0",
-        [VM_EVENT_X86_CR3]  = "CR3",
-        [VM_EVENT_X86_CR4]  = "CR4",
-        [VM_EVENT_X86_XCR0] = "XCR0",
-    };
-
-    if ( index >= ARRAY_SIZE(names) || names[index] == NULL )
-        return "";
-
-    return names[index];
-}
-
-/*
  * Note that this function is not thread safe.
  */
 static void put_response(vm_event_t *vm_event, vm_event_response_t *rsp)
@@ -362,7 +337,7 @@ void usage(char* progname)
 {
     fprintf(stderr, "Usage: %s [-m] <domain_id> write|exec", progname);
 #if defined(__i386__) || defined(__x86_64__)
-            fprintf(stderr, "|breakpoint|altp2m_write|altp2m_exec|debug|cpuid|desc_access|write_ctrlreg_cr4");
+            fprintf(stderr, "|breakpoint|altp2m_write|altp2m_exec|debug|cpuid");
 #elif defined(__arm__) || defined(__aarch64__)
             fprintf(stderr, "|privcall");
 #endif
@@ -393,8 +368,6 @@ int main(int argc, char *argv[])
     int altp2m = 0;
     int debug = 0;
     int cpuid = 0;
-    int desc_access = 0;
-    int write_ctrlreg_cr4 = 0;
     uint16_t altp2m_view_id = 0;
 
     char* progname = argv[0];
@@ -460,14 +433,6 @@ int main(int argc, char *argv[])
     else if ( !strcmp(argv[0], "cpuid") )
     {
         cpuid = 1;
-    }
-    else if ( !strcmp(argv[0], "desc_access") )
-    {
-        desc_access = 1;
-    }
-    else if ( !strcmp(argv[0], "write_ctrlreg_cr4") )
-    {
-        write_ctrlreg_cr4 = 1;
     }
 #elif defined(__arm__) || defined(__aarch64__)
     else if ( !strcmp(argv[0], "privcall") )
@@ -606,34 +571,12 @@ int main(int argc, char *argv[])
         }
     }
 
-    if ( desc_access )
-    {
-        rc = xc_monitor_descriptor_access(xch, domain_id, 1);
-        if ( rc < 0 )
-        {
-            ERROR("Error %d setting descriptor access listener with vm_event\n", rc);
-            goto exit;
-        }
-    }
-
     if ( privcall )
     {
         rc = xc_monitor_privileged_call(xch, domain_id, 1);
         if ( rc < 0 )
         {
             ERROR("Error %d setting privileged call trapping with vm_event\n", rc);
-            goto exit;
-        }
-    }
-
-    if ( write_ctrlreg_cr4 )
-    {
-        /* Mask the CR4.PGE bit so no events will be generated for global TLB flushes. */
-        rc = xc_monitor_write_ctrlreg(xch, domain_id, VM_EVENT_X86_CR4, 1, 1,
-                                      X86_CR4_PGE, 1);
-        if ( rc < 0 )
-        {
-            ERROR("Error %d setting write control register trapping with vm_event\n", rc);
             goto exit;
         }
     }
@@ -652,10 +595,6 @@ int main(int argc, char *argv[])
                 rc = xc_monitor_debug_exceptions(xch, domain_id, 0, 0);
             if ( cpuid )
                 rc = xc_monitor_cpuid(xch, domain_id, 0);
-            if ( desc_access )
-                rc = xc_monitor_descriptor_access(xch, domain_id, 0);
-            if ( write_ctrlreg_cr4 )
-                rc = xc_monitor_write_ctrlreg(xch, domain_id, VM_EVENT_X86_CR4, 0, 0, 0, 0);
 
             if ( privcall )
                 rc = xc_monitor_privileged_call(xch, domain_id, 0);
@@ -839,25 +778,6 @@ int main(int argc, char *argv[])
                 rsp.flags |= VM_EVENT_FLAG_SET_REGISTERS;
                 rsp.data = req.data;
                 rsp.data.regs.x86.rip += req.u.cpuid.insn_length;
-                break;
-            case VM_EVENT_REASON_DESCRIPTOR_ACCESS:
-                printf("Descriptor access: rip=%016"PRIx64", vcpu %d: "\
-                       "VMExit info=0x%"PRIx32", descriptor=%d, is write=%d\n",
-                       req.data.regs.x86.rip,
-                       req.vcpu_id,
-                       req.u.desc_access.arch.vmx.instr_info,
-                       req.u.desc_access.descriptor,
-                       req.u.desc_access.is_write);
-                rsp.flags |= VM_EVENT_FLAG_EMULATE;
-                break;
-            case VM_EVENT_REASON_WRITE_CTRLREG:
-                printf("Control register written: rip=%016"PRIx64", vcpu %d: "
-                       "reg=%s, old_value=%016"PRIx64", new_value=%016"PRIx64"\n",
-                       req.data.regs.x86.rip,
-                       req.vcpu_id,
-                       get_x86_ctrl_reg_name(req.u.write_ctrlreg.index),
-                       req.u.write_ctrlreg.old_value,
-                       req.u.write_ctrlreg.new_value);
                 break;
             default:
                 fprintf(stderr, "UNKNOWN REASON CODE %d\n", req.reason);

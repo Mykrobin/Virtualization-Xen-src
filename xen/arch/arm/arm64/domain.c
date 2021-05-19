@@ -1,3 +1,4 @@
+#include <xen/config.h>
 #include <xen/sched.h>
 
 #include <asm/domain.h>

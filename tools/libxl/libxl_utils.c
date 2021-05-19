@@ -90,7 +90,7 @@ int libxl_name_to_domid(libxl_ctx *ctx, const char *name,
         }
         free(domname);
     }
-    libxl_dominfo_list_free(dominfo, nb_domains);
+    free(dominfo);
     return ret;
 }
 
@@ -316,8 +316,6 @@ int libxl_string_to_backend(libxl_ctx *ctx, char *s, libxl_disk_backend *backend
         } else if (!strcmp(p, "qcow")) {
             *backend = LIBXL_DISK_BACKEND_QDISK;
         } else if (!strcmp(p, "qcow2")) {
-            *backend = LIBXL_DISK_BACKEND_QDISK;
-        } else if (!strcmp(p, "qed")) {
             *backend = LIBXL_DISK_BACKEND_QDISK;
         }
     }

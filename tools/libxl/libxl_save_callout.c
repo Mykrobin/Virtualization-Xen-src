@@ -43,7 +43,7 @@ static void helper_done(libxl__egc *egc, libxl__save_helper_state *shs);
 
 void libxl__xc_domain_restore(libxl__egc *egc, libxl__domain_create_state *dcs,
                               libxl__save_helper_state *shs,
-                              int hvm, int pae)
+                              int hvm, int pae, int superpages)
 {
     STATE_AO_GC(dcs->ao);
 
@@ -61,7 +61,7 @@ void libxl__xc_domain_restore(libxl__egc *egc, libxl__domain_create_state *dcs,
         state->store_port,
         state->store_domid, state->console_port,
         state->console_domid,
-        hvm, pae,
+        hvm, pae, superpages,
         cbflags, dcs->restore_params.checkpointed_stream,
     };
 
@@ -89,8 +89,8 @@ void libxl__xc_domain_save(libxl__egc *egc, libxl__domain_save_state *dss,
         libxl__srm_callout_enumcallbacks_save(&shs->callbacks.save.a);
 
     const unsigned long argnums[] = {
-        dss->domid, dss->xcflags, dss->hvm, cbflags,
-        dss->checkpointed_stream,
+        dss->domid, 0, 0, dss->xcflags, dss->hvm,
+        cbflags, dss->checkpointed_stream,
     };
 
     shs->ao = ao;
@@ -294,8 +294,8 @@ static void helper_stdout_readable(libxl__egc *egc, libxl__ev_fd *ev,
     int rc, errnoval;
 
     if (revents & (POLLERR|POLLPRI)) {
-        LOGD(ERROR, shs->domid, "%s signaled POLLERR|POLLPRI (%#x)",
-             shs->stdout_what, revents);
+        LOG(ERROR, "%s signaled POLLERR|POLLPRI (%#x)",
+            shs->stdout_what, revents);
         rc = ERROR_FAIL;
  out:
         /* this is here because otherwise we bypass the decl of msg[] */
@@ -339,14 +339,14 @@ static void helper_exited(libxl__egc *egc, libxl__ev_child *ch,
 
     if (shs->need_results) {
         if (!shs->rc) {
-            LOGD(ERROR,shs->domid,"%s exited without providing results",what);
+            LOG(ERROR,"%s exited without providing results",what);
             shs->rc = ERROR_FAIL;
         }
     }
 
     if (!shs->completed) {
         if (!shs->rc) {
-            LOGD(ERROR,shs->domid,"%s exited without signaling completion",what);
+            LOG(ERROR,"%s exited without signaling completion",what);
             shs->rc = ERROR_FAIL;
         }
     }

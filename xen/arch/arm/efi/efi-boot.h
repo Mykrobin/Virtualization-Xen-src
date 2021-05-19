@@ -7,6 +7,7 @@
 #include <xen/libfdt/libfdt.h>
 #include <asm/setup.h>
 #include <asm/smp.h>
+#include "efi-dom0.h"
 
 void noreturn efi_xen_start(void *fdt_ptr, uint32_t fdt_size);
 void __flush_dcache_area(const void *vaddr, unsigned long size);
@@ -123,28 +124,15 @@ static void __init *lookup_fdt_config_table(EFI_SYSTEM_TABLE *sys_table)
     return fdt;
 }
 
-static bool __init meminfo_add_bank(struct meminfo *mem,
-                                    EFI_MEMORY_DESCRIPTOR *desc)
-{
-    struct membank *bank;
-
-    if ( mem->nr_banks >= NR_MEM_BANKS )
-        return false;
-
-    bank = &mem->bank[mem->nr_banks];
-    bank->start = desc->PhysicalStart;
-    bank->size = desc->NumberOfPages * EFI_PAGE_SIZE;
-
-    mem->nr_banks++;
-
-    return true;
-}
-
 static EFI_STATUS __init efi_process_memory_map_bootinfo(EFI_MEMORY_DESCRIPTOR *map,
                                                 UINTN mmap_size,
                                                 UINTN desc_size)
 {
     int Index;
+    int i = 0;
+#ifdef CONFIG_ACPI
+    int j = 0;
+#endif
     EFI_MEMORY_DESCRIPTOR *desc_ptr = map;
 
     for ( Index = 0; Index < (mmap_size / desc_size); Index++ )
@@ -154,27 +142,37 @@ static EFI_STATUS __init efi_process_memory_map_bootinfo(EFI_MEMORY_DESCRIPTOR *
               (desc_ptr->Type == EfiBootServicesCode ||
                desc_ptr->Type == EfiBootServicesData)) )
         {
-            if ( !meminfo_add_bank(&bootinfo.mem, desc_ptr) )
+            if ( i >= NR_MEM_BANKS )
             {
                 PrintStr(L"Warning: All " __stringify(NR_MEM_BANKS)
                           " bootinfo mem banks exhausted.\r\n");
                 break;
             }
+            bootinfo.mem.bank[i].start = desc_ptr->PhysicalStart;
+            bootinfo.mem.bank[i].size = desc_ptr->NumberOfPages * EFI_PAGE_SIZE;
+            ++i;
         }
 #ifdef CONFIG_ACPI
         else if ( desc_ptr->Type == EfiACPIReclaimMemory )
         {
-            if ( !meminfo_add_bank(&bootinfo.acpi, desc_ptr) )
+            if ( j >= NR_MEM_BANKS )
             {
                 PrintStr(L"Error: All " __stringify(NR_MEM_BANKS)
                           " acpi meminfo mem banks exhausted.\r\n");
                 return EFI_LOAD_ERROR;
             }
+            acpi_mem.bank[j].start = desc_ptr->PhysicalStart;
+            acpi_mem.bank[j].size  = desc_ptr->NumberOfPages * EFI_PAGE_SIZE;
+            ++j;
         }
 #endif
         desc_ptr = NextMemoryDescriptor(desc_ptr, desc_size);
     }
 
+    bootinfo.mem.nr_banks = i;
+#ifdef CONFIG_ACPI
+    acpi_mem.nr_banks = j;
+#endif
     return EFI_SUCCESS;
 }
 
@@ -559,7 +557,7 @@ static void __init efi_arch_load_addr_check(EFI_LOADED_IMAGE *loaded_image)
         blexit(L"Xen must be loaded at a 4 KByte boundary.");
 }
 
-static bool __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
+static bool_t __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
 {
     /*
      * For arm, we may get a device tree from GRUB (or other bootloader)
@@ -578,13 +576,12 @@ static bool __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
          * We either have no FDT, or one without modules, so we must have a
          * Xen EFI configuration file to specify modules.  (dom0 required)
          */
-        return true;
+        return 1;
     }
     PrintStr(L"Using modules provided by bootloader in FDT\r\n");
     /* We have modules already defined in fdt, just add space. */
     fdt = fdt_increase_size(&dtbfile, EFI_PAGE_SIZE);
-
-    return false;
+    return 0;
 }
 
 static void __init efi_arch_console_init(UINTN cols, UINTN rows)

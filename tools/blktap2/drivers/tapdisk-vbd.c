@@ -1668,8 +1668,7 @@ out:
 
 		params.sector_size = image.secsize;
 		params.capacity    = image.size;
-		snprintf(params.name, sizeof(params.name),
-			 "%.*s", (int)sizeof(params.name) - 1, message);
+		snprintf(params.name, sizeof(params.name) - 1, "%s", message);
 
 		ioctl(vbd->ring.fd, BLKTAP2_IOCTL_SET_PARAMS, &params);
 		td_flag_clear(vbd->state, TD_VBD_PAUSED);

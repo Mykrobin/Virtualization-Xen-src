@@ -1,3 +1,4 @@
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/kernel.h>
@@ -183,8 +184,8 @@ static int __init dmi_table(paddr_t base, u32 len, int num,
 }
 
 
-static inline bool __init dmi_checksum(const void __iomem *buf,
-                                       unsigned int len)
+static inline bool_t __init dmi_checksum(const void __iomem *buf,
+					 unsigned int len)
 {
 	u8 sum = 0;
 	const u8 *p = buf;
@@ -237,7 +238,7 @@ const char *__init dmi_get_table(paddr_t *base, u32 *len)
 {
 	static unsigned int __initdata instance;
 
-	if (efi_enabled(EFI_BOOT)) {
+	if (efi_enabled) {
 		if (efi_smbios3_size && !(instance & 1)) {
 			*base = efi_smbios3_address;
 			*len = efi_smbios3_size;
@@ -695,7 +696,7 @@ static void __init dmi_decode(struct dmi_header *dm)
 
 void __init dmi_scan_machine(void)
 {
-	if ((!efi_enabled(EFI_BOOT) ? dmi_iterate(dmi_decode) :
+	if ((!efi_enabled ? dmi_iterate(dmi_decode) :
 	                    dmi_efi_iterate(dmi_decode)) == 0)
  		dmi_check_system(dmi_blacklist);
 	else
@@ -753,10 +754,10 @@ fail:		d++;
  *	On return, year, month and day are guaranteed to be in the
  *	range of [0,9999], [0,12] and [0,31] respectively.
  */
-bool __init dmi_get_date(int field, int *yearp, int *monthp, int *dayp)
+bool_t __init dmi_get_date(int field, int *yearp, int *monthp, int *dayp)
 {
 	int year = 0, month = 0, day = 0;
-	bool exists;
+	bool_t exists;
 	const char *s, *e, *y;
 
 	s = field < DMI_STRING_MAX ? dmi_ident[field] : NULL;

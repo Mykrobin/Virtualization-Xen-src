@@ -1,7 +1,6 @@
+#include <xen/config.h>
 #include <asm/asm_defns.h>
-#include <asm/macros.h>
 #include <asm/regs.h>
-#include <asm/alternative.h>
 #include <public/xen.h>
 
 /*
@@ -12,8 +11,7 @@
  *
  * To be used with msr cpsr_* only
  */
-#define IFLAGS_AIF      PSR_ABT_MASK | PSR_IRQ_MASK | PSR_FIQ_MASK
-#define IFLAGS_A_F      PSR_ABT_MASK | PSR_FIQ_MASK
+#define IFLAGS__I_      PSR_IRQ_MASK
 
 #define SAVE_ONE_BANKED(reg)    mrs r11, reg; str r11, [sp, #UREGS_##reg]
 #define RESTORE_ONE_BANKED(reg) ldr r11, [sp, #UREGS_##reg]; msr reg, r11
@@ -50,14 +48,6 @@ save_guest_regs:
         SAVE_BANKED(fiq)
         SAVE_ONE_BANKED(R8_fiq); SAVE_ONE_BANKED(R9_fiq); SAVE_ONE_BANKED(R10_fiq)
         SAVE_ONE_BANKED(R11_fiq); SAVE_ONE_BANKED(R12_fiq);
-
-        /*
-         * If the SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT has been set in the cpu
-         * feature, the checking of pending SErrors will be skipped.
-         */
-        ALTERNATIVE("nop",
-                    "b skip_check",
-                    SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT)
         /*
          * Start to check pending virtual abort in the gap of Guest -> HYP
          * world switch.
@@ -113,7 +103,6 @@ abort_guest_exit_end:
          */
         bne return_from_trap
 
-skip_check:
         mov pc, lr
 
         /*
@@ -146,6 +135,7 @@ skip_check:
 
         mrs     r11, SPSR_hyp
         str     r11, [sp, #UREGS_cpsr]
+
 
         /*
          * We need to distinguish whether we came from guest or
@@ -194,7 +184,7 @@ skip_check:
 GLOBAL(hyp_traps_vector)
         b trap_reset                    /* 0x00 - Reset */
         b trap_undefined_instruction    /* 0x04 - Undefined Instruction */
-        b trap_hypervisor_call          /* 0x08 - Hypervisor Call */
+        b trap_supervisor_call          /* 0x08 - Supervisor Call */
         b trap_prefetch_abort           /* 0x0c - Prefetch Abort */
         b trap_data_abort               /* 0x10 - Data Abort */
         b trap_guest_sync               /* 0x14 - Hypervisor */
@@ -254,7 +244,7 @@ decode_vectors:
         vect_br 2, trap_guest_sync
         vect_br 3, trap_data_abort
         vect_br 4, trap_prefetch_abort
-        vect_br 5, trap_hypervisor_call
+        vect_br 5, trap_supervisor_call
         vect_br 6, trap_undefined_instruction
         vect_br 7, trap_reset
 
@@ -267,28 +257,26 @@ trap_reset:
 /*
  * Vector only used by the Hypervisor.
  *
- * While the exception can be executed with all the interrupts (e.g.
- * IRQ) unmasked, the interrupted context may have purposefully masked
- * some of them. So we want to inherit the state from the interrupted
- * context.
+ * While the exception can be executed with IRQ unmasked, the interrupted
+ * context may have purposefully masked it. So we want to inherit the state
+ * from the interrupted context.
  */
 trap_undefined_instruction:
-        vector undefined_instruction, hyp_iflags=IFLAGS_AIF
+        vector undefined_instruction, hyp_iflags=IFLAGS__I_
 
 /* We should never reach this trap */
-trap_hypervisor_call:
-        vector hypervisor_call
+trap_supervisor_call:
+        vector supervisor_call
 
 /*
  * Vector only used by the hypervisor.
  *
- * While the exception can be executed with all the interrupts (e.g.
- * IRQ) unmasked, the interrupted context may have purposefully masked
- * some of them. So we want to inherit the state from the interrupted
- * context.
+ * While the exception can be executed with IRQ unmasked, the interrupted
+ * context may have purposefully masked it. So we want to inherit the state
+ * from the interrupted context.
  */
 trap_prefetch_abort:
-       vector prefetch_abort, hyp_iflags=IFLAGS_AIF
+       vector prefetch_abort, hyp_iflags=IFLAGS__I_
 
 /*
  * Vector only used by the hypervisor.
@@ -300,14 +288,14 @@ trap_prefetch_abort:
 trap_data_abort:
         vector data_abort
 
-/* Vector only used by the guest. We can unmask Abort/IRQ. */
+/* Vector only used by the guest. We can unmask IRQ. */
 trap_guest_sync:
-        vector guest_sync, guest_iflags=ai
+        vector guest_sync, guest_iflags=i
 
 
 /* Vector used by the hypervisor and the guest. */
 trap_irq:
-        vector irq, guest_iflags=a, hyp_iflags=IFLAGS_A_F
+        vector irq
 
 /*
  * Vector used by the hypervisor and the guest.
@@ -380,7 +368,6 @@ return_to_hypervisor:
         add sp, #(UREGS_SP_usr - UREGS_sp); /* SP, LR, SPSR, PC */
         clrex
         eret
-        sb
 
 /*
  * struct vcpu *__context_switch(struct vcpu *prev, struct vcpu *next)

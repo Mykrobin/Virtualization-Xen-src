@@ -23,6 +23,7 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#include <xen/config.h>
 #include <acpi/pdc_intel.h>
 #include <acpi/acconfig.h>
 #include <acpi/actbl.h>
@@ -76,8 +77,8 @@ int __acpi_release_global_lock(unsigned int *lock);
 	    :"=r"(n_hi), "=r"(n_lo)	\
 	    :"0"(n_hi), "1"(n_lo))
 
-extern bool acpi_lapic, acpi_ioapic, acpi_noirq;
-extern bool acpi_force, acpi_ht, acpi_disabled;
+extern bool_t acpi_lapic, acpi_ioapic, acpi_noirq;
+extern bool_t acpi_force, acpi_ht, acpi_disabled;
 extern u32 acpi_smi_cmd;
 extern u8 acpi_enable_value, acpi_disable_value;
 void acpi_pic_sci_set_trigger(unsigned int, u16);
@@ -160,6 +161,6 @@ void hvm_acpi_sleep_button(struct domain *d);
 void save_rest_processor_state(void);
 void restore_rest_processor_state(void);
 
-#define ACPI_MAP_MEM_ATTR	PAGE_HYPERVISOR_UCMINUS
+#define ACPI_MAP_MEM_ATTR	PAGE_HYPERVISOR_NOCACHE
 
 #endif /*__X86_ASM_ACPI_H*/

@@ -15,7 +15,6 @@
 #include <public/tmem.h>
 #include <public/version.h>
 #include <public/pmu.h>
-#include <public/hvm/dm_op.h>
 #include <asm/hypercall.h>
 #include <xsm/xsm.h>
 
@@ -142,12 +141,6 @@ do_xenoprof_op(int op, XEN_GUEST_HANDLE_PARAM(void) arg);
 extern long
 do_xenpmu_op(unsigned int op, XEN_GUEST_HANDLE_PARAM(xen_pmu_params_t) arg);
 
-extern long
-do_dm_op(
-    domid_t domid,
-    unsigned int nr_bufs,
-    XEN_GUEST_HANDLE_PARAM(xen_dm_op_buf_t) bufs);
-
 #ifdef CONFIG_COMPAT
 
 extern int
@@ -196,14 +189,6 @@ DEFINE_XEN_GUEST_HANDLE(multicall_entry_compat_t);
 extern int compat_multicall(
     XEN_GUEST_HANDLE_PARAM(multicall_entry_compat_t) call_list,
     uint32_t nr_calls);
-
-#include <compat/hvm/dm_op.h>
-
-extern int
-compat_dm_op(
-    domid_t domid,
-    unsigned int nr_bufs,
-    XEN_GUEST_HANDLE_PARAM(void) bufs);
 
 #endif
 

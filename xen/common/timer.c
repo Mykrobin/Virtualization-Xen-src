@@ -5,6 +5,7 @@
  * Copyright (c) 2002-2005 K A Fraser
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/errno.h>
@@ -331,20 +332,6 @@ void stop_timer(struct timer *timer)
     timer_unlock_irqrestore(timer, flags);
 }
 
-bool timer_expires_before(struct timer *timer, s_time_t t)
-{
-    unsigned long flags;
-    bool ret;
-
-    if ( !timer_lock_irqsave(timer, flags) )
-        return false;
-
-    ret = active_timer(timer) && timer->expires <= t;
-
-    timer_unlock_irqrestore(timer, flags);
-
-    return ret;
-}
 
 void migrate_timer(struct timer *timer, unsigned int new_cpu)
 {
@@ -601,20 +588,6 @@ static void migrate_timers_from_cpu(unsigned int old_cpu)
 
 static struct timer *dummy_heap;
 
-static void free_percpu_timers(unsigned int cpu)
-{
-    struct timers *ts = &per_cpu(timers, cpu);
-
-    ASSERT(GET_HEAP_SIZE(ts->heap) == 0);
-    if ( GET_HEAP_LIMIT(ts->heap) )
-    {
-        xfree(ts->heap);
-        ts->heap = &dummy_heap;
-    }
-    else
-        ASSERT(ts->heap == &dummy_heap);
-}
-
 static int cpu_callback(
     struct notifier_block *nfb, unsigned long action, void *hcpu)
 {
@@ -624,28 +597,14 @@ static int cpu_callback(
     switch ( action )
     {
     case CPU_UP_PREPARE:
-        /* Only initialise ts once. */
-        if ( !ts->heap )
-        {
-            INIT_LIST_HEAD(&ts->inactive);
-            spin_lock_init(&ts->lock);
-            ts->heap = &dummy_heap;
-        }
+        INIT_LIST_HEAD(&ts->inactive);
+        spin_lock_init(&ts->lock);
+        ts->heap = &dummy_heap;
         break;
-
     case CPU_UP_CANCELED:
     case CPU_DEAD:
         migrate_timers_from_cpu(cpu);
-
-        if ( !park_offline_cpus && system_state != SYS_STATE_suspend )
-            free_percpu_timers(cpu);
         break;
-
-    case CPU_REMOVE:
-        if ( park_offline_cpus )
-            free_percpu_timers(cpu);
-        break;
-
     default:
         break;
     }

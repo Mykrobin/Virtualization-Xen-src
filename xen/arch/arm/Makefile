@@ -5,7 +5,7 @@ subdir-$(CONFIG_ARM_64) += efi
 subdir-$(CONFIG_ACPI) += acpi
 
 obj-$(CONFIG_HAS_ALTERNATIVE) += alternative.o
-obj-y += bootfdt.init.o
+obj-y += bootfdt.o
 obj-y += cpu.o
 obj-y += cpuerrata.o
 obj-y += cpufeature.o
@@ -18,17 +18,13 @@ obj-$(EARLY_PRINTK) += early_printk.o
 obj-y += gic.o
 obj-y += gic-v2.o
 obj-$(CONFIG_HAS_GICV3) += gic-v3.o
-obj-$(CONFIG_HAS_ITS) += gic-v3-its.o
-obj-$(CONFIG_HAS_ITS) += gic-v3-lpi.o
 obj-y += guestcopy.o
 obj-y += guest_atomics.o
-obj-y += guest_walk.o
 obj-y += hvm.o
 obj-y += io.o
 obj-y += irq.o
 obj-y += kernel.o
 obj-$(CONFIG_LIVEPATCH) += livepatch.o
-obj-y += mem_access.o
 obj-y += mm.o
 obj-y += monitor.o
 obj-y += p2m.o
@@ -46,19 +42,11 @@ obj-y += smpboot.o
 obj-y += sysctl.o
 obj-y += time.o
 obj-y += traps.o
-obj-y += vcpreg.o
-subdir-$(CONFIG_NEW_VGIC) += vgic
-ifneq ($(CONFIG_NEW_VGIC),y)
-obj-y += gic-vgic.o
 obj-y += vgic.o
 obj-y += vgic-v2.o
-obj-$(CONFIG_HAS_GICV3) += vgic-v3.o
-obj-$(CONFIG_HAS_ITS) += vgic-v3-its.o
-endif
+obj-$(CONFIG_ARM_64) += vgic-v3.o
 obj-y += vm_event.o
 obj-y += vtimer.o
-obj-$(CONFIG_SBSA_VUART_CONSOLE) += vpl011.o
-obj-y += vsmc.o
 obj-y += vpsci.o
 obj-y += vuart.o
 
@@ -82,13 +70,19 @@ else
 all_symbols =
 endif
 
-$(TARGET): $(TARGET)-syms
+$(TARGET): $(TARGET)-syms $(TARGET).axf
 	$(OBJCOPY) -O binary -S $< $@
 ifeq ($(CONFIG_ARM_64),y)
 	ln -sf $(notdir $@)  ../../$(notdir $@).efi
 endif
 
-ifeq ($(CONFIG_LTO),y)
+$(TARGET).axf: $(TARGET)-syms
+	# XXX: VE model loads by VMA so instead of
+	# making a proper ELF we link with LMA == VMA and adjust crudely
+	$(OBJCOPY) --change-addresses +0x80000000 $< $@
+	$(STRIP) $@
+
+ifeq ($(lto),y)
 # Gather all LTO objects together
 prelink_lto.o: $(ALL_OBJS)
 	$(LD_LTO) -r -o $@ $^
@@ -126,7 +120,7 @@ asm-offsets.s: $(TARGET_SUBARCH)/asm-offsets.c
 	$(CC) $(filter-out -flto,$(CFLAGS)) -S -o $@ $<
 
 xen.lds: xen.lds.S
-	$(CC) -P -E -Ui386 $(AFLAGS) -o $@ $<
+	$(CC) -P -E -Ui386 $(AFLAGS) -DXEN_PHYS_START=$(CONFIG_LOAD_ADDRESS) -o $@ $<
 	sed -e 's/xen\.lds\.o:/xen\.lds:/g' <.xen.lds.d >.xen.lds.d.new
 	mv -f .xen.lds.d.new .xen.lds.d
 
@@ -136,4 +130,5 @@ dtb.o: $(CONFIG_DTB_FILE)
 clean::
 	rm -f asm-offsets.s xen.lds
 	rm -f $(BASEDIR)/.xen-syms.[0-9]*
+	rm -f $(TARGET).axf
 	rm -f $(TARGET).efi

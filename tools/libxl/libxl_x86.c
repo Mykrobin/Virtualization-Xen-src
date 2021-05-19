@@ -7,18 +7,20 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
                                       libxl_domain_config *d_config,
                                       xc_domain_configuration_t *xc_config)
 {
-    switch(d_config->c_info.type) {
-    case LIBXL_DOMAIN_TYPE_HVM:
-        xc_config->emulation_flags = (XEN_X86_EMU_ALL & ~XEN_X86_EMU_VPCI);
-        break;
-    case LIBXL_DOMAIN_TYPE_PVH:
-        xc_config->emulation_flags = XEN_X86_EMU_LAPIC;
-        break;
-    case LIBXL_DOMAIN_TYPE_PV:
+
+    if (d_config->c_info.type == LIBXL_DOMAIN_TYPE_HVM) {
+        if (d_config->b_info.device_model_version !=
+            LIBXL_DEVICE_MODEL_VERSION_NONE) {
+            xc_config->emulation_flags = XEN_X86_EMU_ALL;
+        } else if (libxl_defbool_val(d_config->b_info.u.hvm.apic)) {
+            /*
+             * HVM guests without device model may want
+             * to have LAPIC emulation.
+             */
+            xc_config->emulation_flags = XEN_X86_EMU_LAPIC;
+        }
+    } else {
         xc_config->emulation_flags = 0;
-        break;
-    default:
-        abort();
     }
 
     return 0;
@@ -26,7 +28,6 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
 
 int libxl__arch_domain_save_config(libxl__gc *gc,
                                    libxl_domain_config *d_config,
-                                   libxl__domain_build_state *state,
                                    const xc_domain_configuration_t *xc_config)
 {
     return 0;
@@ -265,7 +266,7 @@ static int libxl__e820_alloc(libxl__gc *gc, uint32_t domid,
     struct e820entry map[E820MAX];
     libxl_domain_build_info *b_info;
 
-    if (d_config == NULL || d_config->c_info.type != LIBXL_DOMAIN_TYPE_PV)
+    if (d_config == NULL || d_config->c_info.type == LIBXL_DOMAIN_TYPE_HVM)
         return ERROR_INVAL;
 
     b_info = &d_config->b_info;
@@ -326,7 +327,7 @@ int libxl__arch_domain_create(libxl__gc *gc, libxl_domain_config *d_config,
         tm = localtime_r(&t, &result);
 
         if (!tm) {
-            LOGED(ERROR, domid, "Failed to call localtime_r");
+            LOGE(ERROR, "Failed to call localtime_r");
             ret = ERROR_FAIL;
             goto out;
         }
@@ -337,18 +338,19 @@ int libxl__arch_domain_create(libxl__gc *gc, libxl_domain_config *d_config,
     if (rtc_timeoffset)
         xc_domain_set_time_offset(ctx->xch, domid, rtc_timeoffset);
 
-    if (d_config->b_info.type != LIBXL_DOMAIN_TYPE_PV) {
-        unsigned long shadow = DIV_ROUNDUP(d_config->b_info.shadow_memkb,
-                                           1024);
-        xc_shadow_control(ctx->xch, domid, XEN_DOMCTL_SHADOW_OP_SET_ALLOCATION,
-                          NULL, 0, &shadow, 0, NULL);
+    if (d_config->b_info.type == LIBXL_DOMAIN_TYPE_HVM ||
+        libxl_defbool_val(d_config->c_info.pvh)) {
+
+        unsigned long shadow;
+        shadow = (d_config->b_info.shadow_memkb + 1023) / 1024;
+        xc_shadow_control(ctx->xch, domid, XEN_DOMCTL_SHADOW_OP_SET_ALLOCATION, NULL, 0, &shadow, 0, NULL);
     }
 
     if (d_config->c_info.type == LIBXL_DOMAIN_TYPE_PV &&
             libxl_defbool_val(d_config->b_info.u.pv.e820_host)) {
         ret = libxl__e820_alloc(gc, domid, d_config);
         if (ret) {
-            LOGED(ERROR, domid, "Failed while collecting E820 with: %d (errno:%d)\n",
+            LOGE(ERROR, "Failed while collecting E820 with: %d (errno:%d)\n",
                  ret, errno);
         }
     }
@@ -374,12 +376,20 @@ int libxl__arch_domain_init_hw_description(libxl__gc *gc,
     return 0;
 }
 
-int libxl__arch_build_dom_finish(libxl__gc *gc,
-                                 libxl_domain_build_info *info,
-                                 struct xc_dom_image *dom,
-                                 libxl__domain_build_state *state)
+int libxl__arch_domain_finalise_hw_description(libxl__gc *gc,
+                                               libxl_domain_build_info *info,
+                                               struct xc_dom_image *dom)
 {
-    return 0;
+    int rc = 0;
+
+    if ((info->type == LIBXL_DOMAIN_TYPE_HVM) &&
+        (info->device_model_version == LIBXL_DEVICE_MODEL_VERSION_NONE)) {
+        rc = libxl__dom_load_acpi(gc, info, dom);
+        if (rc != 0)
+            LOGE(ERROR, "libxl_dom_load_acpi failed");
+    }
+
+    return rc;
 }
 
 /* Return 0 on success, ERROR_* on failure. */
@@ -492,10 +502,10 @@ int libxl__arch_domain_map_irq(libxl__gc *gc, uint32_t domid, int irq)
  * to adjust them. Please refer to libxl__domain_device_construct_rdm().
  */
 #define GUEST_LOW_MEM_START_DEFAULT 0x100000
-static int domain_construct_memmap(libxl__gc *gc,
-                                   libxl_domain_config *d_config,
-                                   uint32_t domid,
-                                   struct xc_dom_image *dom)
+int libxl__arch_domain_construct_memmap(libxl__gc *gc,
+                                        libxl_domain_config *d_config,
+                                        uint32_t domid,
+                                        struct xc_dom_image *dom)
 {
     int rc = 0;
     unsigned int nr = 0, i;
@@ -512,9 +522,6 @@ static int domain_construct_memmap(libxl__gc *gc,
         if (d_config->rdms[i].policy != LIBXL_RDM_RESERVE_POLICY_INVALID)
             e820_entries++;
 
-    /* Add the HVM special pages to PVH memmap as RESERVED. */
-    if (d_config->b_info.type == LIBXL_DOMAIN_TYPE_PVH)
-        e820_entries++;
 
     /* If we should have a highmem range. */
     if (highmem_size)
@@ -525,7 +532,7 @@ static int domain_construct_memmap(libxl__gc *gc,
             e820_entries++;
 
     if (e820_entries >= E820MAX) {
-        LOGD(ERROR, domid, "Ooops! Too many entries in the memory map!");
+        LOG(ERROR, "Ooops! Too many entries in the memory map!");
         rc = ERROR_INVAL;
         goto out;
     }
@@ -545,15 +552,6 @@ static int domain_construct_memmap(libxl__gc *gc,
 
         e820[nr].addr = d_config->rdms[i].start;
         e820[nr].size = d_config->rdms[i].size;
-        e820[nr].type = E820_RESERVED;
-        nr++;
-    }
-
-    /* HVM special pages */
-    if (d_config->b_info.type == LIBXL_DOMAIN_TYPE_PVH) {
-        e820[nr].addr = (X86_HVM_END_SPECIAL_REGION - X86_HVM_NR_SPECIAL_PAGES)
-                        << XC_PAGE_SHIFT;
-        e820[nr].size = X86_HVM_NR_SPECIAL_PAGES << XC_PAGE_SHIFT;
         e820[nr].type = E820_RESERVED;
         nr++;
     }
@@ -580,36 +578,7 @@ static int domain_construct_memmap(libxl__gc *gc,
         goto out;
     }
 
-    dom->e820 = e820;
-    dom->e820_entries = e820_entries;
-
 out:
-    return rc;
-}
-
-int libxl__arch_domain_finalise_hw_description(libxl__gc *gc,
-                                               uint32_t domid,
-                                               libxl_domain_config *d_config,
-                                               struct xc_dom_image *dom)
-{
-    libxl_domain_build_info *const info = &d_config->b_info;
-    int rc;
-
-    if (info->type == LIBXL_DOMAIN_TYPE_PV)
-        return 0;
-
-    if (info->type == LIBXL_DOMAIN_TYPE_PVH) {
-        rc = libxl__dom_load_acpi(gc, info, dom);
-        if (rc != 0) {
-            LOGE(ERROR, "libxl_dom_load_acpi failed");
-            return rc;
-        }
-    }
-
-    rc = domain_construct_memmap(gc, d_config, domid, dom);
-    if (rc != 0)
-        LOGE(ERROR, "setting domain memory map failed");
-
     return rc;
 }
 

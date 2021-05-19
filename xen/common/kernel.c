@@ -10,10 +10,12 @@
 #include <xen/version.h>
 #include <xen/sched.h>
 #include <xen/paging.h>
+#include <xen/nmi.h>
 #include <xen/guest_access.h>
 #include <xen/hypercall.h>
 #include <xsm/xsm.h>
 #include <asm/current.h>
+#include <public/nmi.h>
 #include <public/version.h>
 
 #ifndef COMPAT
@@ -21,45 +23,40 @@
 enum system_state system_state = SYS_STATE_early_boot;
 
 xen_commandline_t saved_cmdline;
-static const char __initconst opt_builtin_cmdline[] = CONFIG_CMDLINE;
 
-static int assign_integer_param(const struct kernel_param *param, uint64_t val)
+static void __init assign_integer_param(
+    const struct kernel_param *param, uint64_t val)
 {
     switch ( param->len )
     {
     case sizeof(uint8_t):
-        if ( val > UINT8_MAX && val < (uint64_t)INT8_MIN )
-            return -EOVERFLOW;
-        *(uint8_t *)param->par.var = val;
+        *(uint8_t *)param->var = val;
         break;
     case sizeof(uint16_t):
-        if ( val > UINT16_MAX && val < (uint64_t)INT16_MIN )
-            return -EOVERFLOW;
-        *(uint16_t *)param->par.var = val;
+        *(uint16_t *)param->var = val;
         break;
     case sizeof(uint32_t):
-        if ( val > UINT32_MAX && val < (uint64_t)INT32_MIN )
-            return -EOVERFLOW;
-        *(uint32_t *)param->par.var = val;
+        *(uint32_t *)param->var = val;
         break;
     case sizeof(uint64_t):
-        *(uint64_t *)param->par.var = val;
+        *(uint64_t *)param->var = val;
         break;
     default:
         BUG();
     }
-
-    return 0;
 }
 
-static int parse_params(const char *cmdline, const struct kernel_param *start,
-                        const struct kernel_param *end)
+void __init cmdline_parse(const char *cmdline)
 {
-    char opt[128], *optval, *optkey, *q;
-    const char *p = cmdline, *key;
+    char opt[100], *optval, *optkey, *q;
+    const char *p = cmdline;
     const struct kernel_param *param;
-    int rc, final_rc = 0;
-    bool bool_assert, found;
+    int bool_assert;
+
+    if ( cmdline == NULL )
+        return;
+
+    safe_strcpy(saved_cmdline, cmdline);
 
     for ( ; ; )
     {
@@ -93,66 +90,46 @@ static int parse_params(const char *cmdline, const struct kernel_param *start,
         }
 
         /* Boolean parameters can be inverted with 'no-' prefix. */
-        key = optkey;
         bool_assert = !!strncmp("no-", optkey, 3);
         if ( !bool_assert )
             optkey += 3;
 
-        rc = 0;
-        found = false;
-        for ( param = start; param < end; param++ )
+        for ( param = __setup_start; param < __setup_end; param++ )
         {
-            int rctmp;
-            const char *s;
-
             if ( strcmp(param->name, optkey) )
             {
                 if ( param->type == OPT_CUSTOM && q &&
                      strlen(param->name) == q + 1 - opt &&
                      !strncmp(param->name, opt, q + 1 - opt) )
                 {
-                    found = true;
                     optval[-1] = '=';
-                    rctmp = param->par.func(q);
+                    ((void (*)(const char *))param->var)(q);
                     optval[-1] = '\0';
-                    if ( !rc )
-                        rc = rctmp;
                 }
                 continue;
             }
 
-            rctmp = 0;
-            found = true;
             switch ( param->type )
             {
             case OPT_STR:
-                strlcpy(param->par.var, optval, param->len);
+                strlcpy(param->var, optval, param->len);
                 break;
             case OPT_UINT:
-                rctmp = assign_integer_param(
+                assign_integer_param(
                     param,
-                    simple_strtoll(optval, &s, 0));
-                if ( *s )
-                    rctmp = -EINVAL;
+                    simple_strtoll(optval, NULL, 0));
                 break;
             case OPT_BOOL:
-                rctmp = *optval ? parse_bool(optval, NULL) : 1;
-                if ( rctmp < 0 )
-                    break;
-                if ( !rctmp )
+                if ( !parse_bool(optval) )
                     bool_assert = !bool_assert;
-                rctmp = 0;
                 assign_integer_param(param, bool_assert);
                 break;
             case OPT_SIZE:
-                rctmp = assign_integer_param(
+                assign_integer_param(
                     param,
-                    parse_size_and_unit(optval, &s));
-                if ( *s )
-                    rctmp = -EINVAL;
+                    parse_size_and_unit(optval, NULL));
                 break;
             case OPT_CUSTOM:
-                rctmp = -EINVAL;
                 if ( !bool_assert )
                 {
                     if ( *optval )
@@ -160,112 +137,31 @@ static int parse_params(const char *cmdline, const struct kernel_param *start,
                     safe_strcpy(opt, "no");
                     optval = opt;
                 }
-                rctmp = param->par.func(optval);
+                ((void (*)(const char *))param->var)(optval);
                 break;
             default:
                 BUG();
                 break;
             }
-
-            if ( !rc )
-                rc = rctmp;
-        }
-
-        if ( rc )
-        {
-            printk("parameter \"%s\" has invalid value \"%s\", rc=%d!\n",
-                    key, optval, rc);
-            final_rc = rc;
-        }
-        if ( !found )
-        {
-            printk("parameter \"%s\" unknown!\n", key);
-            final_rc = -EINVAL;
         }
     }
-
-    return final_rc;
 }
 
-static void __init _cmdline_parse(const char *cmdline)
+int __init parse_bool(const char *s)
 {
-    parse_params(cmdline, __setup_start, __setup_end);
-}
+    if ( !strcmp("no", s) ||
+         !strcmp("off", s) ||
+         !strcmp("false", s) ||
+         !strcmp("disable", s) ||
+         !strcmp("0", s) )
+        return 0;
 
-int runtime_parse(const char *line)
-{
-    return parse_params(line, __param_start, __param_end);
-}
-
-/**
- *    cmdline_parse -- parses the xen command line.
- * If CONFIG_CMDLINE is set, it would be parsed prior to @cmdline.
- * But if CONFIG_CMDLINE_OVERRIDE is set to y, @cmdline will be ignored.
- */
-void __init cmdline_parse(const char *cmdline)
-{
-    if ( opt_builtin_cmdline[0] )
-    {
-        printk("Built-in command line: %s\n", opt_builtin_cmdline);
-        _cmdline_parse(opt_builtin_cmdline);
-    }
-
-#ifndef CONFIG_CMDLINE_OVERRIDE
-    if ( cmdline == NULL )
-        return;
-
-    safe_strcpy(saved_cmdline, cmdline);
-    _cmdline_parse(cmdline);
-#endif
-}
-
-int parse_bool(const char *s, const char *e)
-{
-    size_t len = e ? ({ ASSERT(e >= s); e - s; }) : strlen(s);
-
-    switch ( len )
-    {
-    case 1:
-        if ( *s == '1' )
-            return 1;
-        if ( *s == '0' )
-            return 0;
-        break;
-
-    case 2:
-        if ( !strncmp("on", s, 2) )
-            return 1;
-        if ( !strncmp("no", s, 2) )
-            return 0;
-        break;
-
-    case 3:
-        if ( !strncmp("yes", s, 3) )
-            return 1;
-        if ( !strncmp("off", s, 3) )
-            return 0;
-        break;
-
-    case 4:
-        if ( !strncmp("true", s, 4) )
-            return 1;
-        break;
-
-    case 5:
-        if ( !strncmp("false", s, 5) )
-            return 0;
-        break;
-
-    case 6:
-        if ( !strncmp("enable", s, 6) )
-            return 1;
-        break;
-
-    case 7:
-        if ( !strncmp("disable", s, 7) )
-            return 0;
-        break;
-    }
+    if ( !strcmp("yes", s) ||
+         !strcmp("on", s) ||
+         !strcmp("true", s) ||
+         !strcmp("enable", s) ||
+         !strcmp("1", s) )
+        return 1;
 
     return -1;
 }
@@ -291,31 +187,20 @@ int parse_boolean(const char *name, const char *s, const char *e)
 
     /* =$SOMETHING?  Defer to the regular boolean parsing. */
     if ( s[nlen] == '=' )
-        return parse_bool(&s[nlen + 1], e);
+    {
+        char buf[8];
+
+        s += nlen + 1;
+        slen -= nlen + 1;
+        if ( slen >= ARRAY_SIZE(buf) )
+            return -1;
+        memcpy(buf, s, slen);
+        buf[slen] = 0;
+        return parse_bool(buf);
+    }
 
     /* Unrecognised.  Give up. */
     return -1;
-}
-
-int cmdline_strcmp(const char *frag, const char *name)
-{
-    for ( ; ; frag++, name++ )
-    {
-        unsigned char f = *frag, n = *name;
-        int res = f - n;
-
-        if ( res || n == '\0' )
-        {
-            /*
-             * NUL in 'name' matching a comma, colon or semicolon in 'frag'
-             * implies success.
-             */
-            if ( n == '\0' && (f == ',' || f == ':' || f == ';') )
-                res = 0;
-
-            return res;
-        }
-    }
 }
 
 unsigned int tainted;
@@ -468,9 +353,6 @@ DO(xen_version)(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
                     (1U << XENFEAT_auto_translated_physmap);
             if ( is_hardware_domain(d) )
                 fi.submap |= 1U << XENFEAT_dom0;
-#ifdef CONFIG_ARM
-            fi.submap |= (1U << XENFEAT_ARM_SMCCC_supported);
-#endif
 #ifdef CONFIG_X86
             switch ( d->guest_type )
             {
@@ -479,10 +361,15 @@ DO(xen_version)(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
                              (1U << XENFEAT_highmem_assist) |
                              (1U << XENFEAT_gnttab_map_avail_bits);
                 break;
+            case guest_type_pvh:
+                fi.submap |= (1U << XENFEAT_hvm_safe_pvclock) |
+                             (1U << XENFEAT_supervisor_mode_kernel) |
+                             (1U << XENFEAT_hvm_callback_vector);
+                break;
             case guest_type_hvm:
                 fi.submap |= (1U << XENFEAT_hvm_safe_pvclock) |
                              (1U << XENFEAT_hvm_callback_vector) |
-                             (has_pirq(d) ? (1U << XENFEAT_hvm_pirqs) : 0);
+                             (1U << XENFEAT_hvm_pirqs);
                 break;
             }
 #endif
@@ -566,6 +453,30 @@ DO(xen_version)(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     }
 
     return -ENOSYS;
+}
+
+DO(nmi_op)(unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
+{
+    struct xennmi_callback cb;
+    long rc = 0;
+
+    switch ( cmd )
+    {
+    case XENNMI_register_callback:
+        rc = -EFAULT;
+        if ( copy_from_guest(&cb, arg, 1) )
+            break;
+        rc = register_guest_nmi_callback(cb.handler_address);
+        break;
+    case XENNMI_unregister_callback:
+        rc = unregister_guest_nmi_callback();
+        break;
+    default:
+        rc = -ENOSYS;
+        break;
+    }
+
+    return rc;
 }
 
 #ifdef VM_ASSIST_VALID

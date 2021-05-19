@@ -446,13 +446,14 @@ static int enable_logdirty(struct xc_sr_context *ctx)
     return 0;
 }
 
-static int update_progress_string(struct xc_sr_context *ctx, char **str)
+static int update_progress_string(struct xc_sr_context *ctx,
+                                  char **str, unsigned iter)
 {
     xc_interface *xch = ctx->xch;
     char *new_str = NULL;
-    unsigned int iter = ctx->save.stats.iteration;
 
-    if ( asprintf(&new_str, "Frames iteration %u", iter) == -1 )
+    if ( asprintf(&new_str, "Frames iteration %u of %u",
+                  iter, ctx->save.max_iterations) == -1 )
     {
         PERROR("Unable to allocate new progress string");
         return -1;
@@ -466,28 +467,6 @@ static int update_progress_string(struct xc_sr_context *ctx, char **str)
 }
 
 /*
- * This is the live migration precopy policy - it's called periodically during
- * the precopy phase of live migrations, and is responsible for deciding when
- * the precopy phase should terminate and what should be done next.
- *
- * The policy implemented here behaves identically to the policy previously
- * hard-coded into xc_domain_save() - it proceeds to the stop-and-copy phase of
- * the live migration when there are either fewer than 50 dirty pages, or more
- * than 5 precopy rounds have completed.
- */
-#define SPP_MAX_ITERATIONS      5
-#define SPP_TARGET_DIRTY_COUNT 50
-
-static int simple_precopy_policy(struct precopy_stats stats, void *user)
-{
-    return ((stats.dirty_count >= 0 &&
-            stats.dirty_count < SPP_TARGET_DIRTY_COUNT) ||
-            stats.iteration >= SPP_MAX_ITERATIONS)
-        ? XGS_POLICY_STOP_AND_COPY
-        : XGS_POLICY_CONTINUE_PRECOPY;
-}
-
-/*
  * Send memory while guest is running.
  */
 static int send_memory_live(struct xc_sr_context *ctx)
@@ -495,59 +474,21 @@ static int send_memory_live(struct xc_sr_context *ctx)
     xc_interface *xch = ctx->xch;
     xc_shadow_op_stats_t stats = { 0, ctx->save.p2m_size };
     char *progress_str = NULL;
-    unsigned int x = 0;
+    unsigned x;
     int rc;
-    int policy_decision;
 
-    DECLARE_HYPERCALL_BUFFER_SHADOW(unsigned long, dirty_bitmap,
-                                    &ctx->save.dirty_bitmap_hbuf);
-
-    precopy_policy_t precopy_policy = ctx->save.callbacks->precopy_policy;
-    void *data = ctx->save.callbacks->data;
-
-    struct precopy_stats *policy_stats;
-
-    rc = update_progress_string(ctx, &progress_str);
+    rc = update_progress_string(ctx, &progress_str, 0);
     if ( rc )
         goto out;
 
-    ctx->save.stats = (struct precopy_stats)
-        { .dirty_count   = ctx->save.p2m_size };
-    policy_stats = &ctx->save.stats;
+    rc = send_all_pages(ctx);
+    if ( rc )
+        goto out;
 
-    if ( precopy_policy == NULL )
-         precopy_policy = simple_precopy_policy;
-
-    bitmap_set(dirty_bitmap, ctx->save.p2m_size);
-
-    for ( ; ; )
+    for ( x = 1;
+          ((x < ctx->save.max_iterations) &&
+           (stats.dirty_count > ctx->save.dirty_threshold)); ++x )
     {
-        policy_decision = precopy_policy(*policy_stats, data);
-        x++;
-
-        if ( stats.dirty_count > 0 && policy_decision != XGS_POLICY_ABORT )
-        {
-            rc = update_progress_string(ctx, &progress_str);
-            if ( rc )
-                goto out;
-
-            rc = send_dirty_pages(ctx, stats.dirty_count);
-            if ( rc )
-                goto out;
-        }
-
-        if ( policy_decision != XGS_POLICY_CONTINUE_PRECOPY )
-            break;
-
-        policy_stats->iteration     = x;
-        policy_stats->total_written += policy_stats->dirty_count;
-        policy_stats->dirty_count   = -1;
-
-        policy_decision = precopy_policy(*policy_stats, data);
-
-        if ( policy_decision != XGS_POLICY_CONTINUE_PRECOPY )
-           break;
-
         if ( xc_shadow_control(
                  xch, ctx->domid, XEN_DOMCTL_SHADOW_OP_CLEAN,
                  &ctx->save.dirty_bitmap_hbuf, ctx->save.p2m_size,
@@ -558,8 +499,16 @@ static int send_memory_live(struct xc_sr_context *ctx)
             goto out;
         }
 
-        policy_stats->dirty_count = stats.dirty_count;
+        if ( stats.dirty_count == 0 )
+            break;
 
+        rc = update_progress_string(ctx, &progress_str, x);
+        if ( rc )
+            goto out;
+
+        rc = send_dirty_pages(ctx, stats.dirty_count);
+        if ( rc )
+            goto out;
     }
 
  out:
@@ -571,7 +520,7 @@ static int send_memory_live(struct xc_sr_context *ctx)
 static int colo_merge_secondary_dirty_bitmap(struct xc_sr_context *ctx)
 {
     xc_interface *xch = ctx->xch;
-    struct xc_sr_record rec = { 0, 0, NULL };
+    struct xc_sr_record rec;
     uint64_t *pfns = NULL;
     uint64_t pfn;
     unsigned count, i;
@@ -651,7 +600,8 @@ static int suspend_and_send_dirty(struct xc_sr_context *ctx)
 
     if ( ctx->save.live )
     {
-        rc = update_progress_string(ctx, &progress_str);
+        rc = update_progress_string(ctx, &progress_str,
+                                    ctx->save.max_iterations);
         if ( rc )
             goto out;
     }
@@ -966,8 +916,9 @@ static int save(struct xc_sr_context *ctx, uint16_t guest_type)
 };
 
 int xc_domain_save(xc_interface *xch, int io_fd, uint32_t dom,
-                   uint32_t flags, struct save_callbacks* callbacks,
-                   int hvm, xc_migration_stream_t stream_type, int recv_fd)
+                   uint32_t max_iters, uint32_t max_factor, uint32_t flags,
+                   struct save_callbacks* callbacks, int hvm,
+                   xc_migration_stream_t stream_type, int recv_fd)
 {
     struct xc_sr_context ctx =
         {
@@ -987,6 +938,15 @@ int xc_domain_save(xc_interface *xch, int io_fd, uint32_t dom,
            stream_type == XC_MIG_STREAM_REMUS ||
            stream_type == XC_MIG_STREAM_COLO);
 
+    /*
+     * TODO: Find some time to better tweak the live migration algorithm.
+     *
+     * These parameters are better than the legacy algorithm especially for
+     * busy guests.
+     */
+    ctx.save.max_iterations = 5;
+    ctx.save.dirty_threshold = 50;
+
     /* Sanity checks for callbacks. */
     if ( hvm )
         assert(callbacks->switch_qemu_logdirty);
@@ -995,7 +955,8 @@ int xc_domain_save(xc_interface *xch, int io_fd, uint32_t dom,
     if ( ctx.save.checkpointed == XC_MIG_STREAM_COLO )
         assert(callbacks->wait_checkpoint);
 
-    DPRINTF("fd %d, dom %u, flags %u, hvm %d", io_fd, dom, flags, hvm);
+    DPRINTF("fd %d, dom %u, max_iters %u, max_factor %u, flags %u, hvm %d",
+            io_fd, dom, max_iters, max_factor, flags, hvm);
 
     if ( xc_domain_getinfo(xch, dom, 1, &ctx.dominfo) != 1 )
     {

@@ -24,6 +24,7 @@
  * IN THE SOFTWARE.
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/event.h>
 #include <xen/lib.h>

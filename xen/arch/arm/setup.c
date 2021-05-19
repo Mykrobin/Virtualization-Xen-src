@@ -17,6 +17,7 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/compile.h>
 #include <xen/device_tree.h>
 #include <xen/domain_page.h>
@@ -56,7 +57,7 @@ struct bootinfo __initdata bootinfo;
 struct cpuinfo_arm __read_mostly boot_cpu_data;
 
 #ifdef CONFIG_ACPI
-bool __read_mostly acpi_disabled;
+bool_t __read_mostly acpi_disabled;
 #endif
 
 #ifdef CONFIG_ARM_32
@@ -269,8 +270,7 @@ void __init discard_initial_modules(void)
         if ( mi->module[i].kind == BOOTMOD_XEN )
             continue;
 
-        if ( !mfn_valid(maddr_to_mfn(s)) ||
-             !mfn_valid(maddr_to_mfn(e)) )
+        if ( !mfn_valid(paddr_to_pfn(s)) || !mfn_valid(paddr_to_pfn(e)))
             continue;
 
         dt_unreserved_regions(s, e, init_domheap_pages, 0);
@@ -393,16 +393,24 @@ static paddr_t __init get_xen_paddr(void)
 {
     struct meminfo *mi = &bootinfo.mem;
     paddr_t min_size;
-    paddr_t paddr = 0;
+    paddr_t paddr = 0, last_end;
     int i;
 
     min_size = (_end - _start + (XEN_PADDR_ALIGN-1)) & ~(XEN_PADDR_ALIGN-1);
+
+    last_end = mi->bank[0].start;
 
     /* Find the highest bank with enough space. */
     for ( i = 0; i < mi->nr_banks; i++ )
     {
         const struct membank *bank = &mi->bank[i];
         paddr_t s, e;
+
+        /* We can only deal with contiguous memory at the moment */
+        if ( last_end != bank->start )
+            break;
+
+        last_end = bank->start + bank->size;
 
         if ( bank->size >= min_size )
         {
@@ -556,13 +564,13 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
      * and enough mapped pages for copying the DTB.
      */
     dtb_pages = (dtb_size + PAGE_SIZE-1) >> PAGE_SHIFT;
-    boot_mfn_start = mfn_x(xenheap_mfn_end) - dtb_pages - 1;
-    boot_mfn_end = mfn_x(xenheap_mfn_end);
+    boot_mfn_start = xenheap_mfn_end - dtb_pages - 1;
+    boot_mfn_end = xenheap_mfn_end;
 
     init_boot_pages(pfn_to_paddr(boot_mfn_start), pfn_to_paddr(boot_mfn_end));
 
     /* Copy the DTB. */
-    fdt = mfn_to_virt(mfn_x(alloc_boot_pages(dtb_pages, 1)));
+    fdt = mfn_to_virt(alloc_boot_pages(dtb_pages, 1));
     copy_from_paddr(fdt, dtb_paddr, dtb_size);
     device_tree_flattened = fdt;
 
@@ -592,11 +600,11 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
                 e = bank_end;
 
             /* Avoid the xenheap */
-            if ( s < mfn_to_maddr(mfn_add(xenheap_mfn_start, xenheap_pages))
-                 && mfn_to_maddr(xenheap_mfn_start) < e )
+            if ( s < pfn_to_paddr(xenheap_mfn_start+xenheap_pages)
+                 && pfn_to_paddr(xenheap_mfn_start) < e )
             {
-                e = mfn_to_maddr(xenheap_mfn_start);
-                n = mfn_to_maddr(mfn_add(xenheap_mfn_start, xenheap_pages));
+                e = pfn_to_paddr(xenheap_mfn_start);
+                n = pfn_to_paddr(xenheap_mfn_start+xenheap_pages);
             }
 
             dt_unreserved_regions(s, e, init_boot_pages, 0);
@@ -611,7 +619,7 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
 
     /* Add xenheap memory that was not already added to the boot
        allocator. */
-    init_xenheap_pages(mfn_to_maddr(xenheap_mfn_start),
+    init_xenheap_pages(pfn_to_paddr(xenheap_mfn_start),
                        pfn_to_paddr(boot_mfn_start));
 }
 #else /* CONFIG_ARM_64 */
@@ -655,6 +663,8 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
             if ( e > bank_end )
                 e = bank_end;
 
+            xenheap_mfn_end = e;
+
             dt_unreserved_regions(s, e, init_boot_pages, 0);
             s = n;
         }
@@ -663,8 +673,8 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
     total_pages += ram_size >> PAGE_SHIFT;
 
     xenheap_virt_end = XENHEAP_VIRT_START + ram_end - ram_start;
-    xenheap_mfn_start = maddr_to_mfn(ram_start);
-    xenheap_mfn_end = maddr_to_mfn(ram_end);
+    xenheap_mfn_start = ram_start >> PAGE_SHIFT;
+    xenheap_mfn_end = ram_end >> PAGE_SHIFT;
 
     /*
      * Need enough mapped pages for copying the DTB.
@@ -672,7 +682,7 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
     dtb_pages = (dtb_size + PAGE_SIZE-1) >> PAGE_SHIFT;
 
     /* Copy the DTB. */
-    fdt = mfn_to_virt(mfn_x(alloc_boot_pages(dtb_pages, 1)));
+    fdt = mfn_to_virt(alloc_boot_pages(dtb_pages, 1));
     copy_from_paddr(fdt, dtb_paddr, dtb_size);
     device_tree_flattened = fdt;
 
@@ -681,7 +691,20 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
 }
 #endif
 
-size_t __read_mostly dcache_line_bytes;
+size_t __read_mostly cacheline_bytes;
+
+/* Very early check of the CPU cache properties */
+void __init setup_cache(void)
+{
+    uint32_t ccsid;
+
+    /* Read the cache size ID register for the level-0 data cache */
+    WRITE_SYSREG32(0, CSSELR_EL1);
+    ccsid = READ_SYSREG32(CCSIDR_EL1);
+
+    /* Low 3 bits are log2(cacheline size in words) - 2. */
+    cacheline_bytes = 1U << (4 + (ccsid & 0x7));
+}
 
 /* C entry point for boot CPU */
 void __init start_xen(unsigned long boot_phys_offset,
@@ -694,9 +717,9 @@ void __init start_xen(unsigned long boot_phys_offset,
     const char *cmdline;
     struct bootmodule *xen_bootmodule;
     struct domain *dom0;
-    struct xen_domctl_createdomain dom0_cfg = {};
+    struct xen_arch_domainconfig config;
 
-    dcache_line_bytes = read_dcache_line_bytes();
+    setup_cache();
 
     percpu_init_areas();
     set_processor_id(0); /* needed early, for smp_processor_id() */
@@ -726,7 +749,7 @@ void __init start_xen(unsigned long boot_phys_offset,
     /* Register Xen's load address as a boot module. */
     xen_bootmodule = add_boot_module(BOOTMOD_XEN,
                              (paddr_t)(uintptr_t)(_start + boot_phys_offset),
-                             (paddr_t)(uintptr_t)(_end - _start), NULL);
+                             (paddr_t)(uintptr_t)(_end - _start + 1), NULL);
     BUG_ON(!xen_bootmodule);
 
     xen_paddr = get_xen_paddr();
@@ -745,21 +768,8 @@ void __init start_xen(unsigned long boot_phys_offset,
 
     end_boot_allocator();
 
-    /*
-     * The memory subsystem has been initialized, we can now switch from
-     * early_boot -> boot.
-     */
-    system_state = SYS_STATE_boot;
-
     vm_init();
-
-    if ( acpi_disabled )
-    {
-        printk("Booting using Device Tree\n");
-        dt_unflatten_host_device_tree();
-    }
-    else
-        printk("Booting using ACPI\n");
+    dt_unflatten_host_device_tree();
 
     init_IRQ();
 
@@ -773,6 +783,8 @@ void __init start_xen(unsigned long boot_phys_offset,
     console_init_preirq();
     console_init_ring();
 
+    system_state = SYS_STATE_boot;
+
     processor_id();
 
     smp_init_cpus();
@@ -783,6 +795,8 @@ void __init start_xen(unsigned long boot_phys_offset,
     init_xen_time();
 
     gic_init();
+
+    p2m_vmid_allocator_init();
 
     softirq_init();
 
@@ -808,7 +822,7 @@ void __init start_xen(unsigned long boot_phys_offset,
     local_irq_enable();
     local_abort_enable();
 
-    smp_prepare_cpus();
+    smp_prepare_cpus(cpus);
 
     initialize_keytable();
 
@@ -844,10 +858,10 @@ void __init start_xen(unsigned long boot_phys_offset,
 
     /* Create initial domain 0. */
     /* The vGIC for DOM0 is exactly emulating the hardware GIC */
-    dom0_cfg.arch.gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE;
-    dom0_cfg.arch.nr_spis = gic_number_lines() - 32;
+    config.gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE;
+    config.nr_spis = gic_number_lines() - 32;
 
-    dom0 = domain_create(0, &dom0_cfg);
+    dom0 = domain_create(0, 0, 0, &config);
     if ( IS_ERR(dom0) || (alloc_dom0_vcpu0(dom0) == NULL) )
             panic("Error creating domain 0");
 
@@ -857,7 +871,8 @@ void __init start_xen(unsigned long boot_phys_offset,
     if ( construct_dom0(dom0) != 0)
             panic("Could not set up DOM0 guest OS");
 
-    heap_init_late();
+    /* Scrub RAM that is still free and so may go to an unprivileged domain. */
+    scrub_heap_pages();
 
     init_constructors();
 

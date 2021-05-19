@@ -18,6 +18,7 @@
  */
 
 #include <asm/p2m.h>
+#include <xen/config.h>
 #include <asm/platform.h>
 #include <asm/platforms/omap5.h>
 #include <xen/mm.h>
@@ -51,7 +52,8 @@ static int omap5_init_time(void)
     unsigned int sys_clksel;
     unsigned int num, den, frac1, frac2;
 
-    ckgen_prm_base = ioremap_nocache(OMAP5_CKGEN_PRM_BASE, 0x20);
+    ckgen_prm_base = ioremap_attr(OMAP5_CKGEN_PRM_BASE,
+                                  0x20, PAGE_HYPERVISOR_NOCACHE);
     if ( !ckgen_prm_base )
     {
         dprintk(XENLOG_ERR, "%s: PRM_BASE ioremap failed\n", __func__);
@@ -63,7 +65,8 @@ static int omap5_init_time(void)
 
     iounmap(ckgen_prm_base);
 
-    rt_ct_base = ioremap_nocache(REALTIME_COUNTER_BASE, 0x20);
+    rt_ct_base = ioremap_attr(REALTIME_COUNTER_BASE,
+                              0x20, PAGE_HYPERVISOR_NOCACHE);
     if ( !rt_ct_base )
     {
         dprintk(XENLOG_ERR, "%s: REALTIME_COUNTER_BASE ioremap failed\n", __func__);
@@ -99,20 +102,20 @@ static int omap5_init_time(void)
 static int omap5_specific_mapping(struct domain *d)
 {
     /* Map the PRM module */
-    map_mmio_regions(d, gaddr_to_gfn(OMAP5_PRM_BASE), 2,
-                     maddr_to_mfn(OMAP5_PRM_BASE));
+    map_mmio_regions(d, _gfn(paddr_to_pfn(OMAP5_PRM_BASE)), 2,
+                     _mfn(paddr_to_pfn(OMAP5_PRM_BASE)));
 
     /* Map the PRM_MPU */
-    map_mmio_regions(d, gaddr_to_gfn(OMAP5_PRCM_MPU_BASE), 1,
-                     maddr_to_mfn(OMAP5_PRCM_MPU_BASE));
+    map_mmio_regions(d, _gfn(paddr_to_pfn(OMAP5_PRCM_MPU_BASE)), 1,
+                     _mfn(paddr_to_pfn(OMAP5_PRCM_MPU_BASE)));
 
     /* Map the Wakeup Gen */
-    map_mmio_regions(d, gaddr_to_gfn(OMAP5_WKUPGEN_BASE), 1,
-                     maddr_to_mfn(OMAP5_WKUPGEN_BASE));
+    map_mmio_regions(d, _gfn(paddr_to_pfn(OMAP5_WKUPGEN_BASE)), 1,
+                     _mfn(paddr_to_pfn(OMAP5_WKUPGEN_BASE)));
 
     /* Map the on-chip SRAM */
-    map_mmio_regions(d, gaddr_to_gfn(OMAP5_SRAM_PA), 32,
-                     maddr_to_mfn(OMAP5_SRAM_PA));
+    map_mmio_regions(d, _gfn(paddr_to_pfn(OMAP5_SRAM_PA)), 32,
+                     _mfn(paddr_to_pfn(OMAP5_SRAM_PA)));
 
     return 0;
 }

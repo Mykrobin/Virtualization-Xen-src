@@ -22,6 +22,9 @@
 
  /* Number of pages holding ACPI tables */
 #define NUM_ACPI_PAGES 16
+/* Store RSDP in the last 64 bytes of BIOS RO memory */
+#define RSDP_ADDRESS (0x100000 - 64)
+#define ACPI_INFO_PHYSICAL_ADDRESS 0xfc000000
 
 struct libxl_acpi_ctxt {
     struct acpi_ctxt c;
@@ -81,7 +84,7 @@ static void acpi_mem_free(struct acpi_ctxt *ctxt,
 {
 }
 
-static uint32_t acpi_lapic_id(unsigned cpu)
+static uint8_t acpi_lapic_id(unsigned cpu)
 {
     return cpu * 2;
 }
@@ -95,33 +98,31 @@ static int init_acpi_config(libxl__gc *gc,
     uint32_t domid = dom->guest_domid;
     xc_dominfo_t info;
     struct hvm_info_table *hvminfo;
-    int i, r, rc;
+    int i, rc = 0;
 
     config->dsdt_anycpu = config->dsdt_15cpu = dsdt_pvh;
     config->dsdt_anycpu_len = config->dsdt_15cpu_len = dsdt_pvh_len;
 
-    r = xc_domain_getinfo(xch, domid, 1, &info);
-    if (r < 0) {
-        LOG(ERROR, "getdomaininfo failed (rc=%d)", r);
-        rc = ERROR_FAIL;
+    rc = xc_domain_getinfo(xch, domid, 1, &info);
+    if (rc < 0) {
+        LOG(ERROR, "getdomaininfo failed (rc=%d)", rc);
         goto out;
     }
 
     hvminfo = libxl__zalloc(gc, sizeof(*hvminfo));
 
-    hvminfo->apic_mode = libxl_defbool_val(b_info->apic);
+    hvminfo->apic_mode = libxl_defbool_val(b_info->u.hvm.apic);
 
     if (dom->nr_vnodes) {
         unsigned int *vcpu_to_vnode, *vdistance;
         struct xen_vmemrange *vmemrange;
         struct acpi_numa *numa = &config->numa;
 
-        r = xc_domain_getvnuma(xch, domid, &numa->nr_vnodes,
-                               &numa->nr_vmemranges,
-                               &hvminfo->nr_vcpus, NULL, NULL, NULL);
-        if (r) {
-            LOG(ERROR, "xc_domain_getvnuma failed (rc=%d)", r);
-            rc = ERROR_FAIL;
+        rc = xc_domain_getvnuma(xch, domid, &numa->nr_vnodes,
+                                &numa->nr_vmemranges,
+                                &hvminfo->nr_vcpus, NULL, NULL, NULL);
+        if (rc) {
+            LOG(ERROR, "xc_domain_getvnuma failed (rc=%d)", rc);
             goto out;
         }
 
@@ -129,12 +130,11 @@ static int init_acpi_config(libxl__gc *gc,
         vdistance = libxl__zalloc(gc, dom->nr_vnodes * sizeof(*vdistance));
         vcpu_to_vnode = libxl__zalloc(gc, hvminfo->nr_vcpus *
                                       sizeof(*vcpu_to_vnode));
-        r = xc_domain_getvnuma(xch, domid, &numa->nr_vnodes,
-                               &numa->nr_vmemranges, &hvminfo->nr_vcpus,
-                               vmemrange, vdistance, vcpu_to_vnode);
-        if (r) {
-            LOG(ERROR, "xc_domain_getvnuma failed (rc=%d)", r);
-            rc = ERROR_FAIL;
+        rc = xc_domain_getvnuma(xch, domid, &numa->nr_vnodes,
+                                &numa->nr_vmemranges, &hvminfo->nr_vcpus,
+                                vmemrange, vdistance, vcpu_to_vnode);
+	if (rc) {
+            LOG(ERROR, "xc_domain_getvnuma failed (rc=%d)", rc);
             goto out;
         }
         numa->vmemrange = vmemrange;
@@ -151,7 +151,6 @@ static int init_acpi_config(libxl__gc *gc,
 
     config->lapic_base_address = LAPIC_BASE_ADDRESS;
     config->lapic_id = acpi_lapic_id;
-    config->acpi_revision = 5;
 
     rc = 0;
 out:
@@ -168,7 +167,8 @@ int libxl__dom_load_acpi(libxl__gc *gc,
     void *acpi_pages;
     unsigned long page_mask;
 
-    if (b_info->type != LIBXL_DOMAIN_TYPE_PVH)
+    if ((b_info->type != LIBXL_DOMAIN_TYPE_HVM) ||
+        (b_info->device_model_version != LIBXL_DEVICE_MODEL_VERSION_NONE))
         goto out;
 
     libxl_ctxt.page_size = XC_DOM_PAGE_SIZE(dom);
@@ -217,18 +217,7 @@ int libxl__dom_load_acpi(libxl__gc *gc,
 
     dom->acpi_modules[0].data = (void *)config.rsdp;
     dom->acpi_modules[0].length = 64;
-    /*
-     * Some Linux versions cannot properly process hvm_start_info.rsdp_paddr
-     * and so we need to put RSDP in location that can be discovered by ACPI's
-     * standard search method, in R-O BIOS memory (we chose last 64 bytes)
-     */
-    if (strcmp(dom->parms.guest_os, "linux") ||
-        elf_xen_feature_get(XENFEAT_linux_rsdp_unrestricted,
-                            dom->parms.f_supported))
-        dom->acpi_modules[0].guest_addr_out = ACPI_INFO_PHYSICAL_ADDRESS +
-            (1 + acpi_pages_num) * libxl_ctxt.page_size;
-    else
-        dom->acpi_modules[0].guest_addr_out = 0x100000 - 64;
+    dom->acpi_modules[0].guest_addr_out = RSDP_ADDRESS;
 
     dom->acpi_modules[1].data = (void *)config.infop;
     dom->acpi_modules[1].length = 4096;

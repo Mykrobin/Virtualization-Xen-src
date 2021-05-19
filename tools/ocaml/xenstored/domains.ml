@@ -18,8 +18,6 @@ let debug fmt = Logging.debug "domains" fmt
 let error fmt = Logging.error "domains" fmt
 let warn fmt  = Logging.warn  "domains" fmt
 
-let xc = Xenctrl.interface_open ()
-
 type domains = {
 	eventchn: Event.t;
 	table: (Xenctrl.domid, Domain.t) Hashtbl.t;
@@ -88,7 +86,7 @@ let remove_from_queue dom queue =
 		| None -> ()
 		| Some x -> if x=dom then d := None) queue
 
-let cleanup doms =
+let cleanup xc doms =
 	let notify = ref false in
 	let dead_dom = ref [] in
 
@@ -122,21 +120,18 @@ let cleanup doms =
 let resume doms domid =
 	()
 
-let create doms domid mfn port =
+let create xc doms domid mfn port =
 	let interface = Xenctrl.map_foreign_range xc domid (Xenmmap.getpagesize()) mfn in
 	let dom = Domain.make domid mfn port interface doms.eventchn in
 	Hashtbl.add doms.table domid dom;
 	Domain.bind_interdomain dom;
 	dom
 
-let xenstored_kva = ref ""
-let xenstored_port = ref ""
-
 let create0 doms =
 	let port, interface =
 		(
-			let port = Utils.read_file_single_integer !xenstored_port
-			and fd = Unix.openfile !xenstored_kva
+			let port = Utils.read_file_single_integer Define.xenstored_proc_port
+			and fd = Unix.openfile Define.xenstored_proc_kva
 					       [ Unix.O_RDWR ] 0o600 in
 			let interface = Xenmmap.mmap fd Xenmmap.RDWR Xenmmap.SHARED
 						  (Xenmmap.getpagesize()) 0 in

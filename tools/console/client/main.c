@@ -76,7 +76,7 @@ static void usage(const char *program) {
 	       "\n"
 	       "  -h, --help       display this help and exit\n"
 	       "  -n, --num N      use console number N\n"
-	       "  --type TYPE      console type. must be 'pv', 'serial' or 'vuart'\n"
+	       "  --type TYPE      console type. must be 'pv' or 'serial'\n"
 	       "  --start-notify-fd N file descriptor used to notify parent\n"
 	       , program);
 }
@@ -264,7 +264,6 @@ typedef enum {
        CONSOLE_INVAL,
        CONSOLE_PV,
        CONSOLE_SERIAL,
-       CONSOLE_VUART,
 } console_type;
 
 static struct termios stdin_old_attr;
@@ -335,7 +334,6 @@ int main(int argc, char **argv)
 		{ "num",     1, 0, 'n' },
 		{ "help",    0, 0, 'h' },
 		{ "start-notify-fd", 1, 0, 's' },
-		{ "interactive", 0, 0, 'i' },
 		{ 0 },
 
 	};
@@ -345,7 +343,9 @@ int main(int argc, char **argv)
 	char *end;
 	console_type type = CONSOLE_INVAL;
 	bool interactive = 0;
-	char *console_names = "serial, pv, vuart";
+
+	if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO))
+		interactive = 1;
 
 	while((ch = getopt_long(argc, argv, sopt, lopt, &opt_ind)) != -1) {
 		switch(ch) {
@@ -361,20 +361,14 @@ int main(int argc, char **argv)
 				type = CONSOLE_SERIAL;
 			else if (!strcmp(optarg, "pv"))
 				type = CONSOLE_PV;
-			else if (!strcmp(optarg, "vuart"))
-				type = CONSOLE_VUART;
 			else {
 				fprintf(stderr, "Invalid type argument\n");
-				fprintf(stderr, "Console types supported are: %s\n",
-					console_names);
+				fprintf(stderr, "Console types supported are: serial, pv\n");
 				exit(EINVAL);
 			}
 			break;
 		case 's':
 			start_notify_fd = atoi(optarg);
-			break;
-		case 'i':
-			interactive = 1;
 			break;
 		default:
 			fprintf(stderr, "Invalid argument\n");
@@ -442,10 +436,6 @@ int main(int argc, char **argv)
 		else
 			snprintf(path, strlen(dom_path) + strlen("/device/console/%d/tty") + 5, "%s/device/console/%d/tty", dom_path, num);
 	}
-	if (type == CONSOLE_VUART) {
-		snprintf(path, strlen(dom_path) + strlen("/vuart/0/tty") + 1,
-			 "%s/vuart/0/tty", dom_path);
-	}
 
 	/* FIXME consoled currently does not assume domain-0 doesn't have a
 	   console which is good when we break domain-0 up.  To keep us
@@ -474,8 +464,7 @@ int main(int argc, char **argv)
 	}
 
 	init_term(spty, &attr);
-	if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
-		interactive = 1;
+	if (interactive) {
 		init_term(STDIN_FILENO, &stdin_old_attr);
 		atexit(restore_term_stdin); /* if this fails, oh dear */
 	}

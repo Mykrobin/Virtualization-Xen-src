@@ -9,6 +9,7 @@
  * Copyright (c) 1992, Linus Torvalds
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/preempt.h>
@@ -58,7 +59,7 @@ void process_pending_softirqs(void)
     __do_softirq(1ul<<SCHEDULE_SOFTIRQ);
 }
 
-void do_softirq(void)
+asmlinkage void do_softirq(void)
 {
     ASSERT_NOT_IN_ATOMIC();
     __do_softirq(0);

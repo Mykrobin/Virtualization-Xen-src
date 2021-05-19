@@ -12,9 +12,6 @@ config ARCH
 	string
 	option env="ARCH"
 
-config BROKEN
-	bool
-
 source "arch/$SRCARCH/Kconfig"
 
 config XEN_FULLVERSION
@@ -29,19 +26,5 @@ config DEFCONFIG_LIST
 config EXPERT
 	string
 	option env="XEN_CONFIG_EXPERT"
-
-config LTO
-	bool "Link Time Optimisation"
-	depends on BROKEN
-	---help---
-	  Enable Link Time Optimisation.
-
-	  If unsure, say N.
-
-#
-# For architectures that know their compiler __int128 support is sound
-#
-config ARCH_SUPPORTS_INT128
-	bool
 
 source "Kconfig.debug"

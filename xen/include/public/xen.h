@@ -120,7 +120,6 @@ DEFINE_XEN_GUEST_HANDLE(xen_ulong_t);
 #define __HYPERVISOR_tmem_op              38
 #define __HYPERVISOR_xc_reserved_op       39 /* reserved for XenClient */
 #define __HYPERVISOR_xenpmu_op            40
-#define __HYPERVISOR_dm_op                41
 
 /* Architecture-specific hypercall definitions. */
 #define __HYPERVISOR_arch_0               48
@@ -268,10 +267,6 @@ DEFINE_XEN_GUEST_HANDLE(xen_ulong_t);
  * As MMU_NORMAL_PT_UPDATE above, but A/D bits currently in the PTE are ORed
  * with those in @val.
  *
- * ptr[1:0] == MMU_PT_UPDATE_NO_TRANSLATE:
- * As MMU_NORMAL_PT_UPDATE above, but @val is not translated though FD
- * page tables.
- *
  * @val is usually the machine frame number along with some attributes.
  * The attributes by default follow the architecture defined bits. Meaning that
  * if this is a X86_64 machine and four page table layout is used, the layout
@@ -338,11 +333,9 @@ DEFINE_XEN_GUEST_HANDLE(xen_ulong_t);
  *
  * PAT (bit 7 on) --> PWT (bit 3 on) and clear bit 7.
  */
-#define MMU_NORMAL_PT_UPDATE       0 /* checked '*ptr = val'. ptr is MA.      */
-#define MMU_MACHPHYS_UPDATE        1 /* ptr = MA of frame to modify entry for */
-#define MMU_PT_UPDATE_PRESERVE_AD  2 /* atomically: *ptr = val | (*ptr&(A|D)) */
-#define MMU_PT_UPDATE_NO_TRANSLATE 3 /* checked '*ptr = val'. ptr is MA.      */
-                                     /* val never translated.                 */
+#define MMU_NORMAL_PT_UPDATE      0 /* checked '*ptr = val'. ptr is MA.      */
+#define MMU_MACHPHYS_UPDATE       1 /* ptr = MA of frame to modify entry for */
+#define MMU_PT_UPDATE_PRESERVE_AD 2 /* atomically: *ptr = val | (*ptr&(A|D)) */
 
 /*
  * MMU EXTENDED OPERATIONS
@@ -556,21 +549,16 @@ DEFINE_XEN_GUEST_HANDLE(mmuext_op_t);
  * is useful to ensure that no mappings to the OS's own heap are accidentally
  * installed. (e.g., in Linux this could cause havoc as reference counts
  * aren't adjusted on the I/O-mapping code path).
- * This only makes sense as HYPERVISOR_mmu_update()'s and
- * HYPERVISOR_update_va_mapping_otherdomain()'s "foreigndom" argument. For
- * HYPERVISOR_mmu_update() context it can be specified by any calling domain,
- * otherwise it's only permitted if the caller is privileged.
+ * This only makes sense in MMUEXT_SET_FOREIGNDOM, but in that context can
+ * be specified by any calling domain.
  */
 #define DOMID_IO             xen_mk_uint(0x7FF1)
 
 /*
  * DOMID_XEN is used to allow privileged domains to map restricted parts of
  * Xen's heap space (e.g., the machine_to_phys table).
- * This only makes sense as
- * - HYPERVISOR_mmu_update()'s, HYPERVISOR_mmuext_op()'s, or
- *   HYPERVISOR_update_va_mapping_otherdomain()'s "foreigndom" argument,
- * - with XENMAPSPACE_gmfn_foreign,
- * and is only permitted if the caller is privileged.
+ * This only makes sense in MMUEXT_SET_FOREIGNDOM, and is only permitted if
+ * the caller is privileged.
  */
 #define DOMID_XEN            xen_mk_uint(0x7FF2)
 
@@ -776,7 +764,7 @@ typedef struct shared_info shared_info_t;
  *         (may be omitted)
  *      c. list of allocated page frames [mfn_list, nr_pages]
  *         (unless relocated due to XEN_ELFNOTE_INIT_P2M)
- *      d. start_info_t structure        [register rSI (x86)]
+ *      d. start_info_t structure        [register ESI (x86)]
  *         in case of dom0 this page contains the console info, too
  *      e. unless dom0: xenstore ring page
  *      f. unless dom0: console ring page
@@ -922,12 +910,6 @@ typedef struct dom0_vga_console_info {
             uint32_t gbl_caps;
             /* Mode attributes (offset 0x0, VESA command 0x4f01). */
             uint16_t mode_attrs;
-            uint16_t pad;
-#endif
-#if __XEN_INTERFACE_VERSION__ >= 0x00040901 && \
-    __XEN_INTERFACE_VERSION__ != 0x00040a00
-            /* high 32 bits of lfb_base */
-            uint32_t ext_lfb_base;
 #endif
         } vesa_lfb;
     } u;
@@ -941,37 +923,6 @@ __DEFINE_XEN_GUEST_HANDLE(uint8,  uint8_t);
 __DEFINE_XEN_GUEST_HANDLE(uint16, uint16_t);
 __DEFINE_XEN_GUEST_HANDLE(uint32, uint32_t);
 __DEFINE_XEN_GUEST_HANDLE(uint64, uint64_t);
-
-typedef struct {
-    uint8_t a[16];
-} xen_uuid_t;
-
-/*
- * XEN_DEFINE_UUID(0x00112233, 0x4455, 0x6677, 0x8899,
- *                 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff)
- * will construct UUID 00112233-4455-6677-8899-aabbccddeeff presented as
- * {0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
- * 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
- *
- * NB: This is compatible with Linux kernel and with libuuid, but it is not
- * compatible with Microsoft, as they use mixed-endian encoding (some
- * components are little-endian, some are big-endian).
- */
-#define XEN_DEFINE_UUID_(a, b, c, d, e1, e2, e3, e4, e5, e6)            \
-    {{((a) >> 24) & 0xFF, ((a) >> 16) & 0xFF,                           \
-      ((a) >>  8) & 0xFF, ((a) >>  0) & 0xFF,                           \
-      ((b) >>  8) & 0xFF, ((b) >>  0) & 0xFF,                           \
-      ((c) >>  8) & 0xFF, ((c) >>  0) & 0xFF,                           \
-      ((d) >>  8) & 0xFF, ((d) >>  0) & 0xFF,                           \
-                e1, e2, e3, e4, e5, e6}}
-
-#if defined(__STDC_VERSION__) ? __STDC_VERSION__ >= 199901L : defined(__GNUC__)
-#define XEN_DEFINE_UUID(a, b, c, d, e1, e2, e3, e4, e5, e6)             \
-    ((xen_uuid_t)XEN_DEFINE_UUID_(a, b, c, d, e1, e2, e3, e4, e5, e6))
-#else
-#define XEN_DEFINE_UUID(a, b, c, d, e1, e2, e3, e4, e5, e6)             \
-    XEN_DEFINE_UUID_(a, b, c, d, e1, e2, e3, e4, e5, e6)
-#endif /* __STDC_VERSION__ / __GNUC__ */
 
 #endif /* !__ASSEMBLY__ */
 

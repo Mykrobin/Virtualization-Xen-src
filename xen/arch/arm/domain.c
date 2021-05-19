@@ -9,9 +9,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#include <xen/bitops.h>
-#include <xen/errno.h>
-#include <xen/grant_table.h>
+#include <xen/config.h>
 #include <xen/hypercall.h>
 #include <xen/init.h>
 #include <xen/lib.h>
@@ -19,67 +17,45 @@
 #include <xen/sched.h>
 #include <xen/softirq.h>
 #include <xen/wait.h>
+#include <xen/errno.h>
+#include <xen/bitops.h>
+#include <xen/grant_table.h>
 
-#include <asm/alternative.h>
-#include <asm/cpufeature.h>
 #include <asm/current.h>
 #include <asm/event.h>
-#include <asm/gic.h>
 #include <asm/guest_access.h>
 #include <asm/guest_atomics.h>
-#include <asm/irq.h>
-#include <asm/p2m.h>
-#include <asm/platform.h>
-#include <asm/procinfo.h>
 #include <asm/regs.h>
+#include <asm/p2m.h>
+#include <asm/irq.h>
+#include <asm/cpufeature.h>
 #include <asm/vfp.h>
-#include <asm/vgic.h>
-#include <asm/vtimer.h>
+#include <asm/procinfo.h>
 
+#include <asm/gic.h>
+#include <asm/vgic.h>
+#include <asm/platform.h>
+#include "vtimer.h"
 #include "vuart.h"
 
 DEFINE_PER_CPU(struct vcpu *, curr_vcpu);
 
-static void do_idle(void)
-{
-    unsigned int cpu = smp_processor_id();
-
-    sched_tick_suspend();
-    /* sched_tick_suspend() can raise TIMER_SOFTIRQ. Process it now. */
-    process_pending_softirqs();
-
-    local_irq_disable();
-    if ( cpu_is_haltable(cpu) )
-    {
-        dsb(sy);
-        wfi();
-    }
-    local_irq_enable();
-
-    sched_tick_resume();
-}
-
 void idle_loop(void)
 {
-    unsigned int cpu = smp_processor_id();
-
     for ( ; ; )
     {
-        if ( cpu_is_offline(cpu) )
+        if ( cpu_is_offline(smp_processor_id()) )
             stop_cpu();
 
-        /* Are we here for running vcpu context tasklets, or for idling? */
-        if ( unlikely(tasklet_work_to_do(cpu)) )
-            do_tasklet();
-        /*
-         * Test softirqs twice --- first to see if should even try scrubbing
-         * and then, after it is done, whether softirqs became pending
-         * while we were scrubbing.
-         */
-        else if ( !softirq_pending(cpu) && !scrub_free_pages() &&
-                  !softirq_pending(cpu) )
-            do_idle();
+        local_irq_disable();
+        if ( cpu_is_haltable(smp_processor_id()) )
+        {
+            dsb(sy);
+            wfi();
+        }
+        local_irq_enable();
 
+        do_tasklet();
         do_softirq();
         /*
          * We MUST be last (or before dsb, wfi). Otherwise after we get the
@@ -173,8 +149,6 @@ static void ctxt_switch_from(struct vcpu *p)
 
 static void ctxt_switch_to(struct vcpu *n)
 {
-    uint32_t vpidr;
-
     /* When the idle VCPU is running, Xen will always stay in hypervisor
      * mode. Therefore we don't need to restore the context of an idle VCPU.
      */
@@ -183,8 +157,7 @@ static void ctxt_switch_to(struct vcpu *n)
 
     p2m_restore_state(n);
 
-    vpidr = READ_SYSREG32(MIDR_EL1);
-    WRITE_SYSREG32(vpidr, VPIDR_EL2);
+    WRITE_SYSREG32(n->domain->arch.vpidr, VPIDR_EL2);
     WRITE_SYSREG(n->arch.vmpidr, VMPIDR_EL2);
 
     /* VGIC */
@@ -274,31 +247,28 @@ static void ctxt_switch_to(struct vcpu *n)
 static void update_runstate_area(struct vcpu *v)
 {
     void __user *guest_handle = NULL;
-    struct vcpu_runstate_info runstate;
 
     if ( guest_handle_is_null(runstate_guest(v)) )
         return;
-
-    memcpy(&runstate, &v->runstate, sizeof(runstate));
 
     if ( VM_ASSIST(v->domain, runstate_update_flag) )
     {
         guest_handle = &v->runstate_guest.p->state_entry_time + 1;
         guest_handle--;
-        runstate.state_entry_time |= XEN_RUNSTATE_UPDATE;
+        v->runstate.state_entry_time |= XEN_RUNSTATE_UPDATE;
         __raw_copy_to_guest(guest_handle,
-                            (void *)(&runstate.state_entry_time + 1) - 1, 1);
+                            (void *)(&v->runstate.state_entry_time + 1) - 1, 1);
         smp_wmb();
     }
 
-    __copy_to_guest(runstate_guest(v), &runstate, 1);
+    __copy_to_guest(runstate_guest(v), &v->runstate, 1);
 
     if ( guest_handle )
     {
-        runstate.state_entry_time &= ~XEN_RUNSTATE_UPDATE;
+        v->runstate.state_entry_time &= ~XEN_RUNSTATE_UPDATE;
         smp_wmb();
         __raw_copy_to_guest(guest_handle,
-                            (void *)(&runstate.state_entry_time + 1) - 1, 1);
+                            (void *)(&v->runstate.state_entry_time + 1) - 1, 1);
     }
 }
 
@@ -321,9 +291,6 @@ static void schedule_tail(struct vcpu *prev)
 
 static void continue_new_vcpu(struct vcpu *prev)
 {
-    current->arch.actlr = READ_SYSREG32(ACTLR_EL1);
-    processor_vcpu_initialise(current);
-
     schedule_tail(prev);
 
     if ( is_idle_vcpu(current) )
@@ -340,23 +307,12 @@ void context_switch(struct vcpu *prev, struct vcpu *next)
 {
     ASSERT(local_irq_is_enabled());
     ASSERT(prev != next);
-    ASSERT(!vcpu_cpu_dirty(next));
+    ASSERT(cpumask_empty(next->vcpu_dirty_cpumask));
 
     if ( prev != next )
         update_runstate_area(prev);
 
     local_irq_disable();
-
-    /*
-     * If the serrors_op is "FORWARD", we have to prevent forwarding
-     * SError to wrong vCPU. So before context switch, we have to use
-     * the SYNCRONIZE_SERROR to guarantee that the pending SError would
-     * be caught by current vCPU.
-     *
-     * The SKIP_CTXT_SWITCH_SERROR_SYNC will be set to cpu_hwcaps when the
-     * serrors_op is NOT "FORWARD".
-     */
-    SYNCHRONIZE_SERROR(SKIP_CTXT_SWITCH_SERROR_SYNC);
 
     set_current(next);
 
@@ -393,6 +349,21 @@ void sync_vcpu_execstate(struct vcpu *v)
     __arg;                                                                  \
 })
 
+void hypercall_cancel_continuation(void)
+{
+    struct cpu_user_regs *regs = guest_cpu_user_regs();
+    struct mc_state *mcs = &current->mc_state;
+
+    if ( mcs->flags & MCSF_in_multicall )
+    {
+        __clear_bit(_MCSF_call_preempted, &mcs->flags);
+    }
+    else
+    {
+        regs->pc += 4; /* undo re-execute 'hvc #XEN_HYPERCALL_TAG' */
+    }
+}
+
 unsigned long hypercall_create_continuation(
     unsigned int op, const char *format, ...)
 {
@@ -403,12 +374,12 @@ unsigned long hypercall_create_continuation(
     unsigned int i;
     va_list args;
 
-    current->hcall_preempted = true;
-
     va_start(args, format);
 
     if ( mcs->flags & MCSF_in_multicall )
     {
+        __set_bit(_MCSF_call_preempted, &mcs->flags);
+
         for ( i = 0; *p != '\0'; i++ )
             mcs->call.args[i] = NEXT_ARG(p, args);
 
@@ -418,6 +389,9 @@ unsigned long hypercall_create_continuation(
     else
     {
         regs = guest_cpu_user_regs();
+
+        /* Ensure the hypercall trap instruction is re-executed. */
+        regs->pc -= 4;  /* re-execute 'hvc #XEN_HYPERCALL_TAG' */
 
 #ifdef CONFIG_ARM_64
         if ( !is_32bit_domain(current->domain) )
@@ -472,7 +446,6 @@ unsigned long hypercall_create_continuation(
     return rc;
 
  bad_fmt:
-    va_end(args);
     gprintk(XENLOG_ERR, "Bad hypercall continuation format '%c'\n", *p);
     ASSERT_UNREACHABLE();
     domain_crash(current->domain);
@@ -487,8 +460,8 @@ void startup_cpu_idle_loop(void)
 
     ASSERT(is_idle_vcpu(v));
     /* TODO
-       cpumask_set_cpu(v->processor, v->domain->dirty_cpumask);
-       v->dirty_cpu = v->processor;
+       cpumask_set_cpu(v->processor, v->domain->domain_dirty_cpumask);
+       cpumask_set_cpu(v->processor, v->vcpu_dirty_cpumask);
     */
 
     reset_stack_and_jump(idle_loop);
@@ -497,17 +470,37 @@ void startup_cpu_idle_loop(void)
 struct domain *alloc_domain_struct(void)
 {
     struct domain *d;
+    unsigned int i, max_status_frames;
+
     BUILD_BUG_ON(sizeof(*d) > PAGE_SIZE);
     d = alloc_xenheap_pages(0, 0);
     if ( d == NULL )
         return NULL;
 
     clear_page(d);
+
+    d->arch.grant_shared_gfn = xmalloc_array(gfn_t, max_grant_frames);
+    max_status_frames = grant_to_status_frames(max_grant_frames);
+    d->arch.grant_status_gfn = xmalloc_array(gfn_t, max_status_frames);
+    if ( !d->arch.grant_shared_gfn || !d->arch.grant_status_gfn )
+    {
+        free_domain_struct(d);
+        return NULL;
+    }
+
+    for ( i = 0; i < max_grant_frames; ++i )
+        d->arch.grant_shared_gfn[i] = INVALID_GFN;
+
+    for ( i = 0; i < max_status_frames; ++i )
+        d->arch.grant_status_gfn[i] = INVALID_GFN;
+
     return d;
 }
 
 void free_domain_struct(struct domain *d)
 {
+    xfree(d->arch.grant_shared_gfn);
+    xfree(d->arch.grant_status_gfn);
     free_xenheap_page(d);
 }
 
@@ -516,36 +509,19 @@ void dump_pageframe_info(struct domain *d)
 
 }
 
-/*
- * The new VGIC has a bigger per-IRQ structure, so we need more than one
- * page on ARM64. Cowardly increase the limit in this case.
- */
-#if defined(CONFIG_NEW_VGIC) && defined(CONFIG_ARM_64)
-#define MAX_PAGES_PER_VCPU  2
-#else
-#define MAX_PAGES_PER_VCPU  1
-#endif
-
 struct vcpu *alloc_vcpu_struct(void)
 {
     struct vcpu *v;
-
-    BUILD_BUG_ON(sizeof(*v) > MAX_PAGES_PER_VCPU * PAGE_SIZE);
-    v = alloc_xenheap_pages(get_order_from_bytes(sizeof(*v)), 0);
+    BUILD_BUG_ON(sizeof(*v) > PAGE_SIZE);
+    v = alloc_xenheap_pages(0, 0);
     if ( v != NULL )
-    {
-        unsigned int i;
-
-        for ( i = 0; i < DIV_ROUND_UP(sizeof(*v), PAGE_SIZE); i++ )
-            clear_page((void *)v + i * PAGE_SIZE);
-    }
-
+        clear_page(v);
     return v;
 }
 
 void free_vcpu_struct(struct vcpu *v)
 {
-    free_xenheap_pages(v, get_order_from_bytes(sizeof(*v)));
+    free_xenheap_page(v);
 }
 
 int vcpu_initialise(struct vcpu *v)
@@ -574,7 +550,9 @@ int vcpu_initialise(struct vcpu *v)
 
     v->arch.vmpidr = MPIDR_SMP | vcpuid_to_vaffinity(v->vcpu_id);
 
-    v->arch.hcr_el2 = get_default_hcr_flags();
+    v->arch.actlr = READ_SYSREG32(ACTLR_EL1);
+
+    processor_vcpu_initialise(v);
 
     if ( (rc = vcpu_vgic_init(v)) != 0 )
         goto fail;
@@ -596,13 +574,8 @@ void vcpu_destroy(struct vcpu *v)
     free_xenheap_pages(v->arch.stack, STACK_ORDER);
 }
 
-void vcpu_switch_to_aarch64_mode(struct vcpu *v)
-{
-    v->arch.hcr_el2 |= HCR_RW;
-}
-
-int arch_domain_create(struct domain *d,
-                       struct xen_domctl_createdomain *config)
+int arch_domain_create(struct domain *d, unsigned int domcr_flags,
+                       struct xen_arch_domainconfig *config)
 {
     int rc, count = 0;
 
@@ -626,21 +599,25 @@ int arch_domain_create(struct domain *d,
     if ( (d->shared_info = alloc_xenheap_pages(0, 0)) == NULL )
         goto fail;
 
-    clear_page(d->shared_info);
-    share_xen_page_with_guest(virt_to_page(d->shared_info), d, SHARE_rw);
+    /* Default the virtual ID to match the physical */
+    d->arch.vpidr = boot_cpu_data.midr.bits;
 
-    switch ( config->arch.gic_version )
+    clear_page(d->shared_info);
+    share_xen_page_with_guest(
+        virt_to_page(d->shared_info), d, XENSHARE_writable);
+
+    switch ( config->gic_version )
     {
     case XEN_DOMCTL_CONFIG_GIC_NATIVE:
         switch ( gic_hw_version () )
         {
         case GIC_V2:
-            config->arch.gic_version = XEN_DOMCTL_CONFIG_GIC_V2;
+            config->gic_version = XEN_DOMCTL_CONFIG_GIC_V2;
             d->arch.vgic.version = GIC_V2;
             break;
 
         case GIC_V3:
-            config->arch.gic_version = XEN_DOMCTL_CONFIG_GIC_V3;
+            config->gic_version = XEN_DOMCTL_CONFIG_GIC_V3;
             d->arch.vgic.version = GIC_V3;
             break;
 
@@ -668,10 +645,10 @@ int arch_domain_create(struct domain *d,
     if ( (rc = domain_io_init(d, count + MAX_IO_HANDLER)) != 0 )
         goto fail;
 
-    if ( (rc = domain_vgic_init(d, config->arch.nr_spis)) != 0 )
+    if ( (rc = domain_vgic_init(d, config->nr_spis)) != 0 )
         goto fail;
 
-    if ( (rc = domain_vtimer_init(d, &config->arch)) != 0 )
+    if ( (rc = domain_vtimer_init(d, config)) != 0 )
         goto fail;
 
     update_domain_wallclock_time(d);
@@ -898,12 +875,6 @@ int domain_relinquish_resources(struct domain *d)
         if ( ret )
             return ret;
 
-        /*
-         * Release the resources allocated for vpl011 which were
-         * allocated via a DOMCTL call XEN_DOMCTL_vuart_op.
-         */
-        domain_vpl011_deinit(d);
-
         d->arch.relmem = RELMEM_xen;
         /* Fallthrough */
 
@@ -967,7 +938,6 @@ long arch_do_vcpu_op(int cmd, struct vcpu *v, XEN_GUEST_HANDLE_PARAM(void) arg)
 void arch_dump_vcpu_info(struct vcpu *v)
 {
     gic_dump_info(v);
-    gic_dump_vgic_info(v);
 }
 
 void vcpu_mark_events_pending(struct vcpu *v)
@@ -978,21 +948,14 @@ void vcpu_mark_events_pending(struct vcpu *v)
     if ( already_pending )
         return;
 
-    vgic_inject_irq(v->domain, v, v->domain->arch.evtchn_irq, true);
-}
-
-void vcpu_update_evtchn_irq(struct vcpu *v)
-{
-    bool pending = vcpu_info(v, evtchn_upcall_pending);
-
-    vgic_inject_irq(v->domain, v, v->domain->arch.evtchn_irq, pending);
+    vgic_vcpu_inject_irq(v, v->domain->arch.evtchn_irq);
 }
 
 /* The ARM spec declares that even if local irqs are masked in
  * the CPSR register, an irq should wake up a cpu from WFI anyway.
  * For this reason we need to check for irqs that need delivery,
  * ignoring the CPSR register, *after* calling SCHEDOP_block to
- * avoid races with vgic_inject_irq.
+ * avoid races with vgic_vcpu_inject_irq.
  */
 void vcpu_block_unless_event_pending(struct vcpu *v)
 {
@@ -1001,16 +964,18 @@ void vcpu_block_unless_event_pending(struct vcpu *v)
         vcpu_unblock(current);
 }
 
-void vcpu_kick(struct vcpu *vcpu)
+unsigned int domain_max_vcpus(const struct domain *d)
 {
-    bool running = vcpu->is_running;
-
-    vcpu_unblock(vcpu);
-    if ( running && vcpu != current )
-    {
-        perfc_incr(vcpu_kick);
-        smp_send_event_check_mask(cpumask_of(vcpu->processor));
-    }
+    /*
+     * Since evtchn_init would call domain_max_vcpus for poll_mask
+     * allocation when the vgic_ops haven't been initialised yet,
+     * we return MAX_VIRT_CPUS if d->arch.vgic.handler is null.
+     */
+    if ( !d->arch.vgic.handler )
+        return MAX_VIRT_CPUS;
+    else
+        return min_t(unsigned int, MAX_VIRT_CPUS,
+                     d->arch.vgic.handler->max_vcpus);
 }
 
 /*

@@ -89,143 +89,28 @@ struct buffer {
 	size_t max_capacity;
 };
 
-struct console {
-	char *ttyname;
+struct domain {
+	int domid;
 	int master_fd;
 	int master_pollfd_idx;
 	int slave_fd;
 	int log_fd;
-	struct buffer buffer;
-	char *xspath;
-	char *log_suffix;
-	int ring_ref;
-	xenevtchn_handle *xce_handle;
-	int xce_pollfd_idx;
-	int event_count;
-	long long next_period;
-	xenevtchn_port_or_error_t local_port;
-	xenevtchn_port_or_error_t remote_port;
-	struct xencons_interface *interface;
-	struct domain *d;
-	bool optional;
-	bool use_gnttab;
-};
-
-struct console_type {
-	char *xsname;
-	char *ttyname;
-	char *log_suffix;
-	bool optional;
-	bool use_gnttab;
-};
-
-static struct console_type console_type[] = {
-	{
-		.xsname = "/console",
-		.ttyname = "tty",
-		.log_suffix = "",
-		.optional = false,
-		.use_gnttab = true,
-	},
-#if defined(CONFIG_ARM)
-	{
-		.xsname = "/vuart/0",
-		.ttyname = "tty",
-		.log_suffix = "-vuart0",
-		.optional = true,
-		.use_gnttab = false,
-	},
-#endif
-};
-
-#define NUM_CONSOLE_TYPE (sizeof(console_type)/sizeof(struct console_type))
-
-struct domain {
-	int domid;
 	bool is_dead;
 	unsigned last_seen;
+	struct buffer buffer;
 	struct domain *next;
-	struct console console[NUM_CONSOLE_TYPE];
+	char *conspath;
+	int ring_ref;
+	xenevtchn_port_or_error_t local_port;
+	xenevtchn_port_or_error_t remote_port;
+	xenevtchn_handle *xce_handle;
+	int xce_pollfd_idx;
+	struct xencons_interface *interface;
+	int event_count;
+	long long next_period;
 };
 
 static struct domain *dom_head;
-
-typedef void (*VOID_ITER_FUNC_ARG1)(struct console *);
-typedef int (*INT_ITER_FUNC_ARG1)(struct console *);
-typedef void (*VOID_ITER_FUNC_ARG2)(struct console *,  void *);
-typedef int (*INT_ITER_FUNC_ARG3)(struct console *,
-				  struct domain *dom, void **);
-
-static inline bool console_enabled(struct console *con)
-{
-	return con->local_port != -1;
-}
-
-static inline void console_iter_void_arg1(struct domain *d,
-					  VOID_ITER_FUNC_ARG1 iter_func)
-{
-	unsigned int i;
-	struct console *con = &d->console[0];
-
-	for (i = 0; i < NUM_CONSOLE_TYPE; i++, con++) {
-		iter_func(con);
-	}
-}
-
-static inline void console_iter_void_arg2(struct domain *d,
-					  VOID_ITER_FUNC_ARG2 iter_func,
-					  void *iter_data)
-{
-	unsigned int i;
-	struct console *con = &d->console[0];
-
-	for (i = 0; i < NUM_CONSOLE_TYPE; i++, con++) {
-		iter_func(con, iter_data);
-	}
-}
-
-static inline int console_iter_int_arg1(struct domain *d,
-					INT_ITER_FUNC_ARG1 iter_func)
-{
-	unsigned int i;
-	int ret;
-	struct console *con = &d->console[0];
-
-	for (i = 0; i < NUM_CONSOLE_TYPE; i++, con++) {
-		/*
-		 * Zero return values means success.
-		 *
-		 * Non-zero return value indicates an error in which
-		 * case terminate the loop.
-		 */
-		ret = iter_func(con);
-		if (ret)
-			break;
-	}
-	return ret;
-}
-
-static inline int console_iter_int_arg3(struct domain *d,
-					INT_ITER_FUNC_ARG3 iter_func,
-					void **iter_data)
-{
-	unsigned int i;
-	int ret;
-	struct console *con = &d->console[0];
-
-	for (i = 0; i < NUM_CONSOLE_TYPE; i++, con++) {
-		/*
-		 * Zero return values means success.
-		 *
-		 * Non-zero return value indicates an error in which
-		 * case terminate the loop.
-		 */
-		ret = iter_func(con, d, iter_data);
-		if (ret)
-			break;
-	}
-	return ret;
-}
 
 static int write_all(int fd, const char* buf, size_t len)
 {
@@ -273,22 +158,11 @@ static int write_with_timestamp(int fd, const char *data, size_t sz,
 	return 0;
 }
 
-static inline bool buffer_available(struct console *con)
+static void buffer_append(struct domain *dom)
 {
-	if (discard_overflowed_data ||
-	    !con->buffer.max_capacity ||
-	    con->buffer.size < con->buffer.max_capacity)
-		return true;
-	else
-		return false;
-}
-
-static void buffer_append(struct console *con)
-{
-	struct buffer *buffer = &con->buffer;
-	struct domain *dom = con->d;
+	struct buffer *buffer = &dom->buffer;
 	XENCONS_RING_IDX cons, prod, size;
-	struct xencons_interface *intf = con->interface;
+	struct xencons_interface *intf = dom->interface;
 
 	cons = intf->out_cons;
 	prod = intf->out_prod;
@@ -313,22 +187,22 @@ static void buffer_append(struct console *con)
 
 	xen_mb();
 	intf->out_cons = cons;
-	xenevtchn_notify(con->xce_handle, con->local_port);
+	xenevtchn_notify(dom->xce_handle, dom->local_port);
 
 	/* Get the data to the logfile as early as possible because if
 	 * no one is listening on the console pty then it will fill up
 	 * and handle_tty_write will stop being called.
 	 */
-	if (con->log_fd != -1) {
+	if (dom->log_fd != -1) {
 		int logret;
 		if (log_time_guest) {
 			logret = write_with_timestamp(
-				con->log_fd,
+				dom->log_fd,
 				buffer->data + buffer->size - size,
 				size, &log_time_guest_needts);
 		} else {
 			logret = write_all(
-				con->log_fd,
+				dom->log_fd,
 				buffer->data + buffer->size - size,
 				size);
 		}
@@ -416,13 +290,12 @@ static int create_hv_log(void)
 	return fd;
 }
 
-static int create_console_log(struct console *con)
+static int create_domain_log(struct domain *dom)
 {
 	char logfile[PATH_MAX];
 	char *namepath, *data, *s;
 	int fd;
 	unsigned int len;
-	struct domain *dom = con->d;
 
 	namepath = xs_get_domain_path(xs, dom->domid);
 	s = realloc(namepath, strlen(namepath) + 6);
@@ -441,9 +314,7 @@ static int create_console_log(struct console *con)
 		return -1;
 	}
 
-	snprintf(logfile, PATH_MAX-1, "%s/guest-%s%s.log",
-		 log_dir, data, con->log_suffix);
-
+	snprintf(logfile, PATH_MAX-1, "%s/guest-%s.log", log_dir, data);
 	free(data);
 	logfile[PATH_MAX-1] = '\0';
 
@@ -465,16 +336,16 @@ static int create_console_log(struct console *con)
 	return fd;
 }
 
-static void console_close_tty(struct console *con)
+static void domain_close_tty(struct domain *dom)
 {
-	if (con->master_fd != -1) {
-		close(con->master_fd);
-		con->master_fd = -1;
+	if (dom->master_fd != -1) {
+		close(dom->master_fd);
+		dom->master_fd = -1;
 	}
 
-	if (con->slave_fd != -1) {
-		close(con->slave_fd);
-		con->slave_fd = -1;
+	if (dom->slave_fd != -1) {
+		close(dom->slave_fd);
+		dom->slave_fd = -1;
 	}
 }
 
@@ -538,7 +409,7 @@ void cfmakeraw(struct termios *termios_p)
 }
 #endif /* __sun__ */
 
-static int console_create_tty(struct console *con)
+static int domain_create_tty(struct domain *dom)
 {
 	const char *slave;
 	char *path;
@@ -547,12 +418,11 @@ static int console_create_tty(struct console *con)
 	char *data;
 	unsigned int len;
 	struct termios term;
-	struct domain *dom = con->d;
 
-	assert(con->slave_fd == -1);
-	assert(con->master_fd == -1);
+	assert(dom->slave_fd == -1);
+	assert(dom->master_fd == -1);
 
-	if (openpty(&con->master_fd, &con->slave_fd, NULL, NULL, NULL) < 0) {
+	if (openpty(&dom->master_fd, &dom->slave_fd, NULL, NULL, NULL) < 0) {
 		err = errno;
 		dolog(LOG_ERR, "Failed to create tty for domain-%d "
 		      "(errno = %i, %s)",
@@ -560,7 +430,7 @@ static int console_create_tty(struct console *con)
 		return 0;
 	}
 
-	if (tcgetattr(con->slave_fd, &term) < 0) {
+	if (tcgetattr(dom->slave_fd, &term) < 0) {
 		err = errno;
 		dolog(LOG_ERR, "Failed to get tty attributes for domain-%d "
 			"(errno = %i, %s)",
@@ -568,7 +438,7 @@ static int console_create_tty(struct console *con)
 		goto out;
 	}
 	cfmakeraw(&term);
-	if (tcsetattr(con->slave_fd, TCSANOW, &term) < 0) {
+	if (tcsetattr(dom->slave_fd, TCSANOW, &term) < 0) {
 		err = errno;
 		dolog(LOG_ERR, "Failed to set tty attributes for domain-%d "
 			"(errno = %i, %s)",
@@ -576,7 +446,7 @@ static int console_create_tty(struct console *con)
 		goto out;
 	}
 
-	if ((slave = ptsname(con->master_fd)) == NULL) {
+	if ((slave = ptsname(dom->master_fd)) == NULL) {
 		err = errno;
 		dolog(LOG_ERR, "Failed to get slave name for domain-%d "
 		      "(errno = %i, %s)",
@@ -584,18 +454,18 @@ static int console_create_tty(struct console *con)
 		goto out;
 	}
 
-	success = asprintf(&path, "%s/limit", con->xspath) !=
+	success = asprintf(&path, "%s/limit", dom->conspath) !=
 		-1;
 	if (!success)
 		goto out;
 	data = xs_read(xs, XBT_NULL, path, &len);
 	if (data) {
-		con->buffer.max_capacity = strtoul(data, 0, 0);
+		dom->buffer.max_capacity = strtoul(data, 0, 0);
 		free(data);
 	}
 	free(path);
 
-	success = (asprintf(&path, "%s/%s", con->xspath, con->ttyname) != -1);
+	success = (asprintf(&path, "%s/tty", dom->conspath) != -1);
 	if (!success)
 		goto out;
 	success = xs_write(xs, XBT_NULL, path, slave, strlen(slave));
@@ -603,12 +473,12 @@ static int console_create_tty(struct console *con)
 	if (!success)
 		goto out;
 
-	if (fcntl(con->master_fd, F_SETFL, O_NONBLOCK) == -1)
+	if (fcntl(dom->master_fd, F_SETFL, O_NONBLOCK) == -1)
 		goto out;
 
 	return 1;
 out:
-	console_close_tty(con);
+	domain_close_tty(dom);
 	return 0;
 }
  
@@ -647,41 +517,31 @@ static int xs_gather(struct xs_handle *xs, const char *dir, ...)
 	return ret;
 }
 
-static void console_unmap_interface(struct console *con)
+static void domain_unmap_interface(struct domain *dom)
 {
-	if (con->interface == NULL)
+	if (dom->interface == NULL)
 		return;
-	if (xgt_handle && con->ring_ref == -1)
-		xengnttab_unmap(xgt_handle, con->interface, 1);
+	if (xgt_handle && dom->ring_ref == -1)
+		xengnttab_unmap(xgt_handle, dom->interface, 1);
 	else
-		munmap(con->interface, XC_PAGE_SIZE);
-	con->interface = NULL;
-	con->ring_ref = -1;
+		munmap(dom->interface, XC_PAGE_SIZE);
+	dom->interface = NULL;
+	dom->ring_ref = -1;
 }
  
-static int console_create_ring(struct console *con)
+static int domain_create_ring(struct domain *dom)
 {
 	int err, remote_port, ring_ref, rc;
 	char *type, path[PATH_MAX];
-	struct domain *dom = con->d;
 
-	err = xs_gather(xs, con->xspath,
+	err = xs_gather(xs, dom->conspath,
 			"ring-ref", "%u", &ring_ref,
 			"port", "%i", &remote_port,
 			NULL);
-
-	if (err) {
-		/*
-		 * This is a normal condition for optional consoles: they might not be
-		 * present on xenstore at all. In that case, just return without error.
-		*/
-		if (con->optional)
-			err = 0;
-
+	if (err)
 		goto out;
-	}
 
-	snprintf(path, sizeof(path), "%s/type", con->xspath);
+	snprintf(path, sizeof(path), "%s/type", dom->conspath);
 	type = xs_read(xs, XBT_NULL, path, NULL);
 	if (type && strcmp(type, "xenconsoled") != 0) {
 		free(type);
@@ -690,77 +550,77 @@ static int console_create_ring(struct console *con)
 	free(type);
 
 	/* If using ring_ref and it has changed, remap */
-	if (ring_ref != con->ring_ref && con->ring_ref != -1)
-		console_unmap_interface(con);
+	if (ring_ref != dom->ring_ref && dom->ring_ref != -1)
+		domain_unmap_interface(dom);
 
-	if (!con->interface && xgt_handle && con->use_gnttab) {
+	if (!dom->interface && xgt_handle) {
 		/* Prefer using grant table */
-		con->interface = xengnttab_map_grant_ref(xgt_handle,
+		dom->interface = xengnttab_map_grant_ref(xgt_handle,
 			dom->domid, GNTTAB_RESERVED_CONSOLE,
 			PROT_READ|PROT_WRITE);
-		con->ring_ref = -1;
+		dom->ring_ref = -1;
 	}
-	if (!con->interface) {
+	if (!dom->interface) {
 		/* Fall back to xc_map_foreign_range */
-		con->interface = xc_map_foreign_range(
+		dom->interface = xc_map_foreign_range(
 			xc, dom->domid, XC_PAGE_SIZE,
 			PROT_READ|PROT_WRITE,
 			(unsigned long)ring_ref);
-		if (con->interface == NULL) {
+		if (dom->interface == NULL) {
 			err = EINVAL;
 			goto out;
 		}
-		con->ring_ref = ring_ref;
+		dom->ring_ref = ring_ref;
 	}
 
 	/* Go no further if port has not changed and we are still bound. */
-	if (remote_port == con->remote_port) {
+	if (remote_port == dom->remote_port) {
 		xc_evtchn_status_t status = {
 			.dom = DOMID_SELF,
-			.port = con->local_port };
+			.port = dom->local_port };
 		if ((xc_evtchn_status(xc, &status) == 0) &&
 		    (status.status == EVTCHNSTAT_interdomain))
 			goto out;
 	}
 
-	con->local_port = -1;
-	con->remote_port = -1;
-	if (con->xce_handle != NULL)
-		xenevtchn_close(con->xce_handle);
+	dom->local_port = -1;
+	dom->remote_port = -1;
+	if (dom->xce_handle != NULL)
+		xenevtchn_close(dom->xce_handle);
 
 	/* Opening evtchn independently for each console is a bit
 	 * wasteful, but that's how the code is structured... */
-	con->xce_handle = xenevtchn_open(NULL, 0);
-	if (con->xce_handle == NULL) {
+	dom->xce_handle = xenevtchn_open(NULL, 0);
+	if (dom->xce_handle == NULL) {
 		err = errno;
 		goto out;
 	}
  
-	rc = xenevtchn_bind_interdomain(con->xce_handle,
+	rc = xenevtchn_bind_interdomain(dom->xce_handle,
 		dom->domid, remote_port);
 
 	if (rc == -1) {
 		err = errno;
-		xenevtchn_close(con->xce_handle);
-		con->xce_handle = NULL;
+		xenevtchn_close(dom->xce_handle);
+		dom->xce_handle = NULL;
 		goto out;
 	}
-	con->local_port = rc;
-	con->remote_port = remote_port;
+	dom->local_port = rc;
+	dom->remote_port = remote_port;
 
-	if (con->master_fd == -1) {
-		if (!console_create_tty(con)) {
+	if (dom->master_fd == -1) {
+		if (!domain_create_tty(dom)) {
 			err = errno;
-			xenevtchn_close(con->xce_handle);
-			con->xce_handle = NULL;
-			con->local_port = -1;
-			con->remote_port = -1;
+			xenevtchn_close(dom->xce_handle);
+			dom->xce_handle = NULL;
+			dom->local_port = -1;
+			dom->remote_port = -1;
 			goto out;
 		}
 	}
 
-	if (log_guest && (con->log_fd == -1))
-		con->log_fd = create_console_log(con);
+	if (log_guest && (dom->log_fd == -1))
+		dom->log_fd = create_domain_log(dom);
 
  out:
 	return err;
@@ -770,76 +630,33 @@ static bool watch_domain(struct domain *dom, bool watch)
 {
 	char domid_str[3 + MAX_STRLEN(dom->domid)];
 	bool success;
-	struct console *con = &dom->console[0];
 
 	snprintf(domid_str, sizeof(domid_str), "dom%u", dom->domid);
 	if (watch) {
-		success = xs_watch(xs, con->xspath, domid_str);
+		success = xs_watch(xs, dom->conspath, domid_str);
 		if (success)
-			console_iter_int_arg1(dom, console_create_ring);
+			domain_create_ring(dom);
 		else
-			xs_unwatch(xs, con->xspath, domid_str);
+			xs_unwatch(xs, dom->conspath, domid_str);
 	} else {
-		success = xs_unwatch(xs, con->xspath, domid_str);
+		success = xs_unwatch(xs, dom->conspath, domid_str);
 	}
 
 	return success;
 }
 
-static int console_init(struct console *con, struct domain *dom, void **data)
-{
-	char *s;
-	int err = -1;
-	struct timespec ts;
-	struct console_type **con_type = (struct console_type **)data;
-	char *xsname, *xspath;
-
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
-		dolog(LOG_ERR, "Cannot get time of day %s:%s:L%d",
-		      __FILE__, __FUNCTION__, __LINE__);
-		return err;
-	}
-
-	con->master_fd = -1;
-	con->master_pollfd_idx = -1;
-	con->slave_fd = -1;
-	con->log_fd = -1;
-	con->ring_ref = -1;
-	con->local_port = -1;
-	con->remote_port = -1;
-	con->xce_pollfd_idx = -1;
-	con->next_period = ((long long)ts.tv_sec * 1000) + (ts.tv_nsec / 1000000) + RATE_LIMIT_PERIOD;
-	con->d = dom;
-	con->ttyname = (*con_type)->ttyname;
-	con->log_suffix = (*con_type)->log_suffix;
-	con->optional = (*con_type)->optional;
-	con->use_gnttab = (*con_type)->use_gnttab;
-	xsname = (char *)(*con_type)->xsname;
-	xspath = xs_get_domain_path(xs, dom->domid);
-	s = realloc(xspath, strlen(xspath) +
-		    strlen(xsname) + 1);
-	if (s) {
-		xspath = s;
-		strcat(xspath, xsname);
-		con->xspath = xspath;
-		err = 0;
-	}
-
-	(*con_type)++;
-
-	return err;
-}
-
-static void console_free(struct console *con)
-{
-	if (con->xspath)
-		free(con->xspath);
-}
 
 static struct domain *create_domain(int domid)
 {
 	struct domain *dom;
-	struct console_type *con_type = &console_type[0];
+	char *s;
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0) {
+		dolog(LOG_ERR, "Cannot get time of day %s:%s:L%d",
+		      __FILE__, __FUNCTION__, __LINE__);
+		return NULL;
+	}
 
 	dom = calloc(1, sizeof *dom);
 	if (dom == NULL) {
@@ -850,8 +667,25 @@ static struct domain *create_domain(int domid)
 
 	dom->domid = domid;
 
-	if (console_iter_int_arg3(dom, console_init, (void **)&con_type))
+	dom->conspath = xs_get_domain_path(xs, dom->domid);
+	s = realloc(dom->conspath, strlen(dom->conspath) +
+		    strlen("/console") + 1);
+	if (s == NULL)
 		goto out;
+	dom->conspath = s;
+	strcat(dom->conspath, "/console");
+
+	dom->master_fd = -1;
+	dom->master_pollfd_idx = -1;
+	dom->slave_fd = -1;
+	dom->log_fd = -1;
+	dom->xce_pollfd_idx = -1;
+
+	dom->next_period = ((long long)ts.tv_sec * 1000) + (ts.tv_nsec / 1000000) + RATE_LIMIT_PERIOD;
+
+	dom->ring_ref = -1;
+	dom->local_port = -1;
+	dom->remote_port = -1;
 
 	if (!watch_domain(dom, true))
 		goto out;
@@ -863,7 +697,7 @@ static struct domain *create_domain(int domid)
 
 	return dom;
  out:
-	console_iter_void_arg1(dom, console_free);
+	free(dom->conspath);
 	free(dom);
 	return NULL;
 }
@@ -893,43 +727,32 @@ static void remove_domain(struct domain *dom)
 	}
 }
 
-static void console_cleanup(struct console *con)
-{
-	if (con->log_fd != -1) {
-		close(con->log_fd);
-		con->log_fd = -1;
-	}
-
-	free(con->buffer.data);
-	con->buffer.data = NULL;
-
-	free(con->xspath);
-	con->xspath = NULL;
-}
-
 static void cleanup_domain(struct domain *d)
 {
-	console_iter_void_arg1(d, console_close_tty);
+	domain_close_tty(d);
 
-	console_iter_void_arg1(d, console_cleanup);
+	if (d->log_fd != -1) {
+		close(d->log_fd);
+		d->log_fd = -1;
+	}
+
+	free(d->buffer.data);
+	d->buffer.data = NULL;
+
+	free(d->conspath);
+	d->conspath = NULL;
 
 	remove_domain(d);
-}
-
-static void console_close_evtchn(struct console *con)
-{
-	if (con->xce_handle != NULL)
-		xenevtchn_close(con->xce_handle);
-
-	con->xce_handle = NULL;
 }
 
 static void shutdown_domain(struct domain *d)
 {
 	d->is_dead = true;
 	watch_domain(d, false);
-	console_iter_void_arg1(d, console_unmap_interface);
-	console_iter_void_arg1(d, console_close_evtchn);
+	domain_unmap_interface(d);
+	if (d->xce_handle != NULL)
+		xenevtchn_close(d->xce_handle);
+	d->xce_handle = NULL;
 }
 
 static unsigned enum_pass = 0;
@@ -957,9 +780,9 @@ static void enum_domains(void)
 	}
 }
 
-static int ring_free_bytes(struct console *con)
+static int ring_free_bytes(struct domain *dom)
 {
-	struct xencons_interface *intf = con->interface;
+	struct xencons_interface *intf = dom->interface;
 	XENCONS_RING_IDX cons, prod, space;
 
 	cons = intf->in_cons;
@@ -973,44 +796,43 @@ static int ring_free_bytes(struct console *con)
 	return (sizeof(intf->in) - space);
 }
 
-static void console_handle_broken_tty(struct console *con, int recreate)
+static void domain_handle_broken_tty(struct domain *dom, int recreate)
 {
-	console_close_tty(con);
+	domain_close_tty(dom);
 
 	if (recreate) {
-		console_create_tty(con);
+		domain_create_tty(dom);
 	} else {
-		shutdown_domain(con->d);
+		shutdown_domain(dom);
 	}
 }
 
-static void handle_tty_read(struct console *con)
+static void handle_tty_read(struct domain *dom)
 {
 	ssize_t len = 0;
 	char msg[80];
 	int i;
-	struct xencons_interface *intf = con->interface;
-	struct domain *dom = con->d;
+	struct xencons_interface *intf = dom->interface;
 	XENCONS_RING_IDX prod;
 
 	if (dom->is_dead)
 		return;
 
-	len = ring_free_bytes(con);
+	len = ring_free_bytes(dom);
 	if (len == 0)
 		return;
 
 	if (len > sizeof(msg))
 		len = sizeof(msg);
 
-	len = read(con->master_fd, msg, len);
+	len = read(dom->master_fd, msg, len);
 	/*
 	 * Note: on Solaris, len == 0 means the slave closed, and this
 	 * is no problem, but Linux can't handle this usefully, so we
 	 * keep the slave open for the duration.
 	 */
 	if (len < 0) {
-		console_handle_broken_tty(con, domain_is_valid(dom->domid));
+		domain_handle_broken_tty(dom, domain_is_valid(dom->domid));
 	} else if (domain_is_valid(dom->domid)) {
 		prod = intf->in_prod;
 		for (i = 0; i < len; i++) {
@@ -1019,91 +841,47 @@ static void handle_tty_read(struct console *con)
 		}
 		xen_wmb();
 		intf->in_prod = prod;
-		xenevtchn_notify(con->xce_handle, con->local_port);
+		xenevtchn_notify(dom->xce_handle, dom->local_port);
 	} else {
-		console_close_tty(con);
+		domain_close_tty(dom);
 		shutdown_domain(dom);
 	}
 }
 
-static void handle_tty_write(struct console *con)
+static void handle_tty_write(struct domain *dom)
 {
 	ssize_t len;
-	struct domain *dom = con->d;
 
 	if (dom->is_dead)
 		return;
 
-	len = write(con->master_fd, con->buffer.data + con->buffer.consumed,
-		    con->buffer.size - con->buffer.consumed);
+	len = write(dom->master_fd, dom->buffer.data + dom->buffer.consumed,
+		    dom->buffer.size - dom->buffer.consumed);
  	if (len < 1) {
 		dolog(LOG_DEBUG, "Write failed on domain %d: %zd, %d\n",
 		      dom->domid, len, errno);
-		console_handle_broken_tty(con, domain_is_valid(dom->domid));
+		domain_handle_broken_tty(dom, domain_is_valid(dom->domid));
 	} else {
-		buffer_advance(&con->buffer, len);
+		buffer_advance(&dom->buffer, len);
 	}
 }
 
-static void console_evtchn_unmask(struct console *con, void *data)
-{
-	long long now = *(long long *)data;
-
-	if (!console_enabled(con))
-		return;
-
-	/* CS 16257:955ee4fa1345 introduces a 5ms fuzz
-	 * for select(), it is not clear poll() has
-	 * similar behavior (returning a couple of ms
-	 * sooner than requested) as well. Just leave
-	 * the fuzz here. Remove it with a separate
-	 * patch if necessary */
-	if ((now+5) > con->next_period) {
-		con->next_period = now + RATE_LIMIT_PERIOD;
-		if (con->event_count >= RATE_LIMIT_ALLOWANCE)
-			(void)xenevtchn_unmask(con->xce_handle, con->local_port);
-		con->event_count = 0;
-	}
-}
-
-static void handle_ring_read(struct console *con)
+static void handle_ring_read(struct domain *dom)
 {
 	xenevtchn_port_or_error_t port;
 
-	if (con->d->is_dead)
+	if (dom->is_dead)
 		return;
 
-	if ((port = xenevtchn_pending(con->xce_handle)) == -1)
+	if ((port = xenevtchn_pending(dom->xce_handle)) == -1)
 		return;
 
-	if (port != con->local_port) {
-		dolog(LOG_ERR,
-		      "Event received for invalid port %d, Expected port is %d\n",
-		      port, con->local_port);
-		return;
-	}
+	dom->event_count++;
 
-	con->event_count++;
+	buffer_append(dom);
 
-	buffer_append(con);
-
-	if (con->event_count < RATE_LIMIT_ALLOWANCE)
-		(void)xenevtchn_unmask(con->xce_handle, port);
-}
-
-static void handle_console_ring(struct console *con)
-{
-	if (con->event_count < RATE_LIMIT_ALLOWANCE) {
-		if (con->xce_handle != NULL &&
-		    con->xce_pollfd_idx != -1 &&
-		    !(fds[con->xce_pollfd_idx].revents &
-		      ~(POLLIN|POLLOUT|POLLPRI)) &&
-		    (fds[con->xce_pollfd_idx].revents &
-		     POLLIN))
-			handle_ring_read(con);
-	}
-
-	con->xce_pollfd_idx = -1;
+	if (dom->event_count < RATE_LIMIT_ALLOWANCE)
+		(void)xenevtchn_unmask(dom->xce_handle, port);
 }
 
 static void handle_xs(void)
@@ -1124,7 +902,7 @@ static void handle_xs(void)
 		/* We may get watches firing for domains that have recently
 		   been removed, so dom may be NULL here. */
 		if (dom && dom->is_dead == false)
-			console_iter_int_arg1(dom, console_create_ring);
+			domain_create_ring(dom);
 	}
 
 	free(vec);
@@ -1165,21 +943,14 @@ static void handle_hv_logs(xenevtchn_handle *xce_handle, bool force)
 		(void)xenevtchn_unmask(xce_handle, port);
 }
 
-static void console_open_log(struct console *con)
-{
-	if (console_enabled(con)) {
-		if (con->log_fd != -1)
-			close(con->log_fd);
-		con->log_fd = create_console_log(con);
-	}
-}
-
 static void handle_log_reload(void)
 {
 	if (log_guest) {
 		struct domain *d;
 		for (d = dom_head; d; d = d->next) {
-			console_iter_void_arg1(d, console_open_log);
+			if (d->log_fd != -1)
+				close(d->log_fd);
+			d->log_fd = create_domain_log(d);
 		}
 	}
 
@@ -1229,60 +1000,6 @@ static void reset_fds(void)
 	nr_fds = 0;
 	if (fds)
 		memset(fds, 0, sizeof(struct pollfd) * current_array_size);
-}
-
-static void maybe_add_console_evtchn_fd(struct console *con, void *data)
-{
-	long long next_timeout = *((long long *)data);
-
-	if (con->event_count >= RATE_LIMIT_ALLOWANCE) {
-		/* Determine if we're going to be the next time slice to expire */
-		if (!next_timeout ||
-		    con->next_period < next_timeout)
-			next_timeout = con->next_period;
-	} else if (con->xce_handle != NULL) {
-		if (buffer_available(con)) {
-			int evtchn_fd = xenevtchn_fd(con->xce_handle);
-			con->xce_pollfd_idx = set_fds(evtchn_fd,
-						      POLLIN|POLLPRI);
-		}
-	}
-
-	*((long long *)data) = next_timeout;
-}
-
-static void maybe_add_console_tty_fd(struct console *con)
-{
-	if (con->master_fd != -1) {
-		short events = 0;
-		if (!con->d->is_dead && ring_free_bytes(con))
-			events |= POLLIN;
-
-		if (!buffer_empty(&con->buffer))
-			events |= POLLOUT;
-
-		if (events)
-			con->master_pollfd_idx =
-				set_fds(con->master_fd, events|POLLPRI);
-	}
-}
-
-static void handle_console_tty(struct console *con)
-{
-	if (con->master_fd != -1 && con->master_pollfd_idx != -1) {
-		if (fds[con->master_pollfd_idx].revents &
-		    ~(POLLIN|POLLOUT|POLLPRI))
-			console_handle_broken_tty(con, domain_is_valid(con->d->domid));
-		else {
-			if (fds[con->master_pollfd_idx].revents &
-			    POLLIN)
-				handle_tty_read(con);
-			if (fds[con->master_pollfd_idx].revents &
-			    POLLOUT)
-				handle_tty_write(con);
-		}
-	}
-	con->master_pollfd_idx = -1;
 }
 
 void handle_io(void)
@@ -1342,13 +1059,50 @@ void handle_io(void)
 		/* Re-calculate any event counter allowances & unblock
 		   domains with new allowance */
 		for (d = dom_head; d; d = d->next) {
+			/* CS 16257:955ee4fa1345 introduces a 5ms fuzz
+			 * for select(), it is not clear poll() has
+			 * similar behavior (returning a couple of ms
+			 * sooner than requested) as well. Just leave
+			 * the fuzz here. Remove it with a separate
+			 * patch if necessary */
+			if ((now+5) > d->next_period) {
+				d->next_period = now + RATE_LIMIT_PERIOD;
+				if (d->event_count >= RATE_LIMIT_ALLOWANCE) {
+					(void)xenevtchn_unmask(d->xce_handle, d->local_port);
+				}
+				d->event_count = 0;
+			}
+		}
 
-			console_iter_void_arg2(d, console_evtchn_unmask, (void *)&now);
+		for (d = dom_head; d; d = d->next) {
+			if (d->event_count >= RATE_LIMIT_ALLOWANCE) {
+				/* Determine if we're going to be the next time slice to expire */
+				if (!next_timeout ||
+				    d->next_period < next_timeout)
+					next_timeout = d->next_period;
+			} else if (d->xce_handle != NULL) {
+				if (discard_overflowed_data ||
+				    !d->buffer.max_capacity ||
+				    d->buffer.size < d->buffer.max_capacity) {
+					int evtchn_fd = xenevtchn_fd(d->xce_handle);
+					d->xce_pollfd_idx = set_fds(evtchn_fd,
+								    POLLIN|POLLPRI);
+				}
+			}
 
-			console_iter_void_arg2(d, maybe_add_console_evtchn_fd, 
-					       (void *)&next_timeout);
+			if (d->master_fd != -1) {
+				short events = 0;
+				if (!d->is_dead && ring_free_bytes(d))
+					events |= POLLIN;
 
-			console_iter_void_arg1(d, maybe_add_console_tty_fd);
+				if (!buffer_empty(&d->buffer))
+					events |= POLLOUT;
+
+				if (events)
+					d->master_pollfd_idx =
+						set_fds(d->master_fd,
+							events|POLLPRI);
+			}
 		}
 
 		/* If any domain has been rate limited, we need to work
@@ -1363,12 +1117,8 @@ void handle_io(void)
 		ret = poll(fds, nr_fds, next_timeout ? poll_timeout : -1);
 
 		if (log_reload) {
-			int saved_errno = errno;
-
 			handle_log_reload();
 			log_reload = 0;
-
-			errno = saved_errno;
 		}
 
 		/* Abort if poll failed, except for EINTR cases
@@ -1409,12 +1159,33 @@ void handle_io(void)
 		}
 
 		for (d = dom_head; d; d = n) {
-
 			n = d->next;
+			if (d->event_count < RATE_LIMIT_ALLOWANCE) {
+				if (d->xce_handle != NULL &&
+				    d->xce_pollfd_idx != -1 &&
+				    !(fds[d->xce_pollfd_idx].revents &
+				      ~(POLLIN|POLLOUT|POLLPRI)) &&
+				      (fds[d->xce_pollfd_idx].revents &
+				       POLLIN))
+				    handle_ring_read(d);
+			}
 
-			console_iter_void_arg1(d, handle_console_ring);
+			if (d->master_fd != -1 && d->master_pollfd_idx != -1) {
+				if (fds[d->master_pollfd_idx].revents &
+				    ~(POLLIN|POLLOUT|POLLPRI))
+					domain_handle_broken_tty(d,
+						   domain_is_valid(d->domid));
+				else {
+					if (fds[d->master_pollfd_idx].revents &
+					    POLLIN)
+						handle_tty_read(d);
+					if (fds[d->master_pollfd_idx].revents &
+					    POLLOUT)
+						handle_tty_write(d);
+				}
+			}
 
-			console_iter_void_arg1(d, handle_console_tty);
+			d->xce_pollfd_idx = d->master_pollfd_idx = -1;
 
 			if (d->last_seen != enum_pass)
 				shutdown_domain(d);

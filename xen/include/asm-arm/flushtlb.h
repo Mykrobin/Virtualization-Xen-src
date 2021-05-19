@@ -8,7 +8,9 @@
  * TLB since @page_timestamp.
  */
 /* XXX lazy implementation just doesn't clear anything.... */
-static inline void tlbflush_filter(cpumask_t *mask, uint32_t page_timestamp) {}
+#define tlbflush_filter(mask, page_timestamp)                           \
+do {                                                                    \
+} while ( 0 )
 
 #define tlbflush_current_time()                 (0)
 

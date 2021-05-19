@@ -11,6 +11,7 @@
  * Version 2.  See the file COPYING for more details.
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/init.h>
 #include <xen/kernel.h>
@@ -76,7 +77,7 @@ static struct page_info *kimage_alloc_zeroed_page(unsigned memflags)
     if ( !page )
         return NULL;
 
-    clear_domain_page(page_to_mfn(page));
+    clear_domain_page(_mfn(page_to_mfn(page)));
 
     return page;
 }
@@ -310,11 +311,14 @@ static struct page_info *kimage_alloc_normal_control_page(
      * destination page.
      */
     do {
+        unsigned long mfn, emfn;
         paddr_t addr, eaddr;
 
         page = kimage_alloc_zeroed_page(memflags);
         if ( !page )
             break;
+        mfn   = page_to_mfn(page);
+        emfn  = mfn + 1;
         addr  = page_to_maddr(page);
         eaddr = addr + PAGE_SIZE;
         if ( kimage_is_destination_range(image, addr, eaddr) )
@@ -405,7 +409,7 @@ static struct page_info *kimage_alloc_crash_control_page(struct kexec_image *ima
     if ( page )
     {
         image->next_crash_page = hole_end;
-        clear_domain_page(page_to_mfn(page));
+        clear_domain_page(_mfn(page_to_mfn(page)));
     }
 
     return page;
@@ -501,7 +505,7 @@ static void kimage_free_entry(kimage_entry_t entry)
 {
     struct page_info *page;
 
-    page = maddr_to_page(entry);
+    page = mfn_to_page(entry >> PAGE_SHIFT);
     free_domheap_page(page);
 }
 
@@ -633,15 +637,15 @@ static struct page_info *kimage_alloc_page(struct kexec_image *image,
         if ( old )
         {
             /* If so move it. */
-            mfn_t old_mfn = maddr_to_mfn(*old);
-            mfn_t mfn = maddr_to_mfn(addr);
+            mfn_t old_mfn = _mfn(*old >> PAGE_SHIFT);
+            mfn_t mfn = _mfn(addr >> PAGE_SHIFT);
 
             copy_domain_page(mfn, old_mfn);
             clear_domain_page(old_mfn);
             *old = (addr & ~PAGE_MASK) | IND_SOURCE;
             unmap_domain_page(old);
 
-            page = mfn_to_page(old_mfn);
+            page = mfn_to_page(mfn_x(old_mfn));
             break;
         }
         else
@@ -840,11 +844,11 @@ kimage_entry_t *kimage_entry_next(kimage_entry_t *entry, bool_t compat)
     return entry + 1;
 }
 
-mfn_t kimage_entry_mfn(kimage_entry_t *entry, bool_t compat)
+unsigned long kimage_entry_mfn(kimage_entry_t *entry, bool_t compat)
 {
     if ( compat )
-        return maddr_to_mfn(*(uint32_t *)entry);
-    return maddr_to_mfn(*entry);
+        return *(uint32_t *)entry >> PAGE_SHIFT;
+    return *entry >> PAGE_SHIFT;
 }
 
 unsigned long kimage_entry_ind(kimage_entry_t *entry, bool_t compat)
@@ -854,7 +858,7 @@ unsigned long kimage_entry_ind(kimage_entry_t *entry, bool_t compat)
     return *entry & 0xf;
 }
 
-int kimage_build_ind(struct kexec_image *image, mfn_t ind_mfn,
+int kimage_build_ind(struct kexec_image *image, unsigned long ind_mfn,
                      bool_t compat)
 {
     void *page;
@@ -862,7 +866,7 @@ int kimage_build_ind(struct kexec_image *image, mfn_t ind_mfn,
     int ret = 0;
     paddr_t dest = KIMAGE_NO_DEST;
 
-    page = map_domain_page(ind_mfn);
+    page = map_domain_page(_mfn(ind_mfn));
     if ( !page )
         return -ENOMEM;
 
@@ -873,7 +877,7 @@ int kimage_build_ind(struct kexec_image *image, mfn_t ind_mfn,
     for ( entry = page; ;  )
     {
         unsigned long ind;
-        mfn_t mfn;
+        unsigned long mfn;
 
         ind = kimage_entry_ind(entry, compat);
         mfn = kimage_entry_mfn(entry, compat);
@@ -881,14 +885,14 @@ int kimage_build_ind(struct kexec_image *image, mfn_t ind_mfn,
         switch ( ind )
         {
         case IND_DESTINATION:
-            dest = mfn_to_maddr(mfn);
+            dest = (paddr_t)mfn << PAGE_SHIFT;
             ret = kimage_set_destination(image, dest);
             if ( ret < 0 )
                 goto done;
             break;
         case IND_INDIRECTION:
             unmap_domain_page(page);
-            page = map_domain_page(mfn);
+            page = map_domain_page(_mfn(mfn));
             entry = page;
             continue;
         case IND_DONE:
@@ -913,7 +917,7 @@ int kimage_build_ind(struct kexec_image *image, mfn_t ind_mfn,
                 goto done;
             }
 
-            copy_domain_page(page_to_mfn(xen_page), mfn);
+            copy_domain_page(_mfn(page_to_mfn(xen_page)), _mfn(mfn));
             put_page(guest_page);
 
             ret = kimage_add_page(image, page_to_maddr(xen_page));

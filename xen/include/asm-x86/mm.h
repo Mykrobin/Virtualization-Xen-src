@@ -2,6 +2,7 @@
 #ifndef __ASM_X86_MM_H__
 #define __ASM_X86_MM_H__
 
+#include <xen/config.h>
 #include <xen/list.h>
 #include <xen/spinlock.h>
 #include <xen/rwlock.h>
@@ -11,83 +12,12 @@
 
 /*
  * Per-page-frame information.
- *
+ * 
  * Every architecture must ensure the following:
  *  1. 'struct page_info' contains a 'struct page_list_entry list'.
  *  2. Provide a PFN_ORDER() macro for accessing the order of a free page.
  */
 #define PFN_ORDER(_pfn) ((_pfn)->v.free.order)
-
-#define PG_shift(idx)   (BITS_PER_LONG - (idx))
-#define PG_mask(x, idx) (x ## UL << PG_shift(idx))
-
- /* The following page types are MUTUALLY EXCLUSIVE. */
-#define PGT_none          PG_mask(0, 3)  /* no special uses of this page   */
-#define PGT_l1_page_table PG_mask(1, 3)  /* using as an L1 page table?     */
-#define PGT_l2_page_table PG_mask(2, 3)  /* using as an L2 page table?     */
-#define PGT_l3_page_table PG_mask(3, 3)  /* using as an L3 page table?     */
-#define PGT_l4_page_table PG_mask(4, 3)  /* using as an L4 page table?     */
-#define PGT_seg_desc_page PG_mask(5, 3)  /* using this page in a GDT/LDT?  */
-#define PGT_shared_page   PG_mask(6, 3)  /* CoW sharable page              */
-#define PGT_writable_page PG_mask(7, 3)  /* has writable mappings?         */
-#define PGT_type_mask     PG_mask(7, 3)  /* Bits 61-63.                    */
-
- /* Page is locked? */
-#define _PGT_locked       PG_shift(4)
-#define PGT_locked        PG_mask(1, 4)
- /* Owning guest has pinned this page to its current type? */
-#define _PGT_pinned       PG_shift(5)
-#define PGT_pinned        PG_mask(1, 5)
- /* Has this page been validated for use as its current type? */
-#define _PGT_validated    PG_shift(6)
-#define PGT_validated     PG_mask(1, 6)
- /* PAE only: is this an L2 page directory containing Xen-private mappings? */
-#define _PGT_pae_xen_l2   PG_shift(7)
-#define PGT_pae_xen_l2    PG_mask(1, 7)
-/* Has this page been *partially* validated for use as its current type? */
-#define _PGT_partial      PG_shift(8)
-#define PGT_partial       PG_mask(1, 8)
-
- /* Count of uses of this frame as its current type. */
-#define PGT_count_width   PG_shift(8)
-#define PGT_count_mask    ((1UL<<PGT_count_width)-1)
-
-/* Are the 'type mask' bits identical? */
-#define PGT_type_equal(x, y) (!(((x) ^ (y)) & PGT_type_mask))
-
- /* Cleared when the owning guest 'frees' this page. */
-#define _PGC_allocated    PG_shift(1)
-#define PGC_allocated     PG_mask(1, 1)
- /* Page is Xen heap? */
-#define _PGC_xen_heap     PG_shift(2)
-#define PGC_xen_heap      PG_mask(1, 2)
- /* Set when is using a page as a page table */
-#define _PGC_page_table   PG_shift(3)
-#define PGC_page_table    PG_mask(1, 3)
- /* 3-bit PAT/PCD/PWT cache-attribute hint. */
-#define PGC_cacheattr_base PG_shift(6)
-#define PGC_cacheattr_mask PG_mask(7, 6)
- /* Page is broken? */
-#define _PGC_broken       PG_shift(7)
-#define PGC_broken        PG_mask(1, 7)
- /* Mutually-exclusive page states: { inuse, offlining, offlined, free }. */
-#define PGC_state         PG_mask(3, 9)
-#define PGC_state_inuse   PG_mask(0, 9)
-#define PGC_state_offlining PG_mask(1, 9)
-#define PGC_state_offlined PG_mask(2, 9)
-#define PGC_state_free    PG_mask(3, 9)
-#define page_state_is(pg, st) (((pg)->count_info&PGC_state) == PGC_state_##st)
-
- /* Count of references to this frame. */
-#define PGC_count_width   PG_shift(9)
-#define PGC_count_mask    ((1UL<<PGC_count_width)-1)
-
-/*
- * Page needs to be scrubbed. Since this bit can only be set on a page that is
- * free (i.e. in PGC_state_free) we can reuse PGC_allocated bit.
- */
-#define _PGC_need_scrub   _PGC_allocated
-#define PGC_need_scrub    PGC_allocated
 
 #ifndef CONFIG_BIGMEM
 /*
@@ -117,11 +47,11 @@ struct page_info
          * For unused shadow pages, a list of free shadow pages;
          * for multi-page shadows, links to the other pages in this shadow;
          * for pinnable shadows, if pinned, a list of all pinned shadows
-         * (see sh_type_is_pinnable() for the definition of "pinnable"
+         * (see sh_type_is_pinnable() for the definition of "pinnable" 
          * shadow types).  N.B. a shadow may be both pinnable and multi-page.
          * In that case the pages are inserted in order in the list of
-         * pinned shadows and walkers of that list must be prepared
-         * to keep them all together during updates.
+         * pinned shadows and walkers of that list must be prepared 
+         * to keep them all together during updates. 
          */
         struct page_list_entry list;
         /* For non-pinnable single-page shadows, a higher entry that points
@@ -153,31 +83,14 @@ struct page_info
             unsigned long type:5;   /* What kind of shadow is this? */
             unsigned long pinned:1; /* Is the shadow pinned? */
             unsigned long head:1;   /* Is this the first page of the shadow? */
-#define PAGE_SH_REFCOUNT_WIDTH (PGT_count_width - 7)
+#define PAGE_SH_REFCOUNT_WIDTH 25
             unsigned long count:PAGE_SH_REFCOUNT_WIDTH; /* Reference count */
         } sh;
 
         /* Page is on a free list: ((count_info & PGC_count_mask) == 0). */
-        union {
-            struct {
-                /*
-                 * Index of the first *possibly* unscrubbed page in the buddy.
-                 * One more bit than maximum possible order to accommodate
-                 * INVALID_DIRTY_IDX.
-                 */
-#define INVALID_DIRTY_IDX ((1UL << (MAX_ORDER + 1)) - 1)
-                unsigned int first_dirty;
-
-                /* Do TLBs need flushing for safety before next page use? */
-                bool need_tlbflush;
-
-#define BUDDY_NOT_SCRUBBING    0
-#define BUDDY_SCRUBBING        1
-#define BUDDY_SCRUB_ABORT      2
-                uint8_t  scrub_state;
-            };
-
-            unsigned long val;
+        struct {
+            /* Do TLBs need flushing for safety before next page use? */
+            bool_t need_tlbflush;
         } free;
 
     } u;
@@ -291,12 +204,91 @@ struct page_info
 
 #undef __pdx_t
 
+#define PG_shift(idx)   (BITS_PER_LONG - (idx))
+#define PG_mask(x, idx) (x ## UL << PG_shift(idx))
+
+ /* The following page types are MUTUALLY EXCLUSIVE. */
+#define PGT_none          PG_mask(0, 4)  /* no special uses of this page   */
+#define PGT_l1_page_table PG_mask(1, 4)  /* using as an L1 page table?     */
+#define PGT_l2_page_table PG_mask(2, 4)  /* using as an L2 page table?     */
+#define PGT_l3_page_table PG_mask(3, 4)  /* using as an L3 page table?     */
+#define PGT_l4_page_table PG_mask(4, 4)  /* using as an L4 page table?     */
+#define PGT_seg_desc_page PG_mask(5, 4)  /* using this page in a GDT/LDT?  */
+#define PGT_writable_page PG_mask(7, 4)  /* has writable mappings?         */
+#define PGT_shared_page   PG_mask(8, 4)  /* CoW sharable page              */
+#define PGT_type_mask     PG_mask(15, 4) /* Bits 28-31 or 60-63.           */
+
+ /* Owning guest has pinned this page to its current type? */
+#define _PGT_pinned       PG_shift(5)
+#define PGT_pinned        PG_mask(1, 5)
+ /* Has this page been validated for use as its current type? */
+#define _PGT_validated    PG_shift(6)
+#define PGT_validated     PG_mask(1, 6)
+ /* PAE only: is this an L2 page directory containing Xen-private mappings? */
+#define _PGT_pae_xen_l2   PG_shift(7)
+#define PGT_pae_xen_l2    PG_mask(1, 7)
+/* Has this page been *partially* validated for use as its current type? */
+#define _PGT_partial      PG_shift(8)
+#define PGT_partial       PG_mask(1, 8)
+ /* Page is locked? */
+#define _PGT_locked       PG_shift(9)
+#define PGT_locked        PG_mask(1, 9)
+
+ /* Count of uses of this frame as its current type. */
+#define PGT_count_width   PG_shift(9)
+#define PGT_count_mask    ((1UL<<PGT_count_width)-1)
+
+/* Are the 'type mask' bits identical? */
+#define PGT_type_equal(x, y) (!(((x) ^ (y)) & PGT_type_mask))
+
+ /* Cleared when the owning guest 'frees' this page. */
+#define _PGC_allocated    PG_shift(1)
+#define PGC_allocated     PG_mask(1, 1)
+ /* Page is Xen heap? */
+#define _PGC_xen_heap     PG_shift(2)
+#define PGC_xen_heap      PG_mask(1, 2)
+ /* Set when is using a page as a page table */
+#define _PGC_page_table   PG_shift(3)
+#define PGC_page_table    PG_mask(1, 3)
+ /* 3-bit PAT/PCD/PWT cache-attribute hint. */
+#define PGC_cacheattr_base PG_shift(6)
+#define PGC_cacheattr_mask PG_mask(7, 6)
+ /* Page is broken? */
+#define _PGC_broken       PG_shift(7)
+#define PGC_broken        PG_mask(1, 7)
+ /* Mutually-exclusive page states: { inuse, offlining, offlined, free }. */
+#define PGC_state         PG_mask(3, 9)
+#define PGC_state_inuse   PG_mask(0, 9)
+#define PGC_state_offlining PG_mask(1, 9)
+#define PGC_state_offlined PG_mask(2, 9)
+#define PGC_state_free    PG_mask(3, 9)
+#define page_state_is(pg, st) (((pg)->count_info&PGC_state) == PGC_state_##st)
+
+ /* Count of references to this frame. */
+#define PGC_count_width   PG_shift(9)
+#define PGC_count_mask    ((1UL<<PGC_count_width)-1)
+
+struct spage_info
+{
+       unsigned long type_info;
+};
+
+ /* The following page types are MUTUALLY EXCLUSIVE. */
+#define SGT_none          PG_mask(0, 2)  /* superpage not in use */
+#define SGT_mark          PG_mask(1, 2)  /* Marked as a superpage */
+#define SGT_dynamic       PG_mask(2, 2)  /* has been dynamically mapped as a superpage */
+#define SGT_type_mask     PG_mask(3, 2)  /* Bits 30-31 or 62-63. */
+
+ /* Count of uses of this superpage as its current type. */
+#define SGT_count_width   PG_shift(3)
+#define SGT_count_mask    ((1UL<<SGT_count_width)-1)
+
 #define is_xen_heap_page(page) ((page)->count_info & PGC_xen_heap)
 #define is_xen_heap_mfn(mfn) \
-    (__mfn_valid(mfn) && is_xen_heap_page(mfn_to_page(_mfn(mfn))))
+    (__mfn_valid(mfn) && is_xen_heap_page(__mfn_to_page(mfn)))
 #define is_xen_fixed_mfn(mfn)                     \
-    ((((mfn) << PAGE_SHIFT) >= __pa(_stext)) &&  \
-     (((mfn) << PAGE_SHIFT) <= __pa(__2M_rwdata_end - 1)))
+    ((((mfn) << PAGE_SHIFT) >= __pa(&_stext)) &&  \
+     (((mfn) << PAGE_SHIFT) <= __pa(&__2M_rwdata_end)))
 
 #define PRtype_info "016lx"/* should only be used for printk's */
 
@@ -314,9 +306,17 @@ struct page_info
 
 #define maddr_get_owner(ma)   (page_get_owner(maddr_to_page((ma))))
 
+#define XENSHARE_writable 0
+#define XENSHARE_readonly 1
+extern void share_xen_page_with_guest(
+    struct page_info *page, struct domain *d, int readonly);
+extern void share_xen_page_with_privileged_guests(
+    struct page_info *page, int readonly);
 extern void free_shared_domheap_page(struct page_info *page);
 
 #define frame_table ((struct page_info *)FRAMETABLE_VIRT_START)
+#define spage_table ((struct spage_info *)SPAGETABLE_VIRT_START)
+int get_superpage(unsigned long mfn, struct domain *d);
 extern unsigned long max_page;
 extern unsigned long total_pages;
 void init_frametable(void);
@@ -355,13 +355,14 @@ static inline void *__page_to_virt(const struct page_info *pg)
 int free_page_type(struct page_info *page, unsigned long type,
                    int preemptible);
 
-void init_xen_pae_l2_slots(l2_pgentry_t *l2t, const struct domain *d);
-void init_xen_l4_slots(l4_pgentry_t *l4t, mfn_t l4mfn,
-                       const struct domain *d, mfn_t sl4mfn, bool ro_mpt);
-bool fill_ro_mpt(mfn_t mfn);
-void zap_ro_mpt(mfn_t mfn);
+void init_guest_l4_table(l4_pgentry_t[], const struct domain *,
+                         bool_t zap_ro_mpt);
+bool_t fill_ro_mpt(unsigned long mfn);
+void zap_ro_mpt(unsigned long mfn);
 
-bool is_iomem_page(mfn_t mfn);
+int is_iomem_page(unsigned long mfn);
+
+void clear_superpage_mark(struct page_info *page);
 
 struct platform_bad_page {
     unsigned long mfn;
@@ -376,19 +377,20 @@ const struct platform_bad_page *get_platform_badpages(unsigned int *array_size);
  * All users of page lock for pte serialization live in mm.c, use it
  * to lock a page table page during pte updates, do not take other locks within
  * the critical section delimited by page_lock/unlock, and perform no
- * nesting.
+ * nesting. 
  *
  * All users of page lock for memory sharing live in mm/mem_sharing.c. Page_lock
- * is used in memory sharing to protect addition (share) and removal (unshare)
- * of (gfn,domain) tupples to a list of gfn's that the shared page is currently
- * backing. Nesting may happen when sharing (and locking) two pages -- deadlock
+ * is used in memory sharing to protect addition (share) and removal (unshare) 
+ * of (gfn,domain) tupples to a list of gfn's that the shared page is currently 
+ * backing. Nesting may happen when sharing (and locking) two pages -- deadlock 
  * is avoided by locking pages in increasing order.
  * All memory sharing code paths take the p2m lock of the affected gfn before
- * taking the lock for the underlying page. We enforce ordering between page_lock
- * and p2m_lock using an mm-locks.h construct.
+ * taking the lock for the underlying page. We enforce ordering between page_lock 
+ * and p2m_lock using an mm-locks.h construct. 
  *
  * These two users (pte serialization and memory sharing) do not collide, since
  * sharing is only supported for hvm guests, which do not perform pv pte updates.
+ * 
  */
 int page_lock(struct page_info *page);
 void page_unlock(struct page_info *page);
@@ -401,20 +403,6 @@ int  put_old_guest_table(struct vcpu *);
 int  get_page_from_l1e(
     l1_pgentry_t l1e, struct domain *l1e_owner, struct domain *pg_owner);
 void put_page_from_l1e(l1_pgentry_t l1e, struct domain *l1e_owner);
-
-static inline struct page_info *get_page_from_mfn(mfn_t mfn, struct domain *d)
-{
-    struct page_info *page = mfn_to_page(mfn);
-
-    if ( unlikely(!mfn_valid(mfn)) || unlikely(!get_page(page, d)) )
-    {
-        gdprintk(XENLOG_WARNING,
-                 "Could not get page ref for mfn %"PRI_mfn"\n", mfn_x(mfn));
-        return NULL;
-    }
-
-    return page;
-}
 
 static inline void put_page_and_type(struct page_info *page)
 {
@@ -455,24 +443,25 @@ static inline int get_page_and_type(struct page_info *page,
 
 int check_descriptor(const struct domain *, struct desc_struct *d);
 
+extern bool_t opt_allow_superpage;
 extern paddr_t mem_hotplug;
 
 /******************************************************************************
- * With shadow pagetables, the different kinds of address start
+ * With shadow pagetables, the different kinds of address start 
  * to get get confusing.
- *
- * Virtual addresses are what they usually are: the addresses that are used
- * to accessing memory while the guest is running.  The MMU translates from
- * virtual addresses to machine addresses.
- *
+ * 
+ * Virtual addresses are what they usually are: the addresses that are used 
+ * to accessing memory while the guest is running.  The MMU translates from 
+ * virtual addresses to machine addresses. 
+ * 
  * (Pseudo-)physical addresses are the abstraction of physical memory the
- * guest uses for allocation and so forth.  For the purposes of this code,
+ * guest uses for allocation and so forth.  For the purposes of this code, 
  * we can largely ignore them.
  *
  * Guest frame numbers (gfns) are the entries that the guest puts in its
  * pagetables.  For normal paravirtual guests, they are actual frame numbers,
- * with the translation done by the guest.
- *
+ * with the translation done by the guest.  
+ * 
  * Machine frame numbers (mfns) are the entries that the hypervisor puts
  * in the shadow page tables.
  *
@@ -499,7 +488,7 @@ extern paddr_t mem_hotplug;
 
 #define compat_machine_to_phys_mapping ((unsigned int *)RDWR_COMPAT_MPT_VIRT_START)
 #define _set_gpfn_from_mfn(mfn, pfn) ({                        \
-    struct domain *d = page_get_owner(mfn_to_page(_mfn(mfn))); \
+    struct domain *d = page_get_owner(__mfn_to_page(mfn));     \
     unsigned long entry = (d && (d == dom_cow)) ?              \
         SHARED_M2P_ENTRY : (pfn);                              \
     ((void)((mfn) >= (RDWR_COMPAT_MPT_VIRT_END - RDWR_COMPAT_MPT_VIRT_START) / 4 || \
@@ -511,7 +500,7 @@ extern paddr_t mem_hotplug;
  * Disable some users of set_gpfn_from_mfn() (e.g., free_heap_pages()) until
  * the machine_to_phys_mapping is actually set up.
  */
-extern bool machine_to_phys_mapping_valid;
+extern bool_t machine_to_phys_mapping_valid;
 #define set_gpfn_from_mfn(mfn, pfn) do {        \
     if ( machine_to_phys_mapping_valid )        \
         _set_gpfn_from_mfn(mfn, pfn);           \
@@ -556,8 +545,13 @@ extern int mmcfg_intercept_write(enum x86_segment seg,
                                  void *p_data,
                                  unsigned int bytes,
                                  struct x86_emulate_ctxt *ctxt);
-int pv_emul_cpuid(uint32_t leaf, uint32_t subleaf,
-                  struct cpuid_leaf *res, struct x86_emulate_ctxt *ctxt);
+int pv_emul_cpuid(unsigned int *eax, unsigned int *ebx, unsigned int *ecx,
+                  unsigned int *edx, struct x86_emulate_ctxt *ctxt);
+
+int  ptwr_do_page_fault(struct vcpu *, unsigned long,
+                        struct cpu_user_regs *);
+int  mmio_ro_do_page_fault(struct vcpu *, unsigned long,
+                           struct cpu_user_regs *);
 
 int audit_adjust_pgtables(struct domain *d, int dir, int noisy);
 
@@ -582,9 +576,11 @@ void audit_domains(void);
 
 #endif
 
-void make_cr3(struct vcpu *v, mfn_t mfn);
+int new_guest_cr3(unsigned long pfn);
+void make_cr3(struct vcpu *v, unsigned long mfn);
 void update_cr3(struct vcpu *v);
 int vcpu_destroy_pagetables(struct vcpu *);
+struct trap_bounce *propagate_page_fault(unsigned long addr, u16 error_code);
 void *do_page_walk(struct vcpu *v, unsigned long addr);
 
 int __sync_local_execstate(void);
@@ -594,6 +590,13 @@ long arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg);
 long subarch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg);
 int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void));
 int compat_subarch_memory_op(int op, XEN_GUEST_HANDLE_PARAM(void));
+
+int steal_page(
+    struct domain *d, struct page_info *page, unsigned int memflags);
+int donate_page(
+    struct domain *d, struct page_info *page, unsigned int memflags);
+
+int map_ldt_shadow_page(unsigned int);
 
 #define NIL(type) ((type *)-sizeof(type))
 #define IS_NIL(ptr) (!((uintptr_t)(ptr) + sizeof(*(ptr))))
@@ -616,7 +619,7 @@ extern struct domain *dom_xen, *dom_io, *dom_cow;	/* for vmcoreinfo */
 
 /* Definition of an mm lock: spinlock with extra fields for debugging */
 typedef struct mm_lock {
-    spinlock_t         lock;
+    spinlock_t         lock; 
     int                unlock_level;
     int                locker;          /* processor which holds the lock */
     const char        *locker_function; /* func that took it */
@@ -636,24 +639,5 @@ typedef struct mm_rwlock {
                    &(d)->arch.relmem_list)
 
 extern const char zero_page[];
-
-/* Build a 32bit PSE page table using 4MB pages. */
-void write_32bit_pse_identmap(uint32_t *l2);
-
-/*
- * x86 maps part of physical memory via the directmap region.
- * Return whether the input MFN falls in that range.
- */
-static inline bool arch_mfn_in_directmap(unsigned long mfn)
-{
-    unsigned long eva = min(DIRECTMAP_VIRT_END, HYPERVISOR_VIRT_END);
-
-    return mfn <= (virt_to_mfn(eva - 1) + 1);
-}
-
-int arch_acquire_resource(struct domain *d, unsigned int type,
-                          unsigned int id, unsigned long frame,
-                          unsigned int nr_frames, xen_pfn_t mfn_list[],
-                          unsigned int *flags);
 
 #endif /* __ASM_X86_MM_H__ */

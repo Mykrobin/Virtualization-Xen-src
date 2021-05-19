@@ -20,7 +20,6 @@
 int libxl_mac_to_device_nic(libxl_ctx *ctx, uint32_t domid,
                             const char *mac, libxl_device_nic *nic)
 {
-    GC_INIT(ctx);
     libxl_device_nic *nics;
     int nb, rc, i;
     libxl_mac mac_n;
@@ -29,7 +28,7 @@ int libxl_mac_to_device_nic(libxl_ctx *ctx, uint32_t domid,
     if (rc)
         return rc;
 
-    nics = libxl__device_list(gc, &libxl__nic_devtype, domid, &nb);
+    nics = libxl_device_nic_list(ctx, domid, &nb);
     if (!nics)
         return ERROR_FAIL;
 
@@ -53,8 +52,8 @@ int libxl_mac_to_device_nic(libxl_ctx *ctx, uint32_t domid,
     return rc;
 }
 
-static int libxl__device_nic_setdefault(libxl__gc *gc, uint32_t domid,
-                                        libxl_device_nic *nic, bool hotplug)
+int libxl__device_nic_setdefault(libxl__gc *gc, libxl_device_nic *nic,
+                                 uint32_t domid, bool hotplug)
 {
     int rc;
 
@@ -92,17 +91,17 @@ static int libxl__device_nic_setdefault(libxl__gc *gc, uint32_t domid,
     switch (libxl__domain_type(gc, domid)) {
     case LIBXL_DOMAIN_TYPE_HVM:
         if (!nic->nictype) {
-            if (hotplug)
+            if (hotplug ||
+                (libxl__device_model_version_running(gc, domid) ==
+                 LIBXL_DEVICE_MODEL_VERSION_NONE))
                 nic->nictype = LIBXL_NIC_TYPE_VIF;
             else
                 nic->nictype = LIBXL_NIC_TYPE_VIF_IOEMU;
         }
         break;
-    case LIBXL_DOMAIN_TYPE_PVH:
     case LIBXL_DOMAIN_TYPE_PV:
         if (nic->nictype == LIBXL_NIC_TYPE_VIF_IOEMU) {
-            LOGD(ERROR, domid,
-            "trying to create PV or PVH guest with an emulated interface");
+            LOG(ERROR, "trying to create PV guest with an emulated interface");
             return ERROR_INVAL;
         }
         nic->nictype = LIBXL_NIC_TYPE_VIF;
@@ -116,6 +115,20 @@ static int libxl__device_nic_setdefault(libxl__gc *gc, uint32_t domid,
     return rc;
 }
 
+static int libxl__device_from_nic(libxl__gc *gc, uint32_t domid,
+                                  libxl_device_nic *nic,
+                                  libxl__device *device)
+{
+    device->backend_devid    = nic->devid;
+    device->backend_domid    = nic->backend_domid;
+    device->backend_kind     = LIBXL__DEVICE_KIND_VIF;
+    device->devid            = nic->devid;
+    device->domid            = domid;
+    device->kind             = LIBXL__DEVICE_KIND_VIF;
+
+    return 0;
+}
+
 static void libxl__update_config_nic(libxl__gc *gc, libxl_device_nic *dst,
                                      const libxl_device_nic *src)
 {
@@ -124,13 +137,49 @@ static void libxl__update_config_nic(libxl__gc *gc, libxl_device_nic *dst,
     libxl_mac_copy(CTX, &dst->mac, &src->mac);
 }
 
-static int libxl__set_xenstore_nic(libxl__gc *gc, uint32_t domid,
-                                   libxl_device_nic *nic,
-                                   flexarray_t *back, flexarray_t *front,
-                                   flexarray_t *ro_front)
+static void libxl__device_nic_add(libxl__egc *egc, uint32_t domid,
+                                  libxl_device_nic *nic,
+                                  libxl__ao_device *aodev)
 {
-    flexarray_grow(back, 2);
+    STATE_AO_GC(aodev->ao);
+    flexarray_t *front;
+    flexarray_t *back;
+    libxl__device *device;
+    int rc;
+    xs_transaction_t t = XBT_NULL;
+    libxl_domain_config d_config;
+    libxl_device_nic nic_saved;
+    libxl__domain_userdata_lock *lock = NULL;
 
+    libxl_domain_config_init(&d_config);
+    libxl_device_nic_init(&nic_saved);
+    libxl_device_nic_copy(CTX, &nic_saved, nic);
+
+    rc = libxl__device_nic_setdefault(gc, nic, domid, aodev->update_json);
+    if (rc) goto out;
+
+    front = flexarray_make(gc, 16, 1);
+    back = flexarray_make(gc, 18, 1);
+
+    if (nic->devid == -1) {
+        if ((nic->devid = libxl__device_nextid(gc, domid, "vif")) < 0) {
+            rc = ERROR_FAIL;
+            goto out;
+        }
+    }
+
+    libxl__update_config_nic(gc, &nic_saved, nic);
+
+    GCNEW(device);
+    rc = libxl__device_from_nic(gc, domid, nic, device);
+    if ( rc != 0 ) goto out;
+
+    flexarray_append(back, "frontend-id");
+    flexarray_append(back, GCSPRINTF("%d", domid));
+    flexarray_append(back, "online");
+    flexarray_append(back, "1");
+    flexarray_append(back, "state");
+    flexarray_append(back, GCSPRINTF("%d", XenbusStateInitialising));
     if (nic->script)
         flexarray_append_pair(back, "script",
                               libxl__abs_path(gc, nic->script,
@@ -145,65 +194,6 @@ static int libxl__set_xenstore_nic(libxl__gc *gc, uint32_t domid,
         flexarray_append(back, "forwarddev");
         flexarray_append(back, nic->coloft_forwarddev);
     }
-
-#define MAYBE_ADD_COLO_ARGS(arg) ({                                       \
-    if (nic->colo_##arg) {                                                \
-        flexarray_append(back, "colo_"#arg);                              \
-        flexarray_append(back, nic->colo_##arg);                          \
-    }                                                                     \
-})
-
-    MAYBE_ADD_COLO_ARGS(sock_mirror_id);
-    MAYBE_ADD_COLO_ARGS(sock_mirror_ip);
-    MAYBE_ADD_COLO_ARGS(sock_mirror_port);
-    MAYBE_ADD_COLO_ARGS(sock_compare_pri_in_id);
-    MAYBE_ADD_COLO_ARGS(sock_compare_pri_in_ip);
-    MAYBE_ADD_COLO_ARGS(sock_compare_pri_in_port);
-    MAYBE_ADD_COLO_ARGS(sock_compare_sec_in_id);
-    MAYBE_ADD_COLO_ARGS(sock_compare_sec_in_ip);
-    MAYBE_ADD_COLO_ARGS(sock_compare_sec_in_port);
-    MAYBE_ADD_COLO_ARGS(sock_compare_notify_id);
-    MAYBE_ADD_COLO_ARGS(sock_compare_notify_ip);
-    MAYBE_ADD_COLO_ARGS(sock_compare_notify_port);
-    MAYBE_ADD_COLO_ARGS(sock_redirector0_id);
-    MAYBE_ADD_COLO_ARGS(sock_redirector0_ip);
-    MAYBE_ADD_COLO_ARGS(sock_redirector0_port);
-    MAYBE_ADD_COLO_ARGS(sock_redirector1_id);
-    MAYBE_ADD_COLO_ARGS(sock_redirector1_ip);
-    MAYBE_ADD_COLO_ARGS(sock_redirector1_port);
-    MAYBE_ADD_COLO_ARGS(sock_redirector2_id);
-    MAYBE_ADD_COLO_ARGS(sock_redirector2_ip);
-    MAYBE_ADD_COLO_ARGS(sock_redirector2_port);
-    MAYBE_ADD_COLO_ARGS(filter_mirror_queue);
-    MAYBE_ADD_COLO_ARGS(filter_mirror_outdev);
-    MAYBE_ADD_COLO_ARGS(filter_redirector0_queue);
-    MAYBE_ADD_COLO_ARGS(filter_redirector0_indev);
-    MAYBE_ADD_COLO_ARGS(filter_redirector0_outdev);
-    MAYBE_ADD_COLO_ARGS(filter_redirector1_queue);
-    MAYBE_ADD_COLO_ARGS(filter_redirector1_indev);
-    MAYBE_ADD_COLO_ARGS(filter_redirector1_outdev);
-    MAYBE_ADD_COLO_ARGS(compare_pri_in);
-    MAYBE_ADD_COLO_ARGS(compare_sec_in);
-    MAYBE_ADD_COLO_ARGS(compare_out);
-    MAYBE_ADD_COLO_ARGS(compare_notify_dev);
-
-    MAYBE_ADD_COLO_ARGS(sock_sec_redirector0_id);
-    MAYBE_ADD_COLO_ARGS(sock_sec_redirector0_ip);
-    MAYBE_ADD_COLO_ARGS(sock_sec_redirector0_port);
-    MAYBE_ADD_COLO_ARGS(sock_sec_redirector1_id);
-    MAYBE_ADD_COLO_ARGS(sock_sec_redirector1_ip);
-    MAYBE_ADD_COLO_ARGS(sock_sec_redirector1_port);
-    MAYBE_ADD_COLO_ARGS(filter_sec_redirector0_queue);
-    MAYBE_ADD_COLO_ARGS(filter_sec_redirector0_indev);
-    MAYBE_ADD_COLO_ARGS(filter_sec_redirector0_outdev);
-    MAYBE_ADD_COLO_ARGS(filter_sec_redirector1_queue);
-    MAYBE_ADD_COLO_ARGS(filter_sec_redirector1_indev);
-    MAYBE_ADD_COLO_ARGS(filter_sec_redirector1_outdev);
-    MAYBE_ADD_COLO_ARGS(filter_sec_rewriter0_queue);
-    MAYBE_ADD_COLO_ARGS(checkpoint_host);
-    MAYBE_ADD_COLO_ARGS(checkpoint_port);
-
-#undef MAYBE_ADD_COLO_ARGS
 
     flexarray_append(back, "mac");
     flexarray_append(back,GCSPRINTF(LIBXL_MAC_FMT, LIBXL_MAC_BYTES(nic->mac)));
@@ -231,24 +221,78 @@ static int libxl__set_xenstore_nic(libxl__gc *gc, uint32_t domid,
     flexarray_append(back, libxl__strdup(gc,
                                      libxl_nic_type_to_string(nic->nictype)));
 
+    flexarray_append(front, "backend-id");
+    flexarray_append(front, GCSPRINTF("%d", nic->backend_domid));
+    flexarray_append(front, "state");
+    flexarray_append(front, GCSPRINTF("%d", XenbusStateInitialising));
     flexarray_append(front, "handle");
     flexarray_append(front, GCSPRINTF("%d", nic->devid));
     flexarray_append(front, "mac");
     flexarray_append(front, GCSPRINTF(
                                     LIBXL_MAC_FMT, LIBXL_MAC_BYTES(nic->mac)));
 
-    return 0;
+    if (aodev->update_json) {
+        lock = libxl__lock_domain_userdata(gc, domid);
+        if (!lock) {
+            rc = ERROR_LOCK_FAIL;
+            goto out;
+        }
+
+        rc = libxl__get_domain_configuration(gc, domid, &d_config);
+        if (rc) goto out;
+
+        DEVICE_ADD(nic, nics, domid, &nic_saved, COMPARE_DEVID, &d_config);
+
+        rc = libxl__dm_check_start(gc, &d_config, domid);
+        if (rc) goto out;
+    }
+
+    for (;;) {
+        rc = libxl__xs_transaction_start(gc, &t);
+        if (rc) goto out;
+
+        rc = libxl__device_exists(gc, t, device);
+        if (rc < 0) goto out;
+        if (rc == 1) {              /* already exists in xenstore */
+            LOG(ERROR, "device already exists in xenstore");
+            aodev->action = LIBXL__DEVICE_ACTION_ADD; /* for error message */
+            rc = ERROR_DEVICE_EXISTS;
+            goto out;
+        }
+
+        if (aodev->update_json) {
+            rc = libxl__set_domain_configuration(gc, domid, &d_config);
+            if (rc) goto out;
+        }
+
+        libxl__device_generic_add(gc, t, device,
+                                  libxl__xs_kvs_of_flexarray(gc, back),
+                                  libxl__xs_kvs_of_flexarray(gc, front),
+                                  NULL);
+
+        rc = libxl__xs_transaction_commit(gc, &t);
+        if (!rc) break;
+        if (rc < 0) goto out;
+    }
+
+    aodev->dev = device;
+    aodev->action = LIBXL__DEVICE_ACTION_ADD;
+    libxl__wait_device_connection(egc, aodev);
+
+    rc = 0;
+out:
+    libxl__xs_transaction_abort(gc, &t);
+    if (lock) libxl__unlock_domain_userdata(lock);
+    libxl_device_nic_dispose(&nic_saved);
+    libxl_domain_config_dispose(&d_config);
+    aodev->rc = rc;
+    if (rc) aodev->callback(egc, aodev);
+    return;
 }
 
-static void libxl__device_nic_add(libxl__egc *egc, uint32_t domid,
-                                  libxl_device_nic *nic,
-                                  libxl__ao_device *aodev)
-{
-    libxl__device_add_async(egc, domid, &libxl__nic_devtype, nic, aodev);
-}
-
-static int libxl__nic_from_xenstore(libxl__gc *gc, const char *libxl_path,
-                                    libxl_devid devid, libxl_device_nic *nic)
+static int libxl__device_nic_from_xenstore(libxl__gc *gc,
+                                           const char *libxl_path,
+                                           libxl_device_nic *nic)
 {
     const char *tmp;
     int rc;
@@ -304,64 +348,6 @@ static int libxl__nic_from_xenstore(libxl__gc *gc, const char *libxl_path,
                                 (const char **)(&nic->coloft_forwarddev));
     if (rc) goto out;
 
-#define CHECK_COLO_ARGS(arg) ({                                           \
-    rc = libxl__xs_read_checked(NOGC, XBT_NULL,                           \
-                                GCSPRINTF("%s/colo_"#arg, libxl_path),    \
-                                (const char **)(&nic->colo_##arg));       \
-    if (rc) goto out;                                                     \
-})
-
-    CHECK_COLO_ARGS(sock_mirror_id);
-    CHECK_COLO_ARGS(sock_mirror_ip);
-    CHECK_COLO_ARGS(sock_mirror_port);
-    CHECK_COLO_ARGS(sock_compare_pri_in_id);
-    CHECK_COLO_ARGS(sock_compare_pri_in_ip);
-    CHECK_COLO_ARGS(sock_compare_pri_in_port);
-    CHECK_COLO_ARGS(sock_compare_sec_in_id);
-    CHECK_COLO_ARGS(sock_compare_sec_in_ip);
-    CHECK_COLO_ARGS(sock_compare_sec_in_port);
-    CHECK_COLO_ARGS(sock_compare_notify_id);
-    CHECK_COLO_ARGS(sock_compare_notify_ip);
-    CHECK_COLO_ARGS(sock_compare_notify_port);
-    CHECK_COLO_ARGS(sock_redirector0_id);
-    CHECK_COLO_ARGS(sock_redirector0_ip);
-    CHECK_COLO_ARGS(sock_redirector0_port);
-    CHECK_COLO_ARGS(sock_redirector1_id);
-    CHECK_COLO_ARGS(sock_redirector1_ip);
-    CHECK_COLO_ARGS(sock_redirector1_port);
-    CHECK_COLO_ARGS(sock_redirector2_id);
-    CHECK_COLO_ARGS(sock_redirector2_ip);
-    CHECK_COLO_ARGS(sock_redirector2_port);
-    CHECK_COLO_ARGS(filter_mirror_queue);
-    CHECK_COLO_ARGS(filter_mirror_outdev);
-    CHECK_COLO_ARGS(filter_redirector0_queue);
-    CHECK_COLO_ARGS(filter_redirector0_indev);
-    CHECK_COLO_ARGS(filter_redirector0_outdev);
-    CHECK_COLO_ARGS(filter_redirector1_queue);
-    CHECK_COLO_ARGS(filter_redirector1_indev);
-    CHECK_COLO_ARGS(filter_redirector1_outdev);
-    CHECK_COLO_ARGS(compare_pri_in);
-    CHECK_COLO_ARGS(compare_sec_in);
-    CHECK_COLO_ARGS(compare_out);
-    CHECK_COLO_ARGS(compare_notify_dev);
-    CHECK_COLO_ARGS(sock_sec_redirector0_id);
-    CHECK_COLO_ARGS(sock_sec_redirector0_ip);
-    CHECK_COLO_ARGS(sock_sec_redirector0_port);
-    CHECK_COLO_ARGS(sock_sec_redirector1_id);
-    CHECK_COLO_ARGS(sock_sec_redirector1_ip);
-    CHECK_COLO_ARGS(sock_sec_redirector1_port);
-    CHECK_COLO_ARGS(filter_sec_redirector0_queue);
-    CHECK_COLO_ARGS(filter_sec_redirector0_indev);
-    CHECK_COLO_ARGS(filter_sec_redirector0_outdev);
-    CHECK_COLO_ARGS(filter_sec_redirector1_queue);
-    CHECK_COLO_ARGS(filter_sec_redirector1_indev);
-    CHECK_COLO_ARGS(filter_sec_redirector1_outdev);
-    CHECK_COLO_ARGS(filter_sec_rewriter0_queue);
-    CHECK_COLO_ARGS(checkpoint_host);
-    CHECK_COLO_ARGS(checkpoint_port);
-
-#undef CHECK_COLO_ARGS
-
     /* vif_ioemu nics use the same xenstore entries as vif interfaces */
     rc = libxl__xs_read_checked(gc, XBT_NULL,
                                 GCSPRINTF("%s/type", libxl_path), &tmp);
@@ -380,38 +366,103 @@ static int libxl__nic_from_xenstore(libxl__gc *gc, const char *libxl_path,
     return rc;
 }
 
-libxl_device_nic *libxl_device_nic_list(libxl_ctx *ctx, uint32_t domid, int *num)
+int libxl_devid_to_device_nic(libxl_ctx *ctx, uint32_t domid,
+                              int devid, libxl_device_nic *nic)
 {
-    libxl_device_nic *r;
-
     GC_INIT(ctx);
+    char *libxl_dom_path, *libxl_path;
+    int rc = ERROR_FAIL;
 
-    r = libxl__device_list(gc, &libxl__nic_devtype, domid, num);
+    libxl_device_nic_init(nic);
+    libxl_dom_path = libxl__xs_libxl_path(gc, domid);
+    if (!libxl_dom_path)
+        goto out;
 
+    libxl_path = GCSPRINTF("%s/device/vif/%d", libxl_dom_path, devid);
+
+    rc = libxl__device_nic_from_xenstore(gc, libxl_path, nic);
+    if (rc) goto out;
+
+    rc = 0;
+out:
     GC_FREE;
-
-    return r;
+    return rc;
 }
 
-void libxl_device_nic_list_free(libxl_device_nic* list, int num)
+static int libxl__append_nic_list(libxl__gc *gc,
+                                           uint32_t domid,
+                                           libxl_device_nic **nics,
+                                           int *nnics)
 {
-    libxl__device_list_free(&libxl__nic_devtype, list, num);
+    char *libxl_dir_path = NULL;
+    char **dir = NULL;
+    unsigned int n = 0;
+    libxl_device_nic *pnic = NULL, *pnic_end = NULL;
+    int rc;
+
+    libxl_dir_path = GCSPRINTF("%s/device/vif",
+                               libxl__xs_libxl_path(gc, domid));
+    dir = libxl__xs_directory(gc, XBT_NULL, libxl_dir_path, &n);
+    if (dir && n) {
+        libxl_device_nic *tmp;
+        tmp = realloc(*nics, sizeof (libxl_device_nic) * (*nnics + n));
+        if (tmp == NULL)
+            return ERROR_NOMEM;
+        *nics = tmp;
+        pnic = *nics + *nnics;
+        pnic_end = *nics + *nnics + n;
+        for (; pnic < pnic_end; pnic++, dir++) {
+            const char *p;
+            p = GCSPRINTF("%s/%s", libxl_dir_path, *dir);
+            rc = libxl__device_nic_from_xenstore(gc, p, pnic);
+            if (rc) goto out;
+        }
+        *nnics += n;
+    }
+    return 0;
+
+ out:
+    return rc;
+}
+
+libxl_device_nic *libxl_device_nic_list(libxl_ctx *ctx, uint32_t domid, int *num)
+{
+    GC_INIT(ctx);
+    libxl_device_nic *nics = NULL;
+    int rc;
+
+    *num = 0;
+
+    rc = libxl__append_nic_list(gc, domid, &nics, num);
+    if (rc) goto out_err;
+
+    GC_FREE;
+    return nics;
+
+out_err:
+    LOG(ERROR, "Unable to list nics");
+    while (*num) {
+        (*num)--;
+        libxl_device_nic_dispose(&nics[*num]);
+    }
+    free(nics);
+    return NULL;
 }
 
 int libxl_device_nic_getinfo(libxl_ctx *ctx, uint32_t domid,
                               libxl_device_nic *nic, libxl_nicinfo *nicinfo)
 {
     GC_INIT(ctx);
-    char *nicpath, *libxl_path;
+    char *dompath, *nicpath, *libxl_path;
     char *val;
     int rc;
 
+    dompath = libxl__xs_get_dompath(gc, domid);
     nicinfo->devid = nic->devid;
 
-    nicpath = libxl__domain_device_frontend_path(gc, domid, nicinfo->devid,
-                                                 LIBXL__DEVICE_KIND_VIF);
-    libxl_path = libxl__domain_device_libxl_path(gc, domid, nicinfo->devid,
-                                                 LIBXL__DEVICE_KIND_VIF);
+    nicpath = GCSPRINTF("%s/device/vif/%d", dompath, nicinfo->devid);
+    libxl_path = GCSPRINTF("%s/device/vif/%d",
+                           libxl__xs_libxl_path(gc, domid), nicinfo->devid);
     nicinfo->backend = xs_read(ctx->xsh, XBT_NULL,
                                 GCSPRINTF("%s/backend", libxl_path), NULL);
     if (!nicinfo->backend) {
@@ -477,10 +528,10 @@ int libxl__device_nic_set_devids(libxl__gc *gc, libxl_domain_config *d_config,
          * called libxl_device_nic_add when domcreate_launch_dm gets called,
          * but qemu needs the nic information to be complete.
          */
-        ret = libxl__device_nic_setdefault(gc, domid, &d_config->nics[i],
+        ret = libxl__device_nic_setdefault(gc, &d_config->nics[i], domid,
                                            false);
         if (ret) {
-            LOGD(ERROR, domid, "Unable to set nic defaults for nic %d", i);
+            LOG(ERROR, "Unable to set nic defaults for nic %d", i);
             goto out;
         }
 
@@ -496,19 +547,12 @@ out:
     return ret;
 }
 
-static LIBXL_DEFINE_UPDATE_DEVID(nic)
-static LIBXL_DEFINE_DEVICE_FROM_TYPE(nic)
-
-LIBXL_DEFINE_DEVID_TO_DEVICE(nic)
 LIBXL_DEFINE_DEVICE_ADD(nic)
 LIBXL_DEFINE_DEVICES_ADD(nic)
 LIBXL_DEFINE_DEVICE_REMOVE(nic)
 
-DEFINE_DEVICE_TYPE_STRUCT(nic, VIF,
-    .update_config = libxl_device_nic_update_config,
-    .from_xenstore = (device_from_xenstore_fn_t)libxl__nic_from_xenstore,
-    .set_xenstore_config = (device_set_xenstore_config_fn_t)
-                           libxl__set_xenstore_nic,
+DEFINE_DEVICE_TYPE_STRUCT(nic,
+    .update_config = libxl_device_nic_update_config
 );
 
 /*

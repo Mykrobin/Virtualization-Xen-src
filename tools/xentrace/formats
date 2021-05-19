@@ -35,7 +35,6 @@
 0x0002800e  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  switch_infprev    [ dom:vcpu = 0x%(1)04x%(2)04x, runtime = %(3)d ]
 0x0002800f  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  switch_infnext    [ new_dom:vcpu = 0x%(1)04x%(2)04x, time = %(3)d, r_time = %(4)d ]
 0x00028010  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  domain_shutdown_code [ dom:vcpu = 0x%(1)04x%(2)04x, reason = 0x%(3)08x ]
-0x00028011  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  switch_infcont    [ dom:vcpu = 0x%(1)04x%(2)04x, runtime = %(3)d, r_time = %(4)d ]
 
 0x00022001  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched:sched_tasklet
 0x00022002  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched:account_start [ dom:vcpu = 0x%(1)04x%(2)04x, active = %(3)d ]
@@ -47,13 +46,12 @@
 0x00022008  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched:unboost       [ dom:vcpu = 0x%(1)04x%(2)04x ]
 0x00022009  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched:schedule      [ cpu[16]:tasklet[8]:idle[8] = %(1)08x ]
 0x0002200A  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched:ratelimit     [ dom:vcpu = 0x%(1)08x, runtime = %(2)d ]
-0x0002200B  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched:steal_check   [ peer_cpu = %(1)d, checked = %(2)d ]
 
 0x00022201  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:tick
 0x00022202  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:runq_pos       [ dom:vcpu = 0x%(1)08x, pos = %(2)d]
-0x00022203  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:credit burn    [ dom:vcpu = 0x%(1)08x, credit = %(2)d, budget = %(3)d, delta = %(4)d ]
+0x00022203  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:credit burn    [ dom:vcpu = 0x%(1)08x, credit = %(2)d, delta = %(3)d ]
 0x00022204  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:credit_add
-0x00022205  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:tickle_check   [ dom:vcpu = 0x%(1)08x, credit = %(2)d, score = %(3)d ]
+0x00022205  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:tickle_check   [ dom:vcpu = 0x%(1)08x, credit = %(2)d ]
 0x00022206  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:tickle         [ cpu = %(1)d ]
 0x00022207  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:credit_reset   [ dom:vcpu = 0x%(1)08x, cr_start = %(2)d, cr_end = %(3)d, mult = %(4)d ]
 0x00022208  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:sched_tasklet
@@ -67,10 +65,9 @@
 0x00022210  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:load_check     [ lrq_id[16]:orq_id[16] = 0x%(1)08x, delta = %(2)d ]
 0x00022211  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:load_balance   [ l_bavgload = 0x%(2)08x%(1)08x, o_bavgload = 0x%(4)08x%(3)08x, lrq_id[16]:orq_id[16] = 0x%(5)08x ]
 0x00022212  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:pick_cpu       [ b_avgload = 0x%(2)08x%(1)08x, dom:vcpu = 0x%(3)08x, rq_id[16]:new_cpu[16] = %(4)d ]
-0x00022213  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:runq_candidate [ dom:vcpu = 0x%(1)08x, credit = %(4)d, skipped_vcpus = %(3)d, tickled_cpu = %(2)d ]
+0x00022213  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:runq_candidate [ dom:vcpu = 0x%(1)08x, skipped_vcpus = %(2)d tickled_cpu = %(3)d ]
 0x00022214  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:schedule       [ rq:cpu = 0x%(1)08x, tasklet[8]:idle[8]:smt_idle[8]:tickled[8] = %(2)08x ]
 0x00022215  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:ratelimit      [ dom:vcpu = 0x%(1)08x, runtime = %(2)d ]
-0x00022216  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  csched2:runq_cand_chk  [ dom:vcpu = 0x%(1)08x ]
 
 0x00022801  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rtds:tickle        [ cpu = %(1)d ]
 0x00022802  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rtds:runq_pick     [ dom:vcpu = 0x%(1)08x, cur_deadline = 0x%(3)08x%(2)08x, cur_budget = 0x%(5)08x%(4)08x ]
@@ -78,13 +75,6 @@
 0x00022804  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rtds:repl_budget   [ dom:vcpu = 0x%(1)08x, cur_deadline = 0x%(3)08x%(2)08x, cur_budget = 0x%(5)08x%(4)08x ]
 0x00022805  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rtds:sched_tasklet
 0x00022806  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  rtds:schedule      [ cpu[16]:tasklet[8]:idle[4]:tickled[4] = %(1)08x ]
-
-0x00022A01  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  null:pick_cpu      [ dom:vcpu = 0x%(1)08x, new_cpu = %(2)d ]
-0x00022A02  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  null:assign        [ dom:vcpu = 0x%(1)08x, cpu = %(2)d ]
-0x00022A03  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  null:deassign      [ dom:vcpu = 0x%(1)08x, cpu = %(2)d ]
-0x00022A04  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  null:migrate       [ dom:vcpu = 0x%(1)08x, new_cpu:cpu = 0x%(2)08x ]
-0x00022A05  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  null:schedule      [ cpu[16]:tasklet[16] = %(1)08x, dom:vcpu = 0x%(2)08x ]
-0x00022A06  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  null:sched_tasklet
 
 0x00041001  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  domain_create   [ dom = 0x%(1)08x ]
 0x00041002  CPU%(cpu)d  %(tsc)d (+%(reltsc)8d)  domain_destroy  [ dom = 0x%(1)08x ]

@@ -19,6 +19,7 @@
 #ifndef __ASM_X86_HVM_ASID_H__
 #define __ASM_X86_HVM_ASID_H__
 
+#include <xen/config.h>
 
 struct vcpu;
 struct hvm_vcpu_asid;

@@ -1,7 +1,7 @@
 #include <xen/mm.h>
 #include <asm/shadow.h>
 
-static int _enable_log_dirty(struct domain *d, bool log_global)
+static int _enable_log_dirty(struct domain *d, bool_t log_global)
 {
     ASSERT(is_pv_domain(d));
     return -EOPNOTSUPP;
@@ -20,13 +20,8 @@ static void _clean_dirty_bitmap(struct domain *d)
 
 int shadow_domain_init(struct domain *d, unsigned int domcr_flags)
 {
-    static const struct log_dirty_ops sh_none_ops = {
-        .enable  = _enable_log_dirty,
-        .disable = _disable_log_dirty,
-        .clean   = _clean_dirty_bitmap,
-    };
-
-    paging_log_dirty_init(d, &sh_none_ops);
+    paging_log_dirty_init(d, _enable_log_dirty,
+                          _disable_log_dirty, _clean_dirty_bitmap);
     return is_pv_domain(d) ? 0 : -EOPNOTSUPP;
 }
 
@@ -37,10 +32,10 @@ static int _page_fault(struct vcpu *v, unsigned long va,
     return 0;
 }
 
-static bool _invlpg(struct vcpu *v, unsigned long va)
+static bool_t _invlpg(struct vcpu *v, unsigned long va)
 {
     ASSERT_UNREACHABLE();
-    return true;
+    return 1;
 }
 
 static unsigned long _gva_to_gfn(struct vcpu *v, struct p2m_domain *p2m,
@@ -50,7 +45,7 @@ static unsigned long _gva_to_gfn(struct vcpu *v, struct p2m_domain *p2m,
     return gfn_x(INVALID_GFN);
 }
 
-static void _update_cr3(struct vcpu *v, int do_locking, bool noflush)
+static void _update_cr3(struct vcpu *v, int do_locking)
 {
     ASSERT_UNREACHABLE();
 }

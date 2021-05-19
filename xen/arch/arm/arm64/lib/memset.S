@@ -22,6 +22,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <asm/cache.h>
 #include "assembler.h"
 

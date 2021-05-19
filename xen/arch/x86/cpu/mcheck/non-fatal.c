@@ -7,6 +7,7 @@
  *
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/kernel.h>

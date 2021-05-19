@@ -39,20 +39,19 @@ static int usbback_is_loaded(libxl__gc *gc)
 }
 
 static int libxl__device_usbctrl_setdefault(libxl__gc *gc, uint32_t domid,
-                                            libxl_device_usbctrl *usbctrl,
-                                            bool hotplug)
+                                            libxl_device_usbctrl *usbctrl)
 {
     int rc;
     libxl_domain_type domtype = libxl__domain_type(gc, domid);
 
     if (usbctrl->type == LIBXL_USBCTRL_TYPE_AUTO) {
-        if (domtype != LIBXL_DOMAIN_TYPE_HVM) {
+        if (domtype == LIBXL_DOMAIN_TYPE_PV) {
             rc = usbback_is_loaded(gc);
             if (rc < 0)
                 goto out;
             usbctrl->type = rc ? LIBXL_USBCTRL_TYPE_PV
                                : LIBXL_USBCTRL_TYPE_QUSB;
-        } else {
+        } else if (domtype == LIBXL_DOMAIN_TYPE_HVM) {
             /* FIXME: See if we can detect PV frontend */
             usbctrl->type = LIBXL_USBCTRL_TYPE_DEVICEMODEL;
         }
@@ -246,8 +245,8 @@ static int libxl__device_usbctrl_add_xenstore(libxl__gc *gc, uint32_t domid,
         rc = libxl__get_domain_configuration(gc, domid, &d_config);
         if (rc) goto out;
 
-        device_add_domain_config(gc, &d_config, &libxl__usbctrl_devtype,
-                                 &usbctrl_saved);
+        DEVICE_ADD(usbctrl, usbctrls, domid, &usbctrl_saved,
+                   COMPARE_USBCTRL, &d_config);
 
         rc = libxl__dm_check_start(gc, &d_config, domid);
         if (rc) goto out;
@@ -255,7 +254,7 @@ static int libxl__device_usbctrl_add_xenstore(libxl__gc *gc, uint32_t domid,
         if (usbctrl->type == LIBXL_USBCTRL_TYPE_QUSB) {
             if (!libxl__query_qemu_backend(gc, domid, usbctrl->backend_domid,
                                            "qusb", false)) {
-                LOGD(ERROR, domid, "backend type not supported by device model");
+                LOG(ERROR, "backend type not supported by device model");
                 rc = ERROR_FAIL;
                 goto out;
             }
@@ -270,7 +269,7 @@ static int libxl__device_usbctrl_add_xenstore(libxl__gc *gc, uint32_t domid,
         if (rc < 0) goto out;
         if (rc == 1) {
             /* already exists in xenstore */
-            LOGD(ERROR, domid, "device already exists in xenstore");
+            LOG(ERROR, "device already exists in xenstore");
             rc = ERROR_DEVICE_EXISTS;
             goto out;
         }
@@ -310,8 +309,8 @@ static void libxl__device_usbctrl_del_xenstore(libxl__gc *gc, uint32_t domid,
     xs_transaction_t t = XBT_NULL;
     int rc;
 
-    libxl_path = libxl__domain_device_libxl_path(gc, domid, usbctrl->devid,
-                                                 LIBXL__DEVICE_KIND_VUSB);
+    libxl_path = GCSPRINTF("%s/device/vusb/%d",
+                           libxl__xs_libxl_path(gc, domid), usbctrl->devid);
     be_path = vusb_be_from_xs_libxl_type(gc, libxl_path, usbctrl->type);
 
     for (;;) {
@@ -430,8 +429,6 @@ static int libxl__device_usbdev_del_hvm(libxl__gc *gc, uint32_t domid,
     return libxl__qmp_run_command_flexarray(gc, domid, "device_del", qmp_args);
 }
 
-static LIBXL_DEFINE_UPDATE_DEVID(usbctrl)
-
 /* AO operation to add a usb controller.
  *
  * Generally, it does:
@@ -452,12 +449,16 @@ static void libxl__device_usbctrl_add(libxl__egc *egc, uint32_t domid,
     libxl__device *device;
     int rc;
 
-    rc = libxl__device_usbctrl_setdefault(gc, domid, usbctrl,
-                                          aodev->update_json);
+    rc = libxl__device_usbctrl_setdefault(gc, domid, usbctrl);
     if (rc < 0) goto out;
 
-    rc = libxl__device_usbctrl_update_devid(gc, domid, usbctrl);
-    if (rc) goto out;
+    if (usbctrl->devid == -1) {
+        usbctrl->devid = libxl__device_nextid(gc, domid, "vusb");
+        if (usbctrl->devid < 0) {
+            rc = ERROR_FAIL;
+            goto out;
+        }
+    }
 
     rc = libxl__device_usbctrl_add_xenstore(gc, domid, usbctrl,
                                             aodev->update_json);
@@ -535,7 +536,7 @@ void libxl__initiate_device_usbctrl_remove(libxl__egc *egc,
     for (i = 0; i < num_usbdev; i++) {
         rc = libxl__device_usbdev_remove(gc, domid, &usbdevs[i]);
         if (rc) {
-            LOGD(ERROR, domid, "libxl__device_usbdev_remove failed: controller %d, "
+            LOG(ERROR, "libxl__device_usbdev_remove failed: controller %d, "
                 "port %d", usbdevs[i].ctrl, usbdevs[i].port);
             goto out;
         }
@@ -574,9 +575,8 @@ libxl_device_usbctrl_list(libxl_ctx *ctx, uint32_t domid, int *num)
 
     *num = 0;
 
-    libxl_vusbs_path = GCSPRINTF("%s/device/%s",
-                     libxl__xs_libxl_path(gc, domid),
-                     libxl__device_kind_to_string(LIBXL__DEVICE_KIND_VUSB));
+    libxl_vusbs_path = GCSPRINTF("%s/device/vusb",
+                     libxl__xs_libxl_path(gc, domid));
     entry = libxl__xs_directory(gc, XBT_NULL, libxl_vusbs_path, &nentries);
 
     if (entry && nentries) {
@@ -633,7 +633,7 @@ libxl_device_usbctrl_list(libxl_ctx *ctx, uint32_t domid, int *num)
     return usbctrls;
 
 out:
-    LOGD(ERROR, domid, "Unable to list USB Controllers");
+    LOG(ERROR, "Unable to list USB Controllers");
     libxl_device_usbctrl_list_free(usbctrls, *num);
     GC_FREE;
     *num = 0;
@@ -645,16 +645,16 @@ int libxl_device_usbctrl_getinfo(libxl_ctx *ctx, uint32_t domid,
                                  libxl_usbctrlinfo *usbctrlinfo)
 {
     GC_INIT(ctx);
-    const char *fe_path, *be_path, *tmp;
-    const char *libxl_path;
+    const char *dompath, *fe_path, *be_path, *tmp;
+    const char *libxl_dom_path, *libxl_path;
     int rc;
 
     usbctrlinfo->devid = usbctrl->devid;
 
 #define READ_SUBPATH(path, subpath) ({                                  \
-        rc = libxl__xs_read_mandatory(gc, XBT_NULL,                     \
-                                      GCSPRINTF("%s/" subpath, path),   \
-                                      &tmp);                            \
+        rc = libxl__xs_read_checked(gc, XBT_NULL,                       \
+                                    GCSPRINTF("%s/" subpath, path),     \
+                                    &tmp);                              \
         if (rc) goto out;                                               \
         (char *)tmp;                                                    \
     })
@@ -667,14 +667,14 @@ int libxl_device_usbctrl_getinfo(libxl_ctx *ctx, uint32_t domid,
         tmp ? atoi(tmp) : -1;                                           \
     })
 
-    libxl_path = libxl__domain_device_libxl_path(gc, domid, usbctrl->devid,
-                                                 LIBXL__DEVICE_KIND_VUSB);
+    libxl_dom_path = libxl__xs_libxl_path(gc, domid);
+    libxl_path = GCSPRINTF("%s/device/vusb/%d", libxl_dom_path, usbctrl->devid);
     libxl_usbctrl_type_from_string(READ_SUBPATH(libxl_path, "type"),
                                    &usbctrlinfo->type);
 
     if (usbctrlinfo->type != LIBXL_USBCTRL_TYPE_DEVICEMODEL) {
-        fe_path = libxl__domain_device_frontend_path(gc, domid, usbctrl->devid,
-                                                     LIBXL__DEVICE_KIND_VUSB);
+        dompath = libxl__xs_get_dompath(gc, domid);
+        fe_path = GCSPRINTF("%s/device/vusb/%d", dompath, usbctrl->devid);
         be_path = READ_SUBPATH(libxl_path, "backend");
         usbctrlinfo->backend = libxl__strdup(NOGC, be_path);
         rc = libxl__backendpath_parse_domid(gc, be_path,
@@ -822,9 +822,8 @@ static int get_assigned_devices(libxl__gc *gc,
         unsigned int nc = 0;
         uint32_t domid = atoi(domlist[i]);
 
-        libxl_vusbs_path = GCSPRINTF("%s/device/%s",
-                                     libxl__xs_libxl_path(gc, domid),
-                                     libxl__device_kind_to_string(LIBXL__DEVICE_KIND_VUSB));
+        libxl_vusbs_path = GCSPRINTF("%s/device/vusb",
+                                     libxl__xs_libxl_path(gc, domid));
         usbctrls = libxl__xs_directory(gc, XBT_NULL,
                                        libxl_vusbs_path, &nc);
 
@@ -902,8 +901,8 @@ libxl__device_usbdev_list_for_usbctrl(libxl__gc *gc,
     *usbdevs = NULL;
     *num = 0;
 
-    libxl_path = libxl__domain_device_libxl_path(gc, domid, usbctrl,
-                                                 LIBXL__DEVICE_KIND_VUSB);
+    libxl_path = GCSPRINTF("%s/device/vusb/%d",
+                           libxl__xs_libxl_path(gc, domid), usbctrl);
 
     be_path = vusb_be_from_xs_libxl(gc, libxl_path);
     if (!be_path) {
@@ -961,10 +960,8 @@ libxl_device_usbdev_list(libxl_ctx *ctx, uint32_t domid, int *num)
 
     *num = 0;
 
-    libxl_vusbs_path = GCSPRINTF("%s/device/%s",
-                                 libxl__xs_libxl_path(gc, domid),
-                                 libxl__device_kind_to_string(
-                                 LIBXL__DEVICE_KIND_VUSB));
+    libxl_vusbs_path = GCSPRINTF("%s/device/vusb",
+                                 libxl__xs_libxl_path(gc, domid));
     usbctrls = libxl__xs_directory(gc, XBT_NULL, libxl_vusbs_path, &nc);
 
     for (i = 0; i < nc; i++) {
@@ -994,8 +991,7 @@ static char *vusb_get_port_path(libxl__gc *gc, uint32_t domid,
     char *path;
 
     if (type == LIBXL_USBCTRL_TYPE_DEVICEMODEL)
-        path = GCSPRINTF("%s/device/%s", libxl__xs_libxl_path(gc, domid),
-                         libxl__device_kind_to_string(LIBXL__DEVICE_KIND_VUSB));
+        path = GCSPRINTF("%s/device/vusb", libxl__xs_libxl_path(gc, domid));
     else
         path = GCSPRINTF("%s/backend/%s/%d",
                          libxl__xs_get_dompath(gc, LIBXL_TOOLSTACK_DOMID),
@@ -1071,8 +1067,7 @@ static int libxl__device_usbdev_setdefault(libxl__gc *gc,
 
     if (usbdev->ctrl == -1) {
         if (usbdev->port) {
-            LOGD(ERROR, domid,
-                 "USB controller must be specified if you specify port");
+            LOG(ERROR, "USB controller must be specified if you specify port");
             return ERROR_INVAL;
         }
 
@@ -1083,12 +1078,16 @@ static int libxl__device_usbdev_setdefault(libxl__gc *gc,
 
             GCNEW(usbctrl);
             libxl_device_usbctrl_init(usbctrl);
-            rc = libxl__device_usbctrl_setdefault(gc, domid, usbctrl,
-                                                  update_json);
+            rc = libxl__device_usbctrl_setdefault(gc, domid, usbctrl);
             if (rc < 0) goto out;
 
-            rc = libxl__device_usbctrl_update_devid(gc, domid, usbctrl);
-            if (rc) goto out;
+            if (usbctrl->devid == -1) {
+                usbctrl->devid = libxl__device_nextid(gc, domid, "vusb");
+                if (usbctrl->devid < 0) {
+                    rc = ERROR_FAIL;
+                    goto out;
+                }
+            }
 
             rc = libxl__device_usbctrl_add_xenstore(gc, domid, usbctrl,
                                                     update_json);
@@ -1101,8 +1100,9 @@ static int libxl__device_usbdev_setdefault(libxl__gc *gc,
         /* A controller was specified; look it up */
         const char *libxl_path, *be_path, *tmp;
 
-        libxl_path = libxl__domain_device_libxl_path(gc, domid, usbdev->ctrl,
-	                                                 LIBXL__DEVICE_KIND_VUSB);
+        libxl_path = GCSPRINTF("%s/device/vusb/%d",
+                            libxl__xs_libxl_path(gc, domid),
+                            usbdev->ctrl);
 
         be_path = vusb_be_from_xs_libxl(gc, libxl_path);
         if (!be_path) {
@@ -1119,7 +1119,7 @@ static int libxl__device_usbdev_setdefault(libxl__gc *gc,
             if (rc) goto out;
 
             if (tmp && strcmp(tmp, "")) {
-                LOGD(ERROR, domid, "The controller port isn't available");
+                LOG(ERROR, "The controller port isn't available");
                 rc = ERROR_FAIL;
                 goto out;
             }
@@ -1146,7 +1146,7 @@ static int libxl__device_usbdev_setdefault(libxl__gc *gc,
             }
 
             if (!usbdev->port) {
-                LOGD(ERROR, domid, "No available port under specified controller");
+                LOG(ERROR, "No available port under specified controller");
                 rc = ERROR_FAIL;
                 goto out;
             }
@@ -1183,7 +1183,7 @@ static int libxl__device_usbdev_add_xenstore(libxl__gc *gc, uint32_t domid,
     busid = usbdev_busaddr_to_busid(gc, usbdev->u.hostdev.hostbus,
                                     usbdev->u.hostdev.hostaddr);
     if (!busid) {
-        LOGD(DEBUG, domid, "Fail to get busid of usb device");
+        LOG(DEBUG, "Fail to get busid of usb device");
         rc = ERROR_FAIL;
         goto out;
     }
@@ -1198,8 +1198,8 @@ static int libxl__device_usbdev_add_xenstore(libxl__gc *gc, uint32_t domid,
         rc = libxl__get_domain_configuration(gc, domid, &d_config);
         if (rc) goto out;
 
-        device_add_domain_config(gc, &d_config, &libxl__usbdev_devtype,
-                                         &usbdev_saved);
+        DEVICE_ADD(usbdev, usbdevs, domid, &usbdev_saved,
+                   COMPARE_USB, &d_config);
 
         rc = libxl__dm_check_start(gc, &d_config, domid);
         if (rc) goto out;
@@ -1217,7 +1217,7 @@ static int libxl__device_usbdev_add_xenstore(libxl__gc *gc, uint32_t domid,
         be_path = vusb_get_port_path(gc, domid, type, usbdev->ctrl,
                                      usbdev->port);
 
-        LOGD(DEBUG, domid, "Adding usb device %s to xenstore: controller %d, port %d",
+        LOG(DEBUG, "Adding usb device %s to xenstore: controller %d, port %d",
             busid, usbdev->ctrl, usbdev->port);
 
         rc = libxl__xs_write_checked(gc, t, be_path, busid);
@@ -1245,8 +1245,8 @@ static int libxl__device_usbdev_remove_xenstore(libxl__gc *gc, uint32_t domid,
 
     be_path = vusb_get_port_path(gc, domid, type, usbdev->ctrl, usbdev->port);
 
-    LOGD(DEBUG, domid, "Removing usb device from xenstore: controller %d, port %d",
-         usbdev->ctrl, usbdev->port);
+    LOG(DEBUG, "Removing usb device from xenstore: controller %d, port %d",
+        usbdev->ctrl, usbdev->port);
 
     return libxl__xs_write_checked(gc, XBT_NULL, be_path, "");
 }
@@ -1634,7 +1634,7 @@ static int do_usbdev_add(libxl__gc *gc, uint32_t domid,
         }
         break;
     default:
-        LOGD(ERROR, domid, "Unsupported usb controller type");
+        LOG(ERROR, "Unsupported usb controller type");
         rc = ERROR_FAIL;
         goto out;
     }
@@ -1687,8 +1687,7 @@ static void libxl__device_usbdev_add(libxl__egc *egc, uint32_t domid,
         if (rc) goto out;
 
         if (usbctrlinfo.backend_id != LIBXL_TOOLSTACK_DOMID) {
-            LOGD(ERROR, domid,
-                 "Don't support adding USB device from non-Dom0 backend");
+            LOG(ERROR, "Don't support adding USB device from non-Dom0 backend");
             rc = ERROR_INVAL;
             goto out;
         }
@@ -1696,7 +1695,7 @@ static void libxl__device_usbdev_add(libxl__egc *egc, uint32_t domid,
 
     /* check usb device is assignable type */
     if (!is_usbdev_assignable(gc, usbdev)) {
-        LOGD(ERROR, domid, "USB device is not assignable.");
+        LOG(ERROR, "USB device is not assignable.");
         rc = ERROR_FAIL;
         goto out;
     }
@@ -1704,13 +1703,13 @@ static void libxl__device_usbdev_add(libxl__egc *egc, uint32_t domid,
     /* check usb device is already assigned */
     rc = get_assigned_devices(gc, &assigned, &num_assigned);
     if (rc) {
-        LOGD(ERROR, domid, "cannot determine if device is assigned,"
-                           " refusing to continue");
+        LOG(ERROR, "cannot determine if device is assigned,"
+                   " refusing to continue");
         goto out;
     }
 
     if (is_usbdev_in_array(assigned, num_assigned, usbdev)) {
-        LOGD(ERROR, domid, "USB device already attached to a domain");
+        LOG(ERROR, "USB device already attached to a domain");
         rc = ERROR_INVAL;
         goto out;
     }
@@ -1772,24 +1771,24 @@ static int do_usbdev_remove(libxl__gc *gc, uint32_t domid,
          */
         rc = usbback_dev_unassign(gc, busid);
         if (rc) {
-            LOGD(ERROR, domid, "Error removing device from guest."
-                 " Try running usbdev-detach again.");
+            LOG(ERROR, "Error removing device from guest."
+                " Try running usbdev-detach again.");
             goto out;
         }
 
         rc = libxl__device_usbdev_remove_xenstore(gc, domid, usbdev,
                                                   LIBXL_USBCTRL_TYPE_PV);
         if (rc) {
-            LOGD(ERROR, domid, "Error removing device from guest."
-                 " Try running usbdev-detach again.");
+            LOG(ERROR, "Error removing device from guest."
+                " Try running usbdev-detach again.");
             goto out;
         }
 
         rc = usbdev_rebind(gc, busid);
         if (rc) {
-            LOGD(ERROR, domid, "USB device removed from guest, but couldn't"
-                 " re-bind to domain 0. Try removing and re-inserting"
-                 " the USB device or reloading the driver modules.");
+            LOG(ERROR, "USB device removed from guest, but couldn't"
+                " re-bind to domain 0. Try removing and re-inserting"
+                " the USB device or reloading the driver modules.");
             goto out;
         }
 
@@ -1815,7 +1814,7 @@ static int do_usbdev_remove(libxl__gc *gc, uint32_t domid,
 
         break;
     default:
-        LOGD(ERROR, domid, "Unsupported usb controller type");
+        LOG(ERROR, "Unsupported usb controller type");
         rc = ERROR_FAIL;
         goto out;
     }
@@ -1844,7 +1843,7 @@ static int libxl__device_usbdev_remove(libxl__gc *gc, uint32_t domid,
     int rc;
 
     if (usbdev->ctrl < 0 || usbdev->port < 1) {
-        LOGD(ERROR, domid, "Invalid USB device");
+        LOG(ERROR, "Invalid USB device");
         return ERROR_FAIL;
     }
 
@@ -1856,8 +1855,7 @@ static int libxl__device_usbdev_remove(libxl__gc *gc, uint32_t domid,
     if (rc) goto out;
 
     if (usbctrlinfo.backend_id != LIBXL_TOOLSTACK_DOMID) {
-        LOGD(ERROR, domid,
-             "Don't support removing USB device from non-Dom0 backend");
+        LOG(ERROR, "Don't support removing USB device from non-Dom0 backend");
         rc = ERROR_INVAL;
         goto out;
     }
@@ -1892,11 +1890,12 @@ int libxl_ctrlport_to_device_usbdev(libxl_ctx *ctx,
                                     libxl_device_usbdev *usbdev)
 {
     GC_INIT(ctx);
-    const char *libxl_path, *be_path, *busid;
+    const char *libxl_dom_path, *libxl_path, *be_path, *busid;
     int rc;
 
-    libxl_path = libxl__domain_device_libxl_path(gc, domid, ctrl,
-                 LIBXL__DEVICE_KIND_VUSB);
+    libxl_dom_path = libxl__xs_libxl_path(gc, domid);
+
+    libxl_path = GCSPRINTF("%s/device/vusb/%d", libxl_dom_path, ctrl);
     be_path = vusb_be_from_xs_libxl(gc, libxl_path);
     if (!be_path) {
         rc = ERROR_FAIL;
@@ -1963,16 +1962,10 @@ void libxl_device_usbdev_list_free(libxl_device_usbdev *list, int nr)
    free(list);
 }
 
-#define libxl__device_usbctrl_update_devid NULL
-
-DEFINE_DEVICE_TYPE_STRUCT(usbctrl, VUSB,
+DEFINE_DEVICE_TYPE_STRUCT(usbctrl,
     .dm_needed = libxl_device_usbctrl_dm_needed
 );
-
-#define libxl__device_from_usbdev NULL
-#define libxl__device_usbdev_update_devid NULL
-
-DEFINE_DEVICE_TYPE_STRUCT(usbdev, VUSB);
+DEFINE_DEVICE_TYPE_STRUCT(usbdev);
 
 /*
  * Local variables:

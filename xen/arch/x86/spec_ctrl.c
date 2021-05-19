@@ -24,7 +24,6 @@
 #include <asm/microcode.h>
 #include <asm/msr.h>
 #include <asm/processor.h>
-#include <asm/pv/shim.h>
 #include <asm/setup.h>
 #include <asm/spec_ctrl.h>
 #include <asm/spec_ctrl_asm.h>
@@ -73,26 +72,15 @@ static int __init parse_bti(const char *s)
         if ( !ss )
             ss = strchr(s, '\0');
 
-        val = parse_bool(s, ss);
-        if ( !val )
-        {
-            opt_thunk = THUNK_JMP;
-            opt_ibrs = 0;
-            opt_ibpb = false;
-            opt_rsb_pv = false;
-            opt_rsb_hvm = false;
-        }
-        else if ( val > 0 )
-            rc = -EINVAL;
-        else if ( !strncmp(s, "thunk=", 6) )
+        if ( !strncmp(s, "thunk=", 6) )
         {
             s += 6;
 
-            if ( !cmdline_strcmp(s, "retpoline") )
+            if ( !strncmp(s, "retpoline", ss - s) )
                 opt_thunk = THUNK_RETPOLINE;
-            else if ( !cmdline_strcmp(s, "lfence") )
+            else if ( !strncmp(s, "lfence", ss - s) )
                 opt_thunk = THUNK_LFENCE;
-            else if ( !cmdline_strcmp(s, "jmp") )
+            else if ( !strncmp(s, "jmp", ss - s) )
                 opt_thunk = THUNK_JMP;
             else
                 rc = -EINVAL;
@@ -105,11 +93,6 @@ static int __init parse_bti(const char *s)
             opt_rsb_pv = val;
         else if ( (val = parse_boolean("rsb_vmexit", s, ss)) >= 0 )
             opt_rsb_hvm = val;
-        else if ( (val = parse_boolean("rsb", s, ss)) >= 0 )
-        {
-            opt_rsb_pv = val;
-            opt_rsb_hvm = val;
-        }
         else
             rc = -EINVAL;
 
@@ -120,18 +103,18 @@ static int __init parse_bti(const char *s)
 }
 custom_param("bti", parse_bti);
 
-static int __init parse_spec_ctrl(const char *s)
+static int __init parse_spec_ctrl(char *s)
 {
-    const char *ss;
+    char *ss;
     int val, rc = 0;
 
     do {
         ss = strchr(s, ',');
-        if ( !ss )
-            ss = strchr(s, '\0');
+        if ( ss )
+            *ss = '\0';
 
         /* Global and Xen-wide disable. */
-        val = parse_bool(s, ss);
+        val = parse_bool(s);
         if ( !val )
         {
             opt_msr_sc_pv = false;
@@ -212,11 +195,11 @@ static int __init parse_spec_ctrl(const char *s)
         {
             s += 10;
 
-            if ( !cmdline_strcmp(s, "retpoline") )
+            if ( !strcmp(s, "retpoline") )
                 opt_thunk = THUNK_RETPOLINE;
-            else if ( !cmdline_strcmp(s, "lfence") )
+            else if ( !strcmp(s, "lfence") )
                 opt_thunk = THUNK_LFENCE;
-            else if ( !cmdline_strcmp(s, "jmp") )
+            else if ( !strcmp(s, "jmp") )
                 opt_thunk = THUNK_JMP;
             else
                 rc = -EINVAL;
@@ -235,7 +218,7 @@ static int __init parse_spec_ctrl(const char *s)
             rc = -EINVAL;
 
         s = ss + 1;
-    } while ( *ss );
+    } while ( ss );
 
     return rc;
 }
@@ -247,9 +230,9 @@ int8_t __read_mostly opt_xpti_domu = -1;
 static __init void xpti_init_default(uint64_t caps)
 {
     if ( boot_cpu_data.x86_vendor == X86_VENDOR_AMD )
-        caps = ARCH_CAPS_RDCL_NO;
+        caps = ARCH_CAPABILITIES_RDCL_NO;
 
-    if ( caps & ARCH_CAPS_RDCL_NO )
+    if ( caps & ARCH_CAPABILITIES_RDCL_NO )
     {
         if ( opt_xpti_hwdom < 0 )
             opt_xpti_hwdom = 0;
@@ -265,9 +248,9 @@ static __init void xpti_init_default(uint64_t caps)
     }
 }
 
-static __init int parse_xpti(const char *s)
+static __init int parse_xpti(char *s)
 {
-    const char *ss;
+    char *ss;
     int val, rc = 0;
 
     /* Interpret 'xpti' alone in its positive boolean form. */
@@ -276,10 +259,10 @@ static __init int parse_xpti(const char *s)
 
     do {
         ss = strchr(s, ',');
-        if ( !ss )
-            ss = strchr(s, '\0');
+        if ( ss )
+            *ss = '\0';
 
-        switch ( parse_bool(s, ss) )
+        switch ( parse_bool(s) )
         {
         case 0:
             opt_xpti_hwdom = opt_xpti_domu = 0;
@@ -302,7 +285,7 @@ static __init int parse_xpti(const char *s)
         }
 
         s = ss + 1;
-    } while ( *ss );
+    } while ( ss );
 
     return rc;
 }
@@ -311,9 +294,9 @@ custom_param("xpti", parse_xpti);
 int8_t __read_mostly opt_pv_l1tf_hwdom = -1;
 int8_t __read_mostly opt_pv_l1tf_domu = -1;
 
-static __init int parse_pv_l1tf(const char *s)
+static __init int parse_pv_l1tf(char *s)
 {
-    const char *ss;
+    char *ss;
     int val, rc = 0;
 
     /* Interpret 'pv-l1tf' alone in its positive boolean form. */
@@ -322,10 +305,10 @@ static __init int parse_pv_l1tf(const char *s)
 
     do {
         ss = strchr(s, ',');
-        if ( !ss )
-            ss = strchr(s, '\0');
+        if ( ss )
+            *ss = '\0';
 
-        switch ( parse_bool(s, ss) )
+        switch ( parse_bool(s) )
         {
         case 0:
             opt_pv_l1tf_hwdom = opt_pv_l1tf_domu = 0;
@@ -346,7 +329,7 @@ static __init int parse_pv_l1tf(const char *s)
         }
 
         s = ss + 1;
-    } while ( *ss );
+    } while ( ss );
 
     return rc;
 }
@@ -372,8 +355,8 @@ static void __init print_details(enum ind_thunk thunk, uint64_t caps)
            (_7d0 & cpufeat_mask(X86_FEATURE_SSBD))  ? " SSBD"      : "",
            (_7d0 & cpufeat_mask(X86_FEATURE_MD_CLEAR)) ? " MD_CLEAR" : "",
            (e8b  & cpufeat_mask(X86_FEATURE_IBPB))  ? " IBPB"      : "",
-           (caps & ARCH_CAPS_IBRS_ALL)              ? " IBRS_ALL"  : "",
-           (caps & ARCH_CAPS_RDCL_NO)               ? " RDCL_NO"   : "",
+           (caps & ARCH_CAPABILITIES_IBRS_ALL)      ? " IBRS_ALL"  : "",
+           (caps & ARCH_CAPABILITIES_RDCL_NO)       ? " RDCL_NO"   : "",
            (caps & ARCH_CAPS_RSBA)                  ? " RSBA"      : "",
            (caps & ARCH_CAPS_SKIP_L1DFL)            ? " SKIP_L1DFL": "",
            (caps & ARCH_CAPS_SSB_NO)                ? " SSB_NO"    : "",
@@ -422,7 +405,6 @@ static void __init print_details(enum ind_thunk thunk, uint64_t caps)
     printk("  Support for VMs: PV:%s%s%s%s%s, HVM:%s%s%s%s%s\n",
            (boot_cpu_has(X86_FEATURE_SC_MSR_PV) ||
             boot_cpu_has(X86_FEATURE_SC_RSB_PV) ||
-            boot_cpu_has(X86_FEATURE_MD_CLEAR)  ||
             opt_eager_fpu)                           ? ""               : " None",
            boot_cpu_has(X86_FEATURE_SC_MSR_PV)       ? " MSR_SPEC_CTRL" : "",
            boot_cpu_has(X86_FEATURE_SC_RSB_PV)       ? " RSB"           : "",
@@ -430,7 +412,6 @@ static void __init print_details(enum ind_thunk thunk, uint64_t caps)
            boot_cpu_has(X86_FEATURE_MD_CLEAR)        ? " MD_CLEAR"      : "",
            (boot_cpu_has(X86_FEATURE_SC_MSR_HVM) ||
             boot_cpu_has(X86_FEATURE_SC_RSB_HVM) ||
-            boot_cpu_has(X86_FEATURE_MD_CLEAR)   ||
             opt_eager_fpu)                           ? ""               : " None",
            boot_cpu_has(X86_FEATURE_SC_MSR_HVM)      ? " MSR_SPEC_CTRL" : "",
            boot_cpu_has(X86_FEATURE_SC_RSB_HVM)      ? " RSB"           : "",
@@ -500,11 +481,8 @@ static bool __init retpoline_safe(uint64_t caps)
     /*
      * RSBA may be set by a hypervisor to indicate that we may move to a
      * processor which isn't retpoline-safe.
-     *
-     * Processors offering Enhanced IBRS are not guarenteed to be
-     * repoline-safe.
      */
-    if ( caps & (ARCH_CAPS_RSBA | ARCH_CAPS_IBRS_ALL) )
+    if ( caps & ARCH_CAPS_RSBA )
         return false;
 
     switch ( boot_cpu_data.x86_model )
@@ -563,25 +541,6 @@ static bool __init retpoline_safe(uint64_t caps)
     case 0x8e:
     case 0x9e:
         return false;
-
-        /*
-         * Atom processors before Goldmont Plus/Gemini Lake are retpoline-safe.
-         */
-    case 0x1c: /* Pineview */
-    case 0x26: /* Lincroft */
-    case 0x27: /* Penwell */
-    case 0x35: /* Cloverview */
-    case 0x36: /* Cedarview */
-    case 0x37: /* Baytrail / Valleyview (Silvermont) */
-    case 0x4d: /* Avaton / Rangely (Silvermont) */
-    case 0x4c: /* Cherrytrail / Brasswell */
-    case 0x4a: /* Merrifield */
-    case 0x57: /* Knights Landing */
-    case 0x5a: /* Moorefield */
-    case 0x5c: /* Goldmont */
-    case 0x5f: /* Denverton */
-    case 0x85: /* Knights Mill */
-        return true;
 
     default:
         printk("Unrecognised CPU model %#x - assuming not reptpoline safe\n",
@@ -755,7 +714,7 @@ static __init void l1tf_calculations(uint64_t caps)
     }
 
     /* Any processor advertising RDCL_NO should be not vulnerable to L1TF. */
-    if ( caps & ARCH_CAPS_RDCL_NO )
+    if ( caps & ARCH_CAPABILITIES_RDCL_NO )
         cpu_has_bug_l1tf = false;
 
     if ( cpu_has_bug_l1tf && hit_default )
@@ -1071,15 +1030,12 @@ void __init init_speculation_mitigations(void)
 
     /*
      * By default, enable PV domU L1TF mitigations on all L1TF-vulnerable
-     * hardware, except when running in shim mode.
-     *
-     * In shim mode, SHADOW is expected to be compiled out, and a malicious
-     * guest kernel can only attack the shim Xen, not the host Xen.
+     * hardware.
      */
     if ( opt_pv_l1tf_hwdom == -1 )
         opt_pv_l1tf_hwdom = 0;
     if ( opt_pv_l1tf_domu == -1 )
-        opt_pv_l1tf_domu = !pv_shim && cpu_has_bug_l1tf;
+        opt_pv_l1tf_domu = cpu_has_bug_l1tf;
 
     /*
      * By default, enable L1D_FLUSH on L1TF-vulnerable hardware, unless
@@ -1101,7 +1057,7 @@ void __init init_speculation_mitigations(void)
      * However, if we are on affected hardware, with HT enabled, and the user
      * hasn't explicitly chosen whether to use HT or not, nag them to do so.
      */
-    if ( opt_smt == -1 && cpu_has_bug_l1tf && !pv_shim && hw_smt_enabled )
+    if ( opt_smt == -1 && cpu_has_bug_l1tf && hw_smt_enabled )
         warning_add(
             "Booted on L1TF-vulnerable hardware with SMT/Hyperthreading\n"
             "enabled.  Please assess your configuration and choose an\n"

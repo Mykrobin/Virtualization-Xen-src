@@ -32,7 +32,7 @@ int xc_psr_cmt_attach(xc_interface *xch, uint32_t domid)
     DECLARE_DOMCTL;
 
     domctl.cmd = XEN_DOMCTL_psr_cmt_op;
-    domctl.domain = domid;
+    domctl.domain = (domid_t)domid;
     domctl.u.psr_cmt_op.cmd = XEN_DOMCTL_PSR_CMT_OP_ATTACH;
 
     return do_domctl(xch, &domctl);
@@ -43,7 +43,7 @@ int xc_psr_cmt_detach(xc_interface *xch, uint32_t domid)
     DECLARE_DOMCTL;
 
     domctl.cmd = XEN_DOMCTL_psr_cmt_op;
-    domctl.domain = domid;
+    domctl.domain = (domid_t)domid;
     domctl.u.psr_cmt_op.cmd = XEN_DOMCTL_PSR_CMT_OP_DETACH;
 
     return do_domctl(xch, &domctl);
@@ -56,7 +56,7 @@ int xc_psr_cmt_get_domain_rmid(xc_interface *xch, uint32_t domid,
     DECLARE_DOMCTL;
 
     domctl.cmd = XEN_DOMCTL_psr_cmt_op;
-    domctl.domain = domid;
+    domctl.domain = (domid_t)domid;
     domctl.u.psr_cmt_op.cmd = XEN_DOMCTL_PSR_CMT_OP_QUERY_RMID;
 
     rc = do_domctl(xch, &domctl);
@@ -248,9 +248,9 @@ int xc_psr_cmt_enabled(xc_interface *xch)
 
     return 0;
 }
-int xc_psr_set_domain_data(xc_interface *xch, uint32_t domid,
-                           xc_psr_type type, uint32_t target,
-                           uint64_t data)
+int xc_psr_cat_set_domain_data(xc_interface *xch, uint32_t domid,
+                               xc_psr_cat_type type, uint32_t target,
+                               uint64_t data)
 {
     DECLARE_DOMCTL;
     uint32_t cmd;
@@ -258,37 +258,31 @@ int xc_psr_set_domain_data(xc_interface *xch, uint32_t domid,
     switch ( type )
     {
     case XC_PSR_CAT_L3_CBM:
-        cmd = XEN_DOMCTL_PSR_SET_L3_CBM;
+        cmd = XEN_DOMCTL_PSR_CAT_OP_SET_L3_CBM;
         break;
     case XC_PSR_CAT_L3_CBM_CODE:
-        cmd = XEN_DOMCTL_PSR_SET_L3_CODE;
+        cmd = XEN_DOMCTL_PSR_CAT_OP_SET_L3_CODE;
         break;
     case XC_PSR_CAT_L3_CBM_DATA:
-        cmd = XEN_DOMCTL_PSR_SET_L3_DATA;
-        break;
-    case XC_PSR_CAT_L2_CBM:
-        cmd = XEN_DOMCTL_PSR_SET_L2_CBM;
-        break;
-    case XC_PSR_MBA_THRTL:
-        cmd = XEN_DOMCTL_PSR_SET_MBA_THRTL;
+        cmd = XEN_DOMCTL_PSR_CAT_OP_SET_L3_DATA;
         break;
     default:
         errno = EINVAL;
         return -1;
     }
 
-    domctl.cmd = XEN_DOMCTL_psr_alloc;
-    domctl.domain = domid;
-    domctl.u.psr_alloc.cmd = cmd;
-    domctl.u.psr_alloc.target = target;
-    domctl.u.psr_alloc.data = data;
+    domctl.cmd = XEN_DOMCTL_psr_cat_op;
+    domctl.domain = (domid_t)domid;
+    domctl.u.psr_cat_op.cmd = cmd;
+    domctl.u.psr_cat_op.target = target;
+    domctl.u.psr_cat_op.data = data;
 
     return do_domctl(xch, &domctl);
 }
 
-int xc_psr_get_domain_data(xc_interface *xch, uint32_t domid,
-                           xc_psr_type type, uint32_t target,
-                           uint64_t *data)
+int xc_psr_cat_get_domain_data(xc_interface *xch, uint32_t domid,
+                               xc_psr_cat_type type, uint32_t target,
+                               uint64_t *data)
 {
     int rc;
     DECLARE_DOMCTL;
@@ -297,88 +291,50 @@ int xc_psr_get_domain_data(xc_interface *xch, uint32_t domid,
     switch ( type )
     {
     case XC_PSR_CAT_L3_CBM:
-        cmd = XEN_DOMCTL_PSR_GET_L3_CBM;
+        cmd = XEN_DOMCTL_PSR_CAT_OP_GET_L3_CBM;
         break;
     case XC_PSR_CAT_L3_CBM_CODE:
-        cmd = XEN_DOMCTL_PSR_GET_L3_CODE;
+        cmd = XEN_DOMCTL_PSR_CAT_OP_GET_L3_CODE;
         break;
     case XC_PSR_CAT_L3_CBM_DATA:
-        cmd = XEN_DOMCTL_PSR_GET_L3_DATA;
-        break;
-    case XC_PSR_CAT_L2_CBM:
-        cmd = XEN_DOMCTL_PSR_GET_L2_CBM;
-        break;
-    case XC_PSR_MBA_THRTL:
-        cmd = XEN_DOMCTL_PSR_GET_MBA_THRTL;
+        cmd = XEN_DOMCTL_PSR_CAT_OP_GET_L3_DATA;
         break;
     default:
         errno = EINVAL;
         return -1;
     }
 
-    domctl.cmd = XEN_DOMCTL_psr_alloc;
-    domctl.domain = domid;
-    domctl.u.psr_alloc.cmd = cmd;
-    domctl.u.psr_alloc.target = target;
+    domctl.cmd = XEN_DOMCTL_psr_cat_op;
+    domctl.domain = (domid_t)domid;
+    domctl.u.psr_cat_op.cmd = cmd;
+    domctl.u.psr_cat_op.target = target;
 
     rc = do_domctl(xch, &domctl);
 
     if ( !rc )
-        *data = domctl.u.psr_alloc.data;
+        *data = domctl.u.psr_cat_op.data;
 
     return rc;
 }
 
-int xc_psr_get_hw_info(xc_interface *xch, uint32_t socket,
-                       xc_psr_feat_type type, xc_psr_hw_info *hw_info)
+int xc_psr_cat_get_l3_info(xc_interface *xch, uint32_t socket,
+                           uint32_t *cos_max, uint32_t *cbm_len,
+                           bool *cdp_enabled)
 {
-    int rc = -1;
+    int rc;
     DECLARE_SYSCTL;
 
-    if ( !hw_info )
+    sysctl.cmd = XEN_SYSCTL_psr_cat_op;
+    sysctl.u.psr_cat_op.cmd = XEN_SYSCTL_PSR_CAT_get_l3_info;
+    sysctl.u.psr_cat_op.target = socket;
+
+    rc = xc_sysctl(xch, &sysctl);
+    if ( !rc )
     {
-        errno = EINVAL;
-        return rc;
-    }
-
-    sysctl.cmd = XEN_SYSCTL_psr_alloc;
-    sysctl.u.psr_alloc.target = socket;
-
-    switch ( type )
-    {
-    case XC_PSR_CAT_L2:
-    case XC_PSR_CAT_L3:
-        sysctl.u.psr_alloc.cmd = (type == XC_PSR_CAT_L2) ?
-                                 XEN_SYSCTL_PSR_get_l2_info :
-                                 XEN_SYSCTL_PSR_get_l3_info;
-
-        rc = xc_sysctl(xch, &sysctl);
-        if ( rc )
-            break;
-
-        hw_info->cat.cos_max = sysctl.u.psr_alloc.u.cat_info.cos_max;
-        hw_info->cat.cbm_len = sysctl.u.psr_alloc.u.cat_info.cbm_len;
-        hw_info->cat.cdp_enabled = (type == XC_PSR_CAT_L2) ?
-                                   false :
-                                   (sysctl.u.psr_alloc.u.cat_info.flags &
-                                    XEN_SYSCTL_PSR_CAT_L3_CDP);
-
-        break;
-    case XC_PSR_MBA:
-        sysctl.u.psr_alloc.cmd = XEN_SYSCTL_PSR_get_mba_info;
-        rc = xc_sysctl(xch, &sysctl);
-        if ( rc )
-            break;
-
-        hw_info->mba.cos_max = sysctl.u.psr_alloc.u.mba_info.cos_max;
-        hw_info->mba.thrtl_max = sysctl.u.psr_alloc.u.mba_info.thrtl_max;
-        hw_info->mba.linear = sysctl.u.psr_alloc.u.mba_info.flags &
-                              XEN_SYSCTL_PSR_MBA_LINEAR;
-
-        break;
-    default:
-        errno = EOPNOTSUPP;
-        break;
+        *cos_max = sysctl.u.psr_cat_op.u.l3_info.cos_max;
+        *cbm_len = sysctl.u.psr_cat_op.u.l3_info.cbm_len;
+        *cdp_enabled = sysctl.u.psr_cat_op.u.l3_info.flags &
+                       XEN_SYSCTL_PSR_CAT_L3_CDP;
     }
 
     return rc;

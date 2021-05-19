@@ -60,9 +60,8 @@ static const char *get_vifname(libxl__checkpoint_device *dev,
     /* Convenience aliases */
     const uint32_t domid = dev->cds->domid;
 
-    path = GCSPRINTF("%s/vifname",
-                     libxl__domain_device_backend_path(gc, 0,
-                     domid, nic->devid, LIBXL__DEVICE_KIND_VIF));
+    path = GCSPRINTF("%s/backend/vif/%d/%d/vifname",
+                     libxl__xs_get_dompath(gc, 0), domid, nic->devid);
     rc = libxl__xs_read_checked(gc, XBT_NULL, path, &vifname);
     if (!rc && !vifname) {
         vifname = libxl__device_nic_devname(gc, domid,
@@ -214,7 +213,7 @@ static void colo_save_setup_script_cb(libxl__egc *egc,
         goto out;
 
     if (hotplug_error) {
-        LOGD(ERROR, domid, "colo_proxy script %s setup failed for vif %s: %s",
+        LOG(ERROR, "colo_proxy script %s setup failed for vif %s: %s",
             aes->args[0], vif, hotplug_error);
         rc = ERROR_FAIL;
         goto out;

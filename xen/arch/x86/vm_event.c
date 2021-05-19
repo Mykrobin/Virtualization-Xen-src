@@ -18,8 +18,7 @@
  * License along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <xen/sched.h>
-#include <xen/mem_access.h>
+#include <asm/p2m.h>
 #include <asm/vm_event.h>
 
 /* Implicitly serialized by the domctl lock. */
@@ -113,13 +112,26 @@ void vm_event_set_registers(struct vcpu *v, vm_event_response_t *rsp)
 {
     ASSERT(atomic_read(&v->vm_event_pause_count));
 
-    v->arch.vm_event->gprs = rsp->data.regs.x86;
-    v->arch.vm_event->set_gprs = true;
-}
+    v->arch.user_regs.eax = rsp->data.regs.x86.rax;
+    v->arch.user_regs.ebx = rsp->data.regs.x86.rbx;
+    v->arch.user_regs.ecx = rsp->data.regs.x86.rcx;
+    v->arch.user_regs.edx = rsp->data.regs.x86.rdx;
+    v->arch.user_regs.esp = rsp->data.regs.x86.rsp;
+    v->arch.user_regs.ebp = rsp->data.regs.x86.rbp;
+    v->arch.user_regs.esi = rsp->data.regs.x86.rsi;
+    v->arch.user_regs.edi = rsp->data.regs.x86.rdi;
 
-void vm_event_monitor_next_interrupt(struct vcpu *v)
-{
-    v->arch.monitor.next_interrupt_enabled = true;
+    v->arch.user_regs.r8 = rsp->data.regs.x86.r8;
+    v->arch.user_regs.r9 = rsp->data.regs.x86.r9;
+    v->arch.user_regs.r10 = rsp->data.regs.x86.r10;
+    v->arch.user_regs.r11 = rsp->data.regs.x86.r11;
+    v->arch.user_regs.r12 = rsp->data.regs.x86.r12;
+    v->arch.user_regs.r13 = rsp->data.regs.x86.r13;
+    v->arch.user_regs.r14 = rsp->data.regs.x86.r14;
+    v->arch.user_regs.r15 = rsp->data.regs.x86.r15;
+
+    v->arch.user_regs.eflags = rsp->data.regs.x86.rflags;
+    v->arch.user_regs.eip = rsp->data.regs.x86.rip;
 }
 
 void vm_event_fill_regs(vm_event_request_t *req)
@@ -134,14 +146,14 @@ void vm_event_fill_regs(vm_event_request_t *req)
     /* Architecture-specific vmcs/vmcb bits */
     hvm_funcs.save_cpu_ctxt(curr, &ctxt);
 
-    req->data.regs.x86.rax = regs->rax;
-    req->data.regs.x86.rcx = regs->rcx;
-    req->data.regs.x86.rdx = regs->rdx;
-    req->data.regs.x86.rbx = regs->rbx;
-    req->data.regs.x86.rsp = regs->rsp;
-    req->data.regs.x86.rbp = regs->rbp;
-    req->data.regs.x86.rsi = regs->rsi;
-    req->data.regs.x86.rdi = regs->rdi;
+    req->data.regs.x86.rax = regs->eax;
+    req->data.regs.x86.rcx = regs->ecx;
+    req->data.regs.x86.rdx = regs->edx;
+    req->data.regs.x86.rbx = regs->ebx;
+    req->data.regs.x86.rsp = regs->esp;
+    req->data.regs.x86.rbp = regs->ebp;
+    req->data.regs.x86.rsi = regs->esi;
+    req->data.regs.x86.rdi = regs->edi;
 
     req->data.regs.x86.r8  = regs->r8;
     req->data.regs.x86.r9  = regs->r9;
@@ -152,8 +164,8 @@ void vm_event_fill_regs(vm_event_request_t *req)
     req->data.regs.x86.r14 = regs->r14;
     req->data.regs.x86.r15 = regs->r15;
 
-    req->data.regs.x86.rflags = regs->rflags;
-    req->data.regs.x86.rip    = regs->rip;
+    req->data.regs.x86.rflags = regs->eflags;
+    req->data.regs.x86.rip    = regs->eip;
 
     req->data.regs.x86.dr7 = curr->arch.debugreg[7];
     req->data.regs.x86.cr0 = ctxt.cr0;
@@ -176,7 +188,7 @@ void vm_event_fill_regs(vm_event_request_t *req)
     req->data.regs.x86.gs_base = seg.base;
 
     hvm_get_segment_register(curr, x86_seg_cs, &seg);
-    req->data.regs.x86.cs_arbytes = seg.attr;
+    req->data.regs.x86.cs_arbytes = seg.attr.bytes;
 }
 
 void vm_event_emulate_check(struct vcpu *v, vm_event_response_t *rsp)
@@ -209,12 +221,6 @@ void vm_event_emulate_check(struct vcpu *v, vm_event_response_t *rsp)
             v->arch.vm_event->emul.insn = rsp->data.emul.insn;
             v->arch.vm_event->emulate_flags = rsp->flags;
         }
-        break;
-
-    case VM_EVENT_REASON_DESCRIPTOR_ACCESS:
-        if ( rsp->flags & VM_EVENT_FLAG_SET_EMUL_READ_DATA )
-            v->arch.vm_event->emul.read = rsp->data.emul.read;
-        v->arch.vm_event->emulate_flags = rsp->flags;
         break;
 
     default:

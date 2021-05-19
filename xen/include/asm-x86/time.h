@@ -24,7 +24,7 @@
 
 typedef u64 cycles_t;
 
-extern bool disable_tsc_sync;
+extern bool_t disable_tsc_sync;
 
 static inline cycles_t get_cycles(void)
 {
@@ -56,7 +56,7 @@ uint64_t ns_to_acpi_pm_tick(uint64_t ns);
 
 uint64_t tsc_ticks2ns(uint64_t ticks);
 
-uint64_t pv_soft_rdtsc(const struct vcpu *v, const struct cpu_user_regs *regs);
+void pv_soft_rdtsc(struct vcpu *v, struct cpu_user_regs *regs, int rdtscp);
 u64 gtime_to_gtsc(struct domain *d, u64 time);
 u64 gtsc_to_gtime(struct domain *d, u64 tsc);
 
@@ -71,6 +71,9 @@ void force_update_vcpu_system_time(struct vcpu *v);
 
 bool clocksource_is_tsc(void);
 int host_tsc_is_safe(void);
+void cpuid_time_leaf(uint32_t sub_idx, uint32_t *eax, uint32_t *ebx,
+                     uint32_t *ecx, uint32_t *edx);
+
 u64 stime2tsc(s_time_t stime);
 
 struct time_scale;

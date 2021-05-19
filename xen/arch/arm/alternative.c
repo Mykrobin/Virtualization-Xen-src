@@ -17,6 +17,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/kernel.h>
@@ -32,10 +33,6 @@
 #include <asm/insn.h>
 #include <asm/page.h>
 
-/* Override macros from asm/page.h to make them work with mfn_t */
-#undef virt_to_mfn
-#define virt_to_mfn(va) _mfn(__virt_to_mfn(va))
-
 extern const struct alt_instr __alt_instructions[], __alt_instructions_end[];
 
 struct alt_region {
@@ -46,17 +43,17 @@ struct alt_region {
 /*
  * Check if the target PC is within an alternative block.
  */
-static bool branch_insn_requires_update(const struct alt_instr *alt,
-                                        unsigned long pc)
+static bool_t branch_insn_requires_update(const struct alt_instr *alt,
+                                          unsigned long pc)
 {
     unsigned long replptr;
 
     if ( is_active_kernel_text(pc) )
-        return true;
+        return 1;
 
     replptr = (unsigned long)ALT_REPL_PTR(alt);
     if ( pc >= replptr && pc <= (replptr + alt->alt_len) )
-        return false;
+        return 0;
 
     /*
      * Branching into *another* alternate sequence is doomed, and
@@ -158,7 +155,7 @@ static int __apply_alternatives_multi_stop(void *unused)
     {
         int ret;
         struct alt_region region;
-        mfn_t xen_mfn = virt_to_mfn(_start);
+        mfn_t xen_mfn = _mfn(virt_to_mfn(_start));
         paddr_t xen_size = _end - _start;
         unsigned int xen_order = get_order_from_bytes(xen_size);
         void *xenmap;

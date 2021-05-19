@@ -30,10 +30,10 @@
 /* #define DEBUG_RECEIVED */
 
 #ifdef DEBUG_RECEIVED
-#  define DEBUG_REPORT_RECEIVED(dom, buf, len) \
-    LOGD(DEBUG, dom, "received: '%.*s'", len, buf)
+#  define DEBUG_REPORT_RECEIVED(buf, len) \
+    LOG(DEBUG, "received: '%.*s'", len, buf)
 #else
-#  define DEBUG_REPORT_RECEIVED(dom, buf, len) ((void)0)
+#  define DEBUG_REPORT_RECEIVED(buf, len) ((void)0)
 #endif
 
 /*
@@ -75,11 +75,6 @@ struct libxl__qmp_handler {
 
     int last_id_used;
     LIBXL_STAILQ_HEAD(callback_list, callback_id_pair) callback_list;
-    struct {
-        int major;
-        int minor;
-        int micro;
-    } version;
 };
 
 static int qmp_send(libxl__qmp_handler *qmp,
@@ -142,15 +137,15 @@ static int register_serials_chardev_callback(libxl__qmp_handler *qmp,
             s += strlen("serial");
             port_number = strtol(s, &endptr, 10);
             if (*s == 0 || *endptr != 0) {
-                LIBXL__LOGD(qmp->ctx, LIBXL__LOG_ERROR, qmp->domid,
-                            "Invalid serial port number: %s", s);
+                LIBXL__LOG(qmp->ctx, LIBXL__LOG_ERROR,
+                           "Invalid serial port number: %s", s);
                 return -1;
             }
             ret = store_serial_port_info(qmp, chardev, port_number);
             if (ret) {
-                LIBXL__LOGD_ERRNO(qmp->ctx, LIBXL__LOG_ERROR, qmp->domid,
-                                  "Failed to store serial port information"
-                                  " in xenstore");
+                LIBXL__LOG_ERRNO(qmp->ctx, LIBXL__LOG_ERROR,
+                                 "Failed to store serial port information"
+                                 " in xenstore");
                 return ret;
             }
         }
@@ -195,7 +190,7 @@ static int qmp_register_vnc_callback(libxl__qmp_handler *qmp,
     port = libxl__json_object_get_string(obj);
 
     if (!addr || !port) {
-        LOGD(ERROR, qmp->domid, "Failed to retreive VNC connect information.");
+        LOG(ERROR, "Failed to retreive VNC connect information.");
         goto out;
     }
 
@@ -288,8 +283,8 @@ static void qmp_handle_error_response(libxl__gc *gc, libxl__qmp_handler *qmp,
         free(pp);
     }
 
-    LOGD(ERROR, qmp->domid, "received an error message from QMP server: %s",
-         libxl__json_object_get_string(resp));
+    LOG(ERROR, "received an error message from QMP server: %s",
+        libxl__json_object_get_string(resp));
 }
 
 static int qmp_handle_response(libxl__gc *gc, libxl__qmp_handler *qmp,
@@ -298,25 +293,12 @@ static int qmp_handle_response(libxl__gc *gc, libxl__qmp_handler *qmp,
     libxl__qmp_message_type type = LIBXL__QMP_MESSAGE_TYPE_INVALID;
 
     type = qmp_response_type(qmp, resp);
-    LOGD(DEBUG, qmp->domid, "message type: %s", libxl__qmp_message_type_to_string(type));
+    LOG(DEBUG, "message type: %s", libxl__qmp_message_type_to_string(type));
 
     switch (type) {
-    case LIBXL__QMP_MESSAGE_TYPE_QMP: {
-        const libxl__json_object *o;
-        o = libxl__json_map_get("QMP", resp, JSON_MAP);
-        o = libxl__json_map_get("version", o, JSON_MAP);
-        o = libxl__json_map_get("qemu", o, JSON_MAP);
-        qmp->version.major = libxl__json_object_get_integer(
-            libxl__json_map_get("major", o, JSON_INTEGER));
-        qmp->version.minor = libxl__json_object_get_integer(
-            libxl__json_map_get("minor", o, JSON_INTEGER));
-        qmp->version.micro = libxl__json_object_get_integer(
-            libxl__json_map_get("micro", o, JSON_INTEGER));
-        LOGD(DEBUG, qmp->domid, "QEMU version: %d.%d.%d",
-             qmp->version.major, qmp->version.minor, qmp->version.micro);
+    case LIBXL__QMP_MESSAGE_TYPE_QMP:
         /* On the greeting message from the server, enable QMP capabilities */
         return enable_qmp_capabilities(qmp);
-    }
     case LIBXL__QMP_MESSAGE_TYPE_RETURN: {
         callback_id_pair *pp = qmp_get_callback_from_id(qmp, resp);
 
@@ -350,15 +332,6 @@ static int qmp_handle_response(libxl__gc *gc, libxl__qmp_handler *qmp,
     return 0;
 }
 
-static bool qmp_qemu_check_version(libxl__qmp_handler *qmp, int major,
-                                   int minor, int micro)
-{
-    return qmp->version.major > major ||
-        (qmp->version.major == major &&
-            (qmp->version.minor > minor ||
-             (qmp->version.minor == minor && qmp->version.micro >= micro)));
-}
-
 /*
  * Handler functions
  */
@@ -369,7 +342,7 @@ static libxl__qmp_handler *qmp_init_handler(libxl__gc *gc, uint32_t domid)
 
     qmp = calloc(1, sizeof (libxl__qmp_handler));
     if (qmp == NULL) {
-        LOGED(ERROR, domid, "Failed to allocate qmp_handler");
+        LOGE(ERROR, "Failed to allocate qmp_handler");
         return NULL;
     }
     qmp->ctx = CTX;
@@ -467,26 +440,26 @@ static int qmp_next(libxl__gc *gc, libxl__qmp_handler *qmp)
 
         ret = select(qmp->qmp_fd + 1, &rfds, NULL, NULL, &timeout);
         if (ret == 0) {
-            LOGD(ERROR, qmp->domid, "timeout");
+            LOG(ERROR, "timeout");
             return -1;
         } else if (ret < 0) {
             if (errno == EINTR)
                 continue;
-            LOGED(ERROR, qmp->domid, "Select error");
+            LOGE(ERROR, "Select error");
             return -1;
         }
 
         rd = read(qmp->qmp_fd, qmp->buffer, QMP_RECEIVE_BUFFER_SIZE);
         if (rd == 0) {
-            LOGD(ERROR, qmp->domid, "Unexpected end of socket");
+            LOG(ERROR, "Unexpected end of socket");
             return -1;
         } else if (rd < 0) {
-            LOGED(ERROR, qmp->domid, "Socket read error");
+            LOGE(ERROR, "Socket read error");
             return rd;
         }
         qmp->buffer[rd] = '\0';
 
-        DEBUG_REPORT_RECEIVED(qmp->domid, qmp->buffer, rd);
+        DEBUG_REPORT_RECEIVED(qmp->buffer, rd);
 
         do {
             char *end = NULL;
@@ -517,7 +490,7 @@ static int qmp_next(libxl__gc *gc, libxl__qmp_handler *qmp)
                 if (o) {
                     rc = qmp_handle_response(gc, qmp, o);
                 } else {
-                    LOGD(ERROR, qmp->domid, "Parse error of : %s", s);
+                    LOG(ERROR, "Parse error of : %s", s);
                     return -1;
                 }
 
@@ -526,7 +499,7 @@ static int qmp_next(libxl__gc *gc, libxl__qmp_handler *qmp)
                 break;
             }
         } while (s < s_end);
-    } while (s < s_end);
+   } while (s < s_end);
 
     return rc;
 }
@@ -563,13 +536,13 @@ static char *qmp_send_prepare(libxl__gc *gc, libxl__qmp_handler *qmp,
     s = yajl_gen_get_buf(hand, &buf, &len);
 
     if (s) {
-        LOGD(ERROR, qmp->domid, "Failed to generate a qmp command");
+        LOG(ERROR, "Failed to generate a qmp command");
         goto out;
     }
 
     elm = malloc(sizeof (callback_id_pair));
     if (elm == NULL) {
-        LOGED(ERROR, qmp->domid, "Failed to allocate a QMP callback");
+        LOGE(ERROR, "Failed to allocate a QMP callback");
         goto out;
     }
     elm->id = qmp->last_id_used;
@@ -580,7 +553,7 @@ static char *qmp_send_prepare(libxl__gc *gc, libxl__qmp_handler *qmp,
 
     ret = libxl__strndup(gc, (const char*)buf, len);
 
-    LOGD(DEBUG, qmp->domid, "next qmp command: '%s'", buf);
+    LOG(DEBUG, "next qmp command: '%s'", buf);
 
 out:
     yajl_gen_free(hand);
@@ -726,12 +699,12 @@ libxl__qmp_handler *libxl__qmp_initialize(libxl__gc *gc, uint32_t domid)
 
     qmp_socket = GCSPRINTF("%s/qmp-libxl-%d", libxl__run_dir_path(), domid);
     if ((ret = qmp_open(qmp, qmp_socket, QMP_SOCKET_CONNECT_TIMEOUT)) < 0) {
-        LOGED(ERROR, domid, "Connection error");
+        LOGE(ERROR, "Connection error");
         qmp_free_handler(qmp);
         return NULL;
     }
 
-    LOGD(DEBUG, domid, "connected to %s", qmp_socket);
+    LOG(DEBUG, "connected to %s", qmp_socket);
 
     /* Wait for the response to qmp_capabilities */
     while (!qmp->connected) {
@@ -741,7 +714,7 @@ libxl__qmp_handler *libxl__qmp_initialize(libxl__gc *gc, uint32_t domid)
     }
 
     if (!qmp->connected) {
-        LOGD(ERROR, domid, "Failed to connect to QMP");
+        LOG(ERROR, "Failed to connect to QMP");
         libxl__qmp_close(qmp);
         return NULL;
     }
@@ -763,14 +736,14 @@ void libxl__qmp_cleanup(libxl__gc *gc, uint32_t domid)
     qmp_socket = GCSPRINTF("%s/qmp-libxl-%d", libxl__run_dir_path(), domid);
     if (unlink(qmp_socket) == -1) {
         if (errno != ENOENT) {
-            LOGED(ERROR, domid, "Failed to remove QMP socket file %s", qmp_socket);
+            LOGE(ERROR, "Failed to remove QMP socket file %s", qmp_socket);
         }
     }
 
     qmp_socket = GCSPRINTF("%s/qmp-libxenstat-%d", libxl__run_dir_path(), domid);
     if (unlink(qmp_socket) == -1) {
         if (errno != ENOENT) {
-            LOGED(ERROR, domid, "Failed to remove QMP socket file %s", qmp_socket);
+            LOGE(ERROR, "Failed to remove QMP socket file %s", qmp_socket);
         }
     }
 }
@@ -940,27 +913,13 @@ int libxl__qmp_system_wakeup(libxl__gc *gc, int domid)
     return qmp_run_command(gc, domid, "system_wakeup", NULL, NULL, NULL);
 }
 
-int libxl__qmp_save(libxl__gc *gc, int domid, const char *filename, bool live)
+int libxl__qmp_save(libxl__gc *gc, int domid, const char *filename)
 {
     libxl__json_object *args = NULL;
-    libxl__qmp_handler *qmp = NULL;
-    int rc;
-
-    qmp = libxl__qmp_initialize(gc, domid);
-    if (!qmp)
-        return ERROR_FAIL;
 
     qmp_parameters_add_string(gc, &args, "filename", (char *)filename);
-
-    /* live parameter was added to QEMU 2.11. It signal QEMU that the save
-     * operation is for a live migration rather that for taking a snapshot. */
-    if (qmp_qemu_check_version(qmp, 2, 11, 0))
-        qmp_parameters_add_bool(gc, &args, "live", live);
-
-    rc = qmp_synchronous_send(qmp, "xen-save-devices-state", args,
-                              NULL, NULL, qmp->timeout);
-    libxl__qmp_close(qmp);
-    return rc;
+    return qmp_run_command(gc, domid, "xen-save-devices-state", args,
+                           NULL, NULL);
 }
 
 int libxl__qmp_restore(libxl__gc *gc, int domid, const char *state_file)
@@ -1055,7 +1014,7 @@ static int query_cpus_callback(libxl__qmp_handler *qmp,
 
         o = libxl__json_map_get("CPU", cpu, JSON_INTEGER);
         if (!o) {
-            LOGD(ERROR, qmp->domid, "Failed to retrieve CPU index.");
+            LOG(ERROR, "Failed to retrieve CPU index.");
             rc = ERROR_FAIL;
             goto out;
         }
@@ -1122,16 +1081,15 @@ int libxl__qmp_start_replication(libxl__gc *gc, int domid, bool primary)
     return qmp_run_command(gc, domid, "xen-set-replication", args, NULL, NULL);
 }
 
-int libxl__qmp_query_xen_replication_status(libxl__gc *gc, int domid)
+int libxl__qmp_get_replication_error(libxl__gc *gc, int domid)
 {
-    return qmp_run_command(gc, domid, "query-xen-replication-status", NULL,
+    return qmp_run_command(gc, domid, "xen-get-replication-error", NULL,
                            NULL, NULL);
 }
 
-int libxl__qmp_colo_do_checkpoint(libxl__gc *gc, int domid)
+int libxl__qmp_do_checkpoint(libxl__gc *gc, int domid)
 {
-    return qmp_run_command(gc, domid, "xen-colo-do-checkpoint",
-                           NULL, NULL, NULL);
+    return qmp_run_command(gc, domid, "xen-do-checkpoint", NULL, NULL, NULL);
 }
 
 int libxl__qmp_stop_replication(libxl__gc *gc, int domid, bool primary)

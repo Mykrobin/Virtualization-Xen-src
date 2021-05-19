@@ -10,7 +10,7 @@ else
 IPXE_GIT_URL ?= git://git.ipxe.org/ipxe.git
 endif
 
-IPXE_GIT_TAG := 356f6c1b64d7a97746d1816cef8ca22bdd8d0b5d
+IPXE_GIT_TAG := 827dd1bfee67daa683935ce65316f7e0f057fe1c
 
 IPXE_TARBALL_URL ?= $(XEN_EXTFILES_URL)/ipxe-git-$(IPXE_GIT_TAG).tar.gz
 
@@ -31,7 +31,7 @@ $T:
 	if ! $(FETCHER) _$T $(IPXE_TARBALL_URL); then \
 		$(GIT) clone $(IPXE_GIT_URL) $D.git; \
 		(cd $D.git && $(GIT) archive --format=tar --prefix=$D/ \
-		$(IPXE_GIT_TAG) | gzip -n >../_$T); \
+		$(IPXE_GIT_TAG) | gzip >../_$T); \
 		rm -rf $D.git; \
 	fi
 	mv _$T $T

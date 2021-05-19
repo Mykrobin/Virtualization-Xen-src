@@ -36,14 +36,12 @@ libmemshr.a: $(LIB-OBJS)
 
 install: all
 
-uninstall:
-
 clean:
-	rm -rf *.a *.o *~ $(DEPS_RM)
+	rm -rf *.a *.o *~ $(DEPS)
 
 .PHONY: distclean
 distclean: clean
 
-.PHONY: all build clean install distclean uninstall
+.PHONY: all build clean install distclean
 
--include $(DEPS_INCLUDE)
+-include $(DEPS)

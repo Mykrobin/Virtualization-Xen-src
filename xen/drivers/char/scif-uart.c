@@ -18,6 +18,7 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/console.h>
 #include <xen/errno.h>
 #include <xen/serial.h>

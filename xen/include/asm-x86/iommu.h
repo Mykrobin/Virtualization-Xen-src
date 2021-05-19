@@ -18,7 +18,6 @@
 #include <xen/list.h>
 #include <xen/spinlock.h>
 #include <asm/processor.h>
-#include <asm/hvm/vmx/vmcs.h>
 
 #define DEFAULT_DOMAIN_ADDRESS_WIDTH 48
 #define MAX_IOMMUS 32
@@ -35,6 +34,7 @@ struct arch_iommu
     u64 pgd_maddr;                 /* io page directory machine address */
     spinlock_t mapping_lock;            /* io page table lock */
     int agaw;     /* adjusted guest address width, 0 is level 2 30-bit */
+    struct list_head g2m_ioport_list;   /* guest to machine ioport mapping */
     u64 iommu_bitmap;              /* bitmap of iommu(s) that the domain uses */
     struct list_head mapped_rmrrs;
 
@@ -93,10 +93,7 @@ bool_t iommu_supports_eim(void);
 int iommu_enable_x2apic_IR(void);
 void iommu_disable_x2apic_IR(void);
 
-extern bool untrusted_msi;
-
-int pi_update_irte(const struct pi_desc *pi_desc, const struct pirq *pirq,
-                   const uint8_t gvec);
+int pi_update_irte(const struct vcpu *v, const struct pirq *pirq, const uint8_t gvec);
 
 #endif /* !__ARCH_X86_IOMMU_H__ */
 /*

@@ -30,6 +30,7 @@
     System Programming Guide; Section 9.11. (1997 edition - PPro).
 */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/smp.h>
@@ -93,7 +94,7 @@ static void __init set_num_var_ranges(void)
 		rdmsrl(MSR_MTRRcap, config);
 	} else if (is_cpu(AMD))
 		config = 2;
-	else if (is_cpu(CENTAUR))
+	else if (is_cpu(CYRIX) || is_cpu(CENTAUR))
 		config = 8;
 	num_var_ranges = config & 0xff;
 }

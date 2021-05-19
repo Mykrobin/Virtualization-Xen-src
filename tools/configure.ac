@@ -21,6 +21,8 @@ hotplug/Linux/xen-hotplug-common.sh
 hotplug/Linux/xendomains
 hotplug/NetBSD/rc.d/xencommons
 hotplug/NetBSD/rc.d/xendriverdomain
+libxl/xenlight.pc.in
+libxl/xlutil.pc.in
 ocaml/xenstored/oxenstored.conf
 ])
 AC_CONFIG_HEADERS([config.h])
@@ -119,8 +121,12 @@ AC_SUBST(LINUX_BACKEND_MODULES)
 dnl Enable blktap2 on Linux only.
 AC_ARG_ENABLE([blktap2],
     AS_HELP_STRING([--enable-blktap2],
-                   [Enable blktap2, (DEFAULT is off)]),,[
-        enable_blktap2="no"
+                   [Enable blktap2, (DEFAULT is on for Linux, otherwise off)]),,[
+    case "$host_os" in
+        linux*)
+           enable_blktap2="yes";;
+        *) enable_blktap2="no";;
+    esac
 ])
 AS_IF([test "x$enable_blktap2" = "xyes"], [
 AC_DEFINE([HAVE_BLKTAP2], [1], [Blktap2 enabled])
@@ -266,6 +272,8 @@ AC_ARG_VAR([PYTHON], [Path to the Python parser])
 AC_ARG_VAR([PERL], [Path to Perl parser])
 AC_ARG_VAR([BISON], [Path to Bison parser generator])
 AC_ARG_VAR([FLEX], [Path to Flex lexical analyser generator])
+AC_ARG_VAR([CURL], [Path to curl-config tool])
+AC_ARG_VAR([XML], [Path to xml2-config tool])
 AC_ARG_VAR([BASH], [Path to bash shell])
 AC_ARG_VAR([XGETTEXT], [Path to xgetttext tool])
 AC_ARG_VAR([AS86], [Path to as86 tool])
@@ -292,7 +300,7 @@ AS_IF([test "x$ocamltools" = "xy"], [
             AC_MSG_ERROR([Ocaml tools enabled, but missing ocamlopt or ocamlfind])])
         ocamltools="n"
     ], [
-        AX_COMPARE_VERSION([$OCAMLVERSION], [lt], [4.02.0], [
+        AX_COMPARE_VERSION([$OCAMLVERSION], [lt], [3.09.3], [
             AS_IF([test "x$enable_ocamltools" = "xyes"], [
                 AC_MSG_ERROR([Your version of OCaml: $OCAMLVERSION is not supported])])
             ocamltools="n"
@@ -312,11 +320,7 @@ AS_IF([test "x$xsmpolicy" = "xy"], [
         xsmpolicy="n"
     ])
 ])
-dnl FreeBSD doesn't require bash (hotplug scripts are in plain sh)
-case "$host_os" in
-  freebsd*) ;;
-  *) AX_PATH_PROG_OR_FAIL([BASH], [bash]);;
-esac
+AX_PATH_PROG_OR_FAIL([BASH], [bash])
 AS_IF([echo "$PYTHON" | grep -q "^/"], [
     PYTHONPATH=$PYTHON
     PYTHON=`basename $PYTHONPATH`

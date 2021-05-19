@@ -269,7 +269,6 @@ elf_errorstatus elf_xen_parse_guest_info(struct elf_binary *elf,
     elf_ptrval h;
     unsigned char name[32], value[128];
     unsigned len;
-    elf_errorstatus ret = 0;
 
     h = parms->guest_info;
 #define STAR(h) (elf_access_unsigned(elf, (h), 0, 1))
@@ -337,23 +336,16 @@ elf_errorstatus elf_xen_parse_guest_info(struct elf_binary *elf,
         if ( !strcmp(name, "ELF_PADDR_OFFSET") )
             parms->elf_paddr_offset = strtoull(value, NULL, 0);
         if ( !strcmp(name, "HYPERCALL_PAGE") )
-            parms->virt_hypercall = strtoull(value, NULL, 0) << 12;
+            parms->virt_hypercall = (strtoull(value, NULL, 0) << 12) +
+                parms->virt_base;
 
         /* other */
         if ( !strcmp(name, "FEATURES") )
             if ( elf_xen_parse_features(value, parms->f_supported,
                                         parms->f_required) )
-            {
-                ret = -1;
-                break;
-            }
+                return -1;
     }
-
-    if ( (parms->virt_base != UNSET_ADDR) &&
-         (parms->virt_hypercall != UNSET_ADDR) )
-        parms->virt_hypercall += parms->virt_base;
-
-    return ret;
+    return 0;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -381,13 +373,6 @@ static elf_errorstatus elf_xen_note_check(struct elf_binary *elf,
          return 0;
     }
 
-    /* PVH only requires one ELF note to be set */
-    if ( parms->phys_entry != UNSET_ADDR32 )
-    {
-        elf_msg(elf, "ELF: Found PVH image\n");
-        return 0;
-    }
-
     /* Check the contents of the Xen notes or guest string. */
     if ( ((strlen(parms->loader) == 0) ||
           strncmp(parms->loader, "generic", 7)) &&
@@ -396,7 +381,7 @@ static elf_errorstatus elf_xen_note_check(struct elf_binary *elf,
     {
         elf_err(elf,
                 "ERROR: Will only load images built for the generic loader or Linux images"
-                " (Not '%.*s' and '%.*s') or with PHYS32_ENTRY set\n",
+                " (Not '%.*s' and '%.*s')\n",
                 (int)sizeof(parms->loader), parms->loader,
                 (int)sizeof(parms->guest_os), parms->guest_os);
         return -1;

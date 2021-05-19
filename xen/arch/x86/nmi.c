@@ -13,10 +13,12 @@
  *  Mikael Pettersson : PM converted to driver model. Disable/enable API.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
 #include <xen/irq.h>
+#include <xen/nmi.h>
 #include <xen/delay.h>
 #include <xen/time.h>
 #include <xen/sched.h>
@@ -28,7 +30,6 @@
 #include <asm/mc146818rtc.h>
 #include <asm/msr.h>
 #include <asm/mpspec.h>
-#include <asm/nmi.h>
 #include <asm/debugger.h>
 #include <asm/div64.h>
 #include <asm/apic.h>
@@ -37,54 +38,44 @@ unsigned int nmi_watchdog = NMI_NONE;
 static unsigned int nmi_hz = HZ;
 static unsigned int nmi_perfctr_msr;	/* the MSR to reset in NMI handler */
 static unsigned int nmi_p4_cccr_val;
-static unsigned int nmi_p6_event_width;
 static DEFINE_PER_CPU(struct timer, nmi_timer);
 static DEFINE_PER_CPU(unsigned int, nmi_timer_ticks);
 
 /* opt_watchdog: If true, run a watchdog NMI on each processor. */
-bool __initdata opt_watchdog;
+bool_t __initdata opt_watchdog = 0;
 
 /* watchdog_force: If true, process unknown NMIs when running the watchdog. */
-bool watchdog_force;
+bool_t watchdog_force = 0;
 
-static int __init parse_watchdog(const char *s)
+static void __init parse_watchdog(char *s)
 {
     if ( !*s )
     {
-        opt_watchdog = true;
-        return 0;
+        opt_watchdog = 1;
+        return;
     }
 
-    switch ( parse_bool(s, NULL) )
+    switch ( parse_bool(s) )
     {
     case 0:
-        opt_watchdog = false;
-        return 0;
+        opt_watchdog = 0;
+        return;
     case 1:
-        opt_watchdog = true;
-        return 0;
+        opt_watchdog = 1;
+        return;
     }
 
     if ( !strcmp(s, "force") )
-        watchdog_force = opt_watchdog = true;
-    else
-        return -EINVAL;
-
-    return 0;
+        watchdog_force = opt_watchdog = 1;
 }
 custom_param("watchdog", parse_watchdog);
 
 /* opt_watchdog_timeout: Number of seconds to wait before panic. */
 static unsigned int opt_watchdog_timeout = 5;
-
-static int parse_watchdog_timeout(const char *s)
+static void parse_watchdog_timeout(char * s)
 {
-    const char *q;
-
-    opt_watchdog_timeout = simple_strtoull(s, &q, 0);
+    opt_watchdog_timeout = simple_strtoull(s, NULL, 0);
     opt_watchdog = !!opt_watchdog_timeout;
-
-    return *q ? -EINVAL : 0;
 }
 custom_param("watchdog_timeout", parse_watchdog_timeout);
 
@@ -124,9 +115,7 @@ int nmi_active;
 #define P6_EVNTSEL_USR		(1 << 16)
 #define P6_EVENT_CPU_CLOCKS_NOT_HALTED	 0x79
 #define CORE_EVENT_CPU_CLOCKS_NOT_HALTED 0x3c
-/* Bit width of IA32_PMCx MSRs is reported using CPUID.0AH:EAX[23:16]. */
-#define P6_EVENT_WIDTH_MASK	(((1 << 8) - 1) << 16)
-#define P6_EVENT_WIDTH_MIN	32
+#define P6_EVENT_WIDTH          32
 
 #define P4_ESCR_EVENT_SELECT(N)	((N)<<25)
 #define P4_CCCR_OVF_PMI0	(1<<26)
@@ -164,14 +153,14 @@ static void __init wait_for_nmis(void *p)
     } while( e - s < ticks );
 }
 
-void __init check_nmi_watchdog(void)
+int __init check_nmi_watchdog (void)
 {
     static unsigned int __initdata prev_nmi_count[NR_CPUS];
     int cpu;
-    bool ok = true;
+    bool_t ok = 1;
 
     if ( nmi_watchdog == NMI_NONE )
-        return;
+        return 0;
 
     printk("Testing NMI watchdog on all CPUs:");
 
@@ -190,7 +179,7 @@ void __init check_nmi_watchdog(void)
         if ( nmi_count(cpu) - prev_nmi_count[cpu] < 2 )
         {
             printk(" %d", cpu);
-            ok = false;
+            ok = 0;
         }
     }
 
@@ -208,7 +197,7 @@ void __init check_nmi_watchdog(void)
     if ( nmi_watchdog == NMI_LOCAL_APIC )
         nmi_hz = max(1ul, cpu_khz >> 20);
 
-    return;
+    return 0;
 }
 
 static void nmi_timer_fn(void *unused)
@@ -326,15 +315,6 @@ static void setup_p6_watchdog(unsigned counter)
     unsigned int evntsel;
 
     nmi_perfctr_msr = MSR_P6_PERFCTR(0);
-
-    if ( !nmi_p6_event_width && current_cpu_data.cpuid_level >= 0xa )
-        nmi_p6_event_width = MASK_EXTR(cpuid_eax(0xa), P6_EVENT_WIDTH_MASK);
-    if ( !nmi_p6_event_width )
-        nmi_p6_event_width = P6_EVENT_WIDTH_MIN;
-
-    if ( nmi_p6_event_width < P6_EVENT_WIDTH_MIN ||
-         nmi_p6_event_width > BITS_PER_LONG )
-        return;
 
     clear_msr_range(MSR_P6_EVNTSEL(0), 2);
     clear_msr_range(MSR_P6_PERFCTR(0), 2);
@@ -469,7 +449,7 @@ void watchdog_enable(void)
     atomic_dec(&watchdog_disable_count);
 }
 
-bool watchdog_enabled(void)
+bool_t watchdog_enabled(void)
 {
     return !atomic_read(&watchdog_disable_count);
 }
@@ -491,9 +471,9 @@ int __init watchdog_setup(void)
 }
 
 /* Returns false if this was not a watchdog NMI, true otherwise */
-bool nmi_watchdog_tick(const struct cpu_user_regs *regs)
+bool_t nmi_watchdog_tick(const struct cpu_user_regs *regs)
 {
-    bool watchdog_tick = true;
+    bool_t watchdog_tick = 1;
     unsigned int sum = this_cpu(nmi_timer_ticks);
 
     if ( (this_cpu(last_irq_sums) == sum) && watchdog_enabled() )
@@ -526,7 +506,7 @@ bool nmi_watchdog_tick(const struct cpu_user_regs *regs)
         {
             rdmsrl(MSR_P4_IQ_CCCR0, msr_content);
             if ( !(msr_content & P4_CCCR_OVF) )
-                watchdog_tick = false;
+                watchdog_tick = 0;
 
             /*
              * P4 quirks:
@@ -541,8 +521,8 @@ bool nmi_watchdog_tick(const struct cpu_user_regs *regs)
         else if ( nmi_perfctr_msr == MSR_P6_PERFCTR(0) )
         {
             rdmsrl(MSR_P6_PERFCTR(0), msr_content);
-            if ( msr_content & (1ULL << (nmi_p6_event_width - 1)) )
-                watchdog_tick = false;
+            if ( msr_content & (1ULL << P6_EVENT_WIDTH) )
+                watchdog_tick = 0;
 
             /*
              * Only P6 based Pentium M need to re-unmask the apic vector but
@@ -554,7 +534,7 @@ bool nmi_watchdog_tick(const struct cpu_user_regs *regs)
         {
             rdmsrl(MSR_K7_PERFCTR0, msr_content);
             if ( msr_content & (1ULL << K7_EVENT_WIDTH) )
-                watchdog_tick = false;
+                watchdog_tick = 0;
         }
         write_watchdog_counter(NULL);
     }

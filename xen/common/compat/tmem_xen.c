@@ -3,6 +3,7 @@
  *
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
 #include <xen/domain.h>

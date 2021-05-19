@@ -18,6 +18,7 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/ctype.h>
 #include <xen/init.h>
 #include <xen/lib.h>
@@ -29,14 +30,15 @@
 #include <xen/domain_page.h>
 #include <xen/hypercall.h>
 #include <xen/guest_access.h>
+#include <xen/nospec.h>
 #include <xen/event.h>
 #include <xen/cpu.h>
 #include <xen/wait.h>
 #include <xen/mem_access.h>
 #include <xen/rangeset.h>
+#include <xen/vm_event.h>
 #include <xen/monitor.h>
 #include <xen/warning.h>
-#include <xen/vpci.h>
 #include <asm/shadow.h>
 #include <asm/hap.h>
 #include <asm/current.h>
@@ -61,7 +63,6 @@
 #include <asm/hvm/nestedhvm.h>
 #include <asm/hvm/monitor.h>
 #include <asm/hvm/ioreq.h>
-#include <asm/hvm/vm_event.h>
 #include <asm/altp2m.h>
 #include <asm/mtrr.h>
 #include <asm/apic.h>
@@ -73,8 +74,6 @@
 #include <public/vm_event.h>
 #include <public/arch-x86/cpuid.h>
 #include <asm/cpuid.h>
-
-#include <compat/hvm/hvm_op.h>
 
 bool_t __read_mostly hvm_enabled;
 
@@ -182,6 +181,9 @@ static int __init hvm_enable(void)
         }
         printk("\n");
     }
+
+    if ( !fns->pvh_supported )
+        printk(XENLOG_INFO "HVM: PVH mode not supported on this platform\n");
 
     if ( !opt_altp2m_enabled )
         hvm_funcs.altp2m_supported = 0;
@@ -321,7 +323,7 @@ bool hvm_set_guest_bndcfgs(struct vcpu *v, u64 val)
      * enabled in BNDCFGS.
      */
     if ( (val & IA32_BNDCFGS_ENABLE) &&
-         !(v->arch.xcr0_accum & (X86_XCR0_BNDREGS | X86_XCR0_BNDCSR)) )
+         !(v->arch.xcr0_accum & (XSTATE_BNDREGS | XSTATE_BNDCSR)) )
     {
         uint64_t xcr0 = get_xcr0();
         int rc;
@@ -330,7 +332,7 @@ bool hvm_set_guest_bndcfgs(struct vcpu *v, u64 val)
             return false;
 
         rc = handle_xsetbv(XCR_XFEATURE_ENABLED_MASK,
-                           xcr0 | X86_XCR0_BNDREGS | X86_XCR0_BNDCSR);
+                           xcr0 | XSTATE_BNDREGS | XSTATE_BNDCSR);
 
         if ( rc )
         {
@@ -397,7 +399,7 @@ u64 hvm_scale_tsc(const struct domain *d, u64 tsc)
     return tsc;
 }
 
-static void hvm_set_guest_tsc_fixed(struct vcpu *v, u64 guest_tsc, u64 at_tsc)
+void hvm_set_guest_tsc_fixed(struct vcpu *v, u64 guest_tsc, u64 at_tsc)
 {
     uint64_t tsc;
     uint64_t delta_tsc;
@@ -420,8 +422,6 @@ static void hvm_set_guest_tsc_fixed(struct vcpu *v, u64 guest_tsc, u64 at_tsc)
     hvm_funcs.set_tsc_offset(v, v->arch.hvm_vcpu.cache_tsc_offset, at_tsc);
 }
 
-#define hvm_set_guest_tsc(v, t) hvm_set_guest_tsc_fixed(v, t, 0)
-
 static void hvm_set_guest_tsc_msr(struct vcpu *v, u64 guest_tsc)
 {
     uint64_t tsc_offset = v->arch.hvm_vcpu.cache_tsc_offset;
@@ -429,18 +429,14 @@ static void hvm_set_guest_tsc_msr(struct vcpu *v, u64 guest_tsc)
     hvm_set_guest_tsc(v, guest_tsc);
     v->arch.hvm_vcpu.msr_tsc_adjust += v->arch.hvm_vcpu.cache_tsc_offset
                           - tsc_offset;
-    if ( v == current )
-        update_vcpu_system_time(v);
 }
 
-static void hvm_set_guest_tsc_adjust(struct vcpu *v, u64 tsc_adjust)
+void hvm_set_guest_tsc_adjust(struct vcpu *v, u64 tsc_adjust)
 {
     v->arch.hvm_vcpu.cache_tsc_offset += tsc_adjust
                             - v->arch.hvm_vcpu.msr_tsc_adjust;
     hvm_funcs.set_tsc_offset(v, v->arch.hvm_vcpu.cache_tsc_offset, 0);
     v->arch.hvm_vcpu.msr_tsc_adjust = tsc_adjust;
-    if ( v == current )
-        update_vcpu_system_time(v);
 }
 
 u64 hvm_get_guest_tsc_fixed(struct vcpu *v, uint64_t at_tsc)
@@ -462,8 +458,17 @@ u64 hvm_get_guest_tsc_fixed(struct vcpu *v, uint64_t at_tsc)
     return tsc + v->arch.hvm_vcpu.cache_tsc_offset;
 }
 
+u64 hvm_get_guest_tsc_adjust(struct vcpu *v)
+{
+    return v->arch.hvm_vcpu.msr_tsc_adjust;
+}
+
 void hvm_migrate_timers(struct vcpu *v)
 {
+    /* PVH doesn't use rtc and emulated timers, it uses pvclock mechanism. */
+    if ( is_pvh_vcpu(v) )
+        return;
+
     rtc_migrate_timers(v);
     pt_migrate(v);
 }
@@ -474,8 +479,6 @@ static int hvm_migrate_pirq(struct domain *d, struct hvm_pirq_dpci *pirq_dpci,
     struct vcpu *v = arg;
 
     if ( (pirq_dpci->flags & HVM_IRQ_DPCI_MACH_MSI) &&
-         /* Needn't migrate pirq if this pirq is delivered to guest directly.*/
-         !pirq_dpci->gmsi.posted &&
          (pirq_dpci->gmsi.dest_vcpu_id == v->vcpu_id) )
     {
         struct irq_desc *desc =
@@ -495,7 +498,7 @@ void hvm_migrate_pirqs(struct vcpu *v)
 {
     struct domain *d = v->domain;
 
-    if ( !iommu_enabled || !hvm_domain_irq(d)->dpci )
+    if ( !iommu_enabled || !d->arch.hvm_domain.irq.dpci )
        return;
 
     spin_lock(&d->event_lock);
@@ -503,45 +506,74 @@ void hvm_migrate_pirqs(struct vcpu *v)
     spin_unlock(&d->event_lock);
 }
 
-static bool hvm_get_pending_event(struct vcpu *v, struct x86_event *info)
-{
-    info->cr2 = v->arch.hvm_vcpu.guest_cr[2];
-    return hvm_funcs.get_pending_event(v, info);
-}
-
 void hvm_do_resume(struct vcpu *v)
 {
     check_wakeup_from_wait();
 
-    pt_restore_timer(v);
+    if ( is_hvm_domain(v->domain) )
+        pt_restore_timer(v);
 
     if ( !handle_hvm_io_completion(v) )
         return;
 
     if ( unlikely(v->arch.vm_event) )
-        hvm_vm_event_do_resume(v);
-
-    /* Inject pending hw/sw event */
-    if ( v->arch.hvm_vcpu.inject_event.vector >= 0 )
     {
-        smp_rmb();
+        struct monitor_write_data *w = &v->arch.vm_event->write_data;
 
-        if ( !hvm_event_pending(v) )
-            hvm_inject_event(&v->arch.hvm_vcpu.inject_event);
+        if ( unlikely(v->arch.vm_event->emulate_flags) )
+        {
+            enum emul_kind kind = EMUL_KIND_NORMAL;
 
-        v->arch.hvm_vcpu.inject_event.vector = HVM_EVENT_VECTOR_UNSET;
+            /*
+             * Please observ the order here to match the flag descriptions
+             * provided in public/vm_event.h
+             */
+            if ( v->arch.vm_event->emulate_flags &
+                 VM_EVENT_FLAG_SET_EMUL_READ_DATA )
+                kind = EMUL_KIND_SET_CONTEXT_DATA;
+            else if ( v->arch.vm_event->emulate_flags &
+                      VM_EVENT_FLAG_EMULATE_NOWRITE )
+                kind = EMUL_KIND_NOWRITE;
+            else if ( v->arch.vm_event->emulate_flags &
+                      VM_EVENT_FLAG_SET_EMUL_INSN_DATA )
+                kind = EMUL_KIND_SET_CONTEXT_INSN;
+
+            hvm_emulate_one_vm_event(kind, TRAP_invalid_op,
+                                     HVM_DELIVER_NO_ERROR_CODE);
+
+            v->arch.vm_event->emulate_flags = 0;
+        }
+
+        if ( w->do_write.msr )
+        {
+            hvm_msr_write_intercept(w->msr, w->value, 0);
+            w->do_write.msr = 0;
+        }
+
+        if ( w->do_write.cr0 )
+        {
+            hvm_set_cr0(w->cr0, 0);
+            w->do_write.cr0 = 0;
+        }
+
+        if ( w->do_write.cr4 )
+        {
+            hvm_set_cr4(w->cr4, 0);
+            w->do_write.cr4 = 0;
+        }
+
+        if ( w->do_write.cr3 )
+        {
+            hvm_set_cr3(w->cr3, 0);
+            w->do_write.cr3 = 0;
+        }
     }
 
-    if ( unlikely(v->arch.vm_event) && v->arch.monitor.next_interrupt_enabled )
+    /* Inject pending hw/sw trap */
+    if ( v->arch.hvm_vcpu.inject_trap.vector != -1 )
     {
-        struct x86_event info;
-
-        if ( hvm_get_pending_event(v, &info) )
-        {
-            hvm_monitor_interrupt(info.vector, info.type, info.error_code,
-                                  info.cr2);
-            v->arch.monitor.next_interrupt_enabled = false;
-        }
+        hvm_inject_trap(&v->arch.hvm_vcpu.inject_trap);
+        v->arch.hvm_vcpu.inject_trap.vector = -1;
     }
 }
 
@@ -551,11 +583,7 @@ static int hvm_print_line(
     struct domain *cd = current->domain;
     char c = *val;
 
-    ASSERT(bytes == 1 && port == 0xe9);
-
-    /* Deny any input requests. */
-    if ( dir != IOREQ_WRITE )
-        return X86EMUL_UNHANDLEABLE;
+    BUG_ON(bytes != 1);
 
     /* Accept only printable characters, newline, and horizontal tab. */
     if ( !isprint(c) && (c != '\n') && (c != '\t') )
@@ -575,9 +603,21 @@ static int hvm_print_line(
     return X86EMUL_OKAY;
 }
 
+static int handle_pvh_io(
+    int dir, unsigned int port, unsigned int bytes, uint32_t *val)
+{
+    struct domain *currd = current->domain;
+
+    if ( dir == IOREQ_WRITE )
+        guest_io_write(port, bytes, *val, currd);
+    else
+        *val = guest_io_read(port, bytes, currd);
+
+    return X86EMUL_OKAY;
+}
+
 int hvm_domain_initialise(struct domain *d)
 {
-    unsigned int nr_gsis;
     int rc;
 
     if ( !hvm_enabled )
@@ -587,18 +627,26 @@ int hvm_domain_initialise(struct domain *d)
         return -EINVAL;
     }
 
+    if ( is_pvh_domain(d) )
+    {
+        if ( !hvm_funcs.pvh_supported )
+        {
+            printk(XENLOG_G_WARNING "Attempt to create a PVH guest "
+                   "on a system without necessary hardware support\n");
+            return -EINVAL;
+        }
+        if ( !hap_enabled(d) )
+        {
+            printk(XENLOG_G_INFO "PVH guest must have HAP on\n");
+            return -EINVAL;
+        }
+
+    }
+
     spin_lock_init(&d->arch.hvm_domain.irq_lock);
     spin_lock_init(&d->arch.hvm_domain.uc_lock);
     spin_lock_init(&d->arch.hvm_domain.write_map.lock);
-    rwlock_init(&d->arch.hvm_domain.mmcfg_lock);
     INIT_LIST_HEAD(&d->arch.hvm_domain.write_map.list);
-    INIT_LIST_HEAD(&d->arch.hvm_domain.g2m_ioport_list);
-    INIT_LIST_HEAD(&d->arch.hvm_domain.mmcfg_regions);
-    INIT_LIST_HEAD(&d->arch.hvm_domain.msix_tables);
-
-    rc = create_perdomain_mapping(d, PERDOMAIN_VIRT_START, 0, NULL, NULL);
-    if ( rc )
-        goto fail;
 
     hvm_init_cacheattr_region_list(d);
 
@@ -606,23 +654,14 @@ int hvm_domain_initialise(struct domain *d)
     if ( rc != 0 )
         goto fail0;
 
-    nr_gsis = is_hardware_domain(d) ? nr_irqs_gsi : NR_HVM_DOMU_IRQS;
     d->arch.hvm_domain.pl_time = xzalloc(struct pl_time);
     d->arch.hvm_domain.params = xzalloc_array(uint64_t, HVM_NR_PARAMS);
     d->arch.hvm_domain.io_handler = xzalloc_array(struct hvm_io_handler,
                                                   NR_IO_HANDLERS);
-    d->arch.hvm_domain.irq = xzalloc_bytes(hvm_irq_size(nr_gsis));
-
     rc = -ENOMEM;
-    if ( !d->arch.hvm_domain.pl_time || !d->arch.hvm_domain.irq ||
+    if ( !d->arch.hvm_domain.pl_time ||
          !d->arch.hvm_domain.params  || !d->arch.hvm_domain.io_handler )
         goto fail1;
-
-    /* Set the number of GSIs */
-    hvm_domain_irq(d)->nr_gsis = nr_gsis;
-
-    BUILD_BUG_ON(NR_HVM_DOMU_IRQS < NR_ISAIRQS);
-    ASSERT(hvm_domain_irq(d)->nr_gsis >= NR_ISAIRQS);
 
     /* need link to containing domain */
     d->arch.hvm_domain.pl_time->domain = d;
@@ -641,10 +680,15 @@ int hvm_domain_initialise(struct domain *d)
     else
         d->arch.hvm_domain.io_bitmap = hvm_io_bitmap;
 
-    register_g2m_portio_handler(d);
-    register_vpci_portio_handler(d);
+    register_dpci_portio_handler(d);
 
     hvm_ioreq_init(d);
+
+    if ( is_pvh_domain(d) )
+    {
+        register_portio_handler(d, 0, 0x10003, handle_pvh_io);
+        return 0;
+    }
 
     hvm_init_guest_time(d);
 
@@ -681,16 +725,16 @@ int hvm_domain_initialise(struct domain *d)
     xfree(d->arch.hvm_domain.io_handler);
     xfree(d->arch.hvm_domain.params);
     xfree(d->arch.hvm_domain.pl_time);
-    xfree(d->arch.hvm_domain.irq);
  fail0:
     hvm_destroy_cacheattr_region_list(d);
-    destroy_perdomain_mapping(d, PERDOMAIN_VIRT_START, 0);
- fail:
     return rc;
 }
 
 void hvm_domain_relinquish_resources(struct domain *d)
 {
+    if ( is_pvh_domain(d) )
+        return;
+
     if ( hvm_funcs.nhvm_domain_relinquish_resources )
         hvm_funcs.nhvm_domain_relinquish_resources(d);
 
@@ -711,9 +755,6 @@ void hvm_domain_relinquish_resources(struct domain *d)
 
 void hvm_domain_destroy(struct domain *d)
 {
-    struct list_head *ioport_list, *tmp;
-    struct g2m_ioport *ioport;
-
     xfree(d->arch.hvm_domain.io_handler);
     d->arch.hvm_domain.io_handler = NULL;
 
@@ -722,6 +763,9 @@ void hvm_domain_destroy(struct domain *d)
 
     hvm_destroy_cacheattr_region_list(d);
 
+    if ( is_pvh_domain(d) )
+        return;
+
     hvm_funcs.domain_destroy(d);
     rtc_deinit(d);
     stdvga_deinit(d);
@@ -729,19 +773,6 @@ void hvm_domain_destroy(struct domain *d)
 
     xfree(d->arch.hvm_domain.pl_time);
     d->arch.hvm_domain.pl_time = NULL;
-
-    xfree(d->arch.hvm_domain.irq);
-    d->arch.hvm_domain.irq = NULL;
-
-    list_for_each_safe ( ioport_list, tmp,
-                         &d->arch.hvm_domain.g2m_ioport_list )
-    {
-        ioport = list_entry(ioport_list, struct g2m_ioport, list);
-        list_del(&ioport->list);
-        xfree(ioport);
-    }
-
-    destroy_vpci_mmcfg(d);
 }
 
 static int hvm_save_tsc_adjust(struct domain *d, hvm_domain_context_t *h)
@@ -818,49 +849,49 @@ static int hvm_save_cpu_ctxt(struct domain *d, hvm_domain_context_t *h)
         ctxt.cs_sel = seg.sel;
         ctxt.cs_limit = seg.limit;
         ctxt.cs_base = seg.base;
-        ctxt.cs_arbytes = seg.attr;
+        ctxt.cs_arbytes = seg.attr.bytes;
 
         hvm_get_segment_register(v, x86_seg_ds, &seg);
         ctxt.ds_sel = seg.sel;
         ctxt.ds_limit = seg.limit;
         ctxt.ds_base = seg.base;
-        ctxt.ds_arbytes = seg.attr;
+        ctxt.ds_arbytes = seg.attr.bytes;
 
         hvm_get_segment_register(v, x86_seg_es, &seg);
         ctxt.es_sel = seg.sel;
         ctxt.es_limit = seg.limit;
         ctxt.es_base = seg.base;
-        ctxt.es_arbytes = seg.attr;
+        ctxt.es_arbytes = seg.attr.bytes;
 
         hvm_get_segment_register(v, x86_seg_ss, &seg);
         ctxt.ss_sel = seg.sel;
         ctxt.ss_limit = seg.limit;
         ctxt.ss_base = seg.base;
-        ctxt.ss_arbytes = seg.attr;
+        ctxt.ss_arbytes = seg.attr.bytes;
 
         hvm_get_segment_register(v, x86_seg_fs, &seg);
         ctxt.fs_sel = seg.sel;
         ctxt.fs_limit = seg.limit;
         ctxt.fs_base = seg.base;
-        ctxt.fs_arbytes = seg.attr;
+        ctxt.fs_arbytes = seg.attr.bytes;
 
         hvm_get_segment_register(v, x86_seg_gs, &seg);
         ctxt.gs_sel = seg.sel;
         ctxt.gs_limit = seg.limit;
         ctxt.gs_base = seg.base;
-        ctxt.gs_arbytes = seg.attr;
+        ctxt.gs_arbytes = seg.attr.bytes;
 
         hvm_get_segment_register(v, x86_seg_tr, &seg);
         ctxt.tr_sel = seg.sel;
         ctxt.tr_limit = seg.limit;
         ctxt.tr_base = seg.base;
-        ctxt.tr_arbytes = seg.attr;
+        ctxt.tr_arbytes = seg.attr.bytes;
 
         hvm_get_segment_register(v, x86_seg_ldtr, &seg);
         ctxt.ldtr_sel = seg.sel;
         ctxt.ldtr_limit = seg.limit;
         ctxt.ldtr_base = seg.base;
-        ctxt.ldtr_arbytes = seg.attr;
+        ctxt.ldtr_arbytes = seg.attr.bytes;
 
         if ( v->fpu_initialised )
         {
@@ -868,16 +899,16 @@ static int hvm_save_cpu_ctxt(struct domain *d, hvm_domain_context_t *h)
             ctxt.flags = XEN_X86_FPU_INITIALISED;
         }
 
-        ctxt.rax = v->arch.user_regs.rax;
-        ctxt.rbx = v->arch.user_regs.rbx;
-        ctxt.rcx = v->arch.user_regs.rcx;
-        ctxt.rdx = v->arch.user_regs.rdx;
-        ctxt.rbp = v->arch.user_regs.rbp;
-        ctxt.rsi = v->arch.user_regs.rsi;
-        ctxt.rdi = v->arch.user_regs.rdi;
-        ctxt.rsp = v->arch.user_regs.rsp;
-        ctxt.rip = v->arch.user_regs.rip;
-        ctxt.rflags = v->arch.user_regs.rflags;
+        ctxt.rax = v->arch.user_regs.eax;
+        ctxt.rbx = v->arch.user_regs.ebx;
+        ctxt.rcx = v->arch.user_regs.ecx;
+        ctxt.rdx = v->arch.user_regs.edx;
+        ctxt.rbp = v->arch.user_regs.ebp;
+        ctxt.rsi = v->arch.user_regs.esi;
+        ctxt.rdi = v->arch.user_regs.edi;
+        ctxt.rsp = v->arch.user_regs.esp;
+        ctxt.rip = v->arch.user_regs.eip;
+        ctxt.rflags = v->arch.user_regs.eflags;
         ctxt.r8  = v->arch.user_regs.r8;
         ctxt.r9  = v->arch.user_regs.r9;
         ctxt.r10 = v->arch.user_regs.r10;
@@ -903,31 +934,61 @@ static int hvm_save_cpu_ctxt(struct domain *d, hvm_domain_context_t *h)
 const char *hvm_efer_valid(const struct vcpu *v, uint64_t value,
                            signed int cr0_pg)
 {
-    const struct domain *d = v->domain;
-    const struct cpuid_policy *p = d->arch.cpuid;
+    unsigned int ext1_ecx = 0, ext1_edx = 0;
 
     if ( value & ~EFER_KNOWN_MASK )
         return "Unknown bits set";
 
-    if ( (value & EFER_SCE) && !p->extd.syscall )
+    if ( cr0_pg < 0 && !is_hardware_domain(v->domain) )
+    {
+        unsigned int level;
+
+        ASSERT(v->domain == current->domain);
+        hvm_cpuid(0x80000000, &level, NULL, NULL, NULL);
+        if ( (level >> 16) == 0x8000 && level > 0x80000000 )
+        {
+            unsigned int dummy;
+
+            level = 0x80000001;
+            hvm_funcs.cpuid_intercept(&level, &dummy, &ext1_ecx, &ext1_edx);
+        }
+    }
+    else
+    {
+        ext1_edx = boot_cpu_data.x86_capability[cpufeat_word(X86_FEATURE_LM)];
+        ext1_ecx = boot_cpu_data.x86_capability[cpufeat_word(X86_FEATURE_SVM)];
+    }
+
+    /*
+     * Guests may want to set EFER.SCE and EFER.LME at the same time, so we
+     * can't make the check depend on only X86_FEATURE_SYSCALL (which on VMX
+     * will be clear without the guest having entered 64-bit mode).
+     */
+    if ( (value & EFER_SCE) &&
+         !(ext1_edx & cpufeat_mask(X86_FEATURE_SYSCALL)) &&
+         (cr0_pg >= 0 || !(value & EFER_LME)) )
         return "SCE without feature";
 
-    if ( (value & (EFER_LME | EFER_LMA)) && !p->extd.lm )
+    if ( (value & (EFER_LME | EFER_LMA)) &&
+         !(ext1_edx & cpufeat_mask(X86_FEATURE_LM)) )
         return "LME/LMA without feature";
 
     if ( (value & EFER_LMA) && (!(value & EFER_LME) || !cr0_pg) )
         return "LMA/LME/CR0.PG inconsistency";
 
-    if ( (value & EFER_NX) && !p->extd.nx )
+    if ( (value & EFER_NX) && !(ext1_edx & cpufeat_mask(X86_FEATURE_NX)) )
         return "NX without feature";
 
-    if ( (value & EFER_SVME) && (!p->extd.svm || !nestedhvm_enabled(d)) )
+    if ( (value & EFER_SVME) &&
+         (!(ext1_ecx & cpufeat_mask(X86_FEATURE_SVM)) ||
+          !nestedhvm_enabled(v->domain)) )
         return "SVME without nested virt";
 
     if ( (value & EFER_LMSLE) && !cpu_has_lmsl )
         return "LMSLE without support";
 
-    if ( (value & EFER_FFXSE) && !p->extd.ffxsr )
+    if ( (value & EFER_FFXSE) &&
+         !(ext1_edx & cpufeat_mask(X86_FEATURE_FFXSR)) )
         return "FFXSE without feature";
 
     return NULL;
@@ -941,34 +1002,67 @@ const char *hvm_efer_valid(const struct vcpu *v, uint64_t value,
         X86_CR0_WP | X86_CR0_AM | X86_CR0_NW |  \
         X86_CR0_CD | X86_CR0_PG)))
 
-/* These bits in CR4 can be set by the guest. */
-unsigned long hvm_cr4_guest_valid_bits(const struct domain *d, bool restore)
+/* These bits in CR4 cannot be set by the guest. */
+unsigned long hvm_cr4_guest_reserved_bits(const struct vcpu *v,bool_t restore)
 {
-    const struct cpuid_policy *p = d->arch.cpuid;
-    bool mce, vmxe;
+    unsigned int leaf1_ecx = 0, leaf1_edx = 0;
+    unsigned int leaf7_0_ebx = 0, leaf7_0_ecx = 0;
 
-    /* Logic broken out simply to aid readability below. */
-    mce  = p->basic.mce || p->basic.mca;
-    vmxe = p->basic.vmx && (restore || nestedhvm_enabled(d));
+    if ( !restore && !is_hardware_domain(v->domain) )
+    {
+        unsigned int level;
 
-    return ((p->basic.vme     ? X86_CR4_VME | X86_CR4_PVI : 0) |
-            (p->basic.tsc     ? X86_CR4_TSD               : 0) |
-            (p->basic.de      ? X86_CR4_DE                : 0) |
-            (p->basic.pse     ? X86_CR4_PSE               : 0) |
-            (p->basic.pae     ? X86_CR4_PAE               : 0) |
-            (mce              ? X86_CR4_MCE               : 0) |
-            (p->basic.pge     ? X86_CR4_PGE               : 0) |
-                                X86_CR4_PCE                    |
-            (p->basic.fxsr    ? X86_CR4_OSFXSR            : 0) |
-            (p->basic.sse     ? X86_CR4_OSXMMEXCPT        : 0) |
-            (p->feat.umip     ? X86_CR4_UMIP              : 0) |
-            (vmxe             ? X86_CR4_VMXE              : 0) |
-            (p->feat.fsgsbase ? X86_CR4_FSGSBASE          : 0) |
-            (p->basic.pcid    ? X86_CR4_PCIDE             : 0) |
-            (p->basic.xsave   ? X86_CR4_OSXSAVE           : 0) |
-            (p->feat.smep     ? X86_CR4_SMEP              : 0) |
-            (p->feat.smap     ? X86_CR4_SMAP              : 0) |
-            (p->feat.pku      ? X86_CR4_PKE               : 0));
+        ASSERT(v->domain == current->domain);
+        hvm_cpuid(0, &level, NULL, NULL, NULL);
+        if ( level >= 1 )
+            hvm_cpuid(1, NULL, NULL, &leaf1_ecx, &leaf1_edx);
+        if ( level >= 7 )
+            hvm_cpuid(7, NULL, &leaf7_0_ebx, &leaf7_0_ecx, NULL);
+    }
+    else
+    {
+        leaf1_edx = boot_cpu_data.x86_capability[cpufeat_word(X86_FEATURE_VME)];
+        leaf1_ecx = boot_cpu_data.x86_capability[cpufeat_word(X86_FEATURE_PCID)];
+        leaf7_0_ebx = boot_cpu_data.x86_capability[cpufeat_word(X86_FEATURE_FSGSBASE)];
+        leaf7_0_ecx = boot_cpu_data.x86_capability[cpufeat_word(X86_FEATURE_PKU)];
+    }
+
+    return ~(unsigned long)
+            ((leaf1_edx & cpufeat_mask(X86_FEATURE_VME) ?
+              X86_CR4_VME | X86_CR4_PVI : 0) |
+             (leaf1_edx & cpufeat_mask(X86_FEATURE_TSC) ?
+              X86_CR4_TSD : 0) |
+             (leaf1_edx & cpufeat_mask(X86_FEATURE_DE) ?
+              X86_CR4_DE : 0) |
+             (leaf1_edx & cpufeat_mask(X86_FEATURE_PSE) ?
+              X86_CR4_PSE : 0) |
+             (leaf1_edx & cpufeat_mask(X86_FEATURE_PAE) ?
+              X86_CR4_PAE : 0) |
+             (leaf1_edx & (cpufeat_mask(X86_FEATURE_MCE) |
+                           cpufeat_mask(X86_FEATURE_MCA)) ?
+              X86_CR4_MCE : 0) |
+             (leaf1_edx & cpufeat_mask(X86_FEATURE_PGE) ?
+              X86_CR4_PGE : 0) |
+             X86_CR4_PCE |
+             (leaf1_edx & cpufeat_mask(X86_FEATURE_FXSR) ?
+              X86_CR4_OSFXSR : 0) |
+             (leaf1_edx & cpufeat_mask(X86_FEATURE_SSE) ?
+              X86_CR4_OSXMMEXCPT : 0) |
+             ((restore || nestedhvm_enabled(v->domain)) &&
+              (leaf1_ecx & cpufeat_mask(X86_FEATURE_VMX)) ?
+              X86_CR4_VMXE : 0) |
+             (leaf7_0_ebx & cpufeat_mask(X86_FEATURE_FSGSBASE) ?
+              X86_CR4_FSGSBASE : 0) |
+             (leaf1_ecx & cpufeat_mask(X86_FEATURE_PCID) ?
+              X86_CR4_PCIDE : 0) |
+             (leaf1_ecx & cpufeat_mask(X86_FEATURE_XSAVE) ?
+              X86_CR4_OSXSAVE : 0) |
+             (leaf7_0_ebx & cpufeat_mask(X86_FEATURE_SMEP) ?
+              X86_CR4_SMEP : 0) |
+             (leaf7_0_ebx & cpufeat_mask(X86_FEATURE_SMAP) ?
+              X86_CR4_SMAP : 0) |
+              (leaf7_0_ecx & cpufeat_mask(X86_FEATURE_PKU) ?
+              X86_CR4_PKE : 0));
 }
 
 static int hvm_load_cpu_ctxt(struct domain *d, hvm_domain_context_t *h)
@@ -1005,7 +1099,7 @@ static int hvm_load_cpu_ctxt(struct domain *d, hvm_domain_context_t *h)
         return -EINVAL;
     }
 
-    if ( ctxt.cr4 & ~hvm_cr4_guest_valid_bits(d, true) )
+    if ( ctxt.cr4 & hvm_cr4_guest_reserved_bits(v, 1) )
     {
         printk(XENLOG_G_ERR "HVM%d restore: bad CR4 %#" PRIx64 "\n",
                d->domain_id, ctxt.cr4);
@@ -1065,49 +1159,49 @@ static int hvm_load_cpu_ctxt(struct domain *d, hvm_domain_context_t *h)
     seg.sel = ctxt.cs_sel;
     seg.limit = ctxt.cs_limit;
     seg.base = ctxt.cs_base;
-    seg.attr = ctxt.cs_arbytes;
+    seg.attr.bytes = ctxt.cs_arbytes;
     hvm_set_segment_register(v, x86_seg_cs, &seg);
 
     seg.sel = ctxt.ds_sel;
     seg.limit = ctxt.ds_limit;
     seg.base = ctxt.ds_base;
-    seg.attr = ctxt.ds_arbytes;
+    seg.attr.bytes = ctxt.ds_arbytes;
     hvm_set_segment_register(v, x86_seg_ds, &seg);
 
     seg.sel = ctxt.es_sel;
     seg.limit = ctxt.es_limit;
     seg.base = ctxt.es_base;
-    seg.attr = ctxt.es_arbytes;
+    seg.attr.bytes = ctxt.es_arbytes;
     hvm_set_segment_register(v, x86_seg_es, &seg);
 
     seg.sel = ctxt.ss_sel;
     seg.limit = ctxt.ss_limit;
     seg.base = ctxt.ss_base;
-    seg.attr = ctxt.ss_arbytes;
+    seg.attr.bytes = ctxt.ss_arbytes;
     hvm_set_segment_register(v, x86_seg_ss, &seg);
 
     seg.sel = ctxt.fs_sel;
     seg.limit = ctxt.fs_limit;
     seg.base = ctxt.fs_base;
-    seg.attr = ctxt.fs_arbytes;
+    seg.attr.bytes = ctxt.fs_arbytes;
     hvm_set_segment_register(v, x86_seg_fs, &seg);
 
     seg.sel = ctxt.gs_sel;
     seg.limit = ctxt.gs_limit;
     seg.base = ctxt.gs_base;
-    seg.attr = ctxt.gs_arbytes;
+    seg.attr.bytes = ctxt.gs_arbytes;
     hvm_set_segment_register(v, x86_seg_gs, &seg);
 
     seg.sel = ctxt.tr_sel;
     seg.limit = ctxt.tr_limit;
     seg.base = ctxt.tr_base;
-    seg.attr = ctxt.tr_arbytes;
+    seg.attr.bytes = ctxt.tr_arbytes;
     hvm_set_segment_register(v, x86_seg_tr, &seg);
 
     seg.sel = ctxt.ldtr_sel;
     seg.limit = ctxt.ldtr_limit;
     seg.base = ctxt.ldtr_base;
-    seg.attr = ctxt.ldtr_arbytes;
+    seg.attr.bytes = ctxt.ldtr_arbytes;
     hvm_set_segment_register(v, x86_seg_ldtr, &seg);
 
     /* Cover xsave-absent save file restoration on xsave-capable host. */
@@ -1128,16 +1222,16 @@ static int hvm_load_cpu_ctxt(struct domain *d, hvm_domain_context_t *h)
     if ( xsave_area )
         xsave_area->xsave_hdr.xcomp_bv = 0;
 
-    v->arch.user_regs.rax = ctxt.rax;
-    v->arch.user_regs.rbx = ctxt.rbx;
-    v->arch.user_regs.rcx = ctxt.rcx;
-    v->arch.user_regs.rdx = ctxt.rdx;
-    v->arch.user_regs.rbp = ctxt.rbp;
-    v->arch.user_regs.rsi = ctxt.rsi;
-    v->arch.user_regs.rdi = ctxt.rdi;
-    v->arch.user_regs.rsp = ctxt.rsp;
-    v->arch.user_regs.rip = ctxt.rip;
-    v->arch.user_regs.rflags = ctxt.rflags | X86_EFLAGS_MBS;
+    v->arch.user_regs.eax = ctxt.rax;
+    v->arch.user_regs.ebx = ctxt.rbx;
+    v->arch.user_regs.ecx = ctxt.rcx;
+    v->arch.user_regs.edx = ctxt.rdx;
+    v->arch.user_regs.ebp = ctxt.rbp;
+    v->arch.user_regs.esi = ctxt.rsi;
+    v->arch.user_regs.edi = ctxt.rdi;
+    v->arch.user_regs.esp = ctxt.rsp;
+    v->arch.user_regs.eip = ctxt.rip;
+    v->arch.user_regs.eflags = ctxt.rflags | X86_EFLAGS_MBS;
     v->arch.user_regs.r8  = ctxt.r8;
     v->arch.user_regs.r9  = ctxt.r9;
     v->arch.user_regs.r10 = ctxt.r10;
@@ -1329,11 +1423,7 @@ static int hvm_load_cpu_xsave_states(struct domain *d, hvm_domain_context_t *h)
 }
 
 #define HVM_CPU_MSR_SIZE(cnt) offsetof(struct hvm_msr, msr[cnt])
-static const uint32_t msrs_to_send[] = {
-    MSR_SPEC_CTRL,
-    MSR_INTEL_MISC_FEATURES_ENABLES,
-};
-static unsigned int __read_mostly msr_count_max = ARRAY_SIZE(msrs_to_send);
+static unsigned int __read_mostly msr_count_max;
 
 static int hvm_save_cpu_msrs(struct domain *d, hvm_domain_context_t *h)
 {
@@ -1341,7 +1431,7 @@ static int hvm_save_cpu_msrs(struct domain *d, hvm_domain_context_t *h)
 
     for_each_vcpu ( d, v )
     {
-        struct hvm_save_descriptor *desc = _p(&h->data[h->cur]);
+        struct hvm_save_descriptor *d = _p(&h->data[h->cur]);
         struct hvm_msr *ctxt;
         unsigned int i;
 
@@ -1350,33 +1440,6 @@ static int hvm_save_cpu_msrs(struct domain *d, hvm_domain_context_t *h)
             return 1;
         ctxt = (struct hvm_msr *)&h->data[h->cur];
         ctxt->count = 0;
-
-        for ( i = 0; i < ARRAY_SIZE(msrs_to_send); ++i )
-        {
-            uint64_t val;
-            int rc = guest_rdmsr(v, msrs_to_send[i], &val);
-
-            /*
-             * It is the programmers responsibility to ensure that
-             * msrs_to_send[] contain generally-read/write MSRs.
-             * X86EMUL_EXCEPTION here implies a missing feature, and that the
-             * guest doesn't have access to the MSR.
-             */
-            if ( rc == X86EMUL_EXCEPTION )
-                continue;
-
-            if ( rc != X86EMUL_OKAY )
-            {
-                ASSERT_UNREACHABLE();
-                return -ENXIO;
-            }
-
-            if ( !val )
-                continue; /* Skip empty MSRs. */
-
-            ctxt->msr[ctxt->count].index = msrs_to_send[i];
-            ctxt->msr[ctxt->count++].val = val;
-        }
 
         if ( hvm_funcs.save_msr )
             hvm_funcs.save_msr(v, ctxt);
@@ -1389,7 +1452,7 @@ static int hvm_save_cpu_msrs(struct domain *d, hvm_domain_context_t *h)
         if ( ctxt->count )
         {
             /* Rewrite length to indicate how much space we actually used. */
-            desc->length = HVM_CPU_MSR_SIZE(ctxt->count);
+            d->length = HVM_CPU_MSR_SIZE(ctxt->count);
             h->cur += HVM_CPU_MSR_SIZE(ctxt->count);
         }
         else
@@ -1464,16 +1527,6 @@ static int hvm_load_cpu_msrs(struct domain *d, hvm_domain_context_t *h)
     {
         switch ( ctxt->msr[i].index )
         {
-            int rc;
-
-        case MSR_SPEC_CTRL:
-        case MSR_INTEL_MISC_FEATURES_ENABLES:
-            rc = guest_wrmsr(v, ctxt->msr[i].index, ctxt->msr[i].val);
-
-            if ( rc != X86EMUL_OKAY )
-                err = -ENXIO;
-            break;
-
         default:
             if ( !ctxt->msr[i]._rsvd )
                 err = -ENXIO;
@@ -1540,7 +1593,14 @@ int hvm_vcpu_initialise(struct vcpu *v)
         (void(*)(unsigned long))hvm_assert_evtchn_irq,
         (unsigned long)v);
 
-    v->arch.hvm_vcpu.inject_event.vector = HVM_EVENT_VECTOR_UNSET;
+    v->arch.hvm_vcpu.inject_trap.vector = -1;
+
+    if ( is_pvh_domain(d) )
+    {
+        /* This is for hvm_long_mode_enabled(v). */
+        v->arch.hvm_vcpu.guest_efer = EFER_LMA | EFER_LME;
+        return 0;
+    }
 
     rc = setup_compat_arg_xlat(v); /* teardown: free_compat_arg_xlat() */
     if ( rc != 0 )
@@ -1594,11 +1654,12 @@ void hvm_vcpu_destroy(struct vcpu *v)
     free_compat_arg_xlat(v);
 
     tasklet_kill(&v->arch.hvm_vcpu.assert_evtchn_irq_tasklet);
-    hvm_funcs.vcpu_destroy(v);
-
-    vlapic_destroy(v);
-
     hvm_vcpu_cacheattr_destroy(v);
+
+    if ( is_hvm_vcpu(v) )
+        vlapic_destroy(v);
+
+    hvm_funcs.vcpu_destroy(v);
 }
 
 void hvm_vcpu_down(struct vcpu *v)
@@ -1625,7 +1686,7 @@ void hvm_vcpu_down(struct vcpu *v)
     }
 }
 
-void hvm_hlt(unsigned int eflags)
+void hvm_hlt(unsigned long rflags)
 {
     struct vcpu *curr = current;
 
@@ -1637,7 +1698,7 @@ void hvm_hlt(unsigned int eflags)
      * want to shut down. In a real processor, NMIs are the only way to break
      * out of this.
      */
-    if ( unlikely(!(eflags & X86_EFLAGS_IF)) )
+    if ( unlikely(!(rflags & X86_EFLAGS_IF)) )
         return hvm_vcpu_down(curr);
 
     do_sched_op(SCHEDOP_block, guest_handle_from_ptr(NULL, void));
@@ -1651,35 +1712,26 @@ void hvm_triple_fault(void)
     struct domain *d = v->domain;
     u8 reason = d->arch.hvm_domain.params[HVM_PARAM_TRIPLE_FAULT_REASON];
 
-    gprintk(XENLOG_ERR,
+    gprintk(XENLOG_INFO,
             "Triple fault - invoking HVM shutdown action %d\n",
             reason);
     vcpu_show_execution_state(v);
     domain_shutdown(d, reason);
 }
 
-void hvm_inject_event(const struct x86_event *event)
+void hvm_inject_trap(const struct hvm_trap *trap)
 {
     struct vcpu *curr = current;
-    const uint8_t vector = event->vector;
-    const bool has_ec = ((event->type == X86_EVENTTYPE_HW_EXCEPTION) &&
-                         (vector < 32) && ((TRAP_HAVE_EC & (1u << vector))));
-
-    ASSERT(vector == event->vector); /* Confirm no truncation. */
-    if ( has_ec )
-        ASSERT(event->error_code != X86_EVENT_NO_EC);
-    else
-        ASSERT(event->error_code == X86_EVENT_NO_EC);
 
     if ( nestedhvm_enabled(curr->domain) &&
          !nestedhvm_vmswitch_in_progress(curr) &&
          nestedhvm_vcpu_in_guestmode(curr) &&
-         nhvm_vmcx_guest_intercepts_event(
-             curr, event->vector, event->error_code) )
+         nhvm_vmcx_guest_intercepts_trap(
+             curr, trap->vector, trap->error_code) )
     {
         enum nestedhvm_vmexits nsret;
 
-        nsret = nhvm_vcpu_vmexit_event(curr, event);
+        nsret = nhvm_vcpu_vmexit_trap(curr, trap);
 
         switch ( nsret )
         {
@@ -1695,7 +1747,26 @@ void hvm_inject_event(const struct x86_event *event)
         }
     }
 
-    hvm_funcs.inject_event(event);
+    hvm_funcs.inject_trap(trap);
+}
+
+void hvm_inject_hw_exception(unsigned int trapnr, int errcode)
+{
+    struct hvm_trap trap = {
+        .vector = trapnr,
+        .type = X86_EVENTTYPE_HW_EXCEPTION,
+        .error_code = errcode };
+    hvm_inject_trap(&trap);
+}
+
+void hvm_inject_page_fault(int errcode, unsigned long cr2)
+{
+    struct hvm_trap trap = {
+        .vector = TRAP_page_fault,
+        .type = X86_EVENTTYPE_HW_EXCEPTION,
+        .error_code = errcode,
+        .cr2 = cr2 };
+    hvm_inject_trap(&trap);
 }
 
 int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
@@ -1762,7 +1833,9 @@ int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
      * - 32-bit WinXP (& older Windows) on AMD CPUs for LAPIC accesses,
      * - newer Windows (like Server 2012) for HPET accesses.
      */
-    if ( !nestedhvm_vcpu_in_guestmode(curr) && hvm_mmio_internal(gpa) )
+    if ( !nestedhvm_vcpu_in_guestmode(curr)
+         && is_hvm_domain(currd)
+         && hvm_mmio_internal(gpa) )
     {
         if ( !handle_mmio_with_translation(gla, gpa >> PAGE_SHIFT, npfec) )
             hvm_inject_hw_exception(TRAP_gp_fault, 0);
@@ -1840,8 +1913,7 @@ int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
          */
         if ( page_order > 0 && npfec.insn_fetch && npfec.present && !violation )
         {
-            int res = p2m_set_entry(p2m, _gfn(gfn), mfn, PAGE_ORDER_4K,
-                                    p2mt, p2ma);
+            int res = p2m_set_entry(p2m, gfn, mfn, PAGE_ORDER_4K, p2mt, p2ma);
 
             if ( res )
                 printk(XENLOG_ERR "Failed to shatter gfn %"PRI_gfn": %d\n",
@@ -1858,7 +1930,7 @@ int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
             {
                 bool_t sve;
 
-                p2m->get_entry(p2m, _gfn(gfn), &p2mt, &p2ma, 0, NULL, &sve);
+                p2m->get_entry(p2m, gfn, &p2mt, &p2ma, 0, NULL, &sve);
 
                 if ( !sve && altp2m_vcpu_emulate_ve(curr) )
                 {
@@ -1888,10 +1960,18 @@ int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
          (npfec.write_access &&
           (p2m_is_discard_write(p2mt) || (p2mt == p2m_ioreq_server))) )
     {
+        __put_gfn(p2m, gfn);
+        if ( ap2m_active )
+            __put_gfn(hostp2m, gfn);
+
+        rc = 0;
+        if ( unlikely(is_pvh_domain(currd)) )
+            goto out;
+
         if ( !handle_mmio_with_translation(gla, gpa >> PAGE_SHIFT, npfec) )
             hvm_inject_hw_exception(TRAP_gp_fault, 0);
         rc = 1;
-        goto out_put_gfn;
+        goto out;
     }
 
     /* Check if the page has been paged out */
@@ -1919,7 +1999,7 @@ int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
          */
         if ( npfec.write_access )
         {
-            paging_mark_pfn_dirty(currd, _pfn(gfn));
+            paging_mark_dirty(currd, mfn_x(mfn));
             /*
              * If p2m is really an altp2m, unlock here to avoid lock ordering
              * violation when the change below is propagated from host p2m.
@@ -1983,11 +2063,10 @@ int hvm_handle_xsetbv(u32 index, u64 new_bv)
 {
     int rc;
 
-    if ( index == 0 )
-        hvm_monitor_crX(XCR0, new_bv, current->arch.xcr0);
+    hvm_monitor_crX(XCR0, new_bv, current->arch.xcr0);
 
-    rc = x86emul_write_xcr(index, new_bv, NULL);
-    if ( rc != X86EMUL_OKAY )
+    rc = handle_xsetbv(index, new_bv);
+    if ( rc )
         hvm_inject_hw_exception(TRAP_gp_fault, 0);
 
     return rc;
@@ -2006,6 +2085,7 @@ int hvm_set_efer(uint64_t value)
         printk(XENLOG_G_WARNING
                "%pv: Invalid EFER update: %#"PRIx64" -> %#"PRIx64" - %s\n",
                v, v->arch.hvm_vcpu.guest_efer, value, errstr);
+        hvm_inject_hw_exception(TRAP_gp_fault, 0);
         return X86EMUL_EXCEPTION;
     }
 
@@ -2014,6 +2094,7 @@ int hvm_set_efer(uint64_t value)
     {
         gdprintk(XENLOG_WARNING,
                  "Trying to change EFER.LME with paging enabled\n");
+        hvm_inject_hw_exception(TRAP_gp_fault, 0);
         return X86EMUL_EXCEPTION;
     }
 
@@ -2034,9 +2115,9 @@ int hvm_set_efer(uint64_t value)
          * When LME becomes set, clobber %cs.L to keep the guest firmly in
          * compatibility mode until it reloads %cs itself.
          */
-        if ( cs.l )
+        if ( cs.attr.fields.l )
         {
-            cs.l = 0;
+            cs.attr.fields.l = 0;
             hvm_set_segment_register(v, x86_seg_cs, &cs);
         }
     }
@@ -2084,29 +2165,31 @@ static void hvm_set_uc_mode(struct vcpu *v, bool_t is_in_uc_mode)
 int hvm_mov_to_cr(unsigned int cr, unsigned int gpr)
 {
     struct vcpu *curr = current;
-    unsigned long val = *decode_gpr(guest_cpu_user_regs(), gpr);
-    int rc;
+    unsigned long val, *reg;
 
+    if ( (reg = decode_register(gpr, guest_cpu_user_regs(), 0)) == NULL )
+    {
+        gdprintk(XENLOG_ERR, "invalid gpr: %u\n", gpr);
+        goto exit_and_crash;
+    }
+
+    val = *reg;
     HVMTRACE_LONG_2D(CR_WRITE, cr, TRC_PAR_LONG(val));
     HVM_DBG_LOG(DBG_LEVEL_1, "CR%u, value = %lx", cr, val);
 
     switch ( cr )
     {
     case 0:
-        rc = hvm_set_cr0(val, 1);
-        break;
+        return hvm_set_cr0(val, 1);
 
     case 3:
-        rc = hvm_set_cr3(val, 1);
-        break;
+        return hvm_set_cr3(val, 1);
 
     case 4:
-        rc = hvm_set_cr4(val, 1);
-        break;
+        return hvm_set_cr4(val, 1);
 
     case 8:
         vlapic_set_reg(vcpu_vlapic(curr), APIC_TASKPRI, ((val & 0x0f) << 4));
-        rc = X86EMUL_OKAY;
         break;
 
     default:
@@ -2114,10 +2197,7 @@ int hvm_mov_to_cr(unsigned int cr, unsigned int gpr)
         goto exit_and_crash;
     }
 
-    if ( rc == X86EMUL_EXCEPTION )
-        hvm_inject_hw_exception(TRAP_gp_fault, 0);
-
-    return rc;
+    return X86EMUL_OKAY;
 
  exit_and_crash:
     domain_crash(curr->domain);
@@ -2127,7 +2207,13 @@ int hvm_mov_to_cr(unsigned int cr, unsigned int gpr)
 int hvm_mov_from_cr(unsigned int cr, unsigned int gpr)
 {
     struct vcpu *curr = current;
-    unsigned long val = 0, *reg = decode_gpr(guest_cpu_user_regs(), gpr);
+    unsigned long val = 0, *reg;
+
+    if ( (reg = decode_register(gpr, guest_cpu_user_regs(), 0)) == NULL )
+    {
+        gdprintk(XENLOG_ERR, "invalid gpr: %u\n", gpr);
+        goto exit_and_crash;
+    }
 
     switch ( cr )
     {
@@ -2211,7 +2297,7 @@ int hvm_set_cr0(unsigned long value, bool_t may_defer)
         HVM_DBG_LOG(DBG_LEVEL_1,
                     "Guest attempts to set upper 32 bits in CR0: %lx",
                     value);
-        return X86EMUL_EXCEPTION;
+        goto gpf;
     }
 
     value &= ~HVM_CR0_GUEST_RESERVED_BITS;
@@ -2221,7 +2307,16 @@ int hvm_set_cr0(unsigned long value, bool_t may_defer)
 
     if ( !nestedhvm_vmswitch_in_progress(v) &&
          (value & (X86_CR0_PE | X86_CR0_PG)) == X86_CR0_PG )
-        return X86EMUL_EXCEPTION;
+        goto gpf;
+
+    /* A pvh is not expected to change to real mode. */
+    if ( is_pvh_domain(d) &&
+         (value & (X86_CR0_PE | X86_CR0_PG)) != (X86_CR0_PG | X86_CR0_PE) )
+    {
+        printk(XENLOG_G_WARNING
+               "PVH attempting to turn off PE/PG. CR0:%lx\n", value);
+        goto gpf;
+    }
 
     if ( may_defer && unlikely(v->domain->arch.monitor.write_ctrlreg_enabled &
                                monitor_ctrlreg_bitmask(VM_EVENT_X86_CR0)) )
@@ -2246,7 +2341,7 @@ int hvm_set_cr0(unsigned long value, bool_t may_defer)
                  !nestedhvm_vmswitch_in_progress(v) )
             {
                 HVM_DBG_LOG(DBG_LEVEL_1, "Enable paging before PAE enable");
-                return X86EMUL_EXCEPTION;
+                goto gpf;
             }
             HVM_DBG_LOG(DBG_LEVEL_1, "Enabling long mode");
             v->arch.hvm_vcpu.guest_efer |= EFER_LMA;
@@ -2270,7 +2365,7 @@ int hvm_set_cr0(unsigned long value, bool_t may_defer)
             v->arch.guest_table = pagetable_from_page(page);
 
             HVM_DBG_LOG(DBG_LEVEL_VMMU, "Update CR3 value = %lx, mfn = %lx",
-                        v->arch.hvm_vcpu.guest_cr[3], mfn_x(page_to_mfn(page)));
+                        v->arch.hvm_vcpu.guest_cr[3], page_to_mfn(page));
         }
     }
     else if ( !(value & X86_CR0_PG) && (old_value & X86_CR0_PG) )
@@ -2279,11 +2374,11 @@ int hvm_set_cr0(unsigned long value, bool_t may_defer)
         {
             HVM_DBG_LOG(DBG_LEVEL_1, "Guest attempts to clear CR0.PG "
                         "while CR4.PCIDE=1");
-            return X86EMUL_EXCEPTION;
+            goto gpf;
         }
 
         /* When CR0.PG is cleared, LMA is cleared immediately. */
-        if ( hvm_long_mode_active(v) )
+        if ( hvm_long_mode_enabled(v) )
         {
             v->arch.hvm_vcpu.guest_efer &= ~EFER_LMA;
             hvm_update_guest_efer(v);
@@ -2313,6 +2408,10 @@ int hvm_set_cr0(unsigned long value, bool_t may_defer)
     }
 
     return X86EMUL_OKAY;
+
+ gpf:
+    hvm_inject_hw_exception(TRAP_gp_fault, 0);
+    return X86EMUL_EXCEPTION;
 }
 
 int hvm_set_cr3(unsigned long value, bool_t may_defer)
@@ -2320,7 +2419,6 @@ int hvm_set_cr3(unsigned long value, bool_t may_defer)
     struct vcpu *v = current;
     struct page_info *page;
     unsigned long old = v->arch.hvm_vcpu.guest_cr[3];
-    bool noflush = false;
 
     if ( may_defer && unlikely(v->domain->arch.monitor.write_ctrlreg_enabled &
                                monitor_ctrlreg_bitmask(VM_EVENT_X86_CR3)) )
@@ -2335,12 +2433,6 @@ int hvm_set_cr3(unsigned long value, bool_t may_defer)
 
             return X86EMUL_OKAY;
         }
-    }
-
-    if ( hvm_pcid_enabled(v) ) /* Clear the noflush bit. */
-    {
-        noflush = value & X86_CR3_NOFLUSH;
-        value &= ~X86_CR3_NOFLUSH;
     }
 
     if ( hvm_paging_enabled(v) && !paging_mode_hap(v->domain) &&
@@ -2360,7 +2452,7 @@ int hvm_set_cr3(unsigned long value, bool_t may_defer)
     }
 
     v->arch.hvm_vcpu.guest_cr[3] = value;
-    paging_update_cr3(v, noflush);
+    paging_update_cr3(v);
     return X86EMUL_OKAY;
 
  bad_cr3:
@@ -2374,33 +2466,38 @@ int hvm_set_cr4(unsigned long value, bool_t may_defer)
     struct vcpu *v = current;
     unsigned long old_cr;
 
-    if ( value & ~hvm_cr4_guest_valid_bits(v->domain, false) )
+    if ( value & hvm_cr4_guest_reserved_bits(v, 0) )
     {
         HVM_DBG_LOG(DBG_LEVEL_1,
                     "Guest attempts to set reserved bit in CR4: %lx",
                     value);
-        return X86EMUL_EXCEPTION;
+        goto gpf;
     }
 
     if ( !(value & X86_CR4_PAE) )
     {
-        if ( hvm_long_mode_active(v) )
+        if ( hvm_long_mode_enabled(v) )
         {
             HVM_DBG_LOG(DBG_LEVEL_1, "Guest cleared CR4.PAE while "
                         "EFER.LMA is set");
-            return X86EMUL_EXCEPTION;
+            goto gpf;
+        }
+        if ( is_pvh_vcpu(v) )
+        {
+            HVM_DBG_LOG(DBG_LEVEL_1, "32-bit PVH guest cleared CR4.PAE");
+            goto gpf;
         }
     }
 
     old_cr = v->arch.hvm_vcpu.guest_cr[4];
 
     if ( (value & X86_CR4_PCIDE) && !(old_cr & X86_CR4_PCIDE) &&
-         (!hvm_long_mode_active(v) ||
+         (!hvm_long_mode_enabled(v) ||
           (v->arch.hvm_vcpu.guest_cr[3] & 0xfff)) )
     {
         HVM_DBG_LOG(DBG_LEVEL_1, "Guest attempts to change CR4.PCIDE from "
                     "0 to 1 while either EFER.LMA=0 or CR3[11:0]!=000H");
-        return X86EMUL_EXCEPTION;
+        goto gpf;
     }
 
     if ( may_defer && unlikely(v->domain->arch.monitor.write_ctrlreg_enabled &
@@ -2439,23 +2536,27 @@ int hvm_set_cr4(unsigned long value, bool_t may_defer)
      * guest may enable the feature in CR4 without enabling it in XCR0. We
      * need to context switch / migrate PKRU nevertheless.
      */
-    if ( (value & X86_CR4_PKE) && !(v->arch.xcr0_accum & X86_XCR0_PKRU) )
+    if ( (value & X86_CR4_PKE) && !(v->arch.xcr0_accum & XSTATE_PKRU) )
     {
         int rc = handle_xsetbv(XCR_XFEATURE_ENABLED_MASK,
-                               get_xcr0() | X86_XCR0_PKRU);
+                               get_xcr0() | XSTATE_PKRU);
 
         if ( rc )
         {
             HVM_DBG_LOG(DBG_LEVEL_1, "Failed to force XCR0.PKRU: %d", rc);
-            return X86EMUL_EXCEPTION;
+            goto gpf;
         }
 
         if ( handle_xsetbv(XCR_XFEATURE_ENABLED_MASK,
-                           get_xcr0() & ~X86_XCR0_PKRU) )
+                           get_xcr0() & ~XSTATE_PKRU) )
             /* nothing, best effort only */;
     }
 
     return X86EMUL_OKAY;
+
+ gpf:
+    hvm_inject_hw_exception(TRAP_gp_fault, 0);
+    return X86EMUL_EXCEPTION;
 }
 
 bool_t hvm_virtual_to_linear_addr(
@@ -2464,26 +2565,16 @@ bool_t hvm_virtual_to_linear_addr(
     unsigned long offset,
     unsigned int bytes,
     enum hvm_access_type access_type,
-    const struct segment_register *active_cs,
+    unsigned int addr_size,
     unsigned long *linear_addr)
 {
-    const struct vcpu *curr = current;
     unsigned long addr = offset, last_byte;
     bool_t okay = 0;
 
-    /*
-     * These checks are for a memory access through an active segment.
-     *
-     * It is expected that the access rights of reg are suitable for seg (and
-     * that this is enforced at the point that seg is loaded).
-     */
-    ASSERT(seg < x86_seg_none);
-
-    if ( !(curr->arch.hvm_vcpu.guest_cr[0] & X86_CR0_PE) ||
-         (guest_cpu_user_regs()->eflags & X86_EFLAGS_VM) )
+    if ( !(current->arch.hvm_vcpu.guest_cr[0] & X86_CR0_PE) )
     {
         /*
-         * REAL/VM86 MODE: Don't bother with segment access checks.
+         * REAL MODE: Don't bother with segment access checks.
          * Certain of them are not done in native real mode anyway.
          */
         addr = (uint32_t)(addr + reg->base);
@@ -2491,33 +2582,10 @@ bool_t hvm_virtual_to_linear_addr(
         if ( last_byte < addr )
             goto out;
     }
-    else if ( hvm_long_mode_active(curr) &&
-              (is_x86_system_segment(seg) || active_cs->l) )
+    else if ( addr_size != 64 )
     {
         /*
-         * User segments are always treated as present.  System segment may
-         * not be, and also incur limit checks.
-         */
-        if ( is_x86_system_segment(seg) &&
-             (!reg->p || (offset + bytes - !!bytes) > reg->limit) )
-            goto out;
-
-        /*
-         * LONG MODE: FS, GS and system segments: add segment base. All
-         * addresses must be canonical.
-         */
-        if ( seg >= x86_seg_fs )
-            addr += reg->base;
-
-        last_byte = addr + bytes - !!bytes;
-        if ( !is_canonical_address(addr) || last_byte < addr ||
-             !is_canonical_address(last_byte) )
-            goto out;
-    }
-    else
-    {
-        /*
-         * PROTECTED/COMPATIBILITY MODE: Apply segment checks and add base.
+         * COMPATIBILITY MODE: Apply segment checks and add base.
          */
 
         /*
@@ -2527,34 +2595,30 @@ bool_t hvm_virtual_to_linear_addr(
         addr = (uint32_t)(addr + reg->base);
 
         /* Segment not valid for use (cooked meaning of .p)? */
-        if ( !reg->p )
+        if ( !reg->attr.fields.p )
             goto out;
 
-        /* Read/write restrictions only exist for user segments. */
-        if ( reg->s )
+        switch ( access_type )
         {
-            switch ( access_type )
-            {
-            case hvm_access_read:
-                if ( (reg->type & 0xa) == 0x8 )
-                    goto out; /* execute-only code segment */
-                break;
-            case hvm_access_write:
-                if ( (reg->type & 0xa) != 0x2 )
-                    goto out; /* not a writable data segment */
-                break;
-            default:
-                break;
-            }
+        case hvm_access_read:
+            if ( (reg->attr.fields.type & 0xa) == 0x8 )
+                goto out; /* execute-only code segment */
+            break;
+        case hvm_access_write:
+            if ( (reg->attr.fields.type & 0xa) != 0x2 )
+                goto out; /* not a writable data segment */
+            break;
+        default:
+            break;
         }
 
         last_byte = (uint32_t)offset + bytes - !!bytes;
 
         /* Is this a grows-down data segment? Special limit check if so. */
-        if ( reg->s && (reg->type & 0xc) == 0x4 )
+        if ( (reg->attr.fields.type & 0xc) == 0x4 )
         {
             /* Is upper limit 0xFFFF or 0xFFFFFFFF? */
-            if ( !reg->db )
+            if ( !reg->attr.fields.db )
                 last_byte = (uint16_t)last_byte;
 
             /* Check first byte and last byte against respective bounds. */
@@ -2563,6 +2627,20 @@ bool_t hvm_virtual_to_linear_addr(
         }
         else if ( (last_byte > reg->limit) || (last_byte < offset) )
             goto out; /* last byte is beyond limit or wraps 0xFFFFFFFF */
+    }
+    else
+    {
+        /*
+         * LONG MODE: FS and GS add segment base. Addresses must be canonical.
+         */
+
+        if ( (seg == x86_seg_fs) || (seg == x86_seg_gs) )
+            addr += reg->base;
+
+        last_byte = addr + bytes - !!bytes;
+        if ( !is_canonical_address(addr) || last_byte < addr ||
+             !is_canonical_address(last_byte) )
+            goto out;
     }
 
     /* All checks ok. */
@@ -2612,7 +2690,7 @@ static void *_hvm_map_guest_frame(unsigned long gfn, bool_t permanent,
         if ( unlikely(p2m_is_discard_write(p2mt)) )
             *writable = 0;
         else if ( !permanent )
-            paging_mark_pfn_dirty(d, _pfn(gfn));
+            paging_mark_dirty(d, page_to_mfn(page));
     }
 
     if ( !permanent )
@@ -2654,7 +2732,7 @@ void *hvm_map_guest_frame_ro(unsigned long gfn, bool_t permanent)
 
 void hvm_unmap_guest_frame(void *p, bool_t permanent)
 {
-    mfn_t mfn;
+    unsigned long mfn;
     struct page_info *page;
 
     if ( !p )
@@ -2736,11 +2814,11 @@ static void hvm_unmap_entry(void *p)
 }
 
 static int hvm_load_segment_selector(
-    enum x86_segment seg, uint16_t sel, unsigned int cpl, unsigned int eflags)
+    enum x86_segment seg, uint16_t sel, unsigned int eflags)
 {
-    struct segment_register desctab, segr;
+    struct segment_register desctab, cs, segr;
     struct desc_struct *pdesc, desc;
-    u8 dpl, rpl;
+    u8 dpl, rpl, cpl;
     bool_t writable;
     int fault_type = TRAP_invalid_tss;
     struct vcpu *v = current;
@@ -2750,7 +2828,7 @@ static int hvm_load_segment_selector(
         segr.sel = sel;
         segr.base = (uint32_t)sel << 4;
         segr.limit = 0xffffu;
-        segr.attr = 0xf3;
+        segr.attr.bytes = 0xf3;
         hvm_set_segment_register(v, seg, &segr);
         return 0;
     }
@@ -2770,11 +2848,12 @@ static int hvm_load_segment_selector(
     if ( (seg == x86_seg_ldtr) && (sel & 4) )
         goto fail;
 
+    hvm_get_segment_register(v, x86_seg_cs, &cs);
     hvm_get_segment_register(
         v, (sel & 4) ? x86_seg_ldtr : x86_seg_gdtr, &desctab);
 
     /* Segment not valid for use (cooked meaning of .p)? */
-    if ( !desctab.p )
+    if ( !desctab.attr.fields.p )
         goto fail;
 
     /* Check against descriptor table limit. */
@@ -2794,6 +2873,7 @@ static int hvm_load_segment_selector(
 
         dpl = (desc.b >> 13) & 3;
         rpl = sel & 3;
+        cpl = cs.sel & 3;
 
         switch ( seg )
         {
@@ -2852,10 +2932,10 @@ static int hvm_load_segment_selector(
     segr.base = (((desc.b <<  0) & 0xff000000u) |
                  ((desc.b << 16) & 0x00ff0000u) |
                  ((desc.a >> 16) & 0x0000ffffu));
-    segr.attr = (((desc.b >>  8) & 0x00ffu) |
-                 ((desc.b >> 12) & 0x0f00u));
+    segr.attr.bytes = (((desc.b >>  8) & 0x00ffu) |
+                       ((desc.b >> 12) & 0x0f00u));
     segr.limit = (desc.b & 0x000f0000u) | (desc.a & 0x0000ffffu);
-    if ( segr.g )
+    if ( segr.attr.fields.g )
         segr.limit = (segr.limit << 12) | 0xfffu;
     segr.sel = sel;
     hvm_set_segment_register(v, seg, &segr);
@@ -2870,63 +2950,29 @@ static int hvm_load_segment_selector(
     return 1;
 }
 
-struct tss32 {
-    uint16_t back_link, :16;
-    uint32_t esp0;
-    uint16_t ss0, :16;
-    uint32_t esp1;
-    uint16_t ss1, :16;
-    uint32_t esp2;
-    uint16_t ss2, :16;
-    uint32_t cr3, eip, eflags, eax, ecx, edx, ebx, esp, ebp, esi, edi;
-    uint16_t es, :16, cs, :16, ss, :16, ds, :16, fs, :16, gs, :16, ldt, :16;
-    uint16_t trace /* :1 */, iomap;
-};
-
-void hvm_prepare_vm86_tss(struct vcpu *v, uint32_t base, uint32_t limit)
-{
-    /*
-     * If the provided area is large enough to cover at least the ISA port
-     * range, keep the bitmaps outside the base structure. For rather small
-     * areas (namely relevant for guests having been migrated from older
-     * Xen versions), maximize interrupt vector and port coverage by pointing
-     * the I/O bitmap at 0x20 (which puts the interrupt redirection bitmap
-     * right at zero), accepting accesses to port 0x235 (represented by bit 5
-     * of byte 0x46) to trigger #GP (which will simply result in the access
-     * being handled by the emulator via a slightly different path than it
-     * would be anyway). Be sure to include one extra byte at the end of the
-     * I/O bitmap (hence the missing "- 1" in the comparison is not an
-     * off-by-one mistake), which we deliberately don't fill with all ones.
-     */
-    uint16_t iomap = (limit >= sizeof(struct tss32) + (0x100 / 8) + (0x400 / 8)
-                      ? sizeof(struct tss32) : 0) + (0x100 / 8);
-
-    ASSERT(limit >= sizeof(struct tss32) - 1);
-    /*
-     * Strictly speaking we'd have to use hvm_copy_to_guest_linear() below,
-     * but since the guest is (supposed to be, unless it corrupts that setup
-     * itself, which would harm only itself) running on an identmap, we can
-     * use the less overhead variant below, which also allows passing a vCPU
-     * argument.
-     */
-    hvm_copy_to_guest_phys(base, NULL, limit + 1, v);
-    hvm_copy_to_guest_phys(base + offsetof(struct tss32, iomap),
-                           &iomap, sizeof(iomap), v);
-}
-
 void hvm_task_switch(
     uint16_t tss_sel, enum hvm_task_switch_reason taskswitch_reason,
-    int32_t errcode, unsigned int insn_len)
+    int32_t errcode)
 {
     struct vcpu *v = current;
     struct cpu_user_regs *regs = guest_cpu_user_regs();
     struct segment_register gdt, tr, prev_tr, segr;
     struct desc_struct *optss_desc = NULL, *nptss_desc = NULL, tss_desc;
     bool_t otd_writable, ntd_writable;
-    unsigned int eflags, new_cpl;
-    pagefault_info_t pfinfo;
+    unsigned long eflags;
     int exn_raised, rc;
-    struct tss32 tss;
+    struct {
+        u16 back_link,__blh;
+        u32 esp0;
+        u16 ss0, _0;
+        u32 esp1;
+        u16 ss1, _1;
+        u32 esp2;
+        u16 ss2, _2;
+        u32 cr3, eip, eflags, eax, ecx, edx, ebx, esp, ebp, esi, edi;
+        u16 es, _3, cs, _4, ss, _5, ds, _6, fs, _7, gs, _8, ldt, _9;
+        u16 trace, iomap;
+    } tss;
 
     hvm_get_segment_register(v, x86_seg_gdtr, &gdt);
     hvm_get_segment_register(v, x86_seg_tr, &prev_tr);
@@ -2953,13 +2999,13 @@ void hvm_task_switch(
     tr.base = (((tss_desc.b <<  0) & 0xff000000u) |
                ((tss_desc.b << 16) & 0x00ff0000u) |
                ((tss_desc.a >> 16) & 0x0000ffffu));
-    tr.attr = (((tss_desc.b >>  8) & 0x00ffu) |
-               ((tss_desc.b >> 12) & 0x0f00u));
+    tr.attr.bytes = (((tss_desc.b >>  8) & 0x00ffu) |
+                     ((tss_desc.b >> 12) & 0x0f00u));
     tr.limit = (tss_desc.b & 0x000f0000u) | (tss_desc.a & 0x0000ffffu);
-    if ( tr.g )
+    if ( tr.attr.fields.g )
         tr.limit = (tr.limit << 12) | 0xfffu;
 
-    if ( tr.type != ((taskswitch_reason == TSW_iret) ? 0xb : 0x9) )
+    if ( tr.attr.fields.type != ((taskswitch_reason == TSW_iret) ? 0xb : 0x9) )
     {
         hvm_inject_hw_exception(
             (taskswitch_reason == TSW_iret) ? TRAP_invalid_tss : TRAP_gp_fault,
@@ -2967,7 +3013,7 @@ void hvm_task_switch(
         goto out;
     }
 
-    if ( !tr.p )
+    if ( !tr.attr.fields.p )
     {
         hvm_inject_hw_exception(TRAP_no_segment, tss_sel & 0xfff8);
         goto out;
@@ -2979,18 +3025,16 @@ void hvm_task_switch(
         goto out;
     }
 
-    rc = hvm_copy_from_guest_linear(
-        &tss, prev_tr.base, sizeof(tss), PFEC_page_present, &pfinfo);
-    if ( rc == HVMTRANS_bad_linear_to_gfn )
-        hvm_inject_page_fault(pfinfo.ec, pfinfo.linear);
-    if ( rc != HVMTRANS_okay )
+    rc = hvm_copy_from_guest_virt(
+        &tss, prev_tr.base, sizeof(tss), PFEC_page_present);
+    if ( rc != HVMCOPY_okay )
         goto out;
 
     eflags = regs->eflags;
     if ( taskswitch_reason == TSW_iret )
         eflags &= ~X86_EFLAGS_NT;
 
-    tss.eip    = regs->eip + insn_len;
+    tss.eip    = regs->eip;
     tss.eflags = eflags;
     tss.eax    = regs->eax;
     tss.ecx    = regs->ecx;
@@ -3016,56 +3060,47 @@ void hvm_task_switch(
     hvm_get_segment_register(v, x86_seg_ldtr, &segr);
     tss.ldt = segr.sel;
 
-    rc = hvm_copy_to_guest_linear(prev_tr.base + offsetof(typeof(tss), eip),
-                                  &tss.eip,
-                                  offsetof(typeof(tss), trace) -
-                                  offsetof(typeof(tss), eip),
-                                  PFEC_page_present, &pfinfo);
-    if ( rc == HVMTRANS_bad_linear_to_gfn )
-        hvm_inject_page_fault(pfinfo.ec, pfinfo.linear);
-    if ( rc != HVMTRANS_okay )
+    rc = hvm_copy_to_guest_virt(prev_tr.base + offsetof(typeof(tss), eip),
+                                &tss.eip,
+                                offsetof(typeof(tss), trace) -
+                                offsetof(typeof(tss), eip),
+                                PFEC_page_present);
+    if ( rc != HVMCOPY_okay )
         goto out;
 
-    rc = hvm_copy_from_guest_linear(
-        &tss, tr.base, sizeof(tss), PFEC_page_present, &pfinfo);
-    if ( rc == HVMTRANS_bad_linear_to_gfn )
-        hvm_inject_page_fault(pfinfo.ec, pfinfo.linear);
+    rc = hvm_copy_from_guest_virt(
+        &tss, tr.base, sizeof(tss), PFEC_page_present);
     /*
-     * Note: The HVMTRANS_gfn_shared case could be optimised, if the callee
+     * Note: The HVMCOPY_gfn_shared case could be optimised, if the callee
      * functions knew we want RO access.
      */
-    if ( rc != HVMTRANS_okay )
+    if ( rc != HVMCOPY_okay )
         goto out;
 
-    new_cpl = tss.eflags & X86_EFLAGS_VM ? 3 : tss.cs & 3;
-
-    if ( hvm_load_segment_selector(x86_seg_ldtr, tss.ldt, new_cpl, 0) )
+    if ( hvm_load_segment_selector(x86_seg_ldtr, tss.ldt, 0) )
         goto out;
 
-    rc = hvm_set_cr3(tss.cr3, 1);
-    if ( rc == X86EMUL_EXCEPTION )
-        hvm_inject_hw_exception(TRAP_gp_fault, 0);
-    if ( rc != X86EMUL_OKAY )
+    if ( hvm_set_cr3(tss.cr3, 1) )
         goto out;
 
-    regs->rip    = tss.eip;
-    regs->rflags = tss.eflags | X86_EFLAGS_MBS;
-    regs->rax    = tss.eax;
-    regs->rcx    = tss.ecx;
-    regs->rdx    = tss.edx;
-    regs->rbx    = tss.ebx;
-    regs->rsp    = tss.esp;
-    regs->rbp    = tss.ebp;
-    regs->rsi    = tss.esi;
-    regs->rdi    = tss.edi;
+    regs->eip    = tss.eip;
+    regs->eflags = tss.eflags | 2;
+    regs->eax    = tss.eax;
+    regs->ecx    = tss.ecx;
+    regs->edx    = tss.edx;
+    regs->ebx    = tss.ebx;
+    regs->esp    = tss.esp;
+    regs->ebp    = tss.ebp;
+    regs->esi    = tss.esi;
+    regs->edi    = tss.edi;
 
     exn_raised = 0;
-    if ( hvm_load_segment_selector(x86_seg_es, tss.es, new_cpl, tss.eflags) ||
-         hvm_load_segment_selector(x86_seg_cs, tss.cs, new_cpl, tss.eflags) ||
-         hvm_load_segment_selector(x86_seg_ss, tss.ss, new_cpl, tss.eflags) ||
-         hvm_load_segment_selector(x86_seg_ds, tss.ds, new_cpl, tss.eflags) ||
-         hvm_load_segment_selector(x86_seg_fs, tss.fs, new_cpl, tss.eflags) ||
-         hvm_load_segment_selector(x86_seg_gs, tss.gs, new_cpl, tss.eflags) )
+    if ( hvm_load_segment_selector(x86_seg_es, tss.es, tss.eflags) ||
+         hvm_load_segment_selector(x86_seg_cs, tss.cs, tss.eflags) ||
+         hvm_load_segment_selector(x86_seg_ss, tss.ss, tss.eflags) ||
+         hvm_load_segment_selector(x86_seg_ds, tss.ds, tss.eflags) ||
+         hvm_load_segment_selector(x86_seg_fs, tss.fs, tss.eflags) ||
+         hvm_load_segment_selector(x86_seg_gs, tss.gs, tss.eflags) )
         exn_raised = 1;
 
     if ( taskswitch_reason == TSW_call_or_int )
@@ -3073,19 +3108,15 @@ void hvm_task_switch(
         regs->eflags |= X86_EFLAGS_NT;
         tss.back_link = prev_tr.sel;
 
-        rc = hvm_copy_to_guest_linear(tr.base + offsetof(typeof(tss), back_link),
-                                      &tss.back_link, sizeof(tss.back_link), 0,
-                                      &pfinfo);
-        if ( rc == HVMTRANS_bad_linear_to_gfn )
-        {
-            hvm_inject_page_fault(pfinfo.ec, pfinfo.linear);
+        rc = hvm_copy_to_guest_virt(tr.base + offsetof(typeof(tss), back_link),
+                                    &tss.back_link, sizeof(tss.back_link), 0);
+        if ( rc == HVMCOPY_bad_gva_to_gfn )
             exn_raised = 1;
-        }
-        else if ( rc != HVMTRANS_okay )
+        else if ( rc != HVMCOPY_okay )
             goto out;
     }
 
-    tr.type = 0xb; /* busy 32-bit tss */
+    tr.attr.fields.type = 0xb; /* busy 32-bit tss */
     hvm_set_segment_register(v, x86_seg_tr, &tr);
 
     v->arch.hvm_vcpu.guest_cr[0] |= X86_CR0_TS;
@@ -3100,133 +3131,52 @@ void hvm_task_switch(
 
     if ( errcode >= 0 )
     {
-        struct segment_register cs;
         unsigned long linear_addr;
         unsigned int opsz, sp;
 
-        hvm_get_segment_register(v, x86_seg_cs, &cs);
-        opsz = cs.db ? 4 : 2;
+        hvm_get_segment_register(v, x86_seg_cs, &segr);
+        opsz = segr.attr.fields.db ? 4 : 2;
         hvm_get_segment_register(v, x86_seg_ss, &segr);
-        if ( segr.db )
-            sp = regs->esp -= opsz;
+        if ( segr.attr.fields.db )
+            sp = regs->_esp -= opsz;
         else
-            sp = regs->sp -= opsz;
+            sp = *(uint16_t *)&regs->esp -= opsz;
         if ( hvm_virtual_to_linear_addr(x86_seg_ss, &segr, sp, opsz,
                                         hvm_access_write,
-                                        &cs, &linear_addr) )
+                                        16 << segr.attr.fields.db,
+                                        &linear_addr) )
         {
-            rc = hvm_copy_to_guest_linear(linear_addr, &errcode, opsz, 0,
-                                          &pfinfo);
-            if ( rc == HVMTRANS_bad_linear_to_gfn )
-            {
-                hvm_inject_page_fault(pfinfo.ec, pfinfo.linear);
+            rc = hvm_copy_to_guest_virt(linear_addr, &errcode, opsz, 0);
+            if ( rc == HVMCOPY_bad_gva_to_gfn )
                 exn_raised = 1;
-            }
-            else if ( rc != HVMTRANS_okay )
+            else if ( rc != HVMCOPY_okay )
                 goto out;
         }
     }
 
     if ( (tss.trace & 1) && !exn_raised )
-        hvm_inject_hw_exception(TRAP_debug, X86_EVENT_NO_EC);
+        hvm_inject_hw_exception(TRAP_debug, HVM_DELIVER_NO_ERROR_CODE);
 
  out:
     hvm_unmap_entry(optss_desc);
     hvm_unmap_entry(nptss_desc);
 }
 
-enum hvm_translation_result hvm_translate_get_page(
-    struct vcpu *v, unsigned long addr, bool linear, uint32_t pfec,
-    pagefault_info_t *pfinfo, struct page_info **page_p,
-    gfn_t *gfn_p, p2m_type_t *p2mt_p)
-{
-    struct page_info *page;
-    p2m_type_t p2mt;
-    gfn_t gfn;
-
-    if ( linear )
-    {
-        gfn = _gfn(paging_gva_to_gfn(v, addr, &pfec));
-
-        if ( gfn_eq(gfn, INVALID_GFN) )
-        {
-            if ( pfec & PFEC_page_paged )
-                return HVMTRANS_gfn_paged_out;
-
-            if ( pfec & PFEC_page_shared )
-                return HVMTRANS_gfn_shared;
-
-            if ( pfinfo )
-            {
-                pfinfo->linear = addr;
-                pfinfo->ec = pfec & ~PFEC_implicit;
-            }
-
-            return HVMTRANS_bad_linear_to_gfn;
-        }
-    }
-    else
-    {
-        gfn = gaddr_to_gfn(addr);
-        ASSERT(!pfinfo);
-    }
-
-    /*
-     * No need to do the P2M lookup for internally handled MMIO, benefiting
-     * - 32-bit WinXP (& older Windows) on AMD CPUs for LAPIC accesses,
-     * - newer Windows (like Server 2012) for HPET accesses.
-     */
-    if ( v == current
-         && !nestedhvm_vcpu_in_guestmode(v)
-         && hvm_mmio_internal(gfn_to_gaddr(gfn)) )
-        return HVMTRANS_bad_gfn_to_mfn;
-
-    page = get_page_from_gfn(v->domain, gfn_x(gfn), &p2mt, P2M_UNSHARE);
-
-    if ( !page )
-        return HVMTRANS_bad_gfn_to_mfn;
-
-    if ( p2m_is_paging(p2mt) )
-    {
-        put_page(page);
-        p2m_mem_paging_populate(v->domain, gfn_x(gfn));
-        return HVMTRANS_gfn_paged_out;
-    }
-    if ( p2m_is_shared(p2mt) )
-    {
-        put_page(page);
-        return HVMTRANS_gfn_shared;
-    }
-    if ( p2m_is_grant(p2mt) )
-    {
-        put_page(page);
-        return HVMTRANS_unhandleable;
-    }
-
-    *page_p = page;
-    if ( gfn_p )
-        *gfn_p = gfn;
-    if ( p2mt_p )
-        *p2mt_p = p2mt;
-
-    return HVMTRANS_okay;
-}
-
 #define HVMCOPY_from_guest (0u<<0)
 #define HVMCOPY_to_guest   (1u<<0)
+#define HVMCOPY_no_fault   (0u<<1)
+#define HVMCOPY_fault      (1u<<1)
 #define HVMCOPY_phys       (0u<<2)
-#define HVMCOPY_linear     (1u<<2)
-static enum hvm_translation_result __hvm_copy(
-    void *buf, paddr_t addr, int size, struct vcpu *v, unsigned int flags,
-    uint32_t pfec, pagefault_info_t *pfinfo)
+#define HVMCOPY_virt       (1u<<2)
+static enum hvm_copy_result __hvm_copy(
+    void *buf, paddr_t addr, int size, unsigned int flags, uint32_t pfec)
 {
-    gfn_t gfn;
+    struct vcpu *curr = current;
+    unsigned long gfn;
     struct page_info *page;
     p2m_type_t p2mt;
     char *p;
     int count, todo = size;
-
-    ASSERT(is_hvm_vcpu(v));
 
     /*
      * XXX Disable for 4.1.0: PV-on-HVM drivers will do grant-table ops
@@ -3241,25 +3191,66 @@ static enum hvm_translation_result __hvm_copy(
      * Hence we bail immediately if called from atomic context.
      */
     if ( in_atomic() )
-        return HVMTRANS_unhandleable;
+        return HVMCOPY_unhandleable;
 #endif
 
     while ( todo > 0 )
     {
-        enum hvm_translation_result res;
         paddr_t gpa = addr & ~PAGE_MASK;
 
         count = min_t(int, PAGE_SIZE - gpa, todo);
 
-        res = hvm_translate_get_page(v, addr, flags & HVMCOPY_linear,
-                                     pfec, pfinfo, &page, &gfn, &p2mt);
-        if ( res != HVMTRANS_okay )
-            return res;
+        if ( flags & HVMCOPY_virt )
+        {
+            gfn = paging_gva_to_gfn(curr, addr, &pfec);
+            if ( gfn == gfn_x(INVALID_GFN) )
+            {
+                if ( pfec & PFEC_page_paged )
+                    return HVMCOPY_gfn_paged_out;
+                if ( pfec & PFEC_page_shared )
+                    return HVMCOPY_gfn_shared;
+                if ( flags & HVMCOPY_fault )
+                    hvm_inject_page_fault(pfec, addr);
+                return HVMCOPY_bad_gva_to_gfn;
+            }
+            gpa |= (paddr_t)gfn << PAGE_SHIFT;
+        }
+        else
+        {
+            gfn = addr >> PAGE_SHIFT;
+            gpa = addr;
+        }
 
-        if ( (flags & HVMCOPY_to_guest) && p2mt == p2m_ioreq_server )
+        /*
+         * No need to do the P2M lookup for internally handled MMIO, benefiting
+         * - 32-bit WinXP (& older Windows) on AMD CPUs for LAPIC accesses,
+         * - newer Windows (like Server 2012) for HPET accesses.
+         */
+        if ( !nestedhvm_vcpu_in_guestmode(curr)
+             && is_hvm_vcpu(curr)
+             && hvm_mmio_internal(gpa) )
+            return HVMCOPY_bad_gfn_to_mfn;
+
+        page = get_page_from_gfn(curr->domain, gfn, &p2mt, P2M_UNSHARE);
+
+        if ( !page )
+            return HVMCOPY_bad_gfn_to_mfn;
+
+        if ( p2m_is_paging(p2mt) )
         {
             put_page(page);
-            return HVMTRANS_bad_gfn_to_mfn;
+            p2m_mem_paging_populate(curr->domain, gfn);
+            return HVMCOPY_gfn_paged_out;
+        }
+        if ( p2m_is_shared(p2mt) )
+        {
+            put_page(page);
+            return HVMCOPY_gfn_shared;
+        }
+        if ( p2m_is_grant(p2mt) )
+        {
+            put_page(page);
+            return HVMCOPY_unhandleable;
         }
 
         p = (char *)__map_domain_page(page) + (addr & ~PAGE_MASK);
@@ -3269,19 +3260,15 @@ static enum hvm_translation_result __hvm_copy(
             if ( p2m_is_discard_write(p2mt) )
             {
                 static unsigned long lastpage;
-
-                if ( xchg(&lastpage, gfn_x(gfn)) != gfn_x(gfn) )
-                    dprintk(XENLOG_G_DEBUG,
-                            "%pv attempted write to read-only gfn %#lx (mfn=%#"PRI_mfn")\n",
-                            v, gfn_x(gfn), mfn_x(page_to_mfn(page)));
+                if ( xchg(&lastpage, gfn) != gfn )
+                    gdprintk(XENLOG_DEBUG, "guest attempted write to read-only"
+                             " memory page. gfn=%#lx, mfn=%#lx\n",
+                             gfn, page_to_mfn(page));
             }
             else
             {
-                if ( buf )
-                    memcpy(p, buf, count);
-                else
-                    memset(p, 0, count);
-                paging_mark_pfn_dirty(v->domain, _pfn(gfn_x(gfn)));
+                memcpy(p, buf, count);
+                paging_mark_dirty(curr->domain, page_to_mfn(page));
             }
         }
         else
@@ -3292,67 +3279,179 @@ static enum hvm_translation_result __hvm_copy(
         unmap_domain_page(p);
 
         addr += count;
-        if ( buf )
-            buf += count;
+        buf  += count;
         todo -= count;
         put_page(page);
     }
 
-    return HVMTRANS_okay;
+    return HVMCOPY_okay;
 }
 
-enum hvm_translation_result hvm_copy_to_guest_phys(
-    paddr_t paddr, void *buf, int size, struct vcpu *v)
+static enum hvm_copy_result __hvm_clear(paddr_t addr, int size)
 {
-    return __hvm_copy(buf, paddr, size, v,
-                      HVMCOPY_to_guest | HVMCOPY_phys, 0, NULL);
+    struct vcpu *curr = current;
+    unsigned long gfn;
+    struct page_info *page;
+    p2m_type_t p2mt;
+    char *p;
+    int count, todo = size;
+    uint32_t pfec = PFEC_page_present | PFEC_write_access;
+
+    /*
+     * XXX Disable for 4.1.0: PV-on-HVM drivers will do grant-table ops
+     * such as query_size. Grant-table code currently does copy_to/from_guest
+     * accesses under the big per-domain lock, which this test would disallow.
+     * The test is not needed until we implement sleeping-on-waitqueue when
+     * we access a paged-out frame, and that's post 4.1.0 now.
+     */
+#if 0
+    /*
+     * If the required guest memory is paged out, this function may sleep.
+     * Hence we bail immediately if called from atomic context.
+     */
+    if ( in_atomic() )
+        return HVMCOPY_unhandleable;
+#endif
+
+    while ( todo > 0 )
+    {
+        count = min_t(int, PAGE_SIZE - (addr & ~PAGE_MASK), todo);
+
+        gfn = paging_gva_to_gfn(curr, addr, &pfec);
+        if ( gfn == gfn_x(INVALID_GFN) )
+        {
+            if ( pfec & PFEC_page_paged )
+                return HVMCOPY_gfn_paged_out;
+            if ( pfec & PFEC_page_shared )
+                return HVMCOPY_gfn_shared;
+            return HVMCOPY_bad_gva_to_gfn;
+        }
+
+        page = get_page_from_gfn(curr->domain, gfn, &p2mt, P2M_UNSHARE);
+
+        if ( !page )
+            return HVMCOPY_bad_gfn_to_mfn;
+
+        if ( p2m_is_paging(p2mt) )
+        {
+            put_page(page);
+            p2m_mem_paging_populate(curr->domain, gfn);
+            return HVMCOPY_gfn_paged_out;
+        }
+        if ( p2m_is_shared(p2mt) )
+        {
+            put_page(page);
+            return HVMCOPY_gfn_shared;
+        }
+        if ( p2m_is_grant(p2mt) )
+        {
+            put_page(page);
+            return HVMCOPY_unhandleable;
+        }
+
+        p = (char *)__map_domain_page(page) + (addr & ~PAGE_MASK);
+
+        if ( p2m_is_discard_write(p2mt) )
+        {
+            static unsigned long lastpage;
+            if ( xchg(&lastpage, gfn) != gfn )
+                gdprintk(XENLOG_DEBUG, "guest attempted write to read-only"
+                        " memory page. gfn=%#lx, mfn=%#lx\n",
+                         gfn, page_to_mfn(page));
+        }
+        else
+        {
+            memset(p, 0x00, count);
+            paging_mark_dirty(curr->domain, page_to_mfn(page));
+        }
+
+        unmap_domain_page(p);
+
+        addr += count;
+        todo -= count;
+        put_page(page);
+    }
+
+    return HVMCOPY_okay;
 }
 
-enum hvm_translation_result hvm_copy_from_guest_phys(
+enum hvm_copy_result hvm_copy_to_guest_phys(
+    paddr_t paddr, void *buf, int size)
+{
+    return __hvm_copy(buf, paddr, size,
+                      HVMCOPY_to_guest | HVMCOPY_fault | HVMCOPY_phys,
+                      0);
+}
+
+enum hvm_copy_result hvm_copy_from_guest_phys(
     void *buf, paddr_t paddr, int size)
 {
-    return __hvm_copy(buf, paddr, size, current,
-                      HVMCOPY_from_guest | HVMCOPY_phys, 0, NULL);
+    return __hvm_copy(buf, paddr, size,
+                      HVMCOPY_from_guest | HVMCOPY_fault | HVMCOPY_phys,
+                      0);
 }
 
-enum hvm_translation_result hvm_copy_to_guest_linear(
-    unsigned long addr, void *buf, int size, uint32_t pfec,
-    pagefault_info_t *pfinfo)
+enum hvm_copy_result hvm_copy_to_guest_virt(
+    unsigned long vaddr, void *buf, int size, uint32_t pfec)
 {
-    return __hvm_copy(buf, addr, size, current,
-                      HVMCOPY_to_guest | HVMCOPY_linear,
-                      PFEC_page_present | PFEC_write_access | pfec, pfinfo);
+    return __hvm_copy(buf, vaddr, size,
+                      HVMCOPY_to_guest | HVMCOPY_fault | HVMCOPY_virt,
+                      PFEC_page_present | PFEC_write_access | pfec);
 }
 
-enum hvm_translation_result hvm_copy_from_guest_linear(
-    void *buf, unsigned long addr, int size, uint32_t pfec,
-    pagefault_info_t *pfinfo)
+enum hvm_copy_result hvm_copy_from_guest_virt(
+    void *buf, unsigned long vaddr, int size, uint32_t pfec)
 {
-    return __hvm_copy(buf, addr, size, current,
-                      HVMCOPY_from_guest | HVMCOPY_linear,
-                      PFEC_page_present | pfec, pfinfo);
+    return __hvm_copy(buf, vaddr, size,
+                      HVMCOPY_from_guest | HVMCOPY_fault | HVMCOPY_virt,
+                      PFEC_page_present | pfec);
 }
 
-enum hvm_translation_result hvm_fetch_from_guest_linear(
-    void *buf, unsigned long addr, int size, uint32_t pfec,
-    pagefault_info_t *pfinfo)
+enum hvm_copy_result hvm_fetch_from_guest_virt(
+    void *buf, unsigned long vaddr, int size, uint32_t pfec)
 {
-    return __hvm_copy(buf, addr, size, current,
-                      HVMCOPY_from_guest | HVMCOPY_linear,
-                      PFEC_page_present | PFEC_insn_fetch | pfec, pfinfo);
+    return __hvm_copy(buf, vaddr, size,
+                      HVMCOPY_from_guest | HVMCOPY_fault | HVMCOPY_virt,
+                      PFEC_page_present | PFEC_insn_fetch | pfec);
+}
+
+enum hvm_copy_result hvm_copy_to_guest_virt_nofault(
+    unsigned long vaddr, void *buf, int size, uint32_t pfec)
+{
+    return __hvm_copy(buf, vaddr, size,
+                      HVMCOPY_to_guest | HVMCOPY_no_fault | HVMCOPY_virt,
+                      PFEC_page_present | PFEC_write_access | pfec);
+}
+
+enum hvm_copy_result hvm_copy_from_guest_virt_nofault(
+    void *buf, unsigned long vaddr, int size, uint32_t pfec)
+{
+    return __hvm_copy(buf, vaddr, size,
+                      HVMCOPY_from_guest | HVMCOPY_no_fault | HVMCOPY_virt,
+                      PFEC_page_present | pfec);
+}
+
+enum hvm_copy_result hvm_fetch_from_guest_virt_nofault(
+    void *buf, unsigned long vaddr, int size, uint32_t pfec)
+{
+    return __hvm_copy(buf, vaddr, size,
+                      HVMCOPY_from_guest | HVMCOPY_no_fault | HVMCOPY_virt,
+                      PFEC_page_present | PFEC_insn_fetch | pfec);
 }
 
 unsigned long copy_to_user_hvm(void *to, const void *from, unsigned int len)
 {
     int rc;
 
-    if ( current->hcall_compat && is_compat_arg_xlat_range(to, len) )
+    if ( !current->arch.hvm_vcpu.hcall_64bit &&
+         is_compat_arg_xlat_range(to, len) )
     {
         memcpy(to, from, len);
         return 0;
     }
 
-    rc = hvm_copy_to_guest_linear((unsigned long)to, (void *)from, len, 0, NULL);
+    rc = hvm_copy_to_guest_virt_nofault((unsigned long)to, (void *)from,
+                                        len, 0);
     return rc ? len : 0; /* fake a copy_to_user() return code */
 }
 
@@ -3360,13 +3459,14 @@ unsigned long clear_user_hvm(void *to, unsigned int len)
 {
     int rc;
 
-    if ( current->hcall_compat && is_compat_arg_xlat_range(to, len) )
+    if ( !current->arch.hvm_vcpu.hcall_64bit &&
+         is_compat_arg_xlat_range(to, len) )
     {
         memset(to, 0x00, len);
         return 0;
     }
 
-    rc = hvm_copy_to_guest_linear((unsigned long)to, NULL, len, 0, NULL);
+    rc = __hvm_clear((unsigned long)to, len);
     return rc ? len : 0; /* fake a copy_to_user() return code */
 }
 
@@ -3374,24 +3474,342 @@ unsigned long copy_from_user_hvm(void *to, const void *from, unsigned len)
 {
     int rc;
 
-    if ( current->hcall_compat && is_compat_arg_xlat_range(from, len) )
+    if ( !current->arch.hvm_vcpu.hcall_64bit &&
+         is_compat_arg_xlat_range(from, len) )
     {
         memcpy(to, from, len);
         return 0;
     }
 
-    rc = hvm_copy_from_guest_linear(to, (unsigned long)from, len, 0, NULL);
+    rc = hvm_copy_from_guest_virt_nofault(to, (unsigned long)from, len, 0);
     return rc ? len : 0; /* fake a copy_from_user() return code */
+}
+
+void hvm_hypervisor_cpuid_leaf(uint32_t sub_idx,
+                               uint32_t *eax, uint32_t *ebx,
+                               uint32_t *ecx, uint32_t *edx)
+{
+    *eax = *ebx = *ecx = *edx = 0;
+    if ( hvm_funcs.hypervisor_cpuid_leaf )
+        hvm_funcs.hypervisor_cpuid_leaf(sub_idx, eax, ebx, ecx, edx);
+
+    if ( sub_idx == 0 )
+    {
+        /*
+         * Indicate that memory mapped from other domains (either grants or
+         * foreign pages) has valid IOMMU entries.
+         */
+        *eax |= XEN_HVM_CPUID_IOMMU_MAPPINGS;
+
+        /* Indicate presence of vcpu id and set it in ebx */
+        *eax |= XEN_HVM_CPUID_VCPU_ID_PRESENT;
+        *ebx = current->vcpu_id;
+    }
+}
+
+void hvm_cpuid(unsigned int input, unsigned int *eax, unsigned int *ebx,
+                                   unsigned int *ecx, unsigned int *edx)
+{
+    struct vcpu *v = current;
+    struct domain *d = v->domain;
+    unsigned int count, dummy = 0;
+
+    if ( !eax )
+        eax = &dummy;
+    if ( !ebx )
+        ebx = &dummy;
+    if ( !ecx )
+        ecx = &dummy;
+    count = *ecx;
+    if ( !edx )
+        edx = &dummy;
+
+    if ( cpuid_viridian_leaves(input, eax, ebx, ecx, edx) )
+        return;
+
+    if ( cpuid_hypervisor_leaves(input, count, eax, ebx, ecx, edx) )
+        return;
+
+    if ( input & 0x7fffffff )
+    {
+        /*
+         * Requests outside the supported leaf ranges return zero on AMD
+         * and the highest basic leaf output on Intel. Uniformly follow
+         * the AMD model as the more sane one.
+         */
+        unsigned int limit;
+
+        domain_cpuid(d, (input >> 16) != 0x8000 ? 0 : 0x80000000, 0,
+                     &limit, &dummy, &dummy, &dummy);
+        if ( input > limit )
+        {
+            *eax = 0;
+            *ebx = 0;
+            *ecx = 0;
+            *edx = 0;
+            return;
+        }
+    }
+
+    domain_cpuid(d, input, count, eax, ebx, ecx, edx);
+
+    switch ( input )
+    {
+        unsigned int _ebx, _ecx, _edx;
+
+    case 0x1:
+        /* Fix up VLAPIC details. */
+        *ebx &= 0x00FFFFFFu;
+        *ebx |= (v->vcpu_id * 2) << 24;
+
+        *ecx &= hvm_featureset[FEATURESET_1c];
+        *edx &= hvm_featureset[FEATURESET_1d];
+
+        /* APIC exposed to guests, but Fast-forward MSR_APIC_BASE.EN back in. */
+        if ( vlapic_hw_disabled(vcpu_vlapic(v)) )
+            *edx &= ~cpufeat_bit(X86_FEATURE_APIC);
+
+        /* OSXSAVE cleared by hvm_featureset.  Fast-forward CR4 back in. */
+        if ( v->arch.hvm_vcpu.guest_cr[4] & X86_CR4_OSXSAVE )
+            *ecx |= cpufeat_mask(X86_FEATURE_OSXSAVE);
+
+        /* Don't expose HAP-only features to non-hap guests. */
+        if ( !hap_enabled(d) )
+        {
+            *ecx &= ~cpufeat_mask(X86_FEATURE_PCID);
+
+            /*
+             * PSE36 is not supported in shadow mode.  This bit should be
+             * unilaterally cleared.
+             *
+             * However, an unspecified version of Hyper-V from 2011 refuses
+             * to start as the "cpu does not provide required hw features" if
+             * it can't see PSE36.
+             *
+             * As a workaround, leak the toolstack-provided PSE36 value into a
+             * shadow guest if the guest is already using PAE paging (and
+             * won't care about reverting back to PSE paging).  Otherwise,
+             * knoble it, so a 32bit guest doesn't get the impression that it
+             * could try to use PSE36 paging.
+             */
+            if ( !(hvm_pae_enabled(v) || hvm_long_mode_enabled(v)) )
+                *edx &= ~cpufeat_mask(X86_FEATURE_PSE36);
+        }
+        break;
+
+    case 0x7:
+        if ( count == 0 )
+        {
+            /*
+             * Fold host's FDP_EXCP_ONLY and NO_FPU_SEL into guest's view.
+             *
+             * On hardware with MSR_TSX_CTRL, the admin may have elected to
+             * disable TSX and hide the feature bits.  Migrating-in VMs may
+             * have been booted pre-mitigation when the TSX features were
+             * visbile.
+             *
+             * This situation is compatible (albeit with a perf hit to any TSX
+             * code in the guest), so allow the feature bits to remain set.
+             */
+            *ebx &= ((hvm_featureset[FEATURESET_7b0] &
+                      ~special_features[FEATURESET_7b0]) |
+                     (cpu_has_tsx_ctrl ?
+                      (cpufeat_mask(X86_FEATURE_HLE) |
+                       cpufeat_mask(X86_FEATURE_RTM)) : 0));
+            *ebx |= (host_featureset[FEATURESET_7b0] &
+                     special_features[FEATURESET_7b0]);
+
+            *ecx &= hvm_featureset[FEATURESET_7c0];
+            *edx &= hvm_featureset[FEATURESET_7d0];
+
+            /* Don't expose HAP-only features to non-hap guests. */
+            if ( !hap_enabled(d) )
+            {
+                 *ebx &= ~cpufeat_mask(X86_FEATURE_INVPCID);
+                 *ecx &= ~cpufeat_mask(X86_FEATURE_PKU);
+            }
+
+            /* OSPKE cleared by hvm_featureset.  Fast-forward CR4 back in. */
+            if ( v->arch.hvm_vcpu.guest_cr[4] & X86_CR4_PKE )
+                *ecx |= cpufeat_mask(X86_FEATURE_OSPKE);
+        }
+        break;
+
+    case 0xb:
+        /* Fix the x2APIC identifier. */
+        *edx = v->vcpu_id * 2;
+        break;
+
+    case XSTATE_CPUID:
+        hvm_cpuid(1, NULL, NULL, &_ecx, NULL);
+        if ( !(_ecx & cpufeat_mask(X86_FEATURE_XSAVE)) || count >= 63 )
+        {
+            *eax = *ebx = *ecx = *edx = 0;
+            break;
+        }
+        switch ( count )
+        {
+        case 0:
+        {
+            uint64_t xfeature_mask = XSTATE_FP_SSE;
+            uint32_t xstate_size = XSTATE_AREA_MIN_SIZE;
+
+            if ( _ecx & cpufeat_mask(X86_FEATURE_AVX) )
+            {
+                xfeature_mask |= XSTATE_YMM;
+                xstate_size = max(xstate_size,
+                                  xstate_offsets[_XSTATE_YMM] +
+                                  xstate_sizes[_XSTATE_YMM]);
+            }
+
+            _ecx = 0;
+            hvm_cpuid(7, NULL, &_ebx, &_ecx, NULL);
+
+            if ( _ebx & cpufeat_mask(X86_FEATURE_MPX) )
+            {
+                xfeature_mask |= XSTATE_BNDREGS | XSTATE_BNDCSR;
+                xstate_size = max(xstate_size,
+                                  xstate_offsets[_XSTATE_BNDCSR] +
+                                  xstate_sizes[_XSTATE_BNDCSR]);
+            }
+
+            if ( _ebx & cpufeat_mask(X86_FEATURE_AVX512F) )
+            {
+                xfeature_mask |= XSTATE_OPMASK | XSTATE_ZMM | XSTATE_HI_ZMM;
+                xstate_size = max(xstate_size,
+                                  xstate_offsets[_XSTATE_OPMASK] +
+                                  xstate_sizes[_XSTATE_OPMASK]);
+                xstate_size = max(xstate_size,
+                                  xstate_offsets[_XSTATE_ZMM] +
+                                  xstate_sizes[_XSTATE_ZMM]);
+                xstate_size = max(xstate_size,
+                                  xstate_offsets[_XSTATE_HI_ZMM] +
+                                  xstate_sizes[_XSTATE_HI_ZMM]);
+            }
+
+            if ( _ecx & cpufeat_mask(X86_FEATURE_PKU) )
+            {
+                xfeature_mask |= XSTATE_PKRU;
+                xstate_size = max(xstate_size,
+                                  xstate_offsets[_XSTATE_PKRU] +
+                                  xstate_sizes[_XSTATE_PKRU]);
+            }
+
+            hvm_cpuid(0x80000001, NULL, NULL, &_ecx, NULL);
+
+            if ( _ecx & cpufeat_mask(X86_FEATURE_LWP) )
+            {
+                xfeature_mask |= XSTATE_LWP;
+                xstate_size = max(xstate_size,
+                                  xstate_offsets[_XSTATE_LWP] +
+                                  xstate_sizes[_XSTATE_LWP]);
+            }
+
+            *eax = (uint32_t)xfeature_mask;
+            *edx = (uint32_t)(xfeature_mask >> 32);
+            *ecx = xstate_size;
+
+            /*
+             * Always read CPUID[0xD,0].EBX from hardware, rather than domain
+             * policy.  It varies with enabled xstate, and the correct xcr0 is
+             * in context.
+             */
+            cpuid_count(input, count, &dummy, ebx, &dummy, &dummy);
+            break;
+        }
+
+        case 1:
+            *eax &= hvm_featureset[FEATURESET_Da1];
+
+            if ( *eax & cpufeat_mask(X86_FEATURE_XSAVES) )
+            {
+                /*
+                 * Always read CPUID[0xD,1].EBX from hardware, rather than
+                 * domain policy.  It varies with enabled xstate, and the
+                 * correct xcr0/xss are in context.
+                 */
+                cpuid_count(input, count, &dummy, ebx, &dummy, &dummy);
+            }
+            else
+                *ebx = 0;
+
+            *ecx = *edx = 0;
+            break;
+        }
+        break;
+
+    case 0x80000001:
+        *ecx &= hvm_featureset[FEATURESET_e1c];
+        *edx &= hvm_featureset[FEATURESET_e1d];
+
+        /* If not emulating AMD, clear the duplicated features in e1d. */
+        if ( d->arch.x86_vendor != X86_VENDOR_AMD )
+            *edx &= ~CPUID_COMMON_1D_FEATURES;
+        /* fast-forward MSR_APIC_BASE.EN if it hasn't already been clobbered. */
+        else if ( vlapic_hw_disabled(vcpu_vlapic(v)) )
+            *edx &= ~cpufeat_bit(X86_FEATURE_APIC);
+
+        /* Don't expose HAP-only features to non-hap guests. */
+        if ( !hap_enabled(d) )
+        {
+            *edx &= ~cpufeat_mask(X86_FEATURE_PAGE1GB);
+
+            /*
+             * PSE36 is not supported in shadow mode.  This bit should be
+             * unilaterally cleared.
+             *
+             * However, an unspecified version of Hyper-V from 2011 refuses
+             * to start as the "cpu does not provide required hw features" if
+             * it can't see PSE36.
+             *
+             * As a workaround, leak the toolstack-provided PSE36 value into a
+             * shadow guest if the guest is already using PAE paging (and
+             * won't care about reverting back to PSE paging).  Otherwise,
+             * knoble it, so a 32bit guest doesn't get the impression that it
+             * could try to use PSE36 paging.
+             */
+            if ( !(hvm_pae_enabled(v) || hvm_long_mode_enabled(v)) )
+                *edx &= ~cpufeat_mask(X86_FEATURE_PSE36);
+        }
+        break;
+
+    case 0x80000007:
+        *edx &= (hvm_featureset[FEATURESET_e7d] |
+                 (host_featureset[FEATURESET_e7d] & cpufeat_mask(X86_FEATURE_ITSC)));
+        break;
+
+    case 0x80000008:
+        *eax &= 0xff;
+        count = d->arch.paging.gfn_bits + PAGE_SHIFT;
+        if ( *eax > count )
+            *eax = count;
+
+        hvm_cpuid(1, NULL, NULL, NULL, &_edx);
+        count = _edx & (cpufeat_mask(X86_FEATURE_PAE) |
+                        cpufeat_mask(X86_FEATURE_PSE36)) ? 36 : 32;
+        if ( *eax < count )
+            *eax = count;
+
+        hvm_cpuid(0x80000001, NULL, NULL, NULL, &_edx);
+        *eax |= (_edx & cpufeat_mask(X86_FEATURE_LM) ? vaddr_bits : 32) << 8;
+
+        *ebx &= hvm_featureset[FEATURESET_e8b];
+        break;
+    }
 }
 
 bool hvm_check_cpuid_faulting(struct vcpu *v)
 {
-    const struct msr_vcpu_policy *vp = v->arch.msr;
+    struct segment_register sreg;
 
-    if ( !vp->misc_features_enables.cpuid_faulting )
+    if ( !v->arch.cpuid_faulting )
         return false;
 
-    return hvm_get_cpl(v) > 0;
+    hvm_get_segment_register(v, x86_seg_ss, &sreg);
+    if ( sreg.attr.fields.dpl == 0 )
+        return false;
+
+    return true;
 }
 
 static uint64_t _hvm_rdtsc_intercept(void)
@@ -3403,10 +3821,13 @@ static uint64_t _hvm_rdtsc_intercept(void)
     if ( currd->arch.vtsc )
         switch ( hvm_guest_x86_mode(curr) )
         {
+            struct segment_register sreg;
+
         case 8:
         case 4:
         case 2:
-            if ( unlikely(hvm_get_cpl(curr)) )
+            hvm_get_segment_register(curr, x86_seg_ss, &sreg);
+            if ( unlikely(sreg.attr.fields.dpl) )
             {
         case 1:
                 currd->arch.vtsc_usercount++;
@@ -3424,7 +3845,10 @@ static uint64_t _hvm_rdtsc_intercept(void)
 
 void hvm_rdtsc_intercept(struct cpu_user_regs *regs)
 {
-    msr_split(regs, _hvm_rdtsc_intercept());
+    uint64_t tsc = _hvm_rdtsc_intercept();
+
+    regs->eax = (uint32_t)tsc;
+    regs->edx = (uint32_t)(tsc >> 32);
 
     HVMTRACE_2D(RDTSC, regs->eax, regs->edx);
 }
@@ -3432,21 +3856,26 @@ void hvm_rdtsc_intercept(struct cpu_user_regs *regs)
 int hvm_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
 {
     struct vcpu *v = current;
-    struct domain *d = v->domain;
     uint64_t *var_range_base, *fixed_range_base;
-    int ret;
+    bool mtrr = false;
+    int ret = X86EMUL_OKAY;
 
     var_range_base = (uint64_t *)v->arch.hvm_vcpu.mtrr.var_ranges;
     fixed_range_base = (uint64_t *)v->arch.hvm_vcpu.mtrr.fixed_ranges;
 
-    if ( (ret = guest_rdmsr(v, msr, msr_content)) != X86EMUL_UNHANDLEABLE )
-        return ret;
+    if ( msr == MSR_MTRRcap ||
+         (msr >= MSR_IA32_MTRR_PHYSBASE(0) && msr <= MSR_MTRRdefType) )
+    {
+        unsigned int edx;
 
-    ret = X86EMUL_OKAY;
+        hvm_cpuid(1, NULL, NULL, NULL, &edx);
+        if ( edx & cpufeat_mask(X86_FEATURE_MTRR) )
+            mtrr = true;
+    }
 
     switch ( msr )
     {
-        unsigned int index;
+        unsigned int eax, ebx, ecx, edx, index;
 
     case MSR_EFER:
         *msr_content = v->arch.hvm_vcpu.guest_efer;
@@ -3457,7 +3886,7 @@ int hvm_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
         break;
 
     case MSR_IA32_TSC_ADJUST:
-        *msr_content = v->arch.hvm_vcpu.msr_tsc_adjust;
+        *msr_content = hvm_get_guest_tsc_adjust(v);
         break;
 
     case MSR_TSC_AUX:
@@ -3482,52 +3911,77 @@ int hvm_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
         break;
 
     case MSR_MTRRcap:
-        if ( !d->arch.cpuid->basic.mtrr )
+        if ( !mtrr )
             goto gp_fault;
         *msr_content = v->arch.hvm_vcpu.mtrr.mtrr_cap;
         break;
     case MSR_MTRRdefType:
-        if ( !d->arch.cpuid->basic.mtrr )
+        if ( !mtrr )
             goto gp_fault;
         *msr_content = v->arch.hvm_vcpu.mtrr.def_type
                         | (v->arch.hvm_vcpu.mtrr.enabled << 10);
         break;
     case MSR_MTRRfix64K_00000:
-        if ( !d->arch.cpuid->basic.mtrr )
+        if ( !mtrr )
             goto gp_fault;
         *msr_content = fixed_range_base[0];
         break;
     case MSR_MTRRfix16K_80000:
     case MSR_MTRRfix16K_A0000:
-        if ( !d->arch.cpuid->basic.mtrr )
+        if ( !mtrr )
             goto gp_fault;
         index = msr - MSR_MTRRfix16K_80000;
         *msr_content = fixed_range_base[index + 1];
         break;
     case MSR_MTRRfix4K_C0000...MSR_MTRRfix4K_F8000:
-        if ( !d->arch.cpuid->basic.mtrr )
+        if ( !mtrr )
             goto gp_fault;
         index = msr - MSR_MTRRfix4K_C0000;
         *msr_content = fixed_range_base[index + 3];
         break;
     case MSR_IA32_MTRR_PHYSBASE(0)...MSR_IA32_MTRR_PHYSMASK(MTRR_VCNT-1):
-        if ( !d->arch.cpuid->basic.mtrr )
+        if ( !mtrr )
             goto gp_fault;
         index = msr - MSR_IA32_MTRR_PHYSBASE(0);
         *msr_content = var_range_base[index];
         break;
 
     case MSR_IA32_XSS:
-        if ( !d->arch.cpuid->xstate.xsaves )
+        ecx = 1;
+        hvm_cpuid(XSTATE_CPUID, &eax, NULL, &ecx, NULL);
+        if ( !(eax & cpufeat_mask(X86_FEATURE_XSAVES)) )
             goto gp_fault;
         *msr_content = v->arch.hvm_vcpu.msr_xss;
         break;
 
     case MSR_IA32_BNDCFGS:
-        if ( !d->arch.cpuid->feat.mpx ||
+        ecx = 0;
+        hvm_cpuid(7, NULL, &ebx, &ecx, NULL);
+        if ( !(ebx & cpufeat_mask(X86_FEATURE_MPX)) ||
              !hvm_get_guest_bndcfgs(v, msr_content) )
             goto gp_fault;
         break;
+
+    case MSR_AMD_PATCHLOADER:
+    case MSR_IA32_UCODE_WRITE:
+    case MSR_PRED_CMD:
+    case MSR_FLUSH_CMD:
+        /* Write-only */
+    case MSR_TSX_FORCE_ABORT:
+    case MSR_TSX_CTRL:
+        /* Not offered to guests. */
+        goto gp_fault;
+
+    case MSR_SPEC_CTRL:
+        hvm_cpuid(7, NULL, NULL, NULL, &edx);
+        if ( !(edx & cpufeat_mask(X86_FEATURE_IBRSB)) )
+            goto gp_fault;
+        *msr_content = v->arch.spec_ctrl;
+        break;
+
+    case MSR_ARCH_CAPABILITIES:
+        /* Not implemented yet. */
+        goto gp_fault;
 
     case MSR_K8_ENABLE_C1E:
     case MSR_AMD64_NB_CFG:
@@ -3555,29 +4009,33 @@ int hvm_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
     return ret;
 
  gp_fault:
+    hvm_inject_hw_exception(TRAP_gp_fault, 0);
     ret = X86EMUL_EXCEPTION;
     *msr_content = -1ull;
     goto out;
 }
 
 int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content,
-                            bool may_defer)
+                            bool_t may_defer)
 {
     struct vcpu *v = current;
-    struct domain *d = v->domain;
-    int ret;
+    bool mtrr = false;
+    int ret = X86EMUL_OKAY;
 
     HVMTRACE_3D(MSR_WRITE, msr,
                (uint32_t)msr_content, (uint32_t)(msr_content >> 32));
 
+    if ( msr >= MSR_IA32_MTRR_PHYSBASE(0) && msr <= MSR_MTRRdefType )
+    {
+        unsigned int edx;
+
+        hvm_cpuid(1, NULL, NULL, NULL, &edx);
+        if ( edx & cpufeat_mask(X86_FEATURE_MTRR) )
+            mtrr = true;
+    }
+
     if ( may_defer && unlikely(monitored_msr(v->domain, msr)) )
     {
-        uint64_t msr_old_content;
-
-        ret = hvm_msr_read_intercept(msr, &msr_old_content);
-        if ( ret != X86EMUL_OKAY )
-            return ret;
-
         ASSERT(v->arch.vm_event);
 
         /* The actual write will occur in hvm_do_resume() (if permitted). */
@@ -3585,18 +4043,13 @@ int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content,
         v->arch.vm_event->write_data.msr = msr;
         v->arch.vm_event->write_data.value = msr_content;
 
-        hvm_monitor_msr(msr, msr_content, msr_old_content);
+        hvm_monitor_msr(msr, msr_content);
         return X86EMUL_OKAY;
     }
 
-    if ( (ret = guest_wrmsr(v, msr, msr_content)) != X86EMUL_UNHANDLEABLE )
-        return ret;
-
-    ret = X86EMUL_OKAY;
-
     switch ( msr )
     {
-        unsigned int index;
+        unsigned int eax, ebx, ecx, edx, index;
 
     case MSR_EFER:
         if ( hvm_set_efer(msr_content) )
@@ -3619,7 +4072,8 @@ int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content,
         break;
 
     case MSR_IA32_APICBASE:
-        if ( !vlapic_msr_set(vcpu_vlapic(v), msr_content) )
+        if ( unlikely(is_pvh_vcpu(v)) ||
+             !vlapic_msr_set(vcpu_vlapic(v), msr_content) )
             goto gp_fault;
         break;
 
@@ -3641,14 +4095,14 @@ int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content,
         goto gp_fault;
 
     case MSR_MTRRdefType:
-        if ( !d->arch.cpuid->basic.mtrr )
+        if ( !mtrr )
             goto gp_fault;
         if ( !mtrr_def_type_msr_set(v->domain, &v->arch.hvm_vcpu.mtrr,
                                     msr_content) )
            goto gp_fault;
         break;
     case MSR_MTRRfix64K_00000:
-        if ( !d->arch.cpuid->basic.mtrr )
+        if ( !mtrr )
             goto gp_fault;
         if ( !mtrr_fix_range_msr_set(v->domain, &v->arch.hvm_vcpu.mtrr, 0,
                                      msr_content) )
@@ -3656,7 +4110,7 @@ int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content,
         break;
     case MSR_MTRRfix16K_80000:
     case MSR_MTRRfix16K_A0000:
-        if ( !d->arch.cpuid->basic.mtrr )
+        if ( !mtrr )
             goto gp_fault;
         index = msr - MSR_MTRRfix16K_80000 + 1;
         if ( !mtrr_fix_range_msr_set(v->domain, &v->arch.hvm_vcpu.mtrr,
@@ -3664,7 +4118,7 @@ int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content,
             goto gp_fault;
         break;
     case MSR_MTRRfix4K_C0000...MSR_MTRRfix4K_F8000:
-        if ( !d->arch.cpuid->basic.mtrr )
+        if ( !mtrr )
             goto gp_fault;
         index = msr - MSR_MTRRfix4K_C0000 + 3;
         if ( !mtrr_fix_range_msr_set(v->domain, &v->arch.hvm_vcpu.mtrr,
@@ -3672,25 +4126,98 @@ int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content,
             goto gp_fault;
         break;
     case MSR_IA32_MTRR_PHYSBASE(0)...MSR_IA32_MTRR_PHYSMASK(MTRR_VCNT-1):
-        if ( !d->arch.cpuid->basic.mtrr )
+        if ( !mtrr )
             goto gp_fault;
         if ( !mtrr_var_range_msr_set(v->domain, &v->arch.hvm_vcpu.mtrr,
                                      msr, msr_content) )
             goto gp_fault;
         break;
 
+    case MSR_AMD_PATCHLOADER:
+        /*
+         * See note on MSR_IA32_UCODE_WRITE below, which may or may not apply
+         * to AMD CPUs as well (at least the architectural/CPUID part does).
+         */
+        if ( v->domain->arch.x86_vendor != X86_VENDOR_AMD )
+            goto gp_fault;
+        break;
+
+    case MSR_IA32_UCODE_WRITE:
+        /*
+         * Some versions of Windows at least on certain hardware try to load
+         * microcode before setting up an IDT. Therefore we must not inject #GP
+         * for such attempts. Also the MSR is architectural and not qualified
+         * by any CPUID bit.
+         */
+        if ( v->domain->arch.x86_vendor != X86_VENDOR_INTEL )
+            goto gp_fault;
+        break;
+
     case MSR_IA32_XSS:
+        ecx = 1;
+        hvm_cpuid(XSTATE_CPUID, &eax, NULL, &ecx, NULL);
         /* No XSS features currently supported for guests. */
-        if ( !d->arch.cpuid->xstate.xsaves || msr_content != 0 )
+        if ( !(eax & cpufeat_mask(X86_FEATURE_XSAVES)) || msr_content != 0 )
             goto gp_fault;
         v->arch.hvm_vcpu.msr_xss = msr_content;
         break;
 
     case MSR_IA32_BNDCFGS:
-        if ( !d->arch.cpuid->feat.mpx ||
+        ecx = 0;
+        hvm_cpuid(7, NULL, &ebx, &ecx, NULL);
+        if ( !(ebx & cpufeat_mask(X86_FEATURE_MPX)) ||
              !hvm_set_guest_bndcfgs(v, msr_content) )
             goto gp_fault;
         break;
+
+    case MSR_SPEC_CTRL:
+        hvm_cpuid(7, NULL, NULL, NULL, &edx);
+        if ( !(edx & cpufeat_mask(X86_FEATURE_IBRSB)) )
+            goto gp_fault; /* MSR available? */
+
+        /*
+         * Note: SPEC_CTRL_STIBP is specified as safe to use (i.e. ignored)
+         * when STIBP isn't enumerated in hardware.
+         */
+
+        if ( msr_content & ~(SPEC_CTRL_IBRS | SPEC_CTRL_STIBP |
+                             (edx & cpufeat_mask(X86_FEATURE_SSBD) ? SPEC_CTRL_SSBD : 0)) )
+            goto gp_fault; /* Rsvd bit set? */
+
+        v->arch.spec_ctrl = msr_content;
+        break;
+
+    case MSR_PRED_CMD:
+        hvm_cpuid(7, NULL, NULL, NULL, &edx);
+        hvm_cpuid(0x80000008, NULL, &ebx, NULL, NULL);
+        if ( !(edx & cpufeat_mask(X86_FEATURE_IBRSB)) &&
+             !(ebx & cpufeat_mask(X86_FEATURE_IBPB)) )
+            goto gp_fault; /* MSR available? */
+
+        if ( msr_content & ~PRED_CMD_IBPB )
+            goto gp_fault; /* Rsvd bit set? */
+
+        wrmsrl(MSR_PRED_CMD, msr_content);
+        break;
+
+    case MSR_FLUSH_CMD:
+        hvm_cpuid(7, NULL, NULL, NULL, &edx);
+        if ( !(edx & cpufeat_mask(X86_FEATURE_L1D_FLUSH)) )
+            goto gp_fault; /* MSR available? */
+
+        if ( msr_content & ~FLUSH_CMD_L1D )
+            goto gp_fault; /* Rsvd bit set? */
+
+        wrmsrl(MSR_FLUSH_CMD, msr_content);
+        break;
+
+    case MSR_INTEL_CORE_THREAD_COUNT:
+    case MSR_ARCH_CAPABILITIES:
+        /* Read-only */
+    case MSR_TSX_FORCE_ABORT:
+    case MSR_TSX_CTRL:
+        /* Not offered to guests. */
+        goto gp_fault;
 
     case MSR_AMD64_NB_CFG:
         /* ignore the write */
@@ -3709,115 +4236,53 @@ int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content,
     return ret;
 
 gp_fault:
+    hvm_inject_hw_exception(TRAP_gp_fault, 0);
     return X86EMUL_EXCEPTION;
-}
-
-static bool is_sysdesc_access(const struct x86_emulate_state *state,
-                              const struct x86_emulate_ctxt *ctxt)
-{
-    unsigned int ext;
-    int mode = x86_insn_modrm(state, NULL, &ext);
-
-    switch ( ctxt->opcode )
-    {
-    case X86EMUL_OPC(0x0f, 0x00):
-        if ( !(ext & 4) ) /* SLDT / STR / LLDT / LTR */
-            return true;
-        break;
-
-    case X86EMUL_OPC(0x0f, 0x01):
-        if ( mode != 3 && !(ext & 4) ) /* SGDT / SIDT / LGDT / LIDT */
-            return true;
-        break;
-    }
-
-    return false;
-}
-
-int hvm_descriptor_access_intercept(uint64_t exit_info,
-                                    uint64_t vmx_exit_qualification,
-                                    unsigned int descriptor, bool is_write)
-{
-    struct vcpu *curr = current;
-    struct domain *currd = curr->domain;
-
-    if ( currd->arch.monitor.descriptor_access_enabled )
-    {
-        ASSERT(curr->arch.vm_event);
-        hvm_monitor_descriptor_access(exit_info, vmx_exit_qualification,
-                                      descriptor, is_write);
-    }
-    else if ( !hvm_emulate_one_insn(is_sysdesc_access, "sysdesc access") )
-        domain_crash(currd);
-
-    return X86EMUL_OKAY;
-}
-
-static bool is_cross_vendor(const struct x86_emulate_state *state,
-                            const struct x86_emulate_ctxt *ctxt)
-{
-    switch ( ctxt->opcode )
-    {
-    case X86EMUL_OPC(0x0f, 0x05): /* syscall */
-    case X86EMUL_OPC(0x0f, 0x34): /* sysenter */
-    case X86EMUL_OPC(0x0f, 0x35): /* sysexit */
-        return true;
-    }
-
-    return false;
 }
 
 void hvm_ud_intercept(struct cpu_user_regs *regs)
 {
-    struct vcpu *cur = current;
-    bool should_emulate =
-        cur->domain->arch.cpuid->x86_vendor != boot_cpu_data.x86_vendor;
     struct hvm_emulate_ctxt ctxt;
 
-    hvm_emulate_init_once(&ctxt, opt_hvm_fep ? NULL : is_cross_vendor, regs);
+    hvm_emulate_init_once(&ctxt, regs);
 
     if ( opt_hvm_fep )
     {
+        struct vcpu *cur = current;
         const struct segment_register *cs = &ctxt.seg_reg[x86_seg_cs];
-        uint32_t walk = (ctxt.seg_reg[x86_seg_ss].dpl == 3)
+        uint32_t walk = (ctxt.seg_reg[x86_seg_ss].attr.fields.dpl == 3)
             ? PFEC_user_mode : 0;
         unsigned long addr;
         char sig[5]; /* ud2; .ascii "xen" */
 
-        if ( hvm_virtual_to_linear_addr(x86_seg_cs, cs, regs->rip,
+        if ( hvm_virtual_to_linear_addr(x86_seg_cs, cs, regs->eip,
                                         sizeof(sig), hvm_access_insn_fetch,
-                                        cs, &addr) &&
-             (hvm_fetch_from_guest_linear(sig, addr, sizeof(sig),
-                                          walk, NULL) == HVMTRANS_okay) &&
+                                        (hvm_long_mode_enabled(cur) &&
+                                         cs->attr.fields.l) ? 64 :
+                                        cs->attr.fields.db ? 32 : 16, &addr) &&
+             (hvm_fetch_from_guest_virt_nofault(sig, addr, sizeof(sig),
+                                                walk) == HVMCOPY_okay) &&
              (memcmp(sig, "\xf\xbxen", sizeof(sig)) == 0) )
         {
-            regs->rip += sizeof(sig);
+            regs->eip += sizeof(sig);
             regs->eflags &= ~X86_EFLAGS_RF;
 
             /* Zero the upper 32 bits of %rip if not in 64bit mode. */
-            if ( !(hvm_long_mode_active(cur) && cs->l) )
-                regs->rip = regs->eip;
+            if ( !(hvm_long_mode_enabled(cur) && cs->attr.fields.l) )
+                regs->eip = regs->_eip;
 
             add_taint(TAINT_HVM_FEP);
-
-            should_emulate = true;
         }
-    }
-
-    if ( !should_emulate )
-    {
-        hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
-        return;
     }
 
     switch ( hvm_emulate_one(&ctxt) )
     {
     case X86EMUL_UNHANDLEABLE:
-    case X86EMUL_UNIMPLEMENTED:
-        hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
+        hvm_inject_hw_exception(TRAP_invalid_op, HVM_DELIVER_NO_ERROR_CODE);
         break;
     case X86EMUL_EXCEPTION:
-        hvm_inject_event(&ctxt.ctxt.event);
+        if ( ctxt.exn_pending )
+            hvm_inject_trap(&ctxt.trap);
         /* fall through */
     default:
         hvm_emulate_writeback(&ctxt);
@@ -3862,6 +4327,314 @@ enum hvm_intblk hvm_interrupt_blocked(struct vcpu *v, struct hvm_intack intack)
     return hvm_intblk_none;
 }
 
+static int grant_table_op_is_allowed(unsigned int cmd)
+{
+    switch (cmd) {
+    case GNTTABOP_query_size:
+    case GNTTABOP_setup_table:
+    case GNTTABOP_set_version:
+    case GNTTABOP_get_version:
+    case GNTTABOP_copy:
+    case GNTTABOP_map_grant_ref:
+    case GNTTABOP_unmap_grant_ref:
+    case GNTTABOP_swap_grant_ref:
+        return 1;
+    default:
+        /* all other commands need auditing */
+        return 0;
+    }
+}
+
+static long hvm_grant_table_op(
+    unsigned int cmd, XEN_GUEST_HANDLE_PARAM(void) uop, unsigned int count)
+{
+    if ( !grant_table_op_is_allowed(cmd) )
+        return -ENOSYS; /* all other commands need auditing */
+    return do_grant_table_op(cmd, uop, count);
+}
+
+static long hvm_memory_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
+{
+    long rc;
+
+    switch ( cmd & MEMOP_CMD_MASK )
+    {
+    case XENMEM_machine_memory_map:
+    case XENMEM_machphys_mapping:
+        return -ENOSYS;
+    case XENMEM_decrease_reservation:
+        rc = do_memory_op(cmd, arg);
+        current->domain->arch.hvm_domain.qemu_mapcache_invalidate = 1;
+        return rc;
+    }
+    return do_memory_op(cmd, arg);
+}
+
+static long hvm_physdev_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
+{
+    switch ( cmd )
+    {
+    default:
+        if ( !is_pvh_vcpu(current) || !is_hardware_domain(current->domain) )
+            return -ENOSYS;
+        /* fall through */
+    case PHYSDEVOP_map_pirq:
+    case PHYSDEVOP_unmap_pirq:
+    case PHYSDEVOP_eoi:
+    case PHYSDEVOP_irq_status_query:
+    case PHYSDEVOP_get_free_pirq:
+        return do_physdev_op(cmd, arg);
+    }
+}
+
+static long hvm_grant_table_op_compat32(unsigned int cmd,
+                                        XEN_GUEST_HANDLE_PARAM(void) uop,
+                                        unsigned int count)
+{
+    if ( !grant_table_op_is_allowed(cmd) )
+        return -ENOSYS;
+    return compat_grant_table_op(cmd, uop, count);
+}
+
+static long hvm_memory_op_compat32(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
+{
+    int rc;
+
+    switch ( cmd & MEMOP_CMD_MASK )
+    {
+    case XENMEM_machine_memory_map:
+    case XENMEM_machphys_mapping:
+        return -ENOSYS;
+    case XENMEM_decrease_reservation:
+        rc = compat_memory_op(cmd, arg);
+        current->domain->arch.hvm_domain.qemu_mapcache_invalidate = 1;
+        return rc;
+    }
+    return compat_memory_op(cmd, arg);
+}
+
+static long hvm_physdev_op_compat32(
+    int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
+{
+    switch ( cmd )
+    {
+        case PHYSDEVOP_map_pirq:
+        case PHYSDEVOP_unmap_pirq:
+        case PHYSDEVOP_eoi:
+        case PHYSDEVOP_irq_status_query:
+        case PHYSDEVOP_get_free_pirq:
+            return compat_physdev_op(cmd, arg);
+        break;
+    default:
+            return -ENOSYS;
+        break;
+    }
+}
+
+#define HYPERCALL(x)                                         \
+    [ __HYPERVISOR_ ## x ] = { (hypercall_fn_t *) do_ ## x,  \
+                               (hypercall_fn_t *) do_ ## x }
+
+#define COMPAT_CALL(x)                                       \
+    [ __HYPERVISOR_ ## x ] = { (hypercall_fn_t *) do_ ## x,  \
+                               (hypercall_fn_t *) compat_ ## x }
+
+#define do_memory_op          hvm_memory_op
+#define compat_memory_op      hvm_memory_op_compat32
+#define do_physdev_op         hvm_physdev_op
+#define compat_physdev_op     hvm_physdev_op_compat32
+#define do_grant_table_op     hvm_grant_table_op
+#define compat_grant_table_op hvm_grant_table_op_compat32
+#define do_arch_1             paging_domctl_continuation
+
+static const hypercall_table_t hvm_hypercall_table[] = {
+    COMPAT_CALL(memory_op),
+    COMPAT_CALL(grant_table_op),
+    COMPAT_CALL(vcpu_op),
+    COMPAT_CALL(physdev_op),
+    COMPAT_CALL(xen_version),
+    HYPERCALL(console_io),
+    HYPERCALL(event_channel_op),
+    COMPAT_CALL(sched_op),
+    COMPAT_CALL(set_timer_op),
+    HYPERCALL(xsm_op),
+    HYPERCALL(hvm_op),
+    HYPERCALL(sysctl),
+    HYPERCALL(domctl),
+#ifdef CONFIG_TMEM
+    HYPERCALL(tmem_op),
+#endif
+    COMPAT_CALL(platform_op),
+    COMPAT_CALL(mmuext_op),
+    HYPERCALL(xenpmu_op),
+    HYPERCALL(arch_1)
+};
+
+#undef do_memory_op
+#undef compat_memory_op
+#undef do_physdev_op
+#undef compat_physdev_op
+#undef do_grant_table_op
+#undef compat_grant_table_op
+#undef do_arch_1
+
+#undef HYPERCALL
+#undef COMPAT_CALL
+
+int hvm_do_hypercall(struct cpu_user_regs *regs)
+{
+    struct vcpu *curr = current;
+    struct domain *currd = curr->domain;
+    struct segment_register sreg;
+    int mode = hvm_guest_x86_mode(curr);
+    unsigned long eax = regs->_eax;
+
+    switch ( mode )
+    {
+    case 8:
+        eax = regs->rax;
+        /* Fallthrough to permission check. */
+    case 4:
+    case 2:
+        hvm_get_segment_register(curr, x86_seg_ss, &sreg);
+        if ( unlikely(sreg.attr.fields.dpl) )
+        {
+    default:
+            regs->eax = -EPERM;
+            return HVM_HCALL_completed;
+        }
+    case 0:
+        break;
+    }
+
+    if ( (eax & 0x80000000) && is_viridian_domain(currd) )
+        return viridian_hypercall(regs);
+
+    BUILD_BUG_ON(ARRAY_SIZE(hvm_hypercall_table) >
+                 ARRAY_SIZE(hypercall_args_table));
+
+    if ( eax >= ARRAY_SIZE(hvm_hypercall_table) )
+    {
+        regs->eax = -ENOSYS;
+        return HVM_HCALL_completed;
+    }
+
+    eax = array_index_nospec(eax, ARRAY_SIZE(hvm_hypercall_table));
+
+    if ( !hvm_hypercall_table[eax].native )
+    {
+        regs->eax = -ENOSYS;
+        return HVM_HCALL_completed;
+    }
+
+    curr->arch.hvm_vcpu.hcall_preempted = 0;
+
+    if ( mode == 8 )
+    {
+        unsigned long rdi = regs->rdi;
+        unsigned long rsi = regs->rsi;
+        unsigned long rdx = regs->rdx;
+        unsigned long r10 = regs->r10;
+        unsigned long r8 = regs->r8;
+        unsigned long r9 = regs->r9;
+
+        HVM_DBG_LOG(DBG_LEVEL_HCALL, "hcall%lu(%lx, %lx, %lx, %lx, %lx, %lx)",
+                    eax, rdi, rsi, rdx, r10, r8, r9);
+
+#ifndef NDEBUG
+        /* Deliberately corrupt parameter regs not used by this hypercall. */
+        switch ( hypercall_args_table[eax].native )
+        {
+        case 0: rdi = 0xdeadbeefdeadf00dUL;
+        case 1: rsi = 0xdeadbeefdeadf00dUL;
+        case 2: rdx = 0xdeadbeefdeadf00dUL;
+        case 3: r10 = 0xdeadbeefdeadf00dUL;
+        case 4: r8 = 0xdeadbeefdeadf00dUL;
+        case 5: r9 = 0xdeadbeefdeadf00dUL;
+        }
+#endif
+
+        curr->arch.hvm_vcpu.hcall_64bit = 1;
+        regs->rax = hvm_hypercall_table[eax].native(rdi, rsi, rdx, r10, r8,
+                                                    r9);
+
+        curr->arch.hvm_vcpu.hcall_64bit = 0;
+
+#ifndef NDEBUG
+        if ( !curr->arch.hvm_vcpu.hcall_preempted )
+        {
+            /* Deliberately corrupt parameter regs used by this hypercall. */
+            switch ( hypercall_args_table[eax].native )
+            {
+            case 6: regs->r9  = 0xdeadbeefdeadf00dUL;
+            case 5: regs->r8  = 0xdeadbeefdeadf00dUL;
+            case 4: regs->r10 = 0xdeadbeefdeadf00dUL;
+            case 3: regs->edx = 0xdeadbeefdeadf00dUL;
+            case 2: regs->esi = 0xdeadbeefdeadf00dUL;
+            case 1: regs->edi = 0xdeadbeefdeadf00dUL;
+            }
+        }
+#endif
+    }
+    else
+    {
+        unsigned int ebx = regs->_ebx;
+        unsigned int ecx = regs->_ecx;
+        unsigned int edx = regs->_edx;
+        unsigned int esi = regs->_esi;
+        unsigned int edi = regs->_edi;
+        unsigned int ebp = regs->_ebp;
+
+        HVM_DBG_LOG(DBG_LEVEL_HCALL, "hcall%lu(%x, %x, %x, %x, %x, %x)", eax,
+                    ebx, ecx, edx, esi, edi, ebp);
+
+#ifndef NDEBUG
+        /* Deliberately corrupt parameter regs not used by this hypercall. */
+        switch ( hypercall_args_table[eax].compat )
+        {
+        case 0: ebx = 0xdeadf00d;
+        case 1: ecx = 0xdeadf00d;
+        case 2: edx = 0xdeadf00d;
+        case 3: esi = 0xdeadf00d;
+        case 4: edi = 0xdeadf00d;
+        case 5: ebp = 0xdeadf00d;
+        }
+#endif
+
+        regs->_eax = hvm_hypercall_table[eax].compat(ebx, ecx, edx, esi, edi,
+                                                     ebp);
+
+#ifndef NDEBUG
+        if ( !curr->arch.hvm_vcpu.hcall_preempted )
+        {
+            /* Deliberately corrupt parameter regs used by this hypercall. */
+            switch ( hypercall_args_table[eax].compat )
+            {
+            case 6: regs->ebp = 0xdeadf00d;
+            case 5: regs->edi = 0xdeadf00d;
+            case 4: regs->esi = 0xdeadf00d;
+            case 3: regs->edx = 0xdeadf00d;
+            case 2: regs->ecx = 0xdeadf00d;
+            case 1: regs->ebx = 0xdeadf00d;
+            }
+        }
+#endif
+    }
+
+    HVM_DBG_LOG(DBG_LEVEL_HCALL, "hcall%lu -> %lx",
+                eax, (unsigned long)regs->eax);
+
+    if ( curr->arch.hvm_vcpu.hcall_preempted )
+        return HVM_HCALL_preempted;
+
+    if ( unlikely(currd->arch.hvm_domain.qemu_mapcache_invalidate) &&
+         test_and_clear_bool(currd->arch.hvm_domain.
+                             qemu_mapcache_invalidate) )
+        return HVM_HCALL_invalidate;
+
+    return HVM_HCALL_completed;
+}
+
 static void hvm_latch_shinfo_size(struct domain *d)
 {
     /*
@@ -3896,6 +4669,50 @@ void hvm_hypercall_page_initialise(struct domain *d,
     hvm_funcs.init_hypercall_page(d, hypercall_page);
 }
 
+static int hvmop_set_pci_intx_level(
+    XEN_GUEST_HANDLE_PARAM(xen_hvm_set_pci_intx_level_t) uop)
+{
+    struct xen_hvm_set_pci_intx_level op;
+    struct domain *d;
+    int rc;
+
+    if ( copy_from_guest(&op, uop, 1) )
+        return -EFAULT;
+
+    if ( (op.domain > 0) || (op.bus > 0) || (op.device > 31) || (op.intx > 3) )
+        return -EINVAL;
+
+    rc = rcu_lock_remote_domain_by_id(op.domid, &d);
+    if ( rc != 0 )
+        return rc;
+
+    rc = -EINVAL;
+    if ( !is_hvm_domain(d) )
+        goto out;
+
+    rc = xsm_hvm_set_pci_intx_level(XSM_DM_PRIV, d);
+    if ( rc )
+        goto out;
+
+    rc = 0;
+    switch ( op.level )
+    {
+    case 0:
+        hvm_pci_intx_deassert(d, op.device, op.intx);
+        break;
+    case 1:
+        hvm_pci_intx_assert(d, op.device, op.intx);
+        break;
+    default:
+        rc = -EINVAL;
+        break;
+    }
+
+ out:
+    rcu_unlock_domain(d);
+    return rc;
+}
+
 void hvm_vcpu_reset_state(struct vcpu *v, uint16_t cs, uint16_t ip)
 {
     struct domain *d = v->domain;
@@ -3919,14 +4736,14 @@ void hvm_vcpu_reset_state(struct vcpu *v, uint16_t cs, uint16_t ip)
     fpu_ctxt->mxcsr = MXCSR_DEFAULT;
     if ( v->arch.xsave_area )
     {
-        v->arch.xsave_area->xsave_hdr.xstate_bv = X86_XCR0_FP;
+        v->arch.xsave_area->xsave_hdr.xstate_bv = XSTATE_FP;
         v->arch.xsave_area->xsave_hdr.xcomp_bv = 0;
     }
 
     v->arch.vgc_flags = VGCF_online;
 
     arch_vcpu_regs_init(v);
-    v->arch.user_regs.rip = ip;
+    v->arch.user_regs.eip = ip;
 
     v->arch.hvm_vcpu.guest_cr[0] = X86_CR0_ET;
     hvm_update_guest_cr(v, 0);
@@ -3946,25 +4763,25 @@ void hvm_vcpu_reset_state(struct vcpu *v, uint16_t cs, uint16_t ip)
     reg.sel = cs;
     reg.base = (uint32_t)reg.sel << 4;
     reg.limit = 0xffff;
-    reg.attr = 0x9b;
+    reg.attr.bytes = 0x09b;
     hvm_set_segment_register(v, x86_seg_cs, &reg);
 
     reg.sel = reg.base = 0;
     reg.limit = 0xffff;
-    reg.attr = 0x93;
+    reg.attr.bytes = 0x093;
     hvm_set_segment_register(v, x86_seg_ds, &reg);
     hvm_set_segment_register(v, x86_seg_es, &reg);
     hvm_set_segment_register(v, x86_seg_fs, &reg);
     hvm_set_segment_register(v, x86_seg_gs, &reg);
     hvm_set_segment_register(v, x86_seg_ss, &reg);
 
-    reg.attr = 0x82; /* LDT */
+    reg.attr.bytes = 0x82; /* LDT */
     hvm_set_segment_register(v, x86_seg_ldtr, &reg);
 
-    reg.attr = 0x8b; /* 32-bit TSS (busy) */
+    reg.attr.bytes = 0x8b; /* 32-bit TSS (busy) */
     hvm_set_segment_register(v, x86_seg_tr, &reg);
 
-    reg.attr = 0;
+    reg.attr.bytes = 0;
     hvm_set_segment_register(v, x86_seg_gdtr, &reg);
     hvm_set_segment_register(v, x86_seg_idtr, &reg);
 
@@ -4037,71 +4854,340 @@ static void hvm_s3_resume(struct domain *d)
     }
 }
 
-bool hvm_flush_vcpu_tlb(bool (*flush_vcpu)(void *ctxt, struct vcpu *v),
-                        void *ctxt)
+static int hvmop_set_isa_irq_level(
+    XEN_GUEST_HANDLE_PARAM(xen_hvm_set_isa_irq_level_t) uop)
 {
-    static DEFINE_PER_CPU(cpumask_t, flush_cpumask);
-    cpumask_t *mask = &this_cpu(flush_cpumask);
+    struct xen_hvm_set_isa_irq_level op;
+    struct domain *d;
+    int rc;
+
+    if ( copy_from_guest(&op, uop, 1) )
+        return -EFAULT;
+
+    if ( op.isa_irq > 15 )
+        return -EINVAL;
+
+    rc = rcu_lock_remote_domain_by_id(op.domid, &d);
+    if ( rc != 0 )
+        return rc;
+
+    rc = -EINVAL;
+    if ( !is_hvm_domain(d) )
+        goto out;
+
+    rc = xsm_hvm_set_isa_irq_level(XSM_DM_PRIV, d);
+    if ( rc )
+        goto out;
+
+    rc = 0;
+    switch ( op.level )
+    {
+    case 0:
+        hvm_isa_irq_deassert(d, op.isa_irq);
+        break;
+    case 1:
+        hvm_isa_irq_assert(d, op.isa_irq);
+        break;
+    default:
+        rc = -EINVAL;
+        break;
+    }
+
+ out:
+    rcu_unlock_domain(d);
+    return rc;
+}
+
+static int hvmop_set_pci_link_route(
+    XEN_GUEST_HANDLE_PARAM(xen_hvm_set_pci_link_route_t) uop)
+{
+    struct xen_hvm_set_pci_link_route op;
+    struct domain *d;
+    int rc;
+
+    if ( copy_from_guest(&op, uop, 1) )
+        return -EFAULT;
+
+    if ( (op.link > 3) || (op.isa_irq > 15) )
+        return -EINVAL;
+
+    rc = rcu_lock_remote_domain_by_id(op.domid, &d);
+    if ( rc != 0 )
+        return rc;
+
+    rc = -EINVAL;
+    if ( !is_hvm_domain(d) )
+        goto out;
+
+    rc = xsm_hvm_set_pci_link_route(XSM_DM_PRIV, d);
+    if ( rc )
+        goto out;
+
+    rc = 0;
+    hvm_set_pci_link_route(d, op.link, op.isa_irq);
+
+ out:
+    rcu_unlock_domain(d);
+    return rc;
+}
+
+static int hvmop_inject_msi(
+    XEN_GUEST_HANDLE_PARAM(xen_hvm_inject_msi_t) uop)
+{
+    struct xen_hvm_inject_msi op;
+    struct domain *d;
+    int rc;
+
+    if ( copy_from_guest(&op, uop, 1) )
+        return -EFAULT;
+
+    rc = rcu_lock_remote_domain_by_id(op.domid, &d);
+    if ( rc != 0 )
+        return rc;
+
+    rc = -EINVAL;
+    if ( !is_hvm_domain(d) )
+        goto out;
+
+    rc = xsm_hvm_inject_msi(XSM_DM_PRIV, d);
+    if ( rc )
+        goto out;
+
+    rc = hvm_inject_msi(d, op.addr, op.data);
+
+ out:
+    rcu_unlock_domain(d);
+    return rc;
+}
+
+static int hvmop_flush_tlb_all(void)
+{
     struct domain *d = current->domain;
     struct vcpu *v;
 
+    if ( !is_hvm_domain(d) )
+        return -EINVAL;
+
     /* Avoid deadlock if more than one vcpu tries this at the same time. */
     if ( !spin_trylock(&d->hypercall_deadlock_mutex) )
-        return false;
+        return -ERESTART;
 
     /* Pause all other vcpus. */
     for_each_vcpu ( d, v )
-        if ( v != current && flush_vcpu(ctxt, v) )
+        if ( v != current )
             vcpu_pause_nosync(v);
 
     /* Now that all VCPUs are signalled to deschedule, we wait... */
     for_each_vcpu ( d, v )
-        if ( v != current && flush_vcpu(ctxt, v) )
+        if ( v != current )
             while ( !vcpu_runnable(v) && v->is_running )
                 cpu_relax();
 
     /* All other vcpus are paused, safe to unlock now. */
     spin_unlock(&d->hypercall_deadlock_mutex);
 
-    cpumask_clear(mask);
-
     /* Flush paging-mode soft state (e.g., va->gfn cache; PAE PDPE cache). */
     for_each_vcpu ( d, v )
-    {
-        unsigned int cpu;
+        paging_update_cr3(v);
 
-        if ( !flush_vcpu(ctxt, v) )
-            continue;
-
-        paging_update_cr3(v, false);
-
-        cpu = read_atomic(&v->dirty_cpu);
-        if ( is_vcpu_dirty_cpu(cpu) )
-            __cpumask_set_cpu(cpu, mask);
-    }
-
-    /* Flush TLBs on all CPUs with dirty vcpu state. */
-    flush_tlb_mask(mask);
+    /* Flush all dirty TLBs. */
+    flush_tlb_mask(d->domain_dirty_cpumask);
 
     /* Done. */
     for_each_vcpu ( d, v )
-        if ( v != current && flush_vcpu(ctxt, v) )
+        if ( v != current )
             vcpu_unpause(v);
 
-    return true;
+    return 0;
 }
 
-static bool always_flush(void *ctxt, struct vcpu *v)
+static int hvmop_create_ioreq_server(
+    XEN_GUEST_HANDLE_PARAM(xen_hvm_create_ioreq_server_t) uop)
 {
-    return true;
+    struct domain *curr_d = current->domain;
+    xen_hvm_create_ioreq_server_t op;
+    struct domain *d;
+    int rc;
+
+    if ( copy_from_guest(&op, uop, 1) )
+        return -EFAULT;
+
+    rc = rcu_lock_remote_domain_by_id(op.domid, &d);
+    if ( rc != 0 )
+        return rc;
+
+    rc = -EINVAL;
+    if ( !is_hvm_domain(d) )
+        goto out;
+
+    rc = xsm_hvm_ioreq_server(XSM_DM_PRIV, d, HVMOP_create_ioreq_server);
+    if ( rc != 0 )
+        goto out;
+
+    rc = hvm_create_ioreq_server(d, curr_d->domain_id, 0,
+                                 op.handle_bufioreq, &op.id);
+    if ( rc != 0 )
+        goto out;
+
+    rc = copy_to_guest(uop, &op, 1) ? -EFAULT : 0;
+    
+ out:
+    rcu_unlock_domain(d);
+    return rc;
 }
 
-static int hvmop_flush_tlb_all(void)
+static int hvmop_get_ioreq_server_info(
+    XEN_GUEST_HANDLE_PARAM(xen_hvm_get_ioreq_server_info_t) uop)
 {
-    if ( !is_hvm_domain(current->domain) )
-        return -EINVAL;
+    xen_hvm_get_ioreq_server_info_t op;
+    struct domain *d;
+    int rc;
 
-    return hvm_flush_vcpu_tlb(always_flush, NULL) ? 0 : -ERESTART;
+    if ( copy_from_guest(&op, uop, 1) )
+        return -EFAULT;
+
+    rc = rcu_lock_remote_domain_by_id(op.domid, &d);
+    if ( rc != 0 )
+        return rc;
+
+    rc = -EINVAL;
+    if ( !is_hvm_domain(d) )
+        goto out;
+
+    rc = xsm_hvm_ioreq_server(XSM_DM_PRIV, d, HVMOP_get_ioreq_server_info);
+    if ( rc != 0 )
+        goto out;
+
+    rc = hvm_get_ioreq_server_info(d, op.id,
+                                   &op.ioreq_pfn,
+                                   &op.bufioreq_pfn, 
+                                   &op.bufioreq_port);
+    if ( rc != 0 )
+        goto out;
+
+    rc = copy_to_guest(uop, &op, 1) ? -EFAULT : 0;
+    
+ out:
+    rcu_unlock_domain(d);
+    return rc;
+}
+
+static int hvmop_map_io_range_to_ioreq_server(
+    XEN_GUEST_HANDLE_PARAM(xen_hvm_io_range_t) uop)
+{
+    xen_hvm_io_range_t op;
+    struct domain *d;
+    int rc;
+
+    if ( copy_from_guest(&op, uop, 1) )
+        return -EFAULT;
+
+    rc = rcu_lock_remote_domain_by_id(op.domid, &d);
+    if ( rc != 0 )
+        return rc;
+
+    rc = -EINVAL;
+    if ( !is_hvm_domain(d) )
+        goto out;
+
+    rc = xsm_hvm_ioreq_server(XSM_DM_PRIV, d, HVMOP_map_io_range_to_ioreq_server);
+    if ( rc != 0 )
+        goto out;
+
+    rc = hvm_map_io_range_to_ioreq_server(d, op.id, op.type,
+                                          op.start, op.end);
+
+ out:
+    rcu_unlock_domain(d);
+    return rc;
+}
+
+static int hvmop_unmap_io_range_from_ioreq_server(
+    XEN_GUEST_HANDLE_PARAM(xen_hvm_io_range_t) uop)
+{
+    xen_hvm_io_range_t op;
+    struct domain *d;
+    int rc;
+
+    if ( copy_from_guest(&op, uop, 1) )
+        return -EFAULT;
+
+    rc = rcu_lock_remote_domain_by_id(op.domid, &d);
+    if ( rc != 0 )
+        return rc;
+
+    rc = -EINVAL;
+    if ( !is_hvm_domain(d) )
+        goto out;
+
+    rc = xsm_hvm_ioreq_server(XSM_DM_PRIV, d, HVMOP_unmap_io_range_from_ioreq_server);
+    if ( rc != 0 )
+        goto out;
+
+    rc = hvm_unmap_io_range_from_ioreq_server(d, op.id, op.type,
+                                              op.start, op.end);
+    
+ out:
+    rcu_unlock_domain(d);
+    return rc;
+}
+
+static int hvmop_set_ioreq_server_state(
+    XEN_GUEST_HANDLE_PARAM(xen_hvm_set_ioreq_server_state_t) uop)
+{
+    xen_hvm_set_ioreq_server_state_t op;
+    struct domain *d;
+    int rc;
+
+    if ( copy_from_guest(&op, uop, 1) )
+        return -EFAULT;
+
+    rc = rcu_lock_remote_domain_by_id(op.domid, &d);
+    if ( rc != 0 )
+        return rc;
+
+    rc = -EINVAL;
+    if ( !is_hvm_domain(d) )
+        goto out;
+
+    rc = xsm_hvm_ioreq_server(XSM_DM_PRIV, d, HVMOP_set_ioreq_server_state);
+    if ( rc != 0 )
+        goto out;
+
+    rc = hvm_set_ioreq_server_state(d, op.id, !!op.enabled);
+
+ out:
+    rcu_unlock_domain(d);
+    return rc;
+}
+
+static int hvmop_destroy_ioreq_server(
+    XEN_GUEST_HANDLE_PARAM(xen_hvm_destroy_ioreq_server_t) uop)
+{
+    xen_hvm_destroy_ioreq_server_t op;
+    struct domain *d;
+    int rc;
+
+    if ( copy_from_guest(&op, uop, 1) )
+        return -EFAULT;
+
+    rc = rcu_lock_remote_domain_by_id(op.domid, &d);
+    if ( rc != 0 )
+        return rc;
+
+    rc = -EINVAL;
+    if ( !is_hvm_domain(d) )
+        goto out;
+
+    rc = xsm_hvm_ioreq_server(XSM_DM_PRIV, d, HVMOP_destroy_ioreq_server);
+    if ( rc != 0 )
+        goto out;
+
+    rc = hvm_destroy_ioreq_server(d, op.id);
+
+ out:
+    rcu_unlock_domain(d);
+    return rc;
 }
 
 static int hvmop_set_evtchn_upcall_vector(
@@ -4111,11 +5197,11 @@ static int hvmop_set_evtchn_upcall_vector(
     struct domain *d = current->domain;
     struct vcpu *v;
 
-    if ( !is_hvm_domain(d) )
-        return -EINVAL;
-
     if ( copy_from_guest(&op, uop, 1) )
         return -EFAULT;
+
+    if ( !is_hvm_domain(d) )
+        return -EINVAL;
 
     if ( op.vector < 0x10 )
         return -EINVAL;
@@ -4145,7 +5231,6 @@ static int hvm_allow_set_param(struct domain *d,
     /* The following parameters can be set by the guest. */
     case HVM_PARAM_CALLBACK_IRQ:
     case HVM_PARAM_VM86_TSS:
-    case HVM_PARAM_VM86_TSS_SIZED:
     case HVM_PARAM_ACPI_IOPORTS_LOCATION:
     case HVM_PARAM_VM_GENERATION_ID_ADDR:
     case HVM_PARAM_STORE_EVTCHN:
@@ -4176,7 +5261,6 @@ static int hvm_allow_set_param(struct domain *d,
     case HVM_PARAM_IOREQ_SERVER_PFN:
     case HVM_PARAM_NR_IOREQ_SERVER_PAGES:
     case HVM_PARAM_ALTP2M:
-    case HVM_PARAM_MCA_CAP:
         if ( value != 0 && a->value != value )
             rc = -EEXIST;
         break;
@@ -4207,7 +5291,8 @@ static int hvmop_set_param(
         return -ESRCH;
 
     rc = -EINVAL;
-    if ( !is_hvm_domain(d) )
+    if ( !has_hvm_container_domain(d) ||
+         (is_pvh_domain(d) && (a.index != HVM_PARAM_CALLBACK_IRQ)) )
         goto out;
 
     rc = hvm_allow_set_param(d, &a);
@@ -4253,17 +5338,16 @@ static int hvmop_set_param(
         domain_pause(d);
         d->arch.hvm_domain.params[a.index] = a.value;
         for_each_vcpu ( d, v )
-            paging_update_cr3(v, false);
+            paging_update_cr3(v);
         domain_unpause(d);
 
         domctl_lock_release();
         break;
     case HVM_PARAM_DM_DOMAIN:
-        /* The only value this should ever be set to is DOMID_SELF */
-        if ( a.value != DOMID_SELF )
-            rc = -EINVAL;
+        if ( a.value == DOMID_SELF )
+            a.value = curr_d->domain_id;
 
-        a.value = curr_d->domain_id;
+        rc = hvm_set_dm_domain(d, a.value);
         break;
     case HVM_PARAM_ACPI_S_STATE:
         rc = 0;
@@ -4297,7 +5381,7 @@ static int hvmop_set_param(
          * Remove the check below once we have
          * shadow-on-shadow.
          */
-        if ( !paging_mode_hap(d) && a.value )
+        if ( cpu_has_svm && !paging_mode_hap(d) && a.value )
             rc = -EINVAL;
         if ( a.value &&
              d->arch.hvm_domain.params[HVM_PARAM_ALTP2M] )
@@ -4316,7 +5400,7 @@ static int hvmop_set_param(
         rc = xsm_hvm_param_altp2mhvm(XSM_PRIV, d);
         if ( rc )
             break;
-        if ( a.value > XEN_ALTP2M_limited )
+        if ( a.value > 1 )
             rc = -EINVAL;
         if ( a.value &&
              d->arch.hvm_domain.params[HVM_PARAM_NESTEDHVM] )
@@ -4330,20 +5414,20 @@ static int hvmop_set_param(
             rc = -EINVAL;
         break;
     case HVM_PARAM_IOREQ_SERVER_PFN:
-        d->arch.hvm_domain.ioreq_gfn.base = a.value;
+        d->arch.hvm_domain.ioreq_gmfn.base = a.value;
         break;
     case HVM_PARAM_NR_IOREQ_SERVER_PAGES:
     {
         unsigned int i;
 
         if ( a.value == 0 ||
-             a.value > sizeof(d->arch.hvm_domain.ioreq_gfn.mask) * 8 )
+             a.value > sizeof(d->arch.hvm_domain.ioreq_gmfn.mask) * 8 )
         {
             rc = -EINVAL;
             break;
         }
         for ( i = 0; i < a.value; i++ )
-            set_bit(i, &d->arch.hvm_domain.ioreq_gfn.mask);
+            set_bit(i, &d->arch.hvm_domain.ioreq_gmfn.mask);
 
         break;
     }
@@ -4354,44 +5438,6 @@ static int hvmop_set_param(
             break;
         }
         d->arch.x87_fip_width = a.value;
-        break;
-
-    case HVM_PARAM_VM86_TSS:
-        /* Hardware would silently truncate high bits. */
-        if ( a.value != (uint32_t)a.value )
-        {
-            if ( d == curr_d )
-                domain_crash(d);
-            rc = -EINVAL;
-        }
-        /* Old hvmloader binaries hardcode the size to 128 bytes. */
-        if ( a.value )
-            a.value |= (128ULL << 32) | VM86_TSS_UPDATED;
-        a.index = HVM_PARAM_VM86_TSS_SIZED;
-        break;
-
-    case HVM_PARAM_VM86_TSS_SIZED:
-        if ( (a.value >> 32) < sizeof(struct tss32) )
-        {
-            if ( d == curr_d )
-                domain_crash(d);
-            rc = -EINVAL;
-        }
-        /*
-         * Cap at the theoretically useful maximum (base structure plus
-         * 256 bits interrupt redirection bitmap + 64k bits I/O bitmap
-         * plus one padding byte).
-         */
-        if ( (a.value >> 32) > sizeof(struct tss32) +
-                               (0x100 / 8) + (0x10000 / 8) + 1 )
-            a.value = (uint32_t)a.value |
-                      ((sizeof(struct tss32) + (0x100 / 8) +
-                                               (0x10000 / 8) + 1) << 32);
-        a.value |= VM86_TSS_UPDATED;
-        break;
-
-    case HVM_PARAM_MCA_CAP:
-        rc = vmce_enable_mca_cap(d, a.value);
         break;
     }
 
@@ -4422,7 +5468,6 @@ static int hvm_allow_get_param(struct domain *d,
     /* The following parameters can be read by the guest. */
     case HVM_PARAM_CALLBACK_IRQ:
     case HVM_PARAM_VM86_TSS:
-    case HVM_PARAM_VM86_TSS_SIZED:
     case HVM_PARAM_ACPI_IOPORTS_LOCATION:
     case HVM_PARAM_VM_GENERATION_ID_ADDR:
     case HVM_PARAM_STORE_PFN:
@@ -4467,7 +5512,8 @@ static int hvmop_get_param(
         return -ESRCH;
 
     rc = -EINVAL;
-    if ( !is_hvm_domain(d) )
+    if ( !has_hvm_container_domain(d) ||
+         (is_pvh_domain(d) && (a.index != HVM_PARAM_CALLBACK_IRQ)) )
         goto out;
 
     rc = hvm_allow_get_param(d, &a);
@@ -4479,16 +5525,6 @@ static int hvmop_get_param(
     case HVM_PARAM_ACPI_S_STATE:
         a.value = d->arch.hvm_domain.is_s3_suspended ? 3 : 0;
         break;
-
-    case HVM_PARAM_VM86_TSS:
-        a.value = (uint32_t)d->arch.hvm_domain.params[HVM_PARAM_VM86_TSS_SIZED];
-        break;
-
-    case HVM_PARAM_VM86_TSS_SIZED:
-        a.value = d->arch.hvm_domain.params[HVM_PARAM_VM86_TSS_SIZED] &
-                  ~VM86_TSS_UPDATED;
-        break;
-
     case HVM_PARAM_X87_FIP_WIDTH:
         a.value = d->arch.x87_fip_width;
         break;
@@ -4504,7 +5540,9 @@ static int hvmop_get_param(
          */
         if ( !d->creation_finished )
         {
-            rc = hvm_create_ioreq_server(d, true,
+            domid_t domid = d->arch.hvm_domain.params[HVM_PARAM_DM_DOMAIN];
+
+            rc = hvm_create_ioreq_server(d, domid, 1,
                                          HVM_IOREQSRV_BUFIOREQ_LEGACY, NULL);
             if ( rc != 0 && rc != -EEXIST )
                 goto out;
@@ -4532,7 +5570,6 @@ static int do_altp2m_op(
     struct xen_hvm_altp2m_op a;
     struct domain *d = NULL;
     int rc = 0;
-    uint64_t mode;
 
     if ( !hvm_altp2m_supported() )
         return -EOPNOTSUPP;
@@ -4553,10 +5590,8 @@ static int do_altp2m_op(
     case HVMOP_altp2m_destroy_p2m:
     case HVMOP_altp2m_switch_p2m:
     case HVMOP_altp2m_set_mem_access:
-    case HVMOP_altp2m_set_mem_access_multi:
     case HVMOP_altp2m_change_gfn:
         break;
-
     default:
         return -EOPNOTSUPP;
     }
@@ -4581,20 +5616,18 @@ static int do_altp2m_op(
         goto out;
     }
 
-    mode = d->arch.hvm_domain.params[HVM_PARAM_ALTP2M];
-
-    if ( XEN_ALTP2M_disabled == mode )
-    {
-        rc = -EINVAL;
-        goto out;
-    }
-
-    if ( (rc = xsm_hvm_altp2mhvm_op(XSM_OTHER, d, mode, a.cmd)) )
+    if ( (rc = xsm_hvm_altp2mhvm_op(XSM_TARGET, d)) )
         goto out;
 
     switch ( a.cmd )
     {
     case HVMOP_altp2m_get_domain_state:
+        if ( !d->arch.hvm_domain.params[HVM_PARAM_ALTP2M] )
+        {
+            rc = -EINVAL;
+            break;
+        }
+
         a.u.domain_state.state = altp2m_active(d);
         rc = __copy_to_guest(arg, &a, 1) ? -EFAULT : 0;
         break;
@@ -4604,7 +5637,8 @@ static int do_altp2m_op(
         struct vcpu *v;
         bool_t ostate;
 
-        if ( nestedhvm_enabled(d) )
+        if ( !d->arch.hvm_domain.params[HVM_PARAM_ALTP2M] ||
+             nestedhvm_enabled(d) )
         {
             rc = -EINVAL;
             break;
@@ -4678,37 +5712,6 @@ static int do_altp2m_op(
                                     a.u.set_mem_access.view);
         break;
 
-    case HVMOP_altp2m_set_mem_access_multi:
-        if ( a.u.set_mem_access_multi.pad ||
-             a.u.set_mem_access_multi.opaque > a.u.set_mem_access_multi.nr )
-        {
-            rc = -EINVAL;
-            break;
-        }
-
-        /*
-         * Unlike XENMEM_access_op_set_access_multi, we don't need any bits of
-         * the 'continuation' counter to be zero (to stash a command in).
-         * However, 0x40 is a good 'stride' to make sure that we make
-         * a reasonable amount of forward progress before yielding,
-         * so use a mask of 0x3F here.
-         */
-        rc = p2m_set_mem_access_multi(d, a.u.set_mem_access_multi.pfn_list,
-                                      a.u.set_mem_access_multi.access_list,
-                                      a.u.set_mem_access_multi.nr,
-                                      a.u.set_mem_access_multi.opaque,
-                                      0x3F,
-                                      a.u.set_mem_access_multi.view);
-        if ( rc > 0 )
-        {
-            a.u.set_mem_access_multi.opaque = rc;
-            rc = -ERESTART;
-            if ( __copy_field_to_guest(guest_handle_cast(arg, xen_hvm_altp2m_op_t),
-                                       &a, u.set_mem_access_multi.opaque) )
-                rc = -EFAULT;
-        }
-        break;
-
     case HVMOP_altp2m_change_gfn:
         if ( a.u.change_gfn.pad1 || a.u.change_gfn.pad2 )
             rc = -EINVAL;
@@ -4723,104 +5726,6 @@ static int do_altp2m_op(
 
  out:
     rcu_unlock_domain(d);
-
-    return rc;
-}
-
-DEFINE_XEN_GUEST_HANDLE(compat_hvm_altp2m_op_t);
-
-/*
- * Manually define the CHECK_ macros for hvm_altp2m_op and
- * hvm_altp2m_set_mem_access_multi as the generated versions can't handle
- * correctly the translation of all fields from compat_(*) to xen_(*).
- */
-#ifndef CHECK_hvm_altp2m_op
-#define CHECK_hvm_altp2m_op \
-    CHECK_SIZE_(struct, hvm_altp2m_op); \
-    CHECK_FIELD_(struct, hvm_altp2m_op, version); \
-    CHECK_FIELD_(struct, hvm_altp2m_op, cmd); \
-    CHECK_FIELD_(struct, hvm_altp2m_op, domain); \
-    CHECK_FIELD_(struct, hvm_altp2m_op, pad1); \
-    CHECK_FIELD_(struct, hvm_altp2m_op, pad2)
-#endif /* CHECK_hvm_altp2m_op */
-
-#ifndef CHECK_hvm_altp2m_set_mem_access_multi
-#define CHECK_hvm_altp2m_set_mem_access_multi \
-    CHECK_FIELD_(struct, hvm_altp2m_set_mem_access_multi, view); \
-    CHECK_FIELD_(struct, hvm_altp2m_set_mem_access_multi, pad); \
-    CHECK_FIELD_(struct, hvm_altp2m_set_mem_access_multi, nr); \
-    CHECK_FIELD_(struct, hvm_altp2m_set_mem_access_multi, opaque)
-#endif /* CHECK_hvm_altp2m_set_mem_access_multi */
-
-CHECK_hvm_altp2m_op;
-CHECK_hvm_altp2m_set_mem_access_multi;
-
-static int compat_altp2m_op(
-    XEN_GUEST_HANDLE_PARAM(void) arg)
-{
-    int rc = 0;
-    struct compat_hvm_altp2m_op a;
-    union
-    {
-        XEN_GUEST_HANDLE_PARAM(void) hnd;
-        struct xen_hvm_altp2m_op *altp2m_op;
-    } nat;
-
-    if ( !hvm_altp2m_supported() )
-        return -EOPNOTSUPP;
-
-    if ( copy_from_guest(&a, arg, 1) )
-        return -EFAULT;
-
-    if ( a.pad1 || a.pad2 ||
-         (a.version != HVMOP_ALTP2M_INTERFACE_VERSION) )
-        return -EINVAL;
-
-    set_xen_guest_handle(nat.hnd, COMPAT_ARG_XLAT_VIRT_BASE);
-
-    switch ( a.cmd )
-    {
-    case HVMOP_altp2m_set_mem_access_multi:
-#define XLAT_hvm_altp2m_set_mem_access_multi_HNDL_pfn_list(_d_, _s_); \
-        guest_from_compat_handle((_d_)->pfn_list, (_s_)->pfn_list)
-#define XLAT_hvm_altp2m_set_mem_access_multi_HNDL_access_list(_d_, _s_); \
-        guest_from_compat_handle((_d_)->access_list, (_s_)->access_list)
-        XLAT_hvm_altp2m_set_mem_access_multi(&nat.altp2m_op->u.set_mem_access_multi,
-                                             &a.u.set_mem_access_multi);
-#undef XLAT_hvm_altp2m_set_mem_access_multi_HNDL_pfn_list
-#undef XLAT_hvm_altp2m_set_mem_access_multi_HNDL_access_list
-        break;
-
-    default:
-        return do_altp2m_op(arg);
-    }
-
-    /* Manually fill the common part of the xen_hvm_altp2m_op structure. */
-    nat.altp2m_op->version  = a.version;
-    nat.altp2m_op->cmd      = a.cmd;
-    nat.altp2m_op->domain   = a.domain;
-    nat.altp2m_op->pad1     = a.pad1;
-    nat.altp2m_op->pad2     = a.pad2;
-
-    rc = do_altp2m_op(nat.hnd);
-
-    switch ( a.cmd )
-    {
-    case HVMOP_altp2m_set_mem_access_multi:
-        if ( rc == -ERESTART )
-        {
-            a.u.set_mem_access_multi.opaque =
-                nat.altp2m_op->u.set_mem_access_multi.opaque;
-            if ( __copy_field_to_guest(guest_handle_cast(arg,
-                                                         compat_hvm_altp2m_op_t),
-                                       &a, u.set_mem_access_multi.opaque) )
-                rc = -EFAULT;
-        }
-        break;
-
-    default:
-        ASSERT_UNREACHABLE();
-    }
 
     return rc;
 }
@@ -4880,19 +5785,166 @@ static int hvmop_get_mem_type(
     return rc;
 }
 
+/*
+ * Note that this value is effectively part of the ABI, even if we don't need
+ * to make it a formal part of it: A guest suspended for migration in the
+ * middle of a continuation would fail to work if resumed on a hypervisor
+ * using a different value.
+ */
+#define HVMOP_op_mask 0xff
+
+static bool_t hvm_allow_p2m_type_change(p2m_type_t old, p2m_type_t new)
+{
+    if ( p2m_is_ram(old) ||
+         (p2m_is_hole(old) && new == p2m_mmio_dm) ||
+         (old == p2m_ioreq_server && new == p2m_ram_rw) )
+        return 1;
+
+    return 0;
+}
+
+static int hvmop_set_mem_type(
+    XEN_GUEST_HANDLE_PARAM(xen_hvm_set_mem_type_t) arg,
+    unsigned long *iter)
+{
+    unsigned long start_iter = *iter;
+    struct xen_hvm_set_mem_type a;
+    struct domain *d;
+    unsigned int mem_type;
+    int rc;
+
+    /* Interface types to internal p2m types */
+    static const p2m_type_t memtype[] = {
+        [HVMMEM_ram_rw]  = p2m_ram_rw,
+        [HVMMEM_ram_ro]  = p2m_ram_ro,
+        [HVMMEM_mmio_dm] = p2m_mmio_dm,
+        [HVMMEM_unused] = p2m_invalid,
+        [HVMMEM_ioreq_server] = p2m_ioreq_server
+    };
+
+    if ( copy_from_guest(&a, arg, 1) )
+        return -EFAULT;
+
+    rc = rcu_lock_remote_domain_by_id(a.domid, &d);
+    if ( rc != 0 )
+        return rc;
+
+    rc = -EINVAL;
+    if ( !is_hvm_domain(d) )
+        goto out;
+
+    rc = xsm_hvm_control(XSM_DM_PRIV, d, HVMOP_set_mem_type);
+    if ( rc )
+        goto out;
+
+    rc = -EINVAL;
+    if ( a.nr < start_iter ||
+         ((a.first_pfn + a.nr - 1) < a.first_pfn) ||
+         ((a.first_pfn + a.nr - 1) > domain_get_maximum_gpfn(d)) )
+        goto out;
+
+    mem_type = array_index_nospec(a.hvmmem_type, ARRAY_SIZE(memtype));
+    if ( mem_type >= ARRAY_SIZE(memtype) ||
+         unlikely(mem_type == HVMMEM_unused) )
+        goto out;
+
+    while ( a.nr > start_iter )
+    {
+        unsigned long pfn = a.first_pfn + start_iter;
+        p2m_type_t t;
+
+        get_gfn_unshare(d, pfn, &t);
+        if ( p2m_is_paging(t) )
+        {
+            put_gfn(d, pfn);
+            p2m_mem_paging_populate(d, pfn);
+            rc = -EAGAIN;
+            goto out;
+        }
+        if ( p2m_is_shared(t) )
+        {
+            put_gfn(d, pfn);
+            rc = -EAGAIN;
+            goto out;
+        }
+        if ( !hvm_allow_p2m_type_change(t, memtype[mem_type]) )
+        {
+            put_gfn(d, pfn);
+            goto out;
+        }
+
+        rc = p2m_change_type_one(d, pfn, t, memtype[mem_type]);
+        put_gfn(d, pfn);
+
+        if ( rc )
+            goto out;
+
+        /* Check for continuation if it's not the last interation */
+        if ( a.nr > ++start_iter && !(start_iter & HVMOP_op_mask) &&
+             hypercall_preempt_check() )
+        {
+            rc = -ERESTART;
+            goto out;
+        }
+    }
+    rc = 0;
+
+ out:
+    rcu_unlock_domain(d);
+    *iter = start_iter;
+
+    return rc;
+}
+
 long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
 {
+    unsigned long start_iter, mask;
     long rc = 0;
 
-    /*
-     * NB: hvm_op can be part of a restarted hypercall; but at the
-     * moment the only hypercalls which do continuations don't need to
-     * store any iteration information (since they're just re-trying
-     * the acquisition of a lock).
-     */
-
-    switch ( op )
+    switch ( op & HVMOP_op_mask )
     {
+    default:
+        mask = ~0UL;
+        break;
+    case HVMOP_modified_memory:
+    case HVMOP_set_mem_type:
+        mask = HVMOP_op_mask;
+        break;
+    }
+
+    start_iter = op & ~mask;
+    switch ( op &= mask )
+    {
+    case HVMOP_create_ioreq_server:
+        rc = hvmop_create_ioreq_server(
+            guest_handle_cast(arg, xen_hvm_create_ioreq_server_t));
+        break;
+    
+    case HVMOP_get_ioreq_server_info:
+        rc = hvmop_get_ioreq_server_info(
+            guest_handle_cast(arg, xen_hvm_get_ioreq_server_info_t));
+        break;
+    
+    case HVMOP_map_io_range_to_ioreq_server:
+        rc = hvmop_map_io_range_to_ioreq_server(
+            guest_handle_cast(arg, xen_hvm_io_range_t));
+        break;
+    
+    case HVMOP_unmap_io_range_from_ioreq_server:
+        rc = hvmop_unmap_io_range_from_ioreq_server(
+            guest_handle_cast(arg, xen_hvm_io_range_t));
+        break;
+
+    case HVMOP_set_ioreq_server_state:
+        rc = hvmop_set_ioreq_server_state(
+            guest_handle_cast(arg, xen_hvm_set_ioreq_server_state_t));
+        break;
+    
+    case HVMOP_destroy_ioreq_server:
+        rc = hvmop_destroy_ioreq_server(
+            guest_handle_cast(arg, xen_hvm_destroy_ioreq_server_t));
+        break;
+    
     case HVMOP_set_evtchn_upcall_vector:
         rc = hvmop_set_evtchn_upcall_vector(
             guest_handle_cast(arg, xen_hvm_evtchn_upcall_vector_t));
@@ -4908,13 +5960,139 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
             guest_handle_cast(arg, xen_hvm_param_t));
         break;
 
+    case HVMOP_set_pci_intx_level:
+        rc = hvmop_set_pci_intx_level(
+            guest_handle_cast(arg, xen_hvm_set_pci_intx_level_t));
+        break;
+
+    case HVMOP_set_isa_irq_level:
+        rc = hvmop_set_isa_irq_level(
+            guest_handle_cast(arg, xen_hvm_set_isa_irq_level_t));
+        break;
+
+    case HVMOP_inject_msi:
+        rc = hvmop_inject_msi(
+            guest_handle_cast(arg, xen_hvm_inject_msi_t));
+        break;
+
+    case HVMOP_set_pci_link_route:
+        rc = hvmop_set_pci_link_route(
+            guest_handle_cast(arg, xen_hvm_set_pci_link_route_t));
+        break;
+
     case HVMOP_flush_tlbs:
         rc = guest_handle_is_null(arg) ? hvmop_flush_tlb_all() : -EINVAL;
         break;
 
+    case HVMOP_track_dirty_vram:
+    {
+        struct xen_hvm_track_dirty_vram a;
+        struct domain *d;
+
+        if ( copy_from_guest(&a, arg, 1) )
+            return -EFAULT;
+
+        rc = rcu_lock_remote_domain_by_id(a.domid, &d);
+        if ( rc != 0 )
+            return rc;
+
+        rc = -EINVAL;
+        if ( !is_hvm_domain(d) )
+            goto tdv_fail;
+
+        if ( a.nr > GB(1) >> PAGE_SHIFT )
+            goto tdv_fail;
+
+        rc = xsm_hvm_control(XSM_DM_PRIV, d, op);
+        if ( rc )
+            goto tdv_fail;
+
+        rc = -ESRCH;
+        if ( d->is_dying )
+            goto tdv_fail;
+
+        rc = -EINVAL;
+        if ( d->vcpu == NULL || d->vcpu[0] == NULL )
+            goto tdv_fail;
+
+        if ( shadow_mode_enabled(d) )
+            rc = shadow_track_dirty_vram(d, a.first_pfn, a.nr, a.dirty_bitmap);
+        else
+            rc = hap_track_dirty_vram(d, a.first_pfn, a.nr, a.dirty_bitmap);
+
+    tdv_fail:
+        rcu_unlock_domain(d);
+        break;
+    }
+
+    case HVMOP_modified_memory:
+    {
+        struct xen_hvm_modified_memory a;
+        struct domain *d;
+
+        if ( copy_from_guest(&a, arg, 1) )
+            return -EFAULT;
+
+        rc = rcu_lock_remote_domain_by_id(a.domid, &d);
+        if ( rc != 0 )
+            return rc;
+
+        rc = -EINVAL;
+        if ( !is_hvm_domain(d) )
+            goto modmem_fail;
+
+        rc = xsm_hvm_control(XSM_DM_PRIV, d, op);
+        if ( rc )
+            goto modmem_fail;
+
+        rc = -EINVAL;
+        if ( a.nr < start_iter ||
+             ((a.first_pfn + a.nr - 1) < a.first_pfn) ||
+             ((a.first_pfn + a.nr - 1) > domain_get_maximum_gpfn(d)) )
+            goto modmem_fail;
+
+        rc = 0;
+        if ( !paging_mode_log_dirty(d) )
+            goto modmem_fail;
+
+        while ( a.nr > start_iter )
+        {
+            unsigned long pfn = a.first_pfn + start_iter;
+            struct page_info *page;
+
+            page = get_page_from_gfn(d, pfn, NULL, P2M_UNSHARE);
+            if ( page )
+            {
+                paging_mark_dirty(d, page_to_mfn(page));
+                /* These are most probably not page tables any more */
+                /* don't take a long time and don't die either */
+                sh_remove_shadows(d, _mfn(page_to_mfn(page)), 1, 0);
+                put_page(page);
+            }
+
+            /* Check for continuation if it's not the last interation */
+            if ( a.nr > ++start_iter && !(start_iter & HVMOP_op_mask) &&
+                 hypercall_preempt_check() )
+            {
+                rc = -ERESTART;
+                break;
+            }
+        }
+
+    modmem_fail:
+        rcu_unlock_domain(d);
+        break;
+    }
+
     case HVMOP_get_mem_type:
         rc = hvmop_get_mem_type(
             guest_handle_cast(arg, xen_hvm_get_mem_type_t));
+        break;
+
+    case HVMOP_set_mem_type:
+        rc = hvmop_set_mem_type(
+            guest_handle_cast(arg, xen_hvm_set_mem_type_t),
+            &start_iter);
         break;
 
     case HVMOP_pagetable_dying:
@@ -4964,6 +6142,48 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
         break;
     }
 
+    case HVMOP_inject_trap: 
+    {
+        xen_hvm_inject_trap_t tr;
+        struct domain *d;
+        struct vcpu *v;
+
+        if ( copy_from_guest(&tr, arg, 1 ) )
+            return -EFAULT;
+
+        rc = rcu_lock_remote_domain_by_id(tr.domid, &d);
+        if ( rc != 0 )
+            return rc;
+
+        rc = -EINVAL;
+        if ( !is_hvm_domain(d) )
+            goto injtrap_fail;
+
+        rc = xsm_hvm_control(XSM_DM_PRIV, d, op);
+        if ( rc )
+            goto injtrap_fail;
+
+        rc = -ENOENT;
+        if ( tr.vcpuid >= d->max_vcpus || (v = d->vcpu[tr.vcpuid]) == NULL )
+            goto injtrap_fail;
+        
+        if ( v->arch.hvm_vcpu.inject_trap.vector != -1 )
+            rc = -EBUSY;
+        else 
+        {
+            v->arch.hvm_vcpu.inject_trap.vector = tr.vector;
+            v->arch.hvm_vcpu.inject_trap.type = tr.type;
+            v->arch.hvm_vcpu.inject_trap.error_code = tr.error_code;
+            v->arch.hvm_vcpu.inject_trap.insn_len = tr.insn_len;
+            v->arch.hvm_vcpu.inject_trap.cr2 = tr.cr2;
+            rc = 0;
+        }
+
+    injtrap_fail:
+        rcu_unlock_domain(d);
+        break;
+    }
+
     case HVMOP_guest_request_vm_event:
         if ( guest_handle_is_null(arg) )
             monitor_guest_request();
@@ -4972,7 +6192,7 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
         break;
 
     case HVMOP_altp2m:
-        rc = current->hcall_compat ? compat_altp2m_op(arg) : do_altp2m_op(arg);
+        rc = do_altp2m_op(arg);
         break;
 
     default:
@@ -4984,8 +6204,11 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
     }
 
     if ( rc == -ERESTART )
+    {
+        ASSERT(!(start_iter & mask));
         rc = hypercall_create_continuation(__HYPERVISOR_hvm_op, "lh",
-                                           op, arg);
+                                           op | start_iter, arg);
+    }
 
     return rc;
 }
@@ -5025,167 +6248,32 @@ void hvm_toggle_singlestep(struct vcpu *v)
     v->arch.hvm_vcpu.single_step = !v->arch.hvm_vcpu.single_step;
 }
 
+int hvm_set_mode(struct vcpu *v, int mode)
+{
+
+    switch ( mode )
+    {
+    case 4:
+        v->arch.hvm_vcpu.guest_efer &= ~(EFER_LMA | EFER_LME);
+        break;
+    case 8:
+        v->arch.hvm_vcpu.guest_efer |= (EFER_LMA | EFER_LME);
+        break;
+    default:
+        return -EOPNOTSUPP;
+    }
+
+    hvm_update_guest_efer(v);
+
+    if ( hvm_funcs.set_mode )
+        return hvm_funcs.set_mode(v, mode);
+
+    return 0;
+}
+
 void hvm_domain_soft_reset(struct domain *d)
 {
     hvm_destroy_all_ioreq_servers(d);
-}
-
-/*
- * Segment caches in VMCB/VMCS are inconsistent about which bits are checked,
- * important, and preserved across vmentry/exit.  Cook the values to make them
- * closer to what is architecturally expected from entries in the segment
- * cache.
- */
-void hvm_get_segment_register(struct vcpu *v, enum x86_segment seg,
-                              struct segment_register *reg)
-{
-    hvm_funcs.get_segment_register(v, seg, reg);
-
-    switch ( seg )
-    {
-    case x86_seg_ss:
-        /* SVM may retain %ss.DB when %ss is loaded with a NULL selector. */
-        if ( !reg->p )
-            reg->db = 0;
-        break;
-
-    case x86_seg_tr:
-        /*
-         * SVM doesn't track %tr.B. Architecturally, a loaded TSS segment will
-         * always be busy.
-         */
-        reg->type |= 0x2;
-
-        /*
-         * %cs and %tr are unconditionally present.  SVM ignores these present
-         * bits and will happily run without them set.
-         */
-    case x86_seg_cs:
-        reg->p = 1;
-        break;
-
-    case x86_seg_gdtr:
-    case x86_seg_idtr:
-        /*
-         * Treat GDTR/IDTR as being present system segments.  This avoids them
-         * needing special casing for segmentation checks.
-         */
-        reg->attr = 0x80;
-        break;
-
-    default: /* Avoid triggering -Werror=switch */
-        break;
-    }
-
-    if ( reg->p )
-    {
-        /*
-         * For segments which are present/usable, cook the system flag.  SVM
-         * ignores the S bit on all segments and will happily run with them in
-         * any state.
-         */
-        reg->s = is_x86_user_segment(seg);
-
-        /*
-         * SVM discards %cs.G on #VMEXIT.  Other user segments do have .G
-         * tracked, but Linux commit 80112c89ed87 "KVM: Synthesize G bit for
-         * all segments." indicates that this isn't necessarily the case when
-         * nested under ESXi.
-         *
-         * Unconditionally recalculate G.
-         */
-        reg->g = !!(reg->limit >> 20);
-
-        /*
-         * SVM doesn't track the Accessed flag.  It will always be set for
-         * usable user segments loaded into the descriptor cache.
-         */
-        if ( is_x86_user_segment(seg) )
-            reg->type |= 0x1;
-    }
-}
-
-void hvm_set_segment_register(struct vcpu *v, enum x86_segment seg,
-                              struct segment_register *reg)
-{
-    /* Set G to match the limit field.  VT-x cares, while SVM doesn't. */
-    if ( reg->p )
-        reg->g = !!(reg->limit >> 20);
-
-    switch ( seg )
-    {
-    case x86_seg_cs:
-        ASSERT(reg->p);                              /* Usable. */
-        ASSERT(reg->s);                              /* User segment. */
-        ASSERT(reg->type & 0x1);                     /* Accessed. */
-        ASSERT((reg->base >> 32) == 0);              /* Upper bits clear. */
-        break;
-
-    case x86_seg_ss:
-        if ( reg->p )
-        {
-            ASSERT(reg->s);                          /* User segment. */
-            ASSERT(!(reg->type & 0x8));              /* Data segment. */
-            ASSERT(reg->type & 0x2);                 /* Writeable. */
-            ASSERT(reg->type & 0x1);                 /* Accessed. */
-            ASSERT((reg->base >> 32) == 0);          /* Upper bits clear. */
-        }
-        break;
-
-    case x86_seg_ds:
-    case x86_seg_es:
-    case x86_seg_fs:
-    case x86_seg_gs:
-        if ( reg->p )
-        {
-            ASSERT(reg->s);                          /* User segment. */
-
-            if ( reg->type & 0x8 )
-                ASSERT(reg->type & 0x2);             /* Readable. */
-
-            ASSERT(reg->type & 0x1);                 /* Accessed. */
-
-            if ( seg == x86_seg_fs || seg == x86_seg_gs )
-                ASSERT(is_canonical_address(reg->base));
-            else
-                ASSERT((reg->base >> 32) == 0);      /* Upper bits clear. */
-        }
-        break;
-
-    case x86_seg_tr:
-        ASSERT(reg->p);                              /* Usable. */
-        ASSERT(!reg->s);                             /* System segment. */
-        ASSERT(!(reg->sel & 0x4));                   /* !TI. */
-        if ( reg->type == SYS_DESC_tss_busy )
-            ASSERT(is_canonical_address(reg->base));
-        else if ( reg->type == SYS_DESC_tss16_busy )
-            ASSERT((reg->base >> 32) == 0);
-        else
-            ASSERT(!"%tr typecheck failure");
-        break;
-
-    case x86_seg_ldtr:
-        if ( reg->p )
-        {
-            ASSERT(!reg->s);                         /* System segment. */
-            ASSERT(!(reg->sel & 0x4));               /* !TI. */
-            ASSERT(reg->type == SYS_DESC_ldt);
-            ASSERT(is_canonical_address(reg->base));
-        }
-        break;
-
-    case x86_seg_gdtr:
-    case x86_seg_idtr:
-        ASSERT(is_canonical_address(reg->base));
-        ASSERT((reg->limit >> 16) == 0);             /* Upper bits clear. */
-        break;
-
-    default:
-        ASSERT_UNREACHABLE();
-        return;
-    }
-
-    hvm_funcs.set_segment_register(v, seg, reg);
 }
 
 /*

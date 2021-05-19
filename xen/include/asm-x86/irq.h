@@ -3,11 +3,12 @@
 
 /* (C) 1992, 1993 Linus Torvalds, (C) 1997 Ingo Molnar */
 
+#include <xen/config.h>
 #include <asm/atomic.h>
 #include <asm/numa.h>
 #include <xen/cpumask.h>
 #include <xen/smp.h>
-#include <asm/hvm/irq.h>
+#include <xen/hvm/irq.h>
 #include <irq_vectors.h>
 #include <asm/percpu.h>
 
@@ -51,7 +52,7 @@ struct arch_irq_desc {
 typedef int vector_irq_t[NR_VECTORS];
 DECLARE_PER_CPU(vector_irq_t, vector_irq);
 
-extern bool opt_noirqbalance;
+extern bool_t opt_noirqbalance;
 
 #define OPT_IRQ_VECTOR_MAP_DEFAULT 0 /* Do the default thing  */
 #define OPT_IRQ_VECTOR_MAP_NONE    1 /* None */ 
@@ -108,7 +109,7 @@ void mask_8259A(void);
 void unmask_8259A(void);
 void init_8259A(int aeoi);
 void make_8259A_irq(unsigned int irq);
-bool bogus_8259A_irq(unsigned int irq);
+bool_t bogus_8259A_irq(unsigned int irq);
 int i8259A_suspend(void);
 int i8259A_resume(void);
 
@@ -145,10 +146,10 @@ int get_free_pirqs(struct domain *, unsigned int nr);
 void free_domain_pirqs(struct domain *d);
 int map_domain_emuirq_pirq(struct domain *d, int pirq, int irq);
 int unmap_domain_pirq_emuirq(struct domain *d, int pirq);
-bool hvm_domain_use_pirq(const struct domain *, const struct pirq *);
+bool_t hvm_domain_use_pirq(const struct domain *, const struct pirq *);
 
 /* Reset irq affinities to match the given CPU mask. */
-void fixup_irqs(const cpumask_t *mask, bool verbose);
+void fixup_irqs(const cpumask_t *mask, bool_t verbose);
 void fixup_eoi(void);
 
 int  init_irq_data(void);
@@ -196,13 +197,8 @@ void cleanup_domain_irq_mapping(struct domain *);
 #define IRQ_PT -2
 #define IRQ_MSI_EMU -3
 
-bool cpu_has_pending_apic_eoi(void);
+bool_t cpu_has_pending_apic_eoi(void);
 
 static inline void arch_move_irqs(struct vcpu *v) { }
-
-struct msi_info;
-int allocate_and_map_gsi_pirq(struct domain *d, int index, int *pirq_p);
-int allocate_and_map_msi_pirq(struct domain *d, int index, int *pirq_p,
-                              int type, struct msi_info *msi);
 
 #endif /* _ASM_HW_IRQ_H */

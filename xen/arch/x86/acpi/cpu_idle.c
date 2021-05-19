@@ -30,6 +30,7 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/lib.h>
 #include <xen/types.h>
@@ -79,7 +80,7 @@ static void lapic_timer_nop(void) { }
 void (*__read_mostly lapic_timer_off)(void);
 void (*__read_mostly lapic_timer_on)(void);
 
-bool lapic_timer_init(void)
+bool_t lapic_timer_init(void)
 {
     if ( boot_cpu_has(X86_FEATURE_ARAT) )
     {
@@ -97,9 +98,9 @@ bool lapic_timer_init(void)
         lapic_timer_on = pit_broadcast_exit;
     }
     else
-        return false;
+        return 0;
 
-    return true;
+    return 1;
 }
 
 static uint64_t (*__read_mostly tick_to_ns)(uint64_t) = acpi_pm_tick_to_ns;
@@ -107,7 +108,7 @@ static uint64_t (*__read_mostly tick_to_ns)(uint64_t) = acpi_pm_tick_to_ns;
 void (*__read_mostly pm_idle_save)(void);
 unsigned int max_cstate __read_mostly = ACPI_PROCESSOR_MAX_POWER - 1;
 integer_param("max_cstate", max_cstate);
-static bool __read_mostly local_apic_timer_c2_ok;
+static bool_t __read_mostly local_apic_timer_c2_ok;
 boolean_param("lapic_timer_c2_ok", local_apic_timer_c2_ok);
 
 struct acpi_processor_power *__read_mostly processor_powers[NR_CPUS];
@@ -163,13 +164,7 @@ static void do_get_hw_residencies(void *arg)
     case 0x56:
     /* Skylake */
     case 0x4E:
-    case 0x55:
     case 0x5E:
-    /* Cannon Lake */
-    case 0x66:
-    /* Kaby Lake */
-    case 0x8E:
-    case 0x9E:
         GET_PC2_RES(hw_res->pc2);
         GET_CC7_RES(hw_res->cc7);
         /* fall through */
@@ -188,10 +183,8 @@ static void do_get_hw_residencies(void *arg)
         GET_CC3_RES(hw_res->cc3);
         GET_CC6_RES(hw_res->cc6);
         break;
-    /* Xeon Phi Knights Landing */
+    /* next gen Xeon Phi */
     case 0x57:
-    /* Xeon Phi Knights Mill */
-    case 0x85:
         GET_CC3_RES(hw_res->mc0); /* abusing GET_CC3_RES */
         GET_CC6_RES(hw_res->mc6); /* abusing GET_CC6_RES */
         GET_PC2_RES(hw_res->pc2);
@@ -222,8 +215,6 @@ static void do_get_hw_residencies(void *arg)
     /* Goldmont */
     case 0x5C:
     case 0x5F:
-    /* Goldmont Plus */
-    case 0x7A:
         GET_PC2_RES(hw_res->pc2);
         GET_PC3_RES(hw_res->pc3);
         GET_PC6_RES(hw_res->pc6);
@@ -387,7 +378,7 @@ void cpuidle_wakeup_mwait(cpumask_t *mask)
     cpumask_andnot(mask, mask, &target);
 }
 
-bool arch_skip_send_event_check(unsigned int cpu)
+bool_t arch_skip_send_event_check(unsigned int cpu)
 {
     /*
      * This relies on softirq_pending() and mwait_wakeup() to access data
@@ -515,7 +506,7 @@ void trace_exit_reason(u32 *irq_traced)
  * may not be sent if software enters core C6 during an interrupt service 
  * routine. So we don't enter deep Cx state if there is an EOI pending.
  */
-static bool errata_c6_eoi_workaround(void)
+bool_t errata_c6_eoi_workaround(void)
 {
     static int8_t fix_needed = -1;
 
@@ -1191,11 +1182,10 @@ long set_cx_pminfo(uint32_t cpu, struct xen_processor_power *power)
     cpu_id = get_cpu_id(cpu);
     if ( cpu_id == -1 )
     {
-        static bool warn_once = true;
-
+        static bool_t warn_once = 1;
         if ( warn_once || opt_cpu_info )
             printk(XENLOG_WARNING "No CPU ID for APIC ID %#x\n", cpu);
-        warn_once = false;
+        warn_once = 0;
         return -EINVAL;
     }
 
@@ -1367,10 +1357,12 @@ void cpuidle_disable_deep_cstate(void)
             max_cstate = 1;
     }
 
+    mb();
+
     hpet_disable_legacy_broadcast();
 }
 
-bool cpuidle_using_deep_cstate(void)
+bool_t cpuidle_using_deep_cstate(void)
 {
     return xen_cpuidle && max_cstate > (local_apic_timer_c2_ok ? 2 : 1);
 }

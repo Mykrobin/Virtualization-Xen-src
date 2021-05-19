@@ -17,20 +17,6 @@
 
 #include "private.h"
 
-static int all_restrict_cb(Xentoolcore__Active_Handle *ah, domid_t domid) {
-    xencall_handle *xcall = CONTAINER_OF(ah, *xcall, tc_ah);
-    int rc;
-
-    rc = xentoolcore__restrict_by_dup2_null(xcall->buf_fd);
-    if ( rc )
-        goto out;
-
-    rc = xentoolcore__restrict_by_dup2_null(xcall->fd);
-
-out:
-    return rc;
-}
-
 xencall_handle *xencall_open(xentoollog_logger *logger, unsigned open_flags)
 {
     xencall_handle *xcall = malloc(sizeof(*xcall));
@@ -39,9 +25,6 @@ xencall_handle *xencall_open(xentoollog_logger *logger, unsigned open_flags)
     if (!xcall) return NULL;
 
     xcall->fd = -1;
-    xcall->buf_fd = -1;
-    xcall->tc_ah.restrict_callback = all_restrict_cb;
-    xentoolcore__register_active_handle(&xcall->tc_ah);
 
     xcall->flags = open_flags;
     xcall->buffer_cache_nr = 0;
@@ -69,7 +52,6 @@ xencall_handle *xencall_open(xentoollog_logger *logger, unsigned open_flags)
     return xcall;
 
 err:
-    xentoolcore__deregister_active_handle(&xcall->tc_ah);
     osdep_xencall_close(xcall);
     xtl_logger_destroy(xcall->logger_tofree);
     free(xcall);
@@ -83,7 +65,6 @@ int xencall_close(xencall_handle *xcall)
     if ( !xcall )
         return 0;
 
-    xentoolcore__deregister_active_handle(&xcall->tc_ah);
     rc = osdep_xencall_close(xcall);
     buffer_release_cache(xcall);
     xtl_logger_destroy(xcall->logger_tofree);

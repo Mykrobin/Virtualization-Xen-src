@@ -76,18 +76,6 @@ AC_ARG_WITH([xen-dumpdir],
     [xen_dumpdir_path=$withval],
     [xen_dumpdir_path=$localstatedir/lib/xen/dump])
 
-AC_ARG_WITH([rundir],
-    AS_HELP_STRING([--with-rundir=DIR],
-    [Path to directory for runtime data. [LOCALSTATEDIR/run]]),
-    [rundir_path=$withval],
-    [rundir_path=$localstatedir/run])
-
-AC_ARG_WITH([debugdir],
-    AS_HELP_STRING([--with-debugdir=DIR],
-    [Path to directory for debug symbols. [PREFIX/lib/debug]]),
-    [debugdir_path=$withval],
-    [debugdir_path=$prefix/lib/debug])
-
 if test "$libexecdir" = '${exec_prefix}/libexec' ; then
     case "$host_os" in
          *netbsd*) ;;
@@ -110,7 +98,7 @@ AC_SUBST(LIBEXEC_INC)
 XENFIRMWAREDIR=${LIBEXEC}/boot
 AC_SUBST(XENFIRMWAREDIR)
 
-XEN_RUN_DIR=$rundir_path/xen
+XEN_RUN_DIR=$localstatedir/run/xen
 AC_SUBST(XEN_RUN_DIR)
 
 XEN_LOG_DIR=$localstatedir/log/xen
@@ -119,7 +107,7 @@ AC_SUBST(XEN_LOG_DIR)
 XEN_LIB_STORED=$localstatedir/lib/xenstored
 AC_SUBST(XEN_LIB_STORED)
 
-XEN_RUN_STORED=$rundir_path/xenstored
+XEN_RUN_STORED=$localstatedir/run/xenstored
 AC_SUBST(XEN_RUN_STORED)
 
 XEN_LIB_DIR=$localstatedir/lib/xen
@@ -152,19 +140,4 @@ AC_SUBST(XEN_PAGING_DIR)
 
 XEN_DUMP_DIR=$xen_dumpdir_path
 AC_SUBST(XEN_DUMP_DIR)
-
-DEBUG_DIR=$debugdir_path
-AC_SUBST(DEBUG_DIR)
 ])
-
-case "$host_os" in
-*freebsd*) XENSTORED_KVA=/dev/xen/xenstored ;;
-*) XENSTORED_KVA=/proc/xen/xsd_kva ;;
-esac
-AC_SUBST(XENSTORED_KVA)
-
-case "$host_os" in
-*freebsd*) XENSTORED_PORT=/dev/xen/xenstored ;;
-*) XENSTORED_PORT=/proc/xen/xsd_port ;;
-esac
-AC_SUBST(XENSTORED_PORT)

@@ -48,21 +48,6 @@ int evtchn_send(struct domain *d, unsigned int lport);
 /* Bind a local event-channel port to the specified VCPU. */
 long evtchn_bind_vcpu(unsigned int port, unsigned int vcpu_id);
 
-/* Bind a VIRQ. */
-int evtchn_bind_virq(evtchn_bind_virq_t *bind, evtchn_port_t port);
-
-/* Get the status of an event channel port. */
-int evtchn_status(evtchn_status_t *status);
-
-/* Close an event channel. */
-int evtchn_close(struct domain *d1, int port1, bool guest);
-
-/* Free an event channel. */
-void evtchn_free(struct domain *d, struct evtchn *chn);
-
-/* Allocate a specific event channel port. */
-int evtchn_allocate_port(struct domain *d, unsigned int port);
-
 /* Unmask a local event-channel port. */
 int evtchn_unmask(unsigned int port);
 
@@ -149,13 +134,13 @@ struct evtchn_port_ops {
     void (*set_pending)(struct vcpu *v, struct evtchn *evtchn);
     void (*clear_pending)(struct domain *d, struct evtchn *evtchn);
     void (*unmask)(struct domain *d, struct evtchn *evtchn);
-    bool (*is_pending)(const struct domain *d, evtchn_port_t port);
-    bool (*is_masked)(const struct domain *d, evtchn_port_t port);
+    bool_t (*is_pending)(struct domain *d, evtchn_port_t port);
+    bool_t (*is_masked)(struct domain *d, evtchn_port_t port);
     /*
      * Is the port unavailable because it's still being cleaned up
      * after being closed?
      */
-    bool (*is_busy)(const struct domain *d, evtchn_port_t port);
+    bool_t (*is_busy)(struct domain *d, evtchn_port_t port);
     int (*set_priority)(struct domain *d, struct evtchn *evtchn,
                         unsigned int priority);
     void (*print_state)(struct domain *d, const struct evtchn *evtchn);
@@ -186,23 +171,23 @@ static inline void evtchn_port_unmask(struct domain *d,
     d->evtchn_port_ops->unmask(d, evtchn);
 }
 
-static inline bool evtchn_port_is_pending(const struct domain *d,
-                                          evtchn_port_t port)
+static inline bool_t evtchn_port_is_pending(struct domain *d,
+                                            evtchn_port_t port)
 {
     return d->evtchn_port_ops->is_pending(d, port);
 }
 
-static inline bool evtchn_port_is_masked(const struct domain *d,
-                                         evtchn_port_t port)
+static inline bool_t evtchn_port_is_masked(struct domain *d,
+                                           evtchn_port_t port)
 {
     return d->evtchn_port_ops->is_masked(d, port);
 }
 
-static inline bool evtchn_port_is_busy(const struct domain *d,
-                                       evtchn_port_t port)
+static inline bool_t evtchn_port_is_busy(struct domain *d, evtchn_port_t port)
 {
-    return d->evtchn_port_ops->is_busy &&
-           d->evtchn_port_ops->is_busy(d, port);
+    if ( d->evtchn_port_ops->is_busy )
+        return d->evtchn_port_ops->is_busy(d, port);
+    return 0;
 }
 
 static inline int evtchn_port_set_priority(struct domain *d,

@@ -17,6 +17,7 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/compile.h>
 #include <xen/types.h>
 #include <xen/device_tree.h>
@@ -45,12 +46,6 @@
 #include <asm/setup.h>
 
 struct domain *dom_xen, *dom_io, *dom_cow;
-
-/* Override macros from asm/page.h to make them work with mfn_t */
-#undef virt_to_mfn
-#define virt_to_mfn(va) _mfn(__virt_to_mfn(va))
-#undef mfn_to_virt
-#define mfn_to_virt(mfn) __mfn_to_virt(mfn_x(mfn))
 
 /* Static start-of-day pagetables that we use before the allocators
  * are up. These are used by all CPUs during bringup before switching
@@ -146,12 +141,11 @@ uint64_t init_ttbr;
 static paddr_t phys_offset;
 
 /* Limits of the Xen heap */
-mfn_t xenheap_mfn_start __read_mostly = INVALID_MFN_INITIALIZER;
-mfn_t xenheap_mfn_end __read_mostly;
+unsigned long xenheap_mfn_start __read_mostly = ~0UL;
+unsigned long xenheap_mfn_end __read_mostly;
 vaddr_t xenheap_virt_end __read_mostly;
 #ifdef CONFIG_ARM_64
 vaddr_t xenheap_virt_start __read_mostly;
-unsigned long xenheap_base_pdx __read_mostly;
 #endif
 
 unsigned long frametable_base_pdx __read_mostly;
@@ -190,7 +184,7 @@ void dump_pt_walk(paddr_t ttbr, paddr_t addr,
                   unsigned int nr_root_tables)
 {
     static const char *level_strs[4] = { "0TH", "1ST", "2ND", "3RD" };
-    const mfn_t root_mfn = maddr_to_mfn(ttbr);
+    const unsigned long root_pfn = paddr_to_pfn(ttbr);
     const unsigned int offsets[4] = {
         zeroeth_table_offset(addr),
         first_table_offset(addr),
@@ -224,7 +218,7 @@ void dump_pt_walk(paddr_t ttbr, paddr_t addr,
     else
         root_table = 0;
 
-    mapping = map_domain_page(mfn_add(root_mfn, root_table));
+    mapping = map_domain_page(_mfn(root_pfn + root_table));
 
     for ( level = root_level; ; level++ )
     {
@@ -263,78 +257,10 @@ void dump_hyp_walk(vaddr_t addr)
     dump_pt_walk(ttbr, addr, HYP_PT_ROOT_LEVEL, 1);
 }
 
-/*
- * Standard entry type that we'll use to build Xen's own pagetables.
- * We put the same permissions at every level, because they're ignored
- * by the walker in non-leaf entries.
- */
-static inline lpae_t mfn_to_xen_entry(mfn_t mfn, unsigned attr)
-{
-    lpae_t e = (lpae_t) {
-        .pt = {
-            .valid = 1,           /* Mappings are present */
-            .table = 0,           /* Set to 1 for links and 4k maps */
-            .ai = attr,
-            .ns = 1,              /* Hyp mode is in the non-secure world */
-            .up = 1,              /* See below */
-            .ro = 0,              /* Assume read-write */
-            .af = 1,              /* No need for access tracking */
-            .ng = 1,              /* Makes TLB flushes easier */
-            .contig = 0,          /* Assume non-contiguous */
-            .xn = 1,              /* No need to execute outside .text */
-            .avail = 0,           /* Reference count for domheap mapping */
-        }};
-    /*
-     * For EL2 stage-1 page table, up (aka AP[1]) is RES1 as the translation
-     * regime applies to only one exception level (see D4.4.4 and G4.6.1
-     * in ARM DDI 0487B.a). If this changes, remember to update the
-     * hard-coded values in head.S too.
-     */
-
-    switch ( attr )
-    {
-    case MT_NORMAL_NC:
-        /*
-         * ARM ARM: Overlaying the shareability attribute (DDI
-         * 0406C.b B3-1376 to 1377)
-         *
-         * A memory region with a resultant memory type attribute of Normal,
-         * and a resultant cacheability attribute of Inner Non-cacheable,
-         * Outer Non-cacheable, must have a resultant shareability attribute
-         * of Outer Shareable, otherwise shareability is UNPREDICTABLE.
-         *
-         * On ARMv8 sharability is ignored and explicitly treated as Outer
-         * Shareable for Normal Inner Non_cacheable, Outer Non-cacheable.
-         */
-        e.pt.sh = LPAE_SH_OUTER;
-        break;
-    case MT_DEVICE_nGnRnE:
-    case MT_DEVICE_nGnRE:
-        /*
-         * Shareability is ignored for non-Normal memory, Outer is as
-         * good as anything.
-         *
-         * On ARMv8 sharability is ignored and explicitly treated as Outer
-         * Shareable for any device memory type.
-         */
-        e.pt.sh = LPAE_SH_OUTER;
-        break;
-    default:
-        e.pt.sh = LPAE_SH_INNER;  /* Xen mappings are SMP coherent */
-        break;
-    }
-
-    ASSERT(!(mfn_to_maddr(mfn) & ~PADDR_MASK));
-
-    e.pt.base = mfn_x(mfn);
-
-    return e;
-}
-
 /* Map a 4k page in a fixmap entry */
-void set_fixmap(unsigned map, mfn_t mfn, unsigned int flags)
+void set_fixmap(unsigned map, unsigned long mfn, unsigned attributes)
 {
-    lpae_t pte = mfn_to_xen_entry(mfn, PAGE_AI_MASK(flags));
+    lpae_t pte = mfn_to_xen_entry(mfn, attributes);
     pte.pt.table = 1; /* 4k mappings always have this bit set */
     pte.pt.xn = 1;
     write_pte(xen_fixmap + third_table_offset(FIXMAP_ADDR(map)), pte);
@@ -372,7 +298,7 @@ static void __init create_mappings(lpae_t *second,
 
     count = nr_mfns / LPAE_ENTRIES;
     p = second + second_linear_offset(virt_offset);
-    pte = mfn_to_xen_entry(_mfn(base_mfn), MT_NORMAL);
+    pte = mfn_to_xen_entry(base_mfn, WRITEALLOC);
     if ( granularity == 16 * LPAE_ENTRIES )
         pte.pt.contig = 1;  /* These maps are in 16-entry contiguous chunks. */
     for ( i = 0; i < count; i++ )
@@ -425,7 +351,7 @@ void *map_domain_page(mfn_t mfn)
         else if ( map[slot].pt.avail == 0 )
         {
             /* Commandeer this 2MB slot */
-            pte = mfn_to_xen_entry(_mfn(slot_mfn), MT_NORMAL);
+            pte = mfn_to_xen_entry(slot_mfn, WRITEALLOC);
             pte.pt.avail = 1;
             write_pte(map + slot, pte);
             break;
@@ -480,7 +406,7 @@ void unmap_domain_page(const void *va)
     local_irq_restore(flags);
 }
 
-mfn_t domain_page_map_to_mfn(const void *ptr)
+unsigned long domain_page_map_to_mfn(const void *ptr)
 {
     unsigned long va = (unsigned long)ptr;
     lpae_t *map = this_cpu(xen_dommap);
@@ -493,7 +419,7 @@ mfn_t domain_page_map_to_mfn(const void *ptr)
     ASSERT(slot >= 0 && slot < DOMHEAP_ENTRIES);
     ASSERT(map[slot].pt.avail != 0);
 
-    return _mfn(map[slot].pt.base + offset);
+    return map[slot].pt.base + offset;
 }
 #endif
 
@@ -523,7 +449,7 @@ void __init arch_init_memory(void)
      * Any Xen-heap pages that we will allow to be mapped will have
      * their domain field set to dom_xen.
      */
-    dom_xen = domain_create(DOMID_XEN, NULL);
+    dom_xen = domain_create(DOMID_XEN, DOMCRF_dummy, 0, NULL);
     BUG_ON(IS_ERR(dom_xen));
 
     /*
@@ -531,22 +457,22 @@ void __init arch_init_memory(void)
      * This domain owns I/O pages that are within the range of the page_info
      * array. Mappings occur at the priv of the caller.
      */
-    dom_io = domain_create(DOMID_IO, NULL);
+    dom_io = domain_create(DOMID_IO, DOMCRF_dummy, 0, NULL);
     BUG_ON(IS_ERR(dom_io));
 
     /*
      * Initialise our COW domain.
      * This domain owns sharable pages.
      */
-    dom_cow = domain_create(DOMID_COW, NULL);
+    dom_cow = domain_create(DOMID_COW, DOMCRF_dummy, 0, NULL);
     BUG_ON(IS_ERR(dom_cow));
 }
 
 static inline lpae_t pte_of_xenaddr(vaddr_t va)
 {
     paddr_t ma = va + phys_offset;
-
-    return mfn_to_xen_entry(maddr_to_mfn(ma), MT_NORMAL);
+    unsigned long mfn = ma >> PAGE_SHIFT;
+    return mfn_to_xen_entry(mfn, WRITEALLOC);
 }
 
 /* Map the FDT in the early boot page table */
@@ -606,13 +532,6 @@ void __init remove_early_mappings(void)
 
 extern void relocate_xen(uint64_t ttbr, void *src, void *dst, size_t len);
 
-/* Clear a translation table and clean & invalidate the cache */
-static void clear_table(void *table)
-{
-    clear_page(table);
-    clean_and_invalidate_dcache_va_range(table, PAGE_SIZE);
-}
-
 /* Boot-time pagetable setup.
  * Changes here may need matching changes in head.S */
 void __init setup_pagetables(unsigned long boot_phys_offset, paddr_t xen_paddr)
@@ -652,31 +571,11 @@ void __init setup_pagetables(unsigned long boot_phys_offset, paddr_t xen_paddr)
     }
 #endif
 
-    /* Break up the Xen mapping into 4k pages and protect them separately. */
-    for ( i = 0; i < LPAE_ENTRIES; i++ )
-    {
-        mfn_t mfn = mfn_add(maddr_to_mfn(xen_paddr), i);
-        unsigned long va = XEN_VIRT_START + (i << PAGE_SHIFT);
-
-        if ( !is_kernel(va) )
-            break;
-        pte = mfn_to_xen_entry(mfn, MT_NORMAL);
-        pte.pt.table = 1; /* 4k mappings always have this bit set */
-        if ( is_kernel_text(va) || is_kernel_inittext(va) )
-        {
-            pte.pt.xn = 0;
-            pte.pt.ro = 1;
-        }
-        if ( is_kernel_rodata(va) )
-            pte.pt.ro = 1;
-        xen_xenmap[i] = pte;
-    }
-
     /* Initialise xen second level entries ... */
     /* ... Xen's text etc */
 
-    pte = pte_of_xenaddr((vaddr_t)xen_xenmap);
-    pte.pt.table = 1;
+    pte = mfn_to_xen_entry(xen_paddr>>PAGE_SHIFT, WRITEALLOC);
+    pte.pt.xn = 0;/* Contains our text mapping! */
     xen_second[second_table_offset(XEN_VIRT_START)] = pte;
 
     /* ... Fixmap */
@@ -692,7 +591,7 @@ void __init setup_pagetables(unsigned long boot_phys_offset, paddr_t xen_paddr)
 
     /* ... Boot Misc area for xen relocation */
     dest_va = BOOT_RELOC_VIRT_START;
-    pte = mfn_to_xen_entry(maddr_to_mfn(xen_paddr), MT_NORMAL);
+    pte = mfn_to_xen_entry(xen_paddr >> PAGE_SHIFT, WRITEALLOC);
     /* Map the destination in xen_second. */
     xen_second[second_table_offset(dest_va)] = pte;
     /* Map the destination in boot_second. */
@@ -708,13 +607,43 @@ void __init setup_pagetables(unsigned long boot_phys_offset, paddr_t xen_paddr)
 
     /* Clear the copy of the boot pagetables. Each secondary CPU
      * rebuilds these itself (see head.S) */
-    clear_table(boot_pgtable);
+    memset(boot_pgtable, 0x0, PAGE_SIZE);
+    clean_and_invalidate_dcache(boot_pgtable);
 #ifdef CONFIG_ARM_64
-    clear_table(boot_first);
-    clear_table(boot_first_id);
+    memset(boot_first, 0x0, PAGE_SIZE);
+    clean_and_invalidate_dcache(boot_first);
+    memset(boot_first_id, 0x0, PAGE_SIZE);
+    clean_and_invalidate_dcache(boot_first_id);
 #endif
-    clear_table(boot_second);
-    clear_table(boot_third);
+    memset(boot_second, 0x0, PAGE_SIZE);
+    clean_and_invalidate_dcache(boot_second);
+    memset(boot_third, 0x0, PAGE_SIZE);
+    clean_and_invalidate_dcache(boot_third);
+
+    /* Break up the Xen mapping into 4k pages and protect them separately. */
+    for ( i = 0; i < LPAE_ENTRIES; i++ )
+    {
+        unsigned long mfn = paddr_to_pfn(xen_paddr) + i;
+        unsigned long va = XEN_VIRT_START + (i << PAGE_SHIFT);
+        if ( !is_kernel(va) )
+            break;
+        pte = mfn_to_xen_entry(mfn, WRITEALLOC);
+        pte.pt.table = 1; /* 4k mappings always have this bit set */
+        if ( is_kernel_text(va) || is_kernel_inittext(va) )
+        {
+            pte.pt.xn = 0;
+            pte.pt.ro = 1;
+        }
+        if ( is_kernel_rodata(va) )
+            pte.pt.ro = 1;
+        write_pte(xen_xenmap + i, pte);
+        /* No flush required here as page table is not hooked in yet. */
+    }
+
+    pte = pte_of_xenaddr((vaddr_t)xen_xenmap);
+    pte.pt.table = 1;
+    write_pte(xen_second + second_linear_offset(XEN_VIRT_START), pte);
+    /* TLBFLUSH and ISB would be needed here, but wait until we set WXN */
 
     /* From now on, no mapping may be both writable and executable. */
     WRITE_SYSREG32(READ_SYSREG32(SCTLR_EL2) | SCTLR_WXN, SCTLR_EL2);
@@ -768,8 +697,7 @@ int init_secondary_pagetables(int cpu)
      * domheap mapping pages. */
     for ( i = 0; i < DOMHEAP_SECOND_PAGES; i++ )
     {
-        pte = mfn_to_xen_entry(virt_to_mfn(domheap+i*LPAE_ENTRIES),
-                               MT_NORMAL);
+        pte = mfn_to_xen_entry(virt_to_mfn(domheap+i*LPAE_ENTRIES), WRITEALLOC);
         pte.pt.table = 1;
         write_pte(&first[first_table_offset(DOMHEAP_VIRT_START+i*FIRST_SIZE)], pte);
     }
@@ -805,8 +733,8 @@ void __init setup_xenheap_mappings(unsigned long base_mfn,
 
     /* Record where the xenheap is, for translation routines. */
     xenheap_virt_end = XENHEAP_VIRT_START + nr_mfns * PAGE_SIZE;
-    xenheap_mfn_start = _mfn(base_mfn);
-    xenheap_mfn_end = _mfn(base_mfn + nr_mfns);
+    xenheap_mfn_start = base_mfn;
+    xenheap_mfn_end = base_mfn + nr_mfns;
 }
 #else /* CONFIG_ARM_64 */
 void __init setup_xenheap_mappings(unsigned long base_mfn,
@@ -820,17 +748,16 @@ void __init setup_xenheap_mappings(unsigned long base_mfn,
     mfn = base_mfn & ~((FIRST_SIZE>>PAGE_SHIFT)-1);
 
     /* First call sets the xenheap physical and virtual offset. */
-    if ( mfn_eq(xenheap_mfn_start, INVALID_MFN) )
+    if ( xenheap_mfn_start == ~0UL )
     {
-        xenheap_mfn_start = _mfn(base_mfn);
-        xenheap_base_pdx = mfn_to_pdx(_mfn(base_mfn));
+        xenheap_mfn_start = base_mfn;
         xenheap_virt_start = DIRECTMAP_VIRT_START +
             (base_mfn - mfn) * PAGE_SIZE;
     }
 
-    if ( base_mfn < mfn_x(xenheap_mfn_start) )
+    if ( base_mfn < xenheap_mfn_start )
         panic("cannot add xenheap mapping at %lx below heap start %lx",
-              base_mfn, mfn_x(xenheap_mfn_start));
+              base_mfn, xenheap_mfn_start);
 
     end_mfn = base_mfn + nr_mfns;
 
@@ -838,7 +765,7 @@ void __init setup_xenheap_mappings(unsigned long base_mfn,
      * Virtual address aligned to previous 1GB to match physical
      * address alignment done above.
      */
-    vaddr = (vaddr_t)__mfn_to_virt(base_mfn) & FIRST_MASK;
+    vaddr = (vaddr_t)mfn_to_virt(base_mfn) & FIRST_MASK;
 
     while ( mfn < end_mfn )
     {
@@ -850,7 +777,7 @@ void __init setup_xenheap_mappings(unsigned long base_mfn,
             /* mfn_to_virt is not valid on the 1st 1st mfn, since it
              * is not within the xenheap. */
             first = slot == xenheap_first_first_slot ?
-                xenheap_first_first : __mfn_to_virt(p->pt.base);
+                xenheap_first_first : mfn_to_virt(p->pt.base);
         }
         else if ( xenheap_first_first_slot == -1)
         {
@@ -865,16 +792,16 @@ void __init setup_xenheap_mappings(unsigned long base_mfn,
         }
         else
         {
-            mfn_t first_mfn = alloc_boot_pages(1, 1);
+            unsigned long first_mfn = alloc_boot_pages(1, 1);
 
             clear_page(mfn_to_virt(first_mfn));
-            pte = mfn_to_xen_entry(first_mfn, MT_NORMAL);
+            pte = mfn_to_xen_entry(first_mfn, WRITEALLOC);
             pte.pt.table = 1;
             write_pte(p, pte);
             first = mfn_to_virt(first_mfn);
         }
 
-        pte = mfn_to_xen_entry(_mfn(mfn), MT_NORMAL);
+        pte = mfn_to_xen_entry(mfn, WRITEALLOC);
         /* TODO: Set pte.pt.contig when appropriate. */
         write_pte(&first[first_table_offset(vaddr)], pte);
 
@@ -889,15 +816,14 @@ void __init setup_xenheap_mappings(unsigned long base_mfn,
 /* Map a frame table to cover physical addresses ps through pe */
 void __init setup_frametable_mappings(paddr_t ps, paddr_t pe)
 {
-    unsigned long nr_pdxs = mfn_to_pdx(mfn_add(maddr_to_mfn(pe), -1)) -
-                            mfn_to_pdx(maddr_to_mfn(ps)) + 1;
+    unsigned long nr_pages = (pe - ps) >> PAGE_SHIFT;
+    unsigned long nr_pdxs = pfn_to_pdx(nr_pages);
     unsigned long frametable_size = nr_pdxs * sizeof(struct page_info);
-    mfn_t base_mfn;
+    unsigned long base_mfn;
     const unsigned long mapping_size = frametable_size < MB(32) ? MB(2) : MB(32);
 #ifdef CONFIG_ARM_64
     lpae_t *second, pte;
-    unsigned long nr_second;
-    mfn_t second_base;
+    unsigned long nr_second, second_base;
     int i;
 #endif
 
@@ -913,16 +839,15 @@ void __init setup_frametable_mappings(paddr_t ps, paddr_t pe)
     second = mfn_to_virt(second_base);
     for ( i = 0; i < nr_second; i++ )
     {
-        clear_page(mfn_to_virt(mfn_add(second_base, i)));
-        pte = mfn_to_xen_entry(mfn_add(second_base, i), MT_NORMAL);
+        clear_page(mfn_to_virt(second_base + i));
+        pte = mfn_to_xen_entry(second_base + i, WRITEALLOC);
         pte.pt.table = 1;
         write_pte(&xen_first[first_table_offset(FRAMETABLE_VIRT_START)+i], pte);
     }
-    create_mappings(second, 0, mfn_x(base_mfn), frametable_size >> PAGE_SHIFT,
-                    mapping_size);
+    create_mappings(second, 0, base_mfn, frametable_size >> PAGE_SHIFT, mapping_size);
 #else
-    create_mappings(xen_second, FRAMETABLE_VIRT_START, mfn_x(base_mfn),
-                    frametable_size >> PAGE_SHIFT, mapping_size);
+    create_mappings(xen_second, FRAMETABLE_VIRT_START,
+                    base_mfn, frametable_size >> PAGE_SHIFT, mapping_size);
 #endif
 
     memset(&frame_table[0], 0, nr_pdxs * sizeof(struct page_info));
@@ -968,7 +893,7 @@ static int create_xen_table(lpae_t *entry)
     if ( p == NULL )
         return -ENOMEM;
     clear_page(p);
-    pte = mfn_to_xen_entry(virt_to_mfn(p), MT_NORMAL);
+    pte = mfn_to_xen_entry(virt_to_mfn(p), WRITEALLOC);
     pte.pt.table = 1;
     write_pte(entry, pte);
     return 0;
@@ -983,114 +908,105 @@ enum xenmap_operation {
 
 static int create_xen_entries(enum xenmap_operation op,
                               unsigned long virt,
-                              mfn_t mfn,
+                              unsigned long mfn,
                               unsigned long nr_mfns,
-                              unsigned int flags)
+                              unsigned int ai)
 {
-    int rc = 0;
+    int rc;
     unsigned long addr = virt, addr_end = addr + nr_mfns * PAGE_SIZE;
-    lpae_t pte, *entry;
+    lpae_t pte;
     lpae_t *third = NULL;
 
-    for(; addr < addr_end; addr += PAGE_SIZE, mfn = mfn_add(mfn, 1))
+    for(; addr < addr_end; addr += PAGE_SIZE, mfn++)
     {
-        entry = &xen_second[second_linear_offset(addr)];
-        if ( !lpae_table(*entry) )
+        if ( !xen_second[second_linear_offset(addr)].pt.valid ||
+             !xen_second[second_linear_offset(addr)].pt.table )
         {
-            rc = create_xen_table(entry);
+            rc = create_xen_table(&xen_second[second_linear_offset(addr)]);
             if ( rc < 0 ) {
-                printk("%s: L2 failed\n", __func__);
+                printk("create_xen_entries: L2 failed\n");
                 goto out;
             }
         }
 
-        BUG_ON(!lpae_valid(*entry));
+        BUG_ON(!xen_second[second_linear_offset(addr)].pt.valid);
 
-        third = __mfn_to_virt(entry->pt.base);
-        entry = &third[third_table_offset(addr)];
+        third = __va(pfn_to_paddr(xen_second[second_linear_offset(addr)].pt.base));
 
         switch ( op ) {
             case INSERT:
             case RESERVE:
-                if ( lpae_valid(*entry) )
+                if ( third[third_table_offset(addr)].pt.valid )
                 {
-                    printk("%s: trying to replace an existing mapping addr=%lx mfn=%"PRI_mfn"\n",
-                           __func__, addr, mfn_x(mfn));
-                    rc = -EINVAL;
-                    goto out;
+                    printk("create_xen_entries: trying to replace an existing mapping addr=%lx mfn=%lx\n",
+                           addr, mfn);
+                    return -EINVAL;
                 }
                 if ( op == RESERVE )
                     break;
-                pte = mfn_to_xen_entry(mfn, PAGE_AI_MASK(flags));
-                pte.pt.ro = PAGE_RO_MASK(flags);
-                pte.pt.xn = PAGE_XN_MASK(flags);
-                BUG_ON(!pte.pt.ro && !pte.pt.xn);
+                pte = mfn_to_xen_entry(mfn, ai);
                 pte.pt.table = 1;
-                write_pte(entry, pte);
+                write_pte(&third[third_table_offset(addr)], pte);
                 break;
             case MODIFY:
             case REMOVE:
-                if ( !lpae_valid(*entry) )
+                if ( !third[third_table_offset(addr)].pt.valid )
                 {
-                    printk("%s: trying to %s a non-existing mapping addr=%lx\n",
-                           __func__, op == REMOVE ? "remove" : "modify", addr);
-                    rc = -EINVAL;
-                    goto out;
+                    printk("create_xen_entries: trying to %s a non-existing mapping addr=%lx\n",
+                           op == REMOVE ? "remove" : "modify", addr);
+                    return -EINVAL;
                 }
                 if ( op == REMOVE )
                     pte.bits = 0;
                 else
                 {
-                    pte = *entry;
-                    pte.pt.ro = PAGE_RO_MASK(flags);
-                    pte.pt.xn = PAGE_XN_MASK(flags);
+                    pte = third[third_table_offset(addr)];
+                    pte.pt.ro = PTE_RO_MASK(ai);
+                    pte.pt.xn = PTE_NX_MASK(ai);
                     if ( !pte.pt.ro && !pte.pt.xn )
                     {
-                        printk("%s: Incorrect combination for addr=%lx\n",
-                               __func__, addr);
-                        rc = -EINVAL;
-                        goto out;
+                        printk("create_xen_entries: Incorrect combination for addr=%lx\n",
+                               addr);
+                        return -EINVAL;
                     }
                 }
-                write_pte(entry, pte);
+                write_pte(&third[third_table_offset(addr)], pte);
                 break;
             default:
                 BUG();
         }
     }
-out:
-    /*
-     * Flush the TLBs even in case of failure because we may have
-     * partially modified the PT. This will prevent any unexpected
-     * behavior afterwards.
-     */
     flush_xen_data_tlb_range_va(virt, PAGE_SIZE * nr_mfns);
 
+    rc = 0;
+
+out:
     return rc;
 }
 
 int map_pages_to_xen(unsigned long virt,
-                     mfn_t mfn,
+                     unsigned long mfn,
                      unsigned long nr_mfns,
                      unsigned int flags)
 {
     return create_xen_entries(INSERT, virt, mfn, nr_mfns, flags);
 }
 
-int populate_pt_range(unsigned long virt, unsigned long nr_mfns)
+int populate_pt_range(unsigned long virt, unsigned long mfn,
+                      unsigned long nr_mfns)
 {
-    return create_xen_entries(RESERVE, virt, INVALID_MFN, nr_mfns, 0);
+    return create_xen_entries(RESERVE, virt, mfn, nr_mfns, 0);
 }
 
 int destroy_xen_mappings(unsigned long v, unsigned long e)
 {
-    return create_xen_entries(REMOVE, v, INVALID_MFN, (e - v) >> PAGE_SHIFT, 0);
+    return create_xen_entries(REMOVE, v, 0, (e - v) >> PAGE_SHIFT, 0);
 }
 
 int modify_xen_mappings(unsigned long s, unsigned long e, unsigned int flags)
 {
-    return create_xen_entries(MODIFY, s, INVALID_MFN, (e - s) >> PAGE_SHIFT,
-                              flags);
+    ASSERT((flags & (PTE_NX | PTE_RO)) == flags);
+    return create_xen_entries(MODIFY, s, 0, (e - s) >> PAGE_SHIFT, flags);
 }
 
 enum mg { mg_clear, mg_ro, mg_rw, mg_rx };
@@ -1170,19 +1086,19 @@ void arch_dump_shared_mem_info(void)
 
 int donate_page(struct domain *d, struct page_info *page, unsigned int memflags)
 {
-    ASSERT_UNREACHABLE();
+    ASSERT(0);
     return -ENOSYS;
 }
 
 int steal_page(
     struct domain *d, struct page_info *page, unsigned int memflags)
 {
-    return -EOPNOTSUPP;
+    return -1;
 }
 
 int page_is_ram_type(unsigned long mfn, unsigned long mem_type)
 {
-    ASSERT_UNREACHABLE();
+    ASSERT(0);
     return 0;
 }
 
@@ -1191,8 +1107,8 @@ unsigned long domain_get_maximum_gpfn(struct domain *d)
     return gfn_x(d->arch.p2m.max_mapped_gfn);
 }
 
-void share_xen_page_with_guest(struct page_info *page, struct domain *d,
-                               enum XENSHARE_flags flags)
+void share_xen_page_with_guest(struct page_info *page,
+                          struct domain *d, int readonly)
 {
     if ( page_get_owner(page) == d )
         return;
@@ -1200,8 +1116,8 @@ void share_xen_page_with_guest(struct page_info *page, struct domain *d,
     spin_lock(&d->page_alloc_lock);
 
     /* The incremented type count pins as writable or read-only. */
-    page->u.inuse.type_info =
-        (flags == SHARE_ro ? PGT_none : PGT_writable_page) | 1;
+    page->u.inuse.type_info  = (readonly ? PGT_none : PGT_writable_page);
+    page->u.inuse.type_info |= PGT_validated | 1;
 
     page_set_owner(page, d);
     smp_wmb(); /* install valid domain ptr before updating refcnt. */
@@ -1219,6 +1135,12 @@ void share_xen_page_with_guest(struct page_info *page, struct domain *d,
     spin_unlock(&d->page_alloc_lock);
 }
 
+void share_xen_page_with_privileged_guests(
+    struct page_info *page, int readonly)
+{
+    share_xen_page_with_guest(page, dom_xen, readonly);
+}
+
 int xenmem_add_to_physmap_one(
     struct domain *d,
     unsigned int space,
@@ -1226,19 +1148,66 @@ int xenmem_add_to_physmap_one(
     unsigned long idx,
     gfn_t gfn)
 {
-    mfn_t mfn = INVALID_MFN;
+    unsigned long mfn = 0;
     int rc;
     p2m_type_t t;
     struct page_info *page = NULL;
+    bool status = false;
 
     switch ( space )
     {
     case XENMAPSPACE_grant_table:
-        rc = gnttab_map_frame(d, idx, gfn, &mfn);
-        if ( rc )
-            return rc;
+        grant_write_lock(d->grant_table);
 
-        t = p2m_ram_rw;
+        if ( d->grant_table->gt_version == 0 )
+            d->grant_table->gt_version = 1;
+
+        if ( d->grant_table->gt_version == 2 &&
+                (idx & XENMAPIDX_grant_table_status) )
+        {
+            idx &= ~XENMAPIDX_grant_table_status;
+            if ( idx < nr_status_frames(d->grant_table) )
+                mfn = virt_to_mfn(d->grant_table->status[idx]);
+            else
+                mfn = mfn_x(INVALID_MFN);
+            status = true;
+        }
+        else
+        {
+            if ( (idx >= nr_grant_frames(d->grant_table)) &&
+                 (idx < max_grant_frames) )
+                gnttab_grow_table(d, idx + 1);
+
+            if ( idx < nr_grant_frames(d->grant_table) )
+                mfn = virt_to_mfn(d->grant_table->shared_raw[idx]);
+            else
+                mfn = mfn_x(INVALID_MFN);
+        }
+
+        if ( mfn != mfn_x(INVALID_MFN) &&
+             !gfn_eq(gnttab_get_frame_gfn(d, status, idx), INVALID_GFN) )
+        {
+            rc = guest_physmap_remove_page(d,
+                                           gnttab_get_frame_gfn(d, status, idx),
+                                           _mfn(mfn), 0);
+            if ( rc )
+            {
+                grant_write_unlock(d->grant_table);
+                return rc;
+            }
+        }
+
+        if ( mfn != mfn_x(INVALID_MFN) )
+        {
+            gnttab_set_frame_gfn(d, status, idx, gfn);
+
+            t = p2m_ram_rw;
+        }
+
+        grant_write_unlock(d->grant_table);
+
+        if ( mfn == mfn_x(INVALID_MFN) )
+            return -EINVAL;
 
         break;
     case XENMAPSPACE_shared_info:
@@ -1306,7 +1275,7 @@ int xenmem_add_to_physmap_one(
     }
 
     /* Map at new location. */
-    rc = guest_physmap_add_entry(d, gfn, mfn, 0, t);
+    rc = guest_physmap_add_entry(d, gfn, _mfn(mfn), 0, t);
 
     /* If we fail to add the mapping, we need to drop the reference we
      * took earlier on foreign pages */
@@ -1405,7 +1374,7 @@ void gnttab_clear_flag(struct domain *d, unsigned long nr, uint16_t *addr)
     guest_clear_mask16(d, BIT(nr), addr);
 }
 
-void gnttab_mark_dirty(struct domain *d, mfn_t mfn)
+void gnttab_mark_dirty(struct domain *d, unsigned long l)
 {
     /* XXX: mark dirty */
     static int warning;
@@ -1415,7 +1384,7 @@ void gnttab_mark_dirty(struct domain *d, mfn_t mfn)
     }
 }
 
-int create_grant_host_mapping(unsigned long addr, mfn_t frame,
+int create_grant_host_mapping(unsigned long addr, unsigned long frame,
                               unsigned int flags, unsigned int cache_flags)
 {
     int rc;
@@ -1427,8 +1396,8 @@ int create_grant_host_mapping(unsigned long addr, mfn_t frame,
     if ( flags & GNTMAP_readonly )
         t = p2m_grant_map_ro;
 
-    rc = guest_physmap_add_entry(current->domain, gaddr_to_gfn(addr),
-                                 frame, 0, t);
+    rc = guest_physmap_add_entry(current->domain, _gfn(addr >> PAGE_SHIFT),
+                                 _mfn(frame), 0, t);
 
     if ( rc )
         return GNTST_general_error;
@@ -1436,24 +1405,26 @@ int create_grant_host_mapping(unsigned long addr, mfn_t frame,
         return GNTST_okay;
 }
 
-int replace_grant_host_mapping(unsigned long addr, mfn_t mfn,
-                               unsigned long new_addr, unsigned int flags)
+int replace_grant_host_mapping(unsigned long addr, unsigned long mfn,
+        unsigned long new_addr, unsigned int flags)
 {
-    gfn_t gfn = gaddr_to_gfn(addr);
+    gfn_t gfn = _gfn(addr >> PAGE_SHIFT);
     struct domain *d = current->domain;
     int rc;
 
     if ( new_addr != 0 || (flags & GNTMAP_contains_pte) )
         return GNTST_general_error;
 
-    rc = guest_physmap_remove_page(d, gfn, mfn, 0);
+    rc = guest_physmap_remove_page(d, gfn, _mfn(mfn), 0);
 
     return rc ? GNTST_general_error : GNTST_okay;
 }
 
-bool is_iomem_page(mfn_t mfn)
+int is_iomem_page(unsigned long mfn)
 {
-    return !mfn_valid(mfn);
+    if ( !mfn_valid(mfn) )
+        return 1;
+    return 0;
 }
 
 void clear_and_clean_page(struct page_info *page)
@@ -1463,12 +1434,6 @@ void clear_and_clean_page(struct page_info *page)
     clear_page(p);
     clean_dcache_va_range(p, PAGE_SIZE);
     unmap_domain_page(p);
-}
-
-unsigned long get_upper_mfn_bound(void)
-{
-    /* No memory hotplug yet, so current memory limit is the final one. */
-    return max_page - 1;
 }
 
 /*

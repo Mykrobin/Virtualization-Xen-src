@@ -10,6 +10,7 @@
  * published by the Free Software Foundation.
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/init.h>
 #include <xen/guest_access.h>

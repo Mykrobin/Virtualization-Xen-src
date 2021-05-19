@@ -1,3 +1,4 @@
+#include <xen/config.h>
 #include <xen/cpumask.h>
 #include <xen/mm.h>
 #include <xen/sizes.h>
@@ -8,10 +9,6 @@
 #include <asm/cpufeature.h>
 #include <asm/cpuerrata.h>
 #include <asm/psci.h>
-
-/* Override macros from asm/page.h to make them work with mfn_t */
-#undef virt_to_mfn
-#define virt_to_mfn(va) _mfn(__virt_to_mfn(va))
 
 /* Hardening Branch predictor code for Arm64 */
 #ifdef CONFIG_ARM64_HARDEN_BRANCH_PREDICTOR
@@ -47,7 +44,7 @@ static bool copy_hyp_vect_bpi(unsigned int slot, const char *hyp_vec_start,
     void *dst_remapped;
     const void *dst = __bp_harden_hyp_vecs_start + slot * VECTOR_TABLE_SIZE;
     unsigned int i;
-    mfn_t dst_mfn = virt_to_mfn(dst);
+    mfn_t dst_mfn = _mfn(virt_to_mfn(dst));
 
     BUG_ON(((hyp_vec_end - hyp_vec_start) / 4) > 31);
 
@@ -79,8 +76,7 @@ static bool copy_hyp_vect_bpi(unsigned int slot, const char *hyp_vec_start,
 static bool __maybe_unused
 install_bp_hardening_vec(const struct arm_cpu_capabilities *entry,
                          const char *hyp_vec_start,
-                         const char *hyp_vec_end,
-                         const char *desc)
+                         const char *hyp_vec_end)
 {
     static int last_slot = -1;
     static DEFINE_SPINLOCK(bp_lock);
@@ -94,9 +90,6 @@ install_bp_hardening_vec(const struct arm_cpu_capabilities *entry,
      */
     if ( !entry->matches(entry) )
         return true;
-
-    printk(XENLOG_INFO "CPU%u will %s on exception entry\n",
-           smp_processor_id(), desc);
 
     /*
      * No need to install hardened vector when the processor has
@@ -147,45 +140,29 @@ install_bp_hardening_vec(const struct arm_cpu_capabilities *entry,
     return ret;
 }
 
-extern char __smccc_workaround_1_smc_start[], __smccc_workaround_1_smc_end[];
+extern char __psci_hyp_bp_inval_start[], __psci_hyp_bp_inval_end[];
 
-static int enable_smccc_arch_workaround_1(void *data)
+static int enable_psci_bp_hardening(void *data)
 {
-    struct arm_smccc_res res;
+    bool ret = true;
     static bool warned = false;
-    const struct arm_cpu_capabilities *entry = data;
 
     /*
-     * Enable callbacks are called on every CPU based on the
-     * capabilities. So double-check whether the CPU matches the
-     * entry.
+     * The mitigation is using PSCI version function to invalidate the
+     * branch predictor. This function is only available with PSCI 0.2
+     * and later.
      */
-    if ( !entry->matches(entry) )
-        return 0;
-
-    if ( smccc_ver < SMCCC_VERSION(1, 1) )
-        goto warn;
-
-    arm_smccc_1_1_smc(ARM_SMCCC_ARCH_FEATURES_FID,
-                      ARM_SMCCC_ARCH_WORKAROUND_1_FID, &res);
-    /* The return value is in the lower 32-bits. */
-    if ( (int)res.a0 < 0 )
-        goto warn;
-
-    return !install_bp_hardening_vec(entry,__smccc_workaround_1_smc_start,
-                                     __smccc_workaround_1_smc_end,
-                                     "call ARM_SMCCC_ARCH_WORKAROUND_1");
-
-warn:
-    if ( !warned )
+    if ( psci_ver >= PSCI_VERSION(0, 2) )
+        ret = install_bp_hardening_vec(data, __psci_hyp_bp_inval_start,
+                                       __psci_hyp_bp_inval_end);
+    else if ( !warned )
     {
         ASSERT(system_state < SYS_STATE_active);
-        warning_add("No support for ARM_SMCCC_ARCH_WORKAROUND_1.\n"
-                    "Please update your firmware.\n");
-        warned = false;
+        warning_add("PSCI 0.2 or later is required for the branch predictor hardening.\n");
+        warned = true;
     }
 
-    return 0;
+    return !ret;
 }
 
 #endif /* CONFIG_ARM64_HARDEN_BRANCH_PREDICTOR */
@@ -247,7 +224,7 @@ static int enable_ic_inv_hardening(void *data)
     .midr_range_min = 0,                \
     .midr_range_max = (MIDR_VARIANT_MASK | MIDR_REVISION_MASK)
 
-static bool __maybe_unused
+static bool_t __maybe_unused
 is_affected_midr_range(const struct arm_cpu_capabilities *entry)
 {
     return MIDR_IS_CPU_MODEL_RANGE(current_cpu_data.midr.bits, entry->midr_model,
@@ -301,22 +278,22 @@ static const struct arm_cpu_capabilities arm_errata[] = {
     {
         .capability = ARM_HARDEN_BRANCH_PREDICTOR,
         MIDR_ALL_VERSIONS(MIDR_CORTEX_A57),
-        .enable = enable_smccc_arch_workaround_1,
+        .enable = enable_psci_bp_hardening,
     },
     {
         .capability = ARM_HARDEN_BRANCH_PREDICTOR,
         MIDR_ALL_VERSIONS(MIDR_CORTEX_A72),
-        .enable = enable_smccc_arch_workaround_1,
+        .enable = enable_psci_bp_hardening,
     },
     {
         .capability = ARM_HARDEN_BRANCH_PREDICTOR,
         MIDR_ALL_VERSIONS(MIDR_CORTEX_A73),
-        .enable = enable_smccc_arch_workaround_1,
+        .enable = enable_psci_bp_hardening,
     },
     {
         .capability = ARM_HARDEN_BRANCH_PREDICTOR,
         MIDR_ALL_VERSIONS(MIDR_CORTEX_A75),
-        .enable = enable_smccc_arch_workaround_1,
+        .enable = enable_psci_bp_hardening,
     },
 #endif
 #ifdef CONFIG_ARM32_HARDEN_BRANCH_PREDICTOR

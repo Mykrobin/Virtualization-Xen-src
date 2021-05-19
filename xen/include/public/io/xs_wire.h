@@ -28,8 +28,7 @@
 
 enum xsd_sockmsg_type
 {
-    XS_CONTROL,
-#define XS_DEBUG XS_CONTROL
+    XS_DEBUG,
     XS_DIRECTORY,
     XS_READ,
     XS_GET_PERMS,
@@ -49,11 +48,8 @@ enum xsd_sockmsg_type
     XS_IS_DOMAIN_INTRODUCED,
     XS_RESUME,
     XS_SET_TARGET,
-    /* XS_RESTRICT has been removed */
-    XS_RESET_WATCHES = XS_SET_TARGET + 2,
-    XS_DIRECTORY_PART,
-
-    XS_TYPE_COUNT,      /* Number of valid types. */
+    XS_RESTRICT,
+    XS_RESET_WATCHES,
 
     XS_INVALID = 0xffff /* Guaranteed to remain an invalid type */
 };

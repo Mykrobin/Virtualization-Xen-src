@@ -38,8 +38,6 @@
   { 0xf2fd1544, 0x9794, 0x4a2c, {0x99, 0x2e, 0xe5, 0xbb, 0xcf, 0x20, 0xe3, 0x94} }
 #define SHIM_LOCK_PROTOCOL_GUID \
   { 0x605dab50, 0xe046, 0x4300, {0xab, 0xb6, 0x3d, 0xd8, 0x10, 0xdd, 0x8b, 0x23} }
-#define APPLE_PROPERTIES_PROTOCOL_GUID \
-  { 0x91bd12fe, 0xf6c3, 0x44fb, { 0xa5, 0xb7, 0x51, 0x22, 0xab, 0x30, 0x3a, 0xe0} }
 
 typedef EFI_STATUS
 (/* _not_ EFIAPI */ *EFI_SHIM_LOCK_VERIFY) (
@@ -49,44 +47,6 @@ typedef EFI_STATUS
 typedef struct {
     EFI_SHIM_LOCK_VERIFY Verify;
 } EFI_SHIM_LOCK_PROTOCOL;
-
-struct _EFI_APPLE_PROPERTIES;
-
-typedef EFI_STATUS
-(EFIAPI *EFI_APPLE_PROPERTIES_GET) (
-    IN struct _EFI_APPLE_PROPERTIES *This,
-    IN const EFI_DEVICE_PATH *Device,
-    IN const CHAR16 *PropertyName,
-    OUT VOID *Buffer,
-    IN OUT UINT32 *BufferSize);
-
-typedef EFI_STATUS
-(EFIAPI *EFI_APPLE_PROPERTIES_SET) (
-    IN struct _EFI_APPLE_PROPERTIES *This,
-    IN const EFI_DEVICE_PATH *Device,
-    IN const CHAR16 *PropertyName,
-    IN const VOID *Value,
-    IN UINT32 ValueLen);
-
-typedef EFI_STATUS
-(EFIAPI *EFI_APPLE_PROPERTIES_DELETE) (
-    IN struct _EFI_APPLE_PROPERTIES *This,
-    IN const EFI_DEVICE_PATH *Device,
-    IN const CHAR16 *PropertyName);
-
-typedef EFI_STATUS
-(EFIAPI *EFI_APPLE_PROPERTIES_GETALL) (
-    IN struct _EFI_APPLE_PROPERTIES *This,
-    OUT VOID *Buffer,
-    IN OUT UINT32 *BufferSize);
-
-typedef struct _EFI_APPLE_PROPERTIES {
-    UINTN Version; /* 0x10000 */
-    EFI_APPLE_PROPERTIES_GET Get;
-    EFI_APPLE_PROPERTIES_SET Set;
-    EFI_APPLE_PROPERTIES_DELETE Delete;
-    EFI_APPLE_PROPERTIES_GETALL GetAll;
-} EFI_APPLE_PROPERTIES;
 
 union string {
     CHAR16 *w;
@@ -113,22 +73,11 @@ static char *get_value(const struct file *cfg, const char *section,
 static char *split_string(char *s);
 static CHAR16 *s2w(union string *str);
 static char *w2s(const union string *str);
-static bool read_file(EFI_FILE_HANDLE dir_handle, CHAR16 *name,
-                      struct file *file, char *options);
+static bool_t read_file(EFI_FILE_HANDLE dir_handle, CHAR16 *name,
+                        struct file *file, char *options);
 static size_t wstrlen(const CHAR16 * s);
 static int set_color(u32 mask, int bpp, u8 *pos, u8 *sz);
-static bool match_guid(const EFI_GUID *guid1, const EFI_GUID *guid2);
-
-static void efi_init(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable);
-static void efi_console_set_mode(void);
-static EFI_GRAPHICS_OUTPUT_PROTOCOL *efi_get_gop(void);
-static UINTN efi_find_gop_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
-                               UINTN cols, UINTN rows, UINTN depth);
-static void efi_tables(void);
-static void setup_efi_pci(void);
-static void efi_variables(void);
-static void efi_set_gop_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop, UINTN gop_mode);
-static void efi_exit_boot(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable);
+static bool_t match_guid(const EFI_GUID *guid1, const EFI_GUID *guid2);
 
 static const EFI_BOOT_SERVICES *__initdata efi_bs;
 static UINT32 __initdata efi_bs_revision;
@@ -138,7 +87,7 @@ static SIMPLE_TEXT_OUTPUT_INTERFACE *__initdata StdOut;
 static SIMPLE_TEXT_OUTPUT_INTERFACE *__initdata StdErr;
 
 static UINT32 __initdata mdesc_ver;
-static bool __initdata map_bs;
+static bool_t __initdata map_bs;
 
 static struct file __initdata cfg;
 static struct file __initdata kernel;
@@ -148,56 +97,6 @@ static CHAR16 __initdata newline[] = L"\r\n";
 
 #define PrintStr(s) StdOut->OutputString(StdOut, s)
 #define PrintErr(s) StdErr->OutputString(StdErr, s)
-
-#ifdef CONFIG_ARM
-/*
- * TODO: Enable EFI boot allocator on ARM.
- * This code can be common for x86 and ARM.
- * Things TODO on ARM before enabling ebmalloc:
- *   - estimate required EBMALLOC_SIZE value,
- *   - where (in which section) ebmalloc_mem[] should live; if in
- *     .bss.page_aligned, as it is right now, then whole BSS zeroing
- *     have to be disabled in xen/arch/arm/arm64/head.S; though BSS
- *     should be initialized somehow before use of variables living there,
- *   - use ebmalloc() in ARM/common EFI boot code,
- *   - call free_ebmalloc_unused_mem() somewhere in init code.
- */
-#define EBMALLOC_SIZE	MB(0)
-#else
-#define EBMALLOC_SIZE	MB(1)
-#endif
-
-static char __section(".bss.page_aligned") __aligned(PAGE_SIZE)
-    ebmalloc_mem[EBMALLOC_SIZE];
-static unsigned long __initdata ebmalloc_allocated;
-
-/* EFI boot allocator. */
-static void __init __maybe_unused *ebmalloc(size_t size)
-{
-    void *ptr = ebmalloc_mem + ebmalloc_allocated;
-
-    ebmalloc_allocated += ROUNDUP(size, sizeof(void *));
-
-    if ( ebmalloc_allocated > sizeof(ebmalloc_mem) )
-        blexit(L"Out of static memory\r\n");
-
-    return ptr;
-}
-
-static void __init __maybe_unused free_ebmalloc_unused_mem(void)
-{
-#if 0 /* FIXME: Putting a hole in the BSS breaks the IOMMU mappings for dom0. */
-    unsigned long start, end;
-
-    start = (unsigned long)ebmalloc_mem + PAGE_ALIGN(ebmalloc_allocated);
-    end = (unsigned long)ebmalloc_mem + sizeof(ebmalloc_mem);
-
-    destroy_xen_mappings(start, end);
-    init_xenheap_pages(__pa(start), __pa(end));
-
-    printk(XENLOG_INFO "Freed %lukB unused BSS memory\n", (end - start) >> 10);
-#endif
-}
 
 /*
  * Include architecture specific implementation here, which references the
@@ -307,7 +206,7 @@ static char *__init w2s(const union string *str)
     return str->s;
 }
 
-static bool __init match_guid(const EFI_GUID *guid1, const EFI_GUID *guid2)
+static bool_t __init match_guid(const EFI_GUID *guid1, const EFI_GUID *guid2)
 {
     return guid1->Data1 == guid2->Data1 &&
            guid1->Data2 == guid2->Data2 &&
@@ -378,12 +277,12 @@ static unsigned int __init get_argv(unsigned int argc, CHAR16 **argv,
                                     CHAR16 **options)
 {
     CHAR16 *ptr = (CHAR16 *)(argv + argc + 1), *prev = NULL;
-    bool prev_sep = true;
+    bool_t prev_sep = TRUE;
 
     for ( ; cmdsize > sizeof(*cmdline) && *cmdline;
             cmdsize -= sizeof(*cmdline), ++cmdline )
     {
-        bool cur_sep = *cmdline == L' ' || *cmdline == L'\t';
+        bool_t cur_sep = *cmdline == L' ' || *cmdline == L'\t';
 
         if ( !prev_sep )
         {
@@ -538,8 +437,8 @@ static char * __init split_string(char *s)
     return NULL;
 }
 
-static bool __init read_file(EFI_FILE_HANDLE dir_handle, CHAR16 *name,
-                             struct file *file, char *options)
+static bool_t __init read_file(EFI_FILE_HANDLE dir_handle, CHAR16 *name,
+                               struct file *file, char *options)
 {
     EFI_FILE_HANDLE FileHandle = NULL;
     UINT64 size;
@@ -551,7 +450,7 @@ static bool __init read_file(EFI_FILE_HANDLE dir_handle, CHAR16 *name,
     ret = dir_handle->Open(dir_handle, &FileHandle, name,
                            EFI_FILE_MODE_READ, 0);
     if ( file == &cfg && ret == EFI_NOT_FOUND )
-        return false;
+        return 0;
     if ( EFI_ERROR(ret) )
         what = L"Open";
     else
@@ -611,27 +510,27 @@ static bool __init read_file(EFI_FILE_HANDLE dir_handle, CHAR16 *name,
 
     efi_arch_flush_dcache_area(file->ptr, file->size);
 
-    return true;
+    return 1;
 }
 
 static void __init pre_parse(const struct file *cfg)
 {
     char *ptr = cfg->ptr, *end = ptr + cfg->size;
-    bool start = true, comment = false;
+    bool_t start = 1, comment = 0;
 
     for ( ; ptr < end; ++ptr )
     {
         if ( iscntrl(*ptr) )
         {
-            comment = false;
-            start = true;
+            comment = 0;
+            start = 1;
             *ptr = 0;
         }
         else if ( comment || (start && isspace(*ptr)) )
             *ptr = 0;
         else if ( *ptr == '#' || (start && *ptr == ';') )
         {
-            comment = true;
+            comment = 1;
             *ptr = 0;
         }
         else
@@ -647,7 +546,7 @@ static char *__init get_value(const struct file *cfg, const char *section,
 {
     char *ptr = cfg->ptr, *end = ptr + cfg->size;
     size_t slen = section ? strlen(section) : 0, ilen = strlen(item);
-    bool match = !slen;
+    bool_t match = !slen;
 
     for ( ; ptr < end; ++ptr )
     {
@@ -785,10 +684,10 @@ static UINTN __init efi_find_gop_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
             break;
         }
         if ( !cols && !rows &&
-             (UINTN)mode_info->HorizontalResolution *
+             mode_info->HorizontalResolution *
              mode_info->VerticalResolution > size )
         {
-            size = (UINTN)mode_info->HorizontalResolution *
+            size = mode_info->HorizontalResolution *
                    mode_info->VerticalResolution;
             gop_mode = i;
         }
@@ -940,58 +839,14 @@ static void __init efi_variables(void)
     }
 }
 
-static void __init efi_get_apple_properties(void)
-{
-    static EFI_GUID __initdata props_guid = APPLE_PROPERTIES_PROTOCOL_GUID;
-    EFI_APPLE_PROPERTIES *props;
-    UINT32 size = 0;
-    VOID *data;
-    EFI_STATUS status;
-
-    if ( efi_bs->LocateProtocol(&props_guid, NULL,
-                                (void **)&props) != EFI_SUCCESS )
-        return;
-    if ( props->Version != 0x10000 )
-    {
-        PrintStr(L"Warning: Unsupported Apple device properties version: ");
-        DisplayUint(props->Version, 0);
-        PrintStr(newline);
-        return;
-    }
-
-    props->GetAll(props, NULL, &size);
-    if ( !size ||
-         efi_bs->AllocatePool(EfiRuntimeServicesData, size,
-                              &data) != EFI_SUCCESS )
-        return;
-
-    status = props->GetAll(props, data, &size);
-    if ( status == EFI_SUCCESS )
-    {
-        efi_apple_properties_addr = (UINTN)data;
-        efi_apple_properties_len = size;
-    }
-    else
-    {
-        efi_bs->FreePool(data);
-        PrintStr(L"Warning: Could not query Apple device properties: ");
-        DisplayUint(status, 0);
-        PrintStr(newline);
-    }
-}
-
 static void __init efi_set_gop_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop, UINTN gop_mode)
 {
     EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mode_info;
     EFI_STATUS status;
     UINTN info_size;
 
-    /*
-     * Set graphics mode to a selected one and reset it if we didn't come
-     * directly from EFI loader as video settings might have been already modified.
-     */
-    if ( gop_mode < gop->Mode->MaxMode &&
-         (gop_mode != gop->Mode->Mode || !efi_enabled(EFI_LOADER)) )
+    /* Set graphics mode. */
+    if ( gop_mode < gop->Mode->MaxMode && gop_mode != gop->Mode->Mode )
         gop->SetMode(gop, gop_mode);
 
     /* Get graphics and frame buffer info. */
@@ -1004,7 +859,7 @@ static void __init efi_exit_boot(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *Syste
 {
     EFI_STATUS status;
     UINTN info_size = 0, map_key;
-    bool retry;
+    bool_t retry;
 
     efi_bs->GetMemoryMap(&info_size, NULL, &map_key,
                          &efi_mdesc_size, &mdesc_ver);
@@ -1013,7 +868,7 @@ static void __init efi_exit_boot(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *Syste
     if ( !efi_memmap )
         blexit(L"Unable to allocate memory for EFI memory map");
 
-    for ( retry = false; ; retry = true )
+    for ( retry = 0; ; retry = 1 )
     {
         efi_memmap_size = info_size;
         status = SystemTable->BootServices->GetMemoryMap(&efi_memmap_size,
@@ -1055,7 +910,7 @@ static int __init __maybe_unused set_color(u32 mask, int bpp, u8 *pos, u8 *sz)
        return -EINVAL;
    for ( *pos = 0; !(mask & 1); ++*pos )
        mask >>= 1;
-   for ( *sz = 0; mask & 1; ++*sz)
+   for ( *sz = 0; mask & 1; ++sz)
        mask >>= 1;
    if ( mask )
        return -EINVAL;
@@ -1075,16 +930,9 @@ efi_start(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     EFI_SHIM_LOCK_PROTOCOL *shim_lock;
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
     union string section = { NULL }, name;
-    bool base_video = false;
+    bool_t base_video = 0;
     char *option_str;
-    bool use_cfg_file;
-
-    __set_bit(EFI_BOOT, &efi_flags);
-    __set_bit(EFI_LOADER, &efi_flags);
-
-#ifndef CONFIG_ARM /* Disabled until runtime services implemented. */
-    __set_bit(EFI_RS, &efi_flags);
-#endif
+    bool_t use_cfg_file;
 
     efi_init(ImageHandle, SystemTable);
 
@@ -1119,9 +967,9 @@ efi_start(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
             if ( *ptr == L'/' || *ptr == L'-' )
             {
                 if ( wstrcmp(ptr + 1, L"basevideo") == 0 )
-                    base_video = true;
+                    base_video = 1;
                 else if ( wstrcmp(ptr + 1, L"mapbs") == 0 )
-                    map_bs = true;
+                    map_bs = 1;
                 else if ( wstrncmp(ptr + 1, L"cfg=", 4) == 0 )
                     cfg_file_name = ptr + 5;
                 else if ( i + 1 < argc && wstrcmp(ptr + 1, L"cfg") == 0 )
@@ -1292,9 +1140,6 @@ efi_start(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     /* Get snapshot of variable store parameters. */
     efi_variables();
 
-    /* Collect Apple device properties, if any. */
-    efi_get_apple_properties();
-
     efi_arch_memory_setup();
 
     if ( gop )
@@ -1310,46 +1155,37 @@ efi_start(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 
 #include <asm/spec_ctrl.h>
 
-static bool __initdata efi_map_uc;
+static bool_t __initdata efi_rs_enable = 1;
+static bool_t __initdata efi_map_uc;
 
-static int __init parse_efi_param(const char *s)
+static void __init parse_efi_param(char *s)
 {
-    const char *ss;
-    int rc = 0;
+    char *ss;
 
     do {
-        bool val = strncmp(s, "no-", 3);
+        bool_t val = !!strncmp(s, "no-", 3);
 
         if ( !val )
             s += 3;
 
         ss = strchr(s, ',');
-        if ( !ss )
-            ss = strchr(s, '\0');
+        if ( ss )
+            *ss = '\0';
 
-        if ( !cmdline_strcmp(s, "rs") )
-        {
-            if ( val )
-                __set_bit(EFI_RS, &efi_flags);
-            else
-                __clear_bit(EFI_RS, &efi_flags);
-        }
-        else if ( !cmdline_strcmp(s, "attr=uc") )
+        if ( !strcmp(s, "rs") )
+            efi_rs_enable = val;
+        else if ( !strcmp(s, "attr=uc") )
             efi_map_uc = val;
-        else
-            rc = -EINVAL;
 
         s = ss + 1;
-    } while ( *ss );
-
-    return rc;
+    } while ( ss );
 }
 custom_param("efi", parse_efi_param);
 
 #ifndef USE_SET_VIRTUAL_ADDRESS_MAP
 static __init void copy_mapping(unsigned long mfn, unsigned long end,
-                                bool (*is_valid)(unsigned long smfn,
-                                                 unsigned long emfn))
+                                bool_t (*is_valid)(unsigned long smfn,
+                                                   unsigned long emfn))
 {
     unsigned long next;
 
@@ -1377,7 +1213,7 @@ static __init void copy_mapping(unsigned long mfn, unsigned long end,
     }
 }
 
-static bool __init ram_range_valid(unsigned long smfn, unsigned long emfn)
+static bool_t __init ram_range_valid(unsigned long smfn, unsigned long emfn)
 {
     unsigned long sz = pfn_to_pdx(emfn - 1) / PDX_GROUP_COUNT + 1;
 
@@ -1386,9 +1222,9 @@ static bool __init ram_range_valid(unsigned long smfn, unsigned long emfn)
                          pfn_to_pdx(smfn) / PDX_GROUP_COUNT) < sz;
 }
 
-static bool __init rt_range_valid(unsigned long smfn, unsigned long emfn)
+static bool_t __init rt_range_valid(unsigned long smfn, unsigned long emfn)
 {
-    return true;
+    return 1;
 }
 #endif
 
@@ -1405,11 +1241,6 @@ void __init efi_init_memory(void)
         unsigned int prot;
     } *extra, *extra_head = NULL;
 #endif
-
-    free_ebmalloc_unused_mem();
-
-    if ( !efi_enabled(EFI_BOOT) )
-        return;
 
     printk(XENLOG_INFO "EFI memory map:%s\n",
            map_bs ? " (mapping BootServices)" : "");
@@ -1435,7 +1266,7 @@ void __init efi_init_memory(void)
                     ROUNDUP(desc->PhysicalStart + len, PAGE_SIZE));
         }
 
-        if ( !efi_enabled(EFI_RS) ||
+        if ( !efi_rs_enable ||
              (!(desc->Attribute & EFI_MEMORY_RUNTIME) &&
               (!map_bs ||
                (desc->Type != EfiBootServicesCode &&
@@ -1480,7 +1311,7 @@ void __init efi_init_memory(void)
             if ( (unsigned long)mfn_to_virt(emfn - 1) >= HYPERVISOR_VIRT_END )
                 prot &= ~_PAGE_GLOBAL;
             if ( map_pages_to_xen((unsigned long)mfn_to_virt(smfn),
-                                  _mfn(smfn), emfn - smfn, prot) == 0 )
+                                  smfn, emfn - smfn, prot) == 0 )
                 desc->VirtualStart =
                     (unsigned long)maddr_to_virt(desc->PhysicalStart);
             else
@@ -1509,7 +1340,7 @@ void __init efi_init_memory(void)
         }
     }
 
-    if ( !efi_enabled(EFI_RS) )
+    if ( !efi_rs_enable )
     {
         efi_fw_vendor = NULL;
         return;

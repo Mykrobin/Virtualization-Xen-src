@@ -17,7 +17,3 @@ VERS_1.0 {
 		xenevtchn_pending;
 	local: *; /* Do not expose anything by default */
 };
-VERS_1.1 {
-	global:
-		xenevtchn_restrict;
-} VERS_1.0;

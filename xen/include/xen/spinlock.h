@@ -110,7 +110,7 @@ void _lock_profile_deregister_struct(int32_t, struct lock_profile_qhead *);
 #define lock_profile_deregister_struct(type, ptr)                             \
     _lock_profile_deregister_struct(type, &((ptr)->profile_head))
 
-extern int spinlock_profile_control(struct xen_sysctl_lockprof_op *pc);
+extern int spinlock_profile_control(xen_sysctl_lockprof_op_t *pc);
 extern void spinlock_profile_printall(unsigned char key);
 extern void spinlock_profile_reset(unsigned char key);
 
@@ -153,7 +153,6 @@ typedef struct spinlock {
 #define spin_lock_init(l) (*(l) = (spinlock_t)SPIN_LOCK_UNLOCKED)
 
 void _spin_lock(spinlock_t *lock);
-void _spin_lock_cb(spinlock_t *lock, void (*cond)(void *), void *data);
 void _spin_lock_irq(spinlock_t *lock);
 unsigned long _spin_lock_irqsave(spinlock_t *lock);
 
@@ -170,7 +169,6 @@ void _spin_lock_recursive(spinlock_t *lock);
 void _spin_unlock_recursive(spinlock_t *lock);
 
 #define spin_lock(l)                  _spin_lock(l)
-#define spin_lock_cb(l, c, d)         _spin_lock_cb(l, c, d)
 #define spin_lock_irq(l)              _spin_lock_irq(l)
 #define spin_lock_irqsave(l, f)                                 \
     ({                                                          \
@@ -191,8 +189,6 @@ void _spin_unlock_recursive(spinlock_t *lock);
     spin_trylock(lock) ?                        \
     1 : ({ local_irq_restore(flags); 0; });     \
 })
-
-#define spin_lock_kick(l)             arch_lock_signal_wmb()
 
 /* Ensure a lock is quiescent between two critical operations. */
 #define spin_barrier(l)               _spin_barrier(l)

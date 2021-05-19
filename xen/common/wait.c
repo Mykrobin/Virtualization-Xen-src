@@ -19,6 +19,7 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/sched.h>
 #include <xen/wait.h>
 #include <xen/errno.h>
@@ -165,7 +166,7 @@ static void __prepare_to_wait(struct waitqueue_vcpu *wqv)
 
     if ( unlikely(wqv->esp == 0) )
     {
-        gdprintk(XENLOG_ERR, "Stack too large in %s\n", __func__);
+        gdprintk(XENLOG_ERR, "Stack too large in %s\n", __FUNCTION__);
         domain_crash_synchronous();
     }
 

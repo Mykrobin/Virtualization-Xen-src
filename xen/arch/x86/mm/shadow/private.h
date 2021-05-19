@@ -313,7 +313,7 @@ static inline int page_is_out_of_sync(struct page_info *p)
 
 static inline int mfn_is_out_of_sync(mfn_t gmfn)
 {
-    return page_is_out_of_sync(mfn_to_page(gmfn));
+    return page_is_out_of_sync(mfn_to_page(mfn_x(gmfn)));
 }
 
 static inline int page_oos_may_write(struct page_info *p)
@@ -324,7 +324,7 @@ static inline int page_oos_may_write(struct page_info *p)
 
 static inline int mfn_oos_may_write(mfn_t gmfn)
 {
-    return page_oos_may_write(mfn_to_page(gmfn));
+    return page_oos_may_write(mfn_to_page(mfn_x(gmfn)));
 }
 #endif /* (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC) */
 
@@ -391,6 +391,17 @@ void shadow_update_paging_modes(struct vcpu *v);
  * With user_only == 1, unhooks only the user-mode mappings. */
 void shadow_unhook_mappings(struct domain *d, mfn_t smfn, int user_only);
 
+/* Returns a mapped pointer to write to, or one of the following error
+ * indicators. */
+#define MAPPING_UNHANDLEABLE ((void *)(unsigned long)X86EMUL_UNHANDLEABLE)
+#define MAPPING_EXCEPTION    ((void *)(unsigned long)X86EMUL_EXCEPTION)
+#define MAPPING_SILENT_FAIL  ((void *)(unsigned long)X86EMUL_OKAY)
+#define sh_emulate_map_dest_failed(rc) ((unsigned long)(rc) <= 3)
+void *sh_emulate_map_dest(struct vcpu *v, unsigned long vaddr,
+                          unsigned int bytes, struct sh_emulate_ctxt *sh_ctxt);
+void sh_emulate_unmap_dest(struct vcpu *v, void *addr, unsigned int bytes,
+                           struct sh_emulate_ctxt *sh_ctxt);
+
 #if (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC)
 /* Allow a shadowed page to go out of sync */
 int sh_unsync(struct vcpu *v, mfn_t gmfn);
@@ -453,6 +464,20 @@ void sh_reset_l3_up_pointers(struct vcpu *v);
  * MFN/page-info handling
  */
 
+/* Override macros from asm/page.h to make them work with mfn_t */
+#undef mfn_to_page
+#define mfn_to_page(_m) __mfn_to_page(mfn_x(_m))
+#undef mfn_valid
+#define mfn_valid(_mfn) __mfn_valid(mfn_x(_mfn))
+#undef page_to_mfn
+#define page_to_mfn(_pg) _mfn(__page_to_mfn(_pg))
+
+/* Override pagetable_t <-> struct page_info conversions to work with mfn_t */
+#undef pagetable_get_page
+#define pagetable_get_page(x)   mfn_to_page(pagetable_get_mfn(x))
+#undef pagetable_from_page
+#define pagetable_from_page(pg) pagetable_from_mfn(page_to_mfn(pg))
+
 #define backpointer(sp) _mfn(pdx_to_pfn((unsigned long)(sp)->v.sh.back))
 static inline unsigned long __backpointer(const struct page_info *sp)
 {
@@ -496,7 +521,7 @@ void sh_destroy_shadow(struct domain *d, mfn_t smfn);
  * Returns 0 for failure, 1 for success. */
 static inline int sh_get_ref(struct domain *d, mfn_t smfn, paddr_t entry_pa)
 {
-    unsigned long x, nx;
+    u32 x, nx;
     struct page_info *sp = mfn_to_page(smfn);
 
     ASSERT(mfn_valid(smfn));
@@ -505,7 +530,7 @@ static inline int sh_get_ref(struct domain *d, mfn_t smfn, paddr_t entry_pa)
     x = sp->u.sh.count;
     nx = x + 1;
 
-    if ( unlikely(nx >= (1UL << PAGE_SH_REFCOUNT_WIDTH)) )
+    if ( unlikely(nx >= (1U << PAGE_SH_REFCOUNT_WIDTH)) )
     {
         SHADOW_PRINTK("shadow ref overflow, gmfn=%lx smfn=%lx\n",
                        __backpointer(sp), mfn_x(smfn));
@@ -529,7 +554,7 @@ static inline int sh_get_ref(struct domain *d, mfn_t smfn, paddr_t entry_pa)
  * physical address of the shadow entry that held this reference. */
 static inline void sh_put_ref(struct domain *d, mfn_t smfn, paddr_t entry_pa)
 {
-    unsigned long x, nx;
+    u32 x, nx;
     struct page_info *sp = mfn_to_page(smfn);
 
     ASSERT(mfn_valid(smfn));
@@ -547,8 +572,8 @@ static inline void sh_put_ref(struct domain *d, mfn_t smfn, paddr_t entry_pa)
 
     if ( unlikely(x == 0) )
     {
-        SHADOW_ERROR("shadow ref underflow, smfn=%lx oc=%#lx t=%#x\n",
-                     mfn_x(smfn), sp->u.sh.count + 0UL, sp->u.sh.type);
+        SHADOW_ERROR("shadow ref underflow, smfn=%lx oc=%08x t=%#x\n",
+                     mfn_x(smfn), sp->u.sh.count, sp->u.sh.type);
         BUG();
     }
 
@@ -597,17 +622,15 @@ prev_pinned_shadow(struct page_info *page,
           pos ? (tmp = prev_pinned_shadow(pos, (dom)), 1) : 0;  \
           pos = tmp )
 
-/*
- * Pin a shadow page: take an extra refcount, set the pin bit,
+/* Pin a shadow page: take an extra refcount, set the pin bit,
  * and put the shadow at the head of the list of pinned shadows.
- * Returns false for failure, true for success.
- */
-static inline bool sh_pin(struct domain *d, mfn_t smfn)
+ * Returns 0 for failure, 1 for success. */
+static inline int sh_pin(struct domain *d, mfn_t smfn)
 {
     struct page_info *sp[4];
     struct page_list_head *pin_list;
     unsigned int i, pages;
-    bool already_pinned;
+    bool_t already_pinned;
 
     ASSERT(mfn_valid(smfn));
     sp[0] = mfn_to_page(smfn);
@@ -618,7 +641,7 @@ static inline bool sh_pin(struct domain *d, mfn_t smfn)
 
     pin_list = &d->arch.paging.shadow.pinned_shadows;
     if ( already_pinned && sp[0] == page_list_first(pin_list) )
-        return true;
+        return 1;
 
     /* Treat the up-to-four pages of the shadow as a unit in the list ops */
     for ( i = 1; i < pages; i++ )
@@ -638,7 +661,7 @@ static inline bool sh_pin(struct domain *d, mfn_t smfn)
     {
         /* Not pinned: pin it! */
         if ( !sh_get_ref(d, smfn, 0) )
-            return false;
+            return 0;
         sp[0]->u.sh.pinned = 1;
     }
 
@@ -646,7 +669,7 @@ static inline bool sh_pin(struct domain *d, mfn_t smfn)
     for ( i = pages; i > 0; i-- )
         page_list_add(sp[i - 1], pin_list);
 
-    return true;
+    return 1;
 }
 
 /* Unpin a shadow page: unset the pin bit, take the shadow off the list
@@ -697,8 +720,6 @@ struct sh_emulate_ctxt {
     uint8_t insn_buf_bytes;
     unsigned long insn_buf_eip;
 
-    unsigned int pte_size;
-
     /* Cache of segment registers already gathered for this emulation. */
     unsigned int valid_seg_regs;
     struct segment_register seg_reg[6];
@@ -714,18 +735,9 @@ struct sh_emulate_ctxt {
 };
 
 const struct x86_emulate_ops *shadow_init_emulation(
-    struct sh_emulate_ctxt *sh_ctxt, struct cpu_user_regs *regs,
-    unsigned int pte_size);
+    struct sh_emulate_ctxt *sh_ctxt, struct cpu_user_regs *regs);
 void shadow_continue_emulation(
     struct sh_emulate_ctxt *sh_ctxt, struct cpu_user_regs *regs);
-
-/* Stop counting towards early unshadows, as we've seen a real page fault */
-static inline void sh_reset_early_unshadow(struct vcpu *v)
-{
-#if SHADOW_OPTIMIZATIONS & SHOPT_EARLY_UNSHADOW
-    v->arch.paging.shadow.last_emulated_mfn_for_unshadow = mfn_x(INVALID_MFN);
-#endif
-}
 
 #if (SHADOW_OPTIMIZATIONS & SHOPT_VIRTUAL_TLB)
 /**************************************************************************/

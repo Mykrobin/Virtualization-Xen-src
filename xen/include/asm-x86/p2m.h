@@ -23,12 +23,12 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef _XEN_ASM_X86_P2M_H
-#define _XEN_ASM_X86_P2M_H
+#ifndef _XEN_P2M_H
+#define _XEN_P2M_H
 
+#include <xen/config.h>
 #include <xen/paging.h>
 #include <xen/p2m-common.h>
-#include <xen/mem_access.h>
 #include <asm/mem_sharing.h>
 #include <asm/page.h>    /* for pagetable_t */
 
@@ -89,8 +89,7 @@ typedef unsigned int p2m_query_t;
                        | p2m_to_mask(p2m_ram_paging_out)      \
                        | p2m_to_mask(p2m_ram_paged)           \
                        | p2m_to_mask(p2m_ram_paging_in)       \
-                       | p2m_to_mask(p2m_ram_shared)          \
-                       | p2m_to_mask(p2m_ioreq_server))
+                       | p2m_to_mask(p2m_ram_shared))
 
 /* Types that represent a physmap hole that is ok to replace with a shared
  * entry */
@@ -112,7 +111,8 @@ typedef unsigned int p2m_query_t;
 #define P2M_RO_TYPES (p2m_to_mask(p2m_ram_logdirty)     \
                       | p2m_to_mask(p2m_ram_ro)         \
                       | p2m_to_mask(p2m_grant_map_ro)   \
-                      | p2m_to_mask(p2m_ram_shared))
+                      | p2m_to_mask(p2m_ram_shared)     \
+                      | p2m_to_mask(p2m_ioreq_server))
 
 /* Write-discard types, which should discard the write operations */
 #define P2M_DISCARD_WRITE_TYPES (p2m_to_mask(p2m_ram_ro)     \
@@ -120,8 +120,7 @@ typedef unsigned int p2m_query_t;
 
 /* Types that can be subject to bulk transitions. */
 #define P2M_CHANGEABLE_TYPES (p2m_to_mask(p2m_ram_rw) \
-                              | p2m_to_mask(p2m_ram_logdirty) \
-                              | p2m_to_mask(p2m_ioreq_server) )
+                              | p2m_to_mask(p2m_ram_logdirty) )
 
 #define P2M_POD_TYPES (p2m_to_mask(p2m_populate_on_demand))
 
@@ -193,8 +192,7 @@ struct p2m_domain {
     /* Shadow translated domain: p2m mapping */
     pagetable_t        phys_table;
 
-    /*
-     * Same as a domain's dirty_cpumask but limited to
+    /* Same as domain_dirty_cpumask but limited to
      * this p2m and those physical cpus whose vcpu's are in
      * guestmode.
      */
@@ -210,7 +208,6 @@ struct p2m_domain {
      * to set it to any other value. */
 #define P2M_BASE_EADDR     (~0ULL)
     uint64_t           np2m_base;
-    uint64_t           np2m_generation;
 
     /* Nested p2ms: linked list of n2pms allocated to this domain. 
      * The host p2m hasolds the head of the list and the np2ms are 
@@ -236,20 +233,18 @@ struct p2m_domain {
     struct page_list_head pages;
 
     int                (*set_entry)(struct p2m_domain *p2m,
-                                    gfn_t gfn,
+                                    unsigned long gfn,
                                     mfn_t mfn, unsigned int page_order,
                                     p2m_type_t p2mt,
                                     p2m_access_t p2ma,
                                     int sve);
     mfn_t              (*get_entry)(struct p2m_domain *p2m,
-                                    gfn_t gfn,
+                                    unsigned long gfn,
                                     p2m_type_t *p2mt,
                                     p2m_access_t *p2ma,
                                     p2m_query_t q,
                                     unsigned int *page_order,
                                     bool_t *sve);
-    int                (*recalc)(struct p2m_domain *p2m,
-                                 unsigned long gfn);
     void               (*enable_hardware_log_dirty)(struct p2m_domain *p2m);
     void               (*disable_hardware_log_dirty)(struct p2m_domain *p2m);
     void               (*flush_hardware_cached_dirty)(struct p2m_domain *p2m);
@@ -318,8 +313,8 @@ struct p2m_domain {
                          single;       /* Non-super lists                   */
         long             count,        /* # of pages in cache lists         */
                          entry_count;  /* # of pages in p2m marked pod      */
-        gfn_t            reclaim_single; /* Last gfn of a scan */
-        gfn_t            max_guest;    /* gfn of max guest demand-populate */
+        unsigned long    reclaim_single; /* Last gpfn of a scan */
+        unsigned long    max_guest;    /* gpfn of max guest demand-populate */
 
         /*
          * Tracking of the most recently populated PoD pages, for eager
@@ -341,42 +336,21 @@ struct p2m_domain {
         struct ept_data ept;
         /* NPT-equivalent structure could be added here. */
     };
-
-     struct {
-         spinlock_t lock;
-         /*
-          * ioreq server who's responsible for the emulation of
-          * gfns with specific p2m type(for now, p2m_ioreq_server).
-          */
-         struct hvm_ioreq_server *server;
-         /*
-          * flags specifies whether read, write or both operations
-          * are to be emulated by an ioreq server.
-          */
-         unsigned int flags;
-         unsigned long entry_count;
-     } ioreq;
 };
 
 /* get host p2m table */
 #define p2m_get_hostp2m(d)      ((d)->arch.p2m)
 
-/*
- * Updates vCPU's n2pm to match its np2m_base in VMCx12 and returns that np2m.
+/* Get p2m table (re)usable for specified np2m base.
+ * Automatically destroys and re-initializes a p2m if none found.
+ * If np2m_base == 0 then v->arch.hvm_vcpu.guest_cr[3] is used.
  */
-struct p2m_domain *p2m_get_nestedp2m(struct vcpu *v);
-/* Similar to the above except that returned p2m is still write-locked */
-struct p2m_domain *p2m_get_nestedp2m_locked(struct vcpu *v);
+struct p2m_domain *p2m_get_nestedp2m(struct vcpu *v, uint64_t np2m_base);
 
 /* If vcpu is in host mode then behaviour matches p2m_get_hostp2m().
  * If vcpu is in guest mode then behaviour matches p2m_get_nestedp2m().
  */
 struct p2m_domain *p2m_get_p2m(struct vcpu *v);
-
-#define NP2M_SCHEDLE_IN  0
-#define NP2M_SCHEDLE_OUT 1
-
-void np2m_schedule(int dir);
 
 static inline bool_t p2m_is_hostp2m(const struct p2m_domain *p2m)
 {
@@ -432,7 +406,10 @@ static inline mfn_t __nonnull(3) get_gfn_type(
     return get_gfn_type_access(p2m_get_hostp2m(d), gfn, t, &a, q, NULL);
 }
 
-/* Syntactic sugar: most callers will use one of these. */
+/* Syntactic sugar: most callers will use one of these. 
+ * N.B. get_gfn_query() is the _only_ one guaranteed not to take the
+ * p2m lock; none of the others can be called with the p2m or paging
+ * lock held. */
 #define get_gfn(d, g, t)         get_gfn_type((d), (g), (t), P2M_ALLOC)
 #define get_gfn_query(d, g, t)   get_gfn_type((d), (g), (t), 0)
 #define get_gfn_unshare(d, g, t) get_gfn_type((d), (g), (t), \
@@ -470,7 +447,9 @@ static inline mfn_t get_gfn_query_unlocked(struct domain *d,
  * and should be used by any path that intends to write to the backing page.
  * Returns NULL if the page is not backed by RAM.
  * The caller is responsible for calling put_page() afterwards. */
-struct page_info *p2m_get_page_from_gfn(struct p2m_domain *p2m, gfn_t gfn,
+struct page_info *get_page_from_gfn_p2m(struct domain *d,
+                                        struct p2m_domain *p2m,
+                                        unsigned long gfn,
                                         p2m_type_t *t, p2m_access_t *a,
                                         p2m_query_t q);
 
@@ -480,13 +459,13 @@ static inline struct page_info *get_page_from_gfn(
     struct page_info *page;
 
     if ( paging_mode_translate(d) )
-        return p2m_get_page_from_gfn(p2m_get_hostp2m(d), _gfn(gfn), t, NULL, q);
+        return get_page_from_gfn_p2m(d, p2m_get_hostp2m(d), gfn, t, NULL, q);
 
-    /* Non-translated guests see 1-1 RAM / MMIO mappings everywhere */
-    if ( t )
-        *t = likely(d != dom_io) ? p2m_ram_rw : p2m_mmio_direct;
-    page = mfn_to_page(_mfn(gfn));
-    return mfn_valid(_mfn(gfn)) && get_page(page, d) ? page : NULL;
+    /* Non-translated guests see 1-1 RAM mappings everywhere */
+    if (t)
+        *t = p2m_ram_rw;
+    page = __mfn_to_page(gfn);
+    return mfn_valid(gfn) && get_page(page, d) ? page : NULL;
 }
 
 
@@ -607,19 +586,11 @@ void p2m_change_type_range(struct domain *d,
 int p2m_change_type_one(struct domain *d, unsigned long gfn,
                         p2m_type_t ot, p2m_type_t nt);
 
-/* Synchronously change the p2m type for a range of gfns */
-int p2m_finish_type_change(struct domain *d,
-                           gfn_t first_gfn,
-                           unsigned long max_nr);
-
 /* Report a change affecting memory types. */
 void p2m_memory_type_changed(struct domain *d);
 
 int p2m_is_logdirty_range(struct p2m_domain *, unsigned long start,
                           unsigned long end);
-
-/* Set foreign entry in the p2m table (for priv-mapping) */
-int set_foreign_p2m_entry(struct domain *d, unsigned long gfn, mfn_t mfn);
 
 /* Set mmio addresses in the p2m table (for pass-through) */
 int set_mmio_p2m_entry(struct domain *d, unsigned long gfn, mfn_t mfn,
@@ -651,6 +622,13 @@ int p2m_pod_empty_cache(struct domain *d);
  * domain matches target */
 int p2m_pod_set_mem_target(struct domain *d, unsigned long target);
 
+/* Call when decreasing memory reservation to handle PoD entries properly.
+ * Will return '1' if all entries were handled and nothing more need be done.*/
+int
+p2m_pod_decrease_reservation(struct domain *d,
+                             xen_pfn_t gpfn,
+                             unsigned int order);
+
 /* Scan pod cache when offline/broken page triggered */
 int
 p2m_pod_offline_or_broken_hit(struct page_info *p);
@@ -681,24 +659,46 @@ int p2m_mem_paging_prep(struct domain *d, unsigned long gfn, uint64_t buffer);
 /* Resume normal operation (in case a domain was paused) */
 void p2m_mem_paging_resume(struct domain *d, vm_event_response_t *rsp);
 
+/*
+ * Setup vm_event request based on the access (gla is -1ull if not available).
+ * Handles the rw2rx conversion. Boolean return value indicates if event type
+ * is syncronous (aka. requires vCPU pause). If the req_ptr has been populated,
+ * then the caller should use monitor_traps to send the event on the MONITOR
+ * ring. Once having released get_gfn* locks caller must also xfree the
+ * request.
+ */
+bool_t p2m_mem_access_check(paddr_t gpa, unsigned long gla,
+                            struct npfec npfec,
+                            vm_event_request_t **req_ptr);
+
+/* Check for emulation and mark vcpu for skipping one instruction
+ * upon rescheduling if required. */
+bool p2m_mem_access_emulate_check(struct vcpu *v,
+                                  const vm_event_response_t *rsp);
+
+/* Sanity check for mem_access hardware support */
+static inline bool_t p2m_mem_access_sanity_check(struct domain *d)
+{
+    return is_hvm_domain(d) && cpu_has_vmx && hap_enabled(d);
+}
+
 /* 
  * Internal functions, only called by other p2m code
  */
 
-mfn_t p2m_alloc_ptp(struct p2m_domain *p2m, unsigned int level);
+struct page_info *p2m_alloc_ptp(struct p2m_domain *p2m, unsigned long type);
 void p2m_free_ptp(struct p2m_domain *p2m, struct page_info *pg);
 
 /* Directly set a p2m entry: only for use by p2m code. Does not need
  * a call to put_gfn afterwards/ */
-int __must_check p2m_set_entry(struct p2m_domain *p2m, gfn_t gfn, mfn_t mfn,
-                               unsigned int page_order, p2m_type_t p2mt,
-                               p2m_access_t p2ma);
+int p2m_set_entry(struct p2m_domain *p2m, unsigned long gfn, mfn_t mfn,
+                  unsigned int page_order, p2m_type_t p2mt, p2m_access_t p2ma);
 
 /* Set up function pointers for PT implementation: only for use by p2m code */
 extern void p2m_pt_init(struct p2m_domain *p2m);
 
 void *map_domain_gfn(struct p2m_domain *p2m, gfn_t gfn, mfn_t *mfn,
-                     p2m_type_t *p2mt, p2m_query_t q, uint32_t *pfec);
+                     p2m_type_t *p2mt, p2m_query_t q, uint32_t *rc);
 
 /* Debugging and auditing of the P2M code? */
 #ifndef NDEBUG
@@ -728,8 +728,10 @@ extern void audit_p2m(struct domain *d,
 #endif
 
 /* Called by p2m code when demand-populating a PoD page */
-bool
-p2m_pod_demand_populate(struct p2m_domain *p2m, gfn_t gfn, unsigned int order);
+int
+p2m_pod_demand_populate(struct p2m_domain *p2m, unsigned long gfn,
+                        unsigned int order,
+                        p2m_query_t q);
 
 /*
  * Functions specific to the p2m-pt implementation
@@ -747,28 +749,6 @@ static inline p2m_type_t p2m_flags_to_type(unsigned long flags)
     return (flags >> 12) & 0x7f;
 }
 
-static inline p2m_type_t p2m_recalc_type_range(bool recalc, p2m_type_t t,
-                                               struct p2m_domain *p2m,
-                                               unsigned long gfn_start,
-                                               unsigned long gfn_end)
-{
-    if ( !recalc || !p2m_is_changeable(t) )
-        return t;
-
-    if ( t == p2m_ioreq_server && p2m->ioreq.server != NULL )
-        return t;
-
-    return p2m_is_logdirty_range(p2m, gfn_start, gfn_end) ? p2m_ram_logdirty
-                                                          : p2m_ram_rw;
-}
-
-static inline p2m_type_t p2m_recalc_type(bool recalc, p2m_type_t t,
-                                         struct p2m_domain *p2m,
-                                         unsigned long gfn)
-{
-    return p2m_recalc_type_range(recalc, t, p2m, gfn, gfn);
-}
-
 int p2m_pt_handle_deferred_changes(uint64_t gpa);
 
 /*
@@ -779,8 +759,6 @@ int p2m_pt_handle_deferred_changes(uint64_t gpa);
 void p2m_flush(struct vcpu *v, struct p2m_domain *p2m);
 /* Flushes all nested p2m tables */
 void p2m_flush_nestedp2m(struct domain *d);
-/* Flushes the np2m specified by np2m_base (if it exists) */
-void np2m_flush_base(struct vcpu *v, unsigned long np2m_base);
 
 void nestedp2m_write_p2m_entry(struct p2m_domain *p2m, unsigned long gfn,
     l1_pgentry_t *p, l1_pgentry_t new, unsigned int level);
@@ -801,6 +779,9 @@ static inline struct p2m_domain *p2m_get_altp2m(struct vcpu *v)
 
     return v->domain->arch.altp2m_p2m[index];
 }
+
+/* Locate an alternate p2m by its EPTP */
+unsigned int p2m_find_altp2m_by_eptp(struct domain *d, uint64_t eptp);
 
 /* Switch alternate p2m for a single vcpu */
 bool_t p2m_switch_vcpu_altp2m_by_id(struct vcpu *v, unsigned int idx);
@@ -832,14 +813,14 @@ int p2m_change_altp2m_gfn(struct domain *d, unsigned int idx,
                           gfn_t old_gfn, gfn_t new_gfn);
 
 /* Propagate a host p2m change to all alternate p2m's */
-int p2m_altp2m_propagate_change(struct domain *d, gfn_t gfn,
-                                mfn_t mfn, unsigned int page_order,
-                                p2m_type_t p2mt, p2m_access_t p2ma);
+void p2m_altp2m_propagate_change(struct domain *d, gfn_t gfn,
+                                 mfn_t mfn, unsigned int page_order,
+                                 p2m_type_t p2mt, p2m_access_t p2ma);
 
 /*
  * p2m type to IOMMU flags
  */
-static inline unsigned int p2m_get_iommu_flags(p2m_type_t p2mt, mfn_t mfn)
+static inline unsigned int p2m_get_iommu_flags(p2m_type_t p2mt)
 {
     unsigned int flags;
 
@@ -855,11 +836,6 @@ static inline unsigned int p2m_get_iommu_flags(p2m_type_t p2mt, mfn_t mfn)
     case p2m_grant_map_ro:
         flags = IOMMUF_readable;
         break;
-    case p2m_mmio_direct:
-        flags = IOMMUF_readable;
-        if ( !rangeset_contains_singleton(mmio_ro_ranges, mfn_x(mfn)) )
-            flags |= IOMMUF_writable;
-        break;
     default:
         flags = 0;
         break;
@@ -868,12 +844,7 @@ static inline unsigned int p2m_get_iommu_flags(p2m_type_t p2mt, mfn_t mfn)
     return flags;
 }
 
-int p2m_set_ioreq_server(struct domain *d, unsigned int flags,
-                         struct hvm_ioreq_server *s);
-struct hvm_ioreq_server *p2m_get_ioreq_server(struct domain *d,
-                                              unsigned int *flags);
-
-#endif /* _XEN_ASM_X86_P2M_H */
+#endif /* _XEN_P2M_H */
 
 /*
  * Local variables:

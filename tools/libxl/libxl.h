@@ -210,12 +210,6 @@
 #define LIBXL_HAVE_SCHED_RTDS 1
 
 /*
- * LIBXL_HAVE_SCHED_NULL indicates that the 'null' static scheduler
- * is available.
- */
-#define LIBXL_HAVE_SCHED_NULL 1
-
-/*
  * libxl_domain_build_info has u.hvm.viridian_enable and _disable bitmaps
  * of the specified width.
  */
@@ -257,12 +251,6 @@
 #define LIBXL_HAVE_SCHED_RTDS_VCPU_PARAMS 1
 
 /*
- * LIBXL_HAVE_SCHED_RTDS_VCPU_EXTRA indicates RTDS scheduler
- * now supports per-vcpu extratime settings.
- */
-#define LIBXL_HAVE_SCHED_RTDS_VCPU_EXTRA 1
-
-/*
  * libxl_domain_build_info has the arm.gic_version field.
  */
 #define LIBXL_HAVE_BUILDINFO_ARM_GIC_VERSION 1
@@ -298,61 +286,6 @@
  * wide parameters (i.e., the ratelimiting value).
  */
 #define LIBXL_HAVE_SCHED_CREDIT2_PARAMS 1
-
-/*
- * LIBXL_HAVE_SCHED_CREDIT_MIGR_DELAY indicates that there is a field
- * in libxl_sched_credit_params called vcpu_migr_delay_us which controls
- * the resistance of the vCPUs of the cpupool to migrations among pCPUs.
- */
-#define LIBXL_HAVE_SCHED_CREDIT_MIGR_DELAY
-
-/*
- * LIBXL_HAVE_VIRIDIAN_CRASH_CTL indicates that the 'crash_ctl' value
- * is present in the viridian enlightenment enumeration.
- */
-#define LIBXL_HAVE_VIRIDIAN_CRASH_CTL 1
-
-/*
- * LIBXL_HAVE_BUILDINFO_HVM_ACPI_LAPTOP_SLATE indicates that
- * libxl_domain_build_info has the u.hvm.acpi_laptop_slate field.
- */
-#define LIBXL_HAVE_BUILDINFO_HVM_ACPI_LAPTOP_SLATE 1
-
-/*
- * LIBXL_HAVE_P9S indicates that the p9 field in IDL has been changed to p9s
- */
-#define LIBXL_HAVE_P9S 1
-
-/*
- * LIBXL_HAVE_BUILDINFO_ARM_VUART indicates that the toolstack supports virtual UART
- * for ARM.
- */
-#define LIBXL_HAVE_BUILDINFO_ARM_VUART 1
-
-/*
- * LIBXL_HAVE_BUILDINFO_GRANT_LIMITS indicates that libxl_domain_build_info
- * has the max_grant_frames and max_maptrack_frames fields.
- */
-#define LIBXL_HAVE_BUILDINFO_GRANT_LIMITS 1
-
-#define LIBXL_MAX_GRANT_FRAMES_DEFAULT 32
-#define LIBXL_MAX_MAPTRACK_FRAMES_DEFAULT 1024
-
-/*
- * LIBXL_HAVE_BUILDINFO_* indicates that libxl_domain_build_info has
- * the field represented by the '*'. The original position of those
- * fields is:
- *  - u.hvm.timer_mode
- *  - u.hvm.apic
- *  - u.hvm.nested_hvm
- *  - u.pv.bootloader
- *  - u.pv.bootloader_args
- */
-#define LIBXL_HAVE_BUILDINFO_TIMER_MODE 1
-#define LIBXL_HAVE_BUILDINFO_APIC 1
-#define LIBXL_HAVE_BUILDINFO_NESTED_HVM 1
-#define LIBXL_HAVE_BUILDINFO_BOOTLOADER 1
-#define LIBXL_HAVE_BUILDINFO_BOOTLOADER_ARGS 1
 
 /*
  * libxl ABI compatibility
@@ -688,15 +621,6 @@ typedef struct libxl__ctx libxl_ctx;
 #define LIBXL_HAVE_PHYSINFO_OUTSTANDING_PAGES 1
 
 /*
- * LIBXL_HAVE_PHYSINFO_MAX_POSSIBLE_MFN
- *
- * If this is defined, libxl_physinfo structure will contain an uint64 field
- * called max_possible_mfn, containing the highest possible mfn on this host,
- * possibly taking memory hotplug into account.
- */
-#define LIBXL_HAVE_PHYSINFO_MAX_POSSIBLE_MFN 1
-
-/*
  * LIBXL_HAVE_DOMINFO_OUTSTANDING_MEMKB 1
  *
  * If this is defined, libxl_dominfo will contain a MemKB type field called
@@ -794,6 +718,12 @@ typedef struct libxl__ctx libxl_ctx;
 #define LIBXL_HAVE_DOMAIN_CREATE_RESTORE_SEND_BACK_FD 1
 
 /*
+ * LIBXL_HAVE_CREATEINFO_PVH
+ * If this is defined, then libxl supports creation of a PVH guest.
+ */
+#define LIBXL_HAVE_CREATEINFO_PVH 1
+
+/*
  * LIBXL_HAVE_DRIVER_DOMAIN_CREATION 1
  *
  * If this is defined, libxl_domain_create_info contains a driver_domain
@@ -837,14 +767,6 @@ typedef struct libxl__ctx libxl_ctx;
 #if defined(__arm__) || defined(__aarch64__)
 #define LIBXL_HAVE_NO_SUSPEND_RESUME 1
 #endif
-
-/*
- * LIBXL_HAVE_DOMAIN_SUSPEND_ONLY
- *
- * If this is defined, function libxl_domains_suspend_only() is available.
- */
-
-#define LIBXL_HAVE_DOMAIN_SUSPEND_ONLY 1
 
 /*
  * LIBXL_HAVE_DEVICE_PCI_SEIZE
@@ -948,12 +870,6 @@ typedef struct libxl__ctx libxl_ctx;
  */
 #define LIBXL_HAVE_REMUS 1
 
-/*
- * LIBXL_HAVE_COLO_USERSPACE_PROXY
- * If this is defined, then libxl supports COLO userspace proxy.
- */
-#define LIBXL_HAVE_COLO_USERSPACE_PROXY 1
-
 typedef uint8_t libxl_mac[6];
 #define LIBXL_MAC_FMT "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx"
 #define LIBXL_MAC_FMTLEN ((2*6)+5) /* 6 hex bytes plus 5 colons */
@@ -988,31 +904,6 @@ void libxl_mac_copy(libxl_ctx *ctx, libxl_mac *dst, const libxl_mac *src);
  * If this is defined, the Code and Data Prioritization feature is supported.
  */
 #define LIBXL_HAVE_PSR_CDP 1
-
-/*
- * LIBXL_HAVE_PSR_L2_CAT
- *
- * If this is defined, the L2 Cache Allocation Technology feature is supported.
- */
-#define LIBXL_HAVE_PSR_L2_CAT 1
-
-/*
- * LIBXL_HAVE_PSR_GENERIC
- *
- * If this is defined, the Memory Bandwidth Allocation feature is supported.
- * The following public functions are available:
- *   libxl_psr_{set/get}_val
- *   libxl_psr_get_hw_info
- *   libxl_psr_hw_info_list_free
- */
-#define LIBXL_HAVE_PSR_GENERIC 1
-
-/*
- * LIBXL_HAVE_MCA_CAPS
- *
- * If this is defined, setting MCA capabilities for HVM domain is supported.
- */
-#define LIBXL_HAVE_MCA_CAPS 1
 #endif
 
 /*
@@ -1055,6 +946,14 @@ void libxl_mac_copy(libxl_ctx *ctx, libxl_mac *dst, const libxl_mac *src);
  * the libxl_gfx_passthru_kind enumeration is defined.
 */
 #define LIBXL_HAVE_GFX_PASSTHRU_KIND
+
+/*
+ * LIBXL_HAVE_DEVICE_MODEL_VERSION_NONE
+ *
+ * In the case that LIBXL_HAVE_DEVICE_MODEL_VERSION_NONE is set libxl
+ * allows the creation of HVM guests without a device model.
+ */
+#define LIBXL_HAVE_DEVICE_MODEL_VERSION_NONE 1
 
 /*
  * LIBXL_HAVE_CHECKPOINTED_STREAM
@@ -1112,35 +1011,6 @@ void libxl_mac_copy(libxl_ctx *ctx, libxl_mac *dst, const libxl_mac *src);
  * libxl_get_free_memory() return the memory size in a 64 bit value, too.
  */
 #define LIBXL_HAVE_MEMKB_64BITS 1
-
-/*
- * LIBXL_HAVE_QED
- *
- * If this is defined QED disk formats can be used for both HVM and PV guests.
- */
-#define LIBXL_HAVE_QED 1
-
-/*
- * LIBXL_HAVE_SET_PARAMETERS
- *
- * If this is defined setting hypervisor parameters is supported.
- */
-#define LIBXL_HAVE_SET_PARAMETERS 1
-
-/*
- * LIBXL_HAVE_PV_SHIM
- *
- * If this is defined, libxl_domain_build_info's pvh type information
- * contains members pvshim, pvshim_path, pvshim_cmdline, pvshim_extra.
- */
-#define LIBXL_HAVE_PV_SHIM 1
-
-/*
- * LIBXL_HAVE_PVCALLS
- *
- * If this is defined, libxl supports creating pvcalls interfaces.
- */
-#define LIBXL_HAVE_PVCALLS 1
 
 typedef char **libxl_string_list;
 void libxl_string_list_dispose(libxl_string_list *sl);
@@ -1492,14 +1362,6 @@ int libxl_domain_suspend(libxl_ctx *ctx, uint32_t domid, int fd,
 #define LIBXL_SUSPEND_DEBUG 1
 #define LIBXL_SUSPEND_LIVE 2
 
-/*
- * Only suspend domain, do not save its state to file, do not destroy it.
- * Suspended domain can be resumed with libxl_domain_resume()
- */
-int libxl_domain_suspend_only(libxl_ctx *ctx, uint32_t domid,
-                         const libxl_asyncop_how *ao_how)
-                         LIBXL_EXTERNAL_CALLERS_ONLY;
-
 /* @param suspend_cancel [from xenctrl.h:xc_domain_resume( @param fast )]
  *   If this parameter is true, use co-operative resume. The guest
  *   must support this.
@@ -1693,6 +1555,9 @@ libxl_vcpuinfo *libxl_list_vcpu(libxl_ctx *ctx, uint32_t domid,
                                 int *nb_vcpu, int *nr_cpus_out);
 void libxl_vcpuinfo_list_free(libxl_vcpuinfo *, int nr_vcpus);
 
+void libxl_device_vtpm_list_free(libxl_device_vtpm*, int nr_vtpms);
+void libxl_vtpminfo_list_free(libxl_vtpminfo *, int nr_vtpms);
+
 /*
  * Devices
  * =======
@@ -1833,14 +1698,9 @@ int libxl_device_disk_destroy(libxl_ctx *ctx, uint32_t domid,
                               const libxl_asyncop_how *ao_how)
                               LIBXL_EXTERNAL_CALLERS_ONLY;
 
-libxl_device_disk *libxl_device_disk_list(libxl_ctx *ctx,
-                                          uint32_t domid, int *num)
-                                          LIBXL_EXTERNAL_CALLERS_ONLY;
-void libxl_device_disk_list_free(libxl_device_disk* list, int num)
-                                 LIBXL_EXTERNAL_CALLERS_ONLY;
+libxl_device_disk *libxl_device_disk_list(libxl_ctx *ctx, uint32_t domid, int *num);
 int libxl_device_disk_getinfo(libxl_ctx *ctx, uint32_t domid,
-                              libxl_device_disk *disk, libxl_diskinfo *diskinfo)
-                              LIBXL_EXTERNAL_CALLERS_ONLY;
+                              libxl_device_disk *disk, libxl_diskinfo *diskinfo);
 
 /*
  * Insert a CD-ROM device. A device corresponding to disk must already
@@ -1934,14 +1794,9 @@ int libxl_device_nic_destroy(libxl_ctx *ctx, uint32_t domid,
                              const libxl_asyncop_how *ao_how)
                              LIBXL_EXTERNAL_CALLERS_ONLY;
 
-libxl_device_nic *libxl_device_nic_list(libxl_ctx *ctx,
-                                        uint32_t domid, int *num)
-                                        LIBXL_EXTERNAL_CALLERS_ONLY;
-void libxl_device_nic_list_free(libxl_device_nic* list, int num)
-                                LIBXL_EXTERNAL_CALLERS_ONLY;
+libxl_device_nic *libxl_device_nic_list(libxl_ctx *ctx, uint32_t domid, int *num);
 int libxl_device_nic_getinfo(libxl_ctx *ctx, uint32_t domid,
-                             libxl_device_nic *nic, libxl_nicinfo *nicinfo)
-                             LIBXL_EXTERNAL_CALLERS_ONLY;
+                              libxl_device_nic *nic, libxl_nicinfo *nicinfo);
 
 /*
  * Virtual Channels
@@ -1967,38 +1822,9 @@ int libxl_device_vtpm_destroy(libxl_ctx *ctx, uint32_t domid,
                               const libxl_asyncop_how *ao_how)
                               LIBXL_EXTERNAL_CALLERS_ONLY;
 
-libxl_device_vtpm *libxl_device_vtpm_list(libxl_ctx *ctx,
-                                          uint32_t domid, int *num)
-                                          LIBXL_EXTERNAL_CALLERS_ONLY;
-void libxl_device_vtpm_list_free(libxl_device_vtpm*, int num)
-                                 LIBXL_EXTERNAL_CALLERS_ONLY;
+libxl_device_vtpm *libxl_device_vtpm_list(libxl_ctx *ctx, uint32_t domid, int *num);
 int libxl_device_vtpm_getinfo(libxl_ctx *ctx, uint32_t domid,
-                              libxl_device_vtpm *vtpm, libxl_vtpminfo *vtpminfo)
-                              LIBXL_EXTERNAL_CALLERS_ONLY;
-
-/* Virtual displays */
-int libxl_device_vdispl_add(libxl_ctx *ctx, uint32_t domid,
-                            libxl_device_vdispl *displ,
-                            const libxl_asyncop_how *ao_how)
-                            LIBXL_EXTERNAL_CALLERS_ONLY;
-int libxl_device_vdispl_remove(libxl_ctx *ctx, uint32_t domid,
-                               libxl_device_vdispl *vdispl,
-                               const libxl_asyncop_how *ao_how)
-                               LIBXL_EXTERNAL_CALLERS_ONLY;
-int libxl_device_vdispl_destroy(libxl_ctx *ctx, uint32_t domid,
-                                libxl_device_vdispl *vdispl,
-                                const libxl_asyncop_how *ao_how)
-                                LIBXL_EXTERNAL_CALLERS_ONLY;
-
-libxl_device_vdispl *libxl_device_vdispl_list(libxl_ctx *ctx,
-                                              uint32_t domid, int *num)
-                                              LIBXL_EXTERNAL_CALLERS_ONLY;
-void libxl_device_vdispl_list_free(libxl_device_vdispl* list, int num)
-                                   LIBXL_EXTERNAL_CALLERS_ONLY;
-int libxl_device_vdispl_getinfo(libxl_ctx *ctx, uint32_t domid,
-                                libxl_device_vdispl *vdispl,
-                                libxl_vdisplinfo *vdisplinfo)
-                                LIBXL_EXTERNAL_CALLERS_ONLY;
+                               libxl_device_vtpm *vtpm, libxl_vtpminfo *vtpminfo);
 
 /* Keyboard */
 int libxl_device_vkb_add(libxl_ctx *ctx, uint32_t domid, libxl_device_vkb *vkb,
@@ -2025,26 +1851,6 @@ int libxl_device_vfb_destroy(libxl_ctx *ctx, uint32_t domid,
                              libxl_device_vfb *vfb,
                              const libxl_asyncop_how *ao_how)
                              LIBXL_EXTERNAL_CALLERS_ONLY;
-
-/* 9pfs */
-int libxl_device_p9_remove(libxl_ctx *ctx, uint32_t domid,
-                           libxl_device_p9 *p9,
-                           const libxl_asyncop_how *ao_how)
-                           LIBXL_EXTERNAL_CALLERS_ONLY;
-int libxl_device_p9_destroy(libxl_ctx *ctx, uint32_t domid,
-                            libxl_device_p9 *p9,
-                            const libxl_asyncop_how *ao_how)
-                            LIBXL_EXTERNAL_CALLERS_ONLY;
-
-/* pvcalls interface */
-int libxl_device_pvcallsif_remove(libxl_ctx *ctx, uint32_t domid,
-                                  libxl_device_pvcallsif *pvcallsif,
-                                  const libxl_asyncop_how *ao_how)
-                                  LIBXL_EXTERNAL_CALLERS_ONLY;
-int libxl_device_pvcallsif_destroy(libxl_ctx *ctx, uint32_t domid,
-                                   libxl_device_pvcallsif *pvcallsif,
-                                   const libxl_asyncop_how *ao_how)
-                                   LIBXL_EXTERNAL_CALLERS_ONLY;
 
 /* PCI Passthrough */
 int libxl_device_pci_add(libxl_ctx *ctx, uint32_t domid,
@@ -2250,7 +2056,6 @@ int libxl_send_trigger(libxl_ctx *ctx, uint32_t domid,
                        libxl_trigger trigger, uint32_t vcpuid);
 int libxl_send_sysrq(libxl_ctx *ctx, uint32_t domid, char sysrq);
 int libxl_send_debug_keys(libxl_ctx *ctx, char *keys);
-int libxl_set_parameters(libxl_ctx *ctx, char *params);
 
 typedef struct libxl__xen_console_reader libxl_xen_console_reader;
 
@@ -2274,12 +2079,6 @@ int libxl_tmem_shared_auth(libxl_ctx *ctx, uint32_t domid, char* uuid,
 int libxl_tmem_freeable(libxl_ctx *ctx);
 
 int libxl_get_freecpus(libxl_ctx *ctx, libxl_bitmap *cpumap);
-
-/*
- * Set poolid to LIBXL_CPUOOL_POOLID_ANY to have Xen choose a
- * free poolid for you.
- */
-#define LIBXL_CPUPOOL_POOLID_ANY 0xFFFFFFFF
 int libxl_cpupool_create(libxl_ctx *ctx, const char *name,
                          libxl_scheduler sched,
                          libxl_bitmap cpumap, libxl_uuid *uuid,
@@ -2312,7 +2111,7 @@ bool libxl_ms_vm_genid_is_zero(const libxl_ms_vm_genid *id);
 void libxl_ms_vm_genid_copy(libxl_ctx *ctx, libxl_ms_vm_genid *dst,
                             const libxl_ms_vm_genid *src);
 
-#if defined(__i386__) || defined(__x86_64__)
+#ifdef LIBXL_HAVE_PSR_CMT
 int libxl_psr_cmt_attach(libxl_ctx *ctx, uint32_t domid);
 int libxl_psr_cmt_detach(libxl_ctx *ctx, uint32_t domid);
 int libxl_psr_cmt_domain_attached(libxl_ctx *ctx, uint32_t domid);
@@ -2325,7 +2124,9 @@ int libxl_psr_cmt_get_cache_occupancy(libxl_ctx *ctx,
                                       uint32_t domid,
                                       uint32_t socketid,
                                       uint32_t *l3_cache_occupancy);
+#endif
 
+#ifdef LIBXL_HAVE_PSR_MBM
 int libxl_psr_cmt_type_supported(libxl_ctx *ctx, libxl_psr_cmt_type type);
 int libxl_psr_cmt_get_sample(libxl_ctx *ctx,
                              uint32_t domid,
@@ -2333,7 +2134,9 @@ int libxl_psr_cmt_get_sample(libxl_ctx *ctx,
                              uint64_t scope,
                              uint64_t *sample_r,
                              uint64_t *tsc_r);
+#endif
 
+#ifdef LIBXL_HAVE_PSR_CAT
 /*
  * Function to set a domain's cbm. It operates on a single or multiple
  * target(s) defined in 'target_map'. The definition of 'target_map' is
@@ -2356,37 +2159,9 @@ int libxl_psr_cat_get_cbm(libxl_ctx *ctx, uint32_t domid,
  * On success, the function returns an array of elements in 'info',
  * and the length in 'nr'.
  */
-int libxl_psr_cat_get_info(libxl_ctx *ctx, libxl_psr_cat_info **info,
-                           unsigned int *nr, unsigned int lvl);
 int libxl_psr_cat_get_l3_info(libxl_ctx *ctx, libxl_psr_cat_info **info,
                               int *nr);
 void libxl_psr_cat_info_list_free(libxl_psr_cat_info *list, int nr);
-
-typedef enum libxl_psr_cbm_type libxl_psr_type;
-
-/*
- * Function to set a domain's value. It operates on a single or multiple
- * target(s) defined in 'target_map'. 'target_map' specifies all the sockets
- * to be operated on.
- */
-int libxl_psr_set_val(libxl_ctx *ctx, uint32_t domid,
-                      libxl_psr_type type, libxl_bitmap *target_map,
-                      uint64_t val);
-/*
- * Function to get a domain's cbm. It operates on a single 'target'.
- * 'target' specifies which socket to be operated on.
- */
-int libxl_psr_get_val(libxl_ctx *ctx, uint32_t domid,
-                      libxl_psr_type type, unsigned int target,
-                      uint64_t *val);
-/*
- * On success, the function returns an array of elements in 'info',
- * and the length in 'nr'.
- */
-int libxl_psr_get_hw_info(libxl_ctx *ctx, libxl_psr_feat_type type,
-                          unsigned int lvl, unsigned int *nr,
-                          libxl_psr_hw_info **info);
-void libxl_psr_hw_info_list_free(libxl_psr_hw_info *list, unsigned int nr);
 #endif
 
 /* misc */

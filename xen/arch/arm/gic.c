@@ -17,6 +17,7 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/mm.h>
@@ -36,11 +37,17 @@
 #include <asm/vgic.h>
 #include <asm/acpi.h>
 
-DEFINE_PER_CPU(uint64_t, lr_mask);
+static void gic_restore_pending_irqs(struct vcpu *v);
+
+static DEFINE_PER_CPU(uint64_t, lr_mask);
+
+#define lr_all_full() (this_cpu(lr_mask) == ((1 << gic_hw_ops->info->nr_lrs) - 1))
 
 #undef GIC_DEBUG
 
-const struct gic_hw_operations *gic_hw_ops;
+static void gic_update_one_lr(struct vcpu *v, int i);
+
+static const struct gic_hw_operations *gic_hw_ops;
 
 void register_gic_ops(const struct gic_hw_operations *ops)
 {
@@ -85,6 +92,8 @@ void gic_restore_state(struct vcpu *v)
     gic_hw_ops->restore_state(v);
 
     isb();
+
+    gic_restore_pending_irqs(v);
 }
 
 /* desc->irq needs to be disabled before calling this function */
@@ -128,25 +137,25 @@ void gic_route_irq_to_xen(struct irq_desc *desc, unsigned int priority)
 int gic_route_irq_to_guest(struct domain *d, unsigned int virq,
                            struct irq_desc *desc, unsigned int priority)
 {
-    int ret;
+    unsigned long flags;
+    /* Use vcpu0 to retrieve the pending_irq struct. Given that we only
+     * route SPIs to guests, it doesn't make any difference. */
+    struct vcpu *v_target = vgic_get_target_vcpu(d->vcpu[0], virq);
+    struct vgic_irq_rank *rank = vgic_rank_irq(v_target, virq);
+    struct pending_irq *p = irq_to_pending(v_target, virq);
+    int res = -EBUSY;
 
     ASSERT(spin_is_locked(&desc->lock));
     /* Caller has already checked that the IRQ is an SPI */
     ASSERT(virq >= 32);
     ASSERT(virq < vgic_num_irqs(d));
-    ASSERT(!is_lpi(virq));
 
-    /*
-     * When routing an IRQ to guest, the virtual state is not synced
-     * back to the physical IRQ. To prevent get unsync, restrict the
-     * routing to when the Domain is been created.
-     */
-    if ( d->creation_finished )
-        return -EBUSY;
+    vgic_lock_rank(v_target, rank, flags);
 
-    ret = vgic_connect_hw_irq(d, NULL, virq, desc, true);
-    if ( ret )
-        return ret;
+    if ( p->desc ||
+         /* The VIRQ should not be already enabled by the guest */
+         test_bit(GIC_IRQ_GUEST_ENABLED, &p->status) )
+        goto out;
 
     desc->handler = gic_hw_ops->gic_guest_irq_type;
     set_bit(_IRQ_GUEST, &desc->status);
@@ -155,39 +164,59 @@ int gic_route_irq_to_guest(struct domain *d, unsigned int virq,
         gic_set_irq_type(desc, desc->arch.type);
     gic_set_irq_priority(desc, priority);
 
-    return 0;
+    p->desc = desc;
+    res = 0;
+
+out:
+    vgic_unlock_rank(v_target, rank, flags);
+
+    return res;
 }
 
 /* This function only works with SPIs for now */
 int gic_remove_irq_from_guest(struct domain *d, unsigned int virq,
                               struct irq_desc *desc)
 {
-    int ret;
+    struct vcpu *v_target = vgic_get_target_vcpu(d->vcpu[0], virq);
+    struct vgic_irq_rank *rank = vgic_rank_irq(v_target, virq);
+    struct pending_irq *p = irq_to_pending(v_target, virq);
+    unsigned long flags;
 
     ASSERT(spin_is_locked(&desc->lock));
     ASSERT(test_bit(_IRQ_GUEST, &desc->status));
-    ASSERT(!is_lpi(virq));
+    ASSERT(p->desc == desc);
 
-    /*
-     * Removing an interrupt while the domain is running may have
-     * undesirable effect on the vGIC emulation.
-     */
-    if ( !d->is_dying )
-        return -EBUSY;
+    vgic_lock_rank(v_target, rank, flags);
 
-    desc->handler->shutdown(desc);
+    if ( d->is_dying )
+    {
+        desc->handler->shutdown(desc);
 
-    /* EOI the IRQ if it has not been done by the guest */
-    if ( test_bit(_IRQ_INPROGRESS, &desc->status) )
-        gic_hw_ops->deactivate_irq(desc);
-    clear_bit(_IRQ_INPROGRESS, &desc->status);
-
-    ret = vgic_connect_hw_irq(d, NULL, virq, desc, false);
-    if ( ret )
-        return ret;
+        /* EOI the IRQ if it has not been done by the guest */
+        if ( test_bit(_IRQ_INPROGRESS, &desc->status) )
+            gic_hw_ops->deactivate_irq(desc);
+        clear_bit(_IRQ_INPROGRESS, &desc->status);
+    }
+    else
+    {
+        /*
+         * TODO: Handle eviction from LRs For now, deny
+         * remove if the IRQ is inflight or not disabled.
+         */
+        if ( test_bit(_IRQ_INPROGRESS, &desc->status) ||
+             !test_bit(_IRQ_DISABLED, &desc->status) )
+        {
+            vgic_unlock_rank(v_target, rank, flags);
+            return -EBUSY;
+        }
+    }
 
     clear_bit(_IRQ_GUEST, &desc->status);
     desc->handler = &no_irq_type;
+
+    p->desc = NULL;
+
+    vgic_unlock_rank(v_target, rank, flags);
 
     return 0;
 }
@@ -294,11 +323,6 @@ void send_SGI_mask(const cpumask_t *cpumask, enum gic_sgi sgi)
 {
     ASSERT(sgi < 16); /* There are only 16 SGIs */
 
-   /*
-    * Ensure that stores to Normal memory are visible to the other CPUs
-    * before issuing the IPI.
-    * Matches the read barrier in do_sgi.
-    */
     dsb(sy);
     gic_hw_ops->send_SGI(sgi, SGI_TARGET_LIST, cpumask);
 }
@@ -312,11 +336,6 @@ void send_SGI_self(enum gic_sgi sgi)
 {
     ASSERT(sgi < 16); /* There are only 16 SGIs */
 
-   /*
-    * Ensure that stores to Normal memory are visible to the other CPUs
-    * before issuing the IPI.
-    * Matches the read barrier in do_sgi.
-    */
     dsb(sy);
     gic_hw_ops->send_SGI(sgi, SGI_TARGET_SELF, NULL);
 }
@@ -325,11 +344,6 @@ void send_SGI_allbutself(enum gic_sgi sgi)
 {
    ASSERT(sgi < 16); /* There are only 16 SGIs */
 
-   /*
-    * Ensure that stores to Normal memory are visible to the other CPUs
-    * before issuing the IPI.
-    * Matches the read barrier in do_sgi.
-    */
    dsb(sy);
    gic_hw_ops->send_SGI(sgi, SGI_TARGET_OTHERS, NULL);
 }
@@ -355,6 +369,302 @@ void gic_disable_cpu(void)
     gic_hw_ops->disable_interface();
 }
 
+static inline void gic_set_lr(int lr, struct pending_irq *p,
+                              unsigned int state)
+{
+    ASSERT(!local_irq_is_enabled());
+
+    gic_hw_ops->update_lr(lr, p, state);
+
+    set_bit(GIC_IRQ_GUEST_VISIBLE, &p->status);
+    clear_bit(GIC_IRQ_GUEST_QUEUED, &p->status);
+    p->lr = lr;
+}
+
+static inline void gic_add_to_lr_pending(struct vcpu *v, struct pending_irq *n)
+{
+    struct pending_irq *iter;
+
+    ASSERT(spin_is_locked(&v->arch.vgic.lock));
+
+    if ( !list_empty(&n->lr_queue) )
+        return;
+
+    list_for_each_entry ( iter, &v->arch.vgic.lr_pending, lr_queue )
+    {
+        if ( iter->priority > n->priority )
+        {
+            list_add_tail(&n->lr_queue, &iter->lr_queue);
+            return;
+        }
+    }
+    list_add_tail(&n->lr_queue, &v->arch.vgic.lr_pending);
+}
+
+void gic_remove_from_queues(struct vcpu *v, unsigned int virtual_irq)
+{
+    struct pending_irq *p = irq_to_pending(v, virtual_irq);
+    unsigned long flags;
+
+    spin_lock_irqsave(&v->arch.vgic.lock, flags);
+    if ( !list_empty(&p->lr_queue) )
+        list_del_init(&p->lr_queue);
+    spin_unlock_irqrestore(&v->arch.vgic.lock, flags);
+}
+
+void gic_raise_inflight_irq(struct vcpu *v, unsigned int virtual_irq)
+{
+    struct pending_irq *n = irq_to_pending(v, virtual_irq);
+
+    ASSERT(spin_is_locked(&v->arch.vgic.lock));
+
+    /* Don't try to update the LR if the interrupt is disabled */
+    if ( !test_bit(GIC_IRQ_GUEST_ENABLED, &n->status) )
+        return;
+
+    if ( list_empty(&n->lr_queue) )
+    {
+        if ( v == current )
+            gic_update_one_lr(v, n->lr);
+    }
+#ifdef GIC_DEBUG
+    else
+        gdprintk(XENLOG_DEBUG, "trying to inject irq=%u into d%dv%d, when it is still lr_pending\n",
+                 virtual_irq, v->domain->domain_id, v->vcpu_id);
+#endif
+}
+
+void gic_raise_guest_irq(struct vcpu *v, unsigned int virtual_irq,
+        unsigned int priority)
+{
+    int i;
+    unsigned int nr_lrs = gic_hw_ops->info->nr_lrs;
+
+    ASSERT(spin_is_locked(&v->arch.vgic.lock));
+
+    if ( v == current && list_empty(&v->arch.vgic.lr_pending) )
+    {
+        i = find_first_zero_bit(&this_cpu(lr_mask), nr_lrs);
+        if (i < nr_lrs) {
+            set_bit(i, &this_cpu(lr_mask));
+            gic_set_lr(i, irq_to_pending(v, virtual_irq), GICH_LR_PENDING);
+            return;
+        }
+    }
+
+    gic_add_to_lr_pending(v, irq_to_pending(v, virtual_irq));
+}
+
+static void gic_update_one_lr(struct vcpu *v, int i)
+{
+    struct pending_irq *p;
+    int irq;
+    struct gic_lr lr_val;
+
+    ASSERT(spin_is_locked(&v->arch.vgic.lock));
+    ASSERT(!local_irq_is_enabled());
+
+    gic_hw_ops->read_lr(i, &lr_val);
+    irq = lr_val.virq;
+    p = irq_to_pending(v, irq);
+    if ( lr_val.state & GICH_LR_ACTIVE )
+    {
+        set_bit(GIC_IRQ_GUEST_ACTIVE, &p->status);
+        if ( test_bit(GIC_IRQ_GUEST_ENABLED, &p->status) &&
+             test_and_clear_bit(GIC_IRQ_GUEST_QUEUED, &p->status) )
+        {
+            if ( p->desc == NULL )
+            {
+                 lr_val.state |= GICH_LR_PENDING;
+                 gic_hw_ops->write_lr(i, &lr_val);
+            }
+            else
+                gdprintk(XENLOG_WARNING, "unable to inject hw irq=%d into d%dv%d: already active in LR%d\n",
+                         irq, v->domain->domain_id, v->vcpu_id, i);
+        }
+    }
+    else if ( lr_val.state & GICH_LR_PENDING )
+    {
+        int q __attribute__ ((unused)) = test_and_clear_bit(GIC_IRQ_GUEST_QUEUED, &p->status);
+#ifdef GIC_DEBUG
+        if ( q )
+            gdprintk(XENLOG_DEBUG, "trying to inject irq=%d into d%dv%d, when it is already pending in LR%d\n",
+                    irq, v->domain->domain_id, v->vcpu_id, i);
+#endif
+    }
+    else
+    {
+        gic_hw_ops->clear_lr(i);
+        clear_bit(i, &this_cpu(lr_mask));
+
+        if ( p->desc != NULL )
+            clear_bit(_IRQ_INPROGRESS, &p->desc->status);
+        clear_bit(GIC_IRQ_GUEST_VISIBLE, &p->status);
+        clear_bit(GIC_IRQ_GUEST_ACTIVE, &p->status);
+        p->lr = GIC_INVALID_LR;
+        if ( test_bit(GIC_IRQ_GUEST_ENABLED, &p->status) &&
+             test_bit(GIC_IRQ_GUEST_QUEUED, &p->status) &&
+             !test_bit(GIC_IRQ_GUEST_MIGRATING, &p->status) )
+            gic_raise_guest_irq(v, irq, p->priority);
+        else {
+            list_del_init(&p->inflight);
+            /*
+             * Remove from inflight, then change physical affinity. It
+             * makes sure that when a new interrupt is received on the
+             * next pcpu, inflight is already cleared. No concurrent
+             * accesses to inflight.
+             */
+            smp_wmb();
+            if ( test_bit(GIC_IRQ_GUEST_MIGRATING, &p->status) )
+            {
+                struct vcpu *v_target = vgic_get_target_vcpu(v, irq);
+                irq_set_affinity(p->desc, cpumask_of(v_target->processor));
+                clear_bit(GIC_IRQ_GUEST_MIGRATING, &p->status);
+            }
+        }
+    }
+}
+
+void gic_clear_lrs(struct vcpu *v)
+{
+    int i = 0;
+    unsigned long flags;
+    unsigned int nr_lrs = gic_hw_ops->info->nr_lrs;
+
+    /* The idle domain has no LRs to be cleared. Since gic_restore_state
+     * doesn't write any LR registers for the idle domain they could be
+     * non-zero. */
+    if ( is_idle_vcpu(v) )
+        return;
+
+    gic_hw_ops->update_hcr_status(GICH_HCR_UIE, 0);
+
+    spin_lock_irqsave(&v->arch.vgic.lock, flags);
+
+    while ((i = find_next_bit((const unsigned long *) &this_cpu(lr_mask),
+                              nr_lrs, i)) < nr_lrs ) {
+        gic_update_one_lr(v, i);
+        i++;
+    }
+
+    spin_unlock_irqrestore(&v->arch.vgic.lock, flags);
+}
+
+static void gic_restore_pending_irqs(struct vcpu *v)
+{
+    int lr = 0;
+    struct pending_irq *p, *t, *p_r;
+    struct list_head *inflight_r;
+    unsigned long flags;
+    unsigned int nr_lrs = gic_hw_ops->info->nr_lrs;
+    int lrs = nr_lrs;
+
+    spin_lock_irqsave(&v->arch.vgic.lock, flags);
+
+    if ( list_empty(&v->arch.vgic.lr_pending) )
+        goto out;
+
+    inflight_r = &v->arch.vgic.inflight_irqs;
+    list_for_each_entry_safe ( p, t, &v->arch.vgic.lr_pending, lr_queue )
+    {
+        lr = find_next_zero_bit(&this_cpu(lr_mask), nr_lrs, lr);
+        if ( lr >= nr_lrs )
+        {
+            /* No more free LRs: find a lower priority irq to evict */
+            list_for_each_entry_reverse( p_r, inflight_r, inflight )
+            {
+                if ( p_r->priority == p->priority )
+                    goto out;
+                if ( test_bit(GIC_IRQ_GUEST_VISIBLE, &p_r->status) &&
+                     !test_bit(GIC_IRQ_GUEST_ACTIVE, &p_r->status) )
+                    goto found;
+            }
+            /* We didn't find a victim this time, and we won't next
+             * time, so quit */
+            goto out;
+
+found:
+            lr = p_r->lr;
+            p_r->lr = GIC_INVALID_LR;
+            set_bit(GIC_IRQ_GUEST_QUEUED, &p_r->status);
+            clear_bit(GIC_IRQ_GUEST_VISIBLE, &p_r->status);
+            gic_add_to_lr_pending(v, p_r);
+            inflight_r = &p_r->inflight;
+        }
+
+        gic_set_lr(lr, p, GICH_LR_PENDING);
+        list_del_init(&p->lr_queue);
+        set_bit(lr, &this_cpu(lr_mask));
+
+        /* We can only evict nr_lrs entries */
+        lrs--;
+        if ( lrs == 0 )
+            break;
+    }
+
+out:
+    spin_unlock_irqrestore(&v->arch.vgic.lock, flags);
+}
+
+void gic_clear_pending_irqs(struct vcpu *v)
+{
+    struct pending_irq *p, *t;
+
+    ASSERT(spin_is_locked(&v->arch.vgic.lock));
+
+    v->arch.lr_mask = 0;
+    list_for_each_entry_safe ( p, t, &v->arch.vgic.lr_pending, lr_queue )
+        list_del_init(&p->lr_queue);
+}
+
+int gic_events_need_delivery(void)
+{
+    struct vcpu *v = current;
+    struct pending_irq *p;
+    unsigned long flags;
+    const unsigned long apr = gic_hw_ops->read_apr(0);
+    int mask_priority;
+    int active_priority;
+    int rc = 0;
+
+    mask_priority = gic_hw_ops->read_vmcr_priority();
+    active_priority = find_next_bit(&apr, 32, 0);
+
+    spin_lock_irqsave(&v->arch.vgic.lock, flags);
+
+    /* TODO: We order the guest irqs by priority, but we don't change
+     * the priority of host irqs. */
+
+    /* find the first enabled non-active irq, the queue is already
+     * ordered by priority */
+    list_for_each_entry( p, &v->arch.vgic.inflight_irqs, inflight )
+    {
+        if ( GIC_PRI_TO_GUEST(p->priority) >= mask_priority )
+            goto out;
+        if ( GIC_PRI_TO_GUEST(p->priority) >= active_priority )
+            goto out;
+        if ( test_bit(GIC_IRQ_GUEST_ENABLED, &p->status) )
+        {
+            rc = 1;
+            goto out;
+        }
+    }
+
+out:
+    spin_unlock_irqrestore(&v->arch.vgic.lock, flags);
+    return rc;
+}
+
+void gic_inject(void)
+{
+    ASSERT(!local_irq_is_enabled());
+
+    gic_restore_pending_irqs(current);
+
+    if ( !list_empty(&current->arch.vgic.lr_pending) && lr_all_full() )
+        gic_hw_ops->update_hcr_status(GICH_HCR_UIE, 1);
+}
+
 static void do_sgi(struct cpu_user_regs *regs, enum gic_sgi sgi)
 {
     /* Lower the priority */
@@ -364,13 +674,6 @@ static void do_sgi(struct cpu_user_regs *regs, enum gic_sgi sgi)
 
     /* Lower the priority */
     gic_hw_ops->eoi_irq(desc);
-
-    /*
-     * Ensure any shared data written by the CPU sending
-     * the IPI is read after we've read the ACK register on the GIC.
-     * Matches the write barrier in send_SGI_* helpers.
-     */
-    smp_rmb();
 
     switch (sgi)
     {
@@ -404,18 +707,10 @@ void gic_interrupt(struct cpu_user_regs *regs, int is_fiq)
         if ( likely(irq >= 16 && irq < 1020) )
         {
             local_irq_enable();
-            isb();
             do_IRQ(regs, irq, is_fiq);
             local_irq_disable();
         }
-        else if ( is_lpi(irq) )
-        {
-            local_irq_enable();
-            isb();
-            gic_hw_ops->do_LPI(irq);
-            local_irq_disable();
-        }
-        else if ( unlikely(irq < 16) )
+        else if (unlikely(irq < 16))
         {
             do_sgi(regs, irq);
         }
@@ -445,8 +740,20 @@ static void maintenance_interrupt(int irq, void *dev_id, struct cpu_user_regs *r
 
 void gic_dump_info(struct vcpu *v)
 {
+    struct pending_irq *p;
+
     printk("GICH_LRs (vcpu %d) mask=%"PRIx64"\n", v->vcpu_id, v->arch.lr_mask);
     gic_hw_ops->dump_state(v);
+
+    list_for_each_entry ( p, &v->arch.vgic.inflight_irqs, inflight )
+    {
+        printk("Inflight irq=%u lr=%u\n", p->irq, p->lr);
+    }
+
+    list_for_each_entry( p, &v->arch.vgic.lr_pending, lr_queue )
+    {
+        printk("Pending irq=%d\n", p->irq);
+    }
 }
 
 void init_maintenance_interrupt(void)
@@ -467,18 +774,6 @@ int gic_make_hwdom_dt_node(const struct domain *d,
 int gic_make_hwdom_madt(const struct domain *d, u32 offset)
 {
     return gic_hw_ops->make_hwdom_madt(d, offset);
-}
-
-unsigned long gic_get_hwdom_madt_size(const struct domain *d)
-{
-    unsigned long madt_size;
-
-    madt_size = sizeof(struct acpi_table_madt)
-                + sizeof(struct acpi_madt_generic_interrupt) * d->max_vcpus
-                + sizeof(struct acpi_madt_generic_distributor)
-                + gic_hw_ops->get_hwdom_extra_madt_size(d);
-
-    return madt_size;
 }
 
 int gic_iomem_deny_access(const struct domain *d)

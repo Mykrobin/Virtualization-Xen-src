@@ -21,6 +21,7 @@
 #
 *****************************************************************************/
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/sched.h>
@@ -446,6 +447,18 @@ int do_pm_op(struct xen_sysctl_pm_op *op)
         sched_smt_power_savings = !!op->u.set_sched_opt_smt;
         op->u.set_sched_opt_smt = saved_value;
 
+        break;
+    }
+
+    case XEN_SYSCTL_pm_op_set_vcpu_migration_delay:
+    {
+        set_vcpu_migration_delay(op->u.set_vcpu_migration_delay);
+        break;
+    }
+
+    case XEN_SYSCTL_pm_op_get_vcpu_migration_delay:
+    {
+        op->u.get_vcpu_migration_delay = get_vcpu_migration_delay();
         break;
     }
 

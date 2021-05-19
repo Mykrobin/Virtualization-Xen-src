@@ -10,9 +10,6 @@
 #define GENMASK(h, l) \
     (((~0UL) << (l)) & (~0UL >> (BITS_PER_LONG - 1 - (h))))
 
-#define GENMASK_ULL(h, l) \
-    (((~0ULL) << (l)) & (~0ULL >> (BITS_PER_LLONG - 1 - (h))))
-
 /*
  * ffs: find first bit set. This is defined the same way as
  * the libc and compiler builtin ffs routines, therefore
@@ -223,7 +220,7 @@ static inline __u32 ror32(__u32 word, unsigned int shift)
 #define __L4(_x)  (((_x) & 0x0000000c) ? ( 2 + __L2( (_x)>> 2)) : __L2( _x))
 #define __L8(_x)  (((_x) & 0x000000f0) ? ( 4 + __L4( (_x)>> 4)) : __L4( _x))
 #define __L16(_x) (((_x) & 0x0000ff00) ? ( 8 + __L8( (_x)>> 8)) : __L8( _x))
-#define ilog2(_x) (((_x) & 0xffff0000) ? (16 + __L16((_x)>>16)) : __L16(_x))
+#define LOG_2(_x) (((_x) & 0xffff0000) ? (16 + __L16((_x)>>16)) : __L16(_x))
 
 /**
  * for_each_set_bit - iterate over every set bit in a memory region

@@ -5,6 +5,7 @@
  * tables for IO APICS as well as uniprocessor 8259-alikes.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <asm/regs.h>
@@ -32,9 +33,9 @@
 
 static DEFINE_SPINLOCK(i8259A_lock);
 
-static bool _mask_and_ack_8259A_irq(unsigned int irq);
+static bool_t _mask_and_ack_8259A_irq(unsigned int irq);
 
-bool bogus_8259A_irq(unsigned int irq)
+bool_t bogus_8259A_irq(unsigned int irq)
 {
     return _mask_and_ack_8259A_irq(irq);
 }
@@ -193,11 +194,11 @@ static inline int i8259A_irq_real(unsigned int irq)
  * to the two 8259s is important!  Return a boolean
  * indicating whether the irq was genuine or spurious.
  */
-static bool _mask_and_ack_8259A_irq(unsigned int irq)
+static bool_t _mask_and_ack_8259A_irq(unsigned int irq)
 {
     unsigned int irqmask = 1 << irq;
     unsigned long flags;
-    bool is_real_irq = true; /* Assume real unless spurious */
+    bool_t is_real_irq = 1; /* Assume real unless spurious */
 
     spin_lock_irqsave(&i8259A_lock, flags);
 
@@ -218,7 +219,7 @@ static bool _mask_and_ack_8259A_irq(unsigned int irq)
      */
     if ((cached_irq_mask & irqmask) && !i8259A_irq_real(irq)) {
         static int spurious_irq_mask;
-        is_real_irq = false;
+        is_real_irq = 0;
         /* Report spurious IRQ, once per IRQ line. */
         if (!(spurious_irq_mask & irqmask)) {
             printk("spurious 8259A interrupt: IRQ%d.\n", irq);

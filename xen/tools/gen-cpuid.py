@@ -3,10 +3,6 @@
 
 import sys, os, re
 
-if (sys.version_info > (3, 0)):
-    def xrange(x):
-        return range(x)
-
 class Fail(Exception):
     pass
 
@@ -33,7 +29,6 @@ class State(object):
         self.pv = []
         self.hvm_shadow = []
         self.hvm_hap = []
-        self.bitfields = [] # Text to declare named bitfields in C
 
 def parse_definitions(state):
     """
@@ -102,13 +97,13 @@ def parse_definitions(state):
 def featureset_to_uint32s(fs, nr):
     """ Represent a featureset as a list of C-compatible uint32_t's """
 
-    bitmap = 0
+    bitmap = 0L
     for f in fs:
-        bitmap |= 1 << f
+        bitmap |= 1L << f
 
     words = []
     while bitmap:
-        words.append(bitmap & ((1 << 32) - 1))
+        words.append(bitmap & ((1L << 32) - 1))
         bitmap >>= 32
 
     assert len(words) <= nr
@@ -133,7 +128,16 @@ def crunch_numbers(state):
     common_1d = (FPU, VME, DE, PSE, TSC, MSR, PAE, MCE, CX8, APIC,
                  MTRR, PGE, MCA, CMOV, PAT, PSE36, MMX, FXSR)
 
-    state.known = featureset_to_uint32s(state.names.keys(), nr_entries)
+    # All known features.  Duplicate the common features in e1d
+    e1d_base = SYSCALL & ~31
+    state.known = featureset_to_uint32s(
+        state.names.keys() + [ e1d_base + (x % 32) for x in common_1d ],
+        nr_entries)
+
+    # Fold common back into names
+    for f in common_1d:
+        state.names[e1d_base + (f % 32)] = "E1D_" + state.names[f]
+
     state.common_1d = featureset_to_uint32s(common_1d, 1)[0]
     state.special = featureset_to_uint32s(state.raw_special, nr_entries)
     state.pv = featureset_to_uint32s(state.raw_pv, nr_entries)
@@ -177,11 +181,9 @@ def crunch_numbers(state):
         # bit is only representable in the 64bit PTE format offered by PAE.
         PAE: [LM, NX],
 
-        TSC: [TSC_DEADLINE, RDTSCP, TSC_ADJUST, ITSC],
-
         # APIC is special, but X2APIC does depend on APIC being available in
         # the first place.
-        APIC: [X2APIC, TSC_DEADLINE, EXTAPIC],
+        APIC: [X2APIC],
 
         # AMD built MMXExtentions and 3DNow as extentions to MMX.
         MMX: [MMXEXT, _3DNOW],
@@ -197,7 +199,7 @@ def crunch_numbers(state):
         # %XMM support, without specific inter-dependencies.  Additionally
         # AMD has a special mis-alignment sub-mode.
         SSE: [SSE2, SSE3, SSSE3, SSE4A, MISALIGNSSE,
-              AESNI, PCLMULQDQ, SHA],
+              AESNI, SHA],
 
         # SSE2 was re-specified as core instructions for 64bit.
         SSE2: [LM],
@@ -229,14 +231,9 @@ def crunch_numbers(state):
         XSAVE: [XSAVEOPT, XSAVEC, XGETBV1, XSAVES,
                 AVX, MPX, PKU, LWP],
 
-        # AVX is taken to mean hardware support for 256bit registers (which in
-        # practice depends on the VEX prefix to encode), and the instructions
-        # themselves.
-        #
-        # AVX is not taken to mean support for the VEX prefix itself (nor XOP
-        # for the XOP prefix).  VEX/XOP-encoded GPR instructions, such as
-        # those from the BMI{1,2}, TBM and LWP sets function fine in the
-        # absence of any enabled xstate.
+        # AVX is taken to mean hardware support for VEX encoded instructions,
+        # 256bit registers, and the instructions themselves.  Each of these
+        # subsequent instruction groups may only be VEX encoded.
         AVX: [FMA, FMA4, F16C, AVX2, XOP],
 
         # CX16 is only encodable in Long Mode.  LAHF_LM indicates that the
@@ -248,18 +245,15 @@ def crunch_numbers(state):
         # standard 3DNow in the earlier K6 processors.
         _3DNOW: [_3DNOWEXT],
 
-        # This is just the dependency between AVX512 and AVX2 of XSTATE
-        # feature flags.  If want to use AVX512, AVX2 must be supported and
-        # enabled.
+        # This is just the dependency between AVX512 and AVX2 of XSTATE feature flags.
+        # If want to use AVX512, AVX2 must be supported and enabled.
         AVX2: [AVX512F],
 
-        # AVX512F is taken to mean hardware support for 512bit registers
-        # (which in practice depends on the EVEX prefix to encode), and the
-        # instructions themselves. All further AVX512 features are built on
-        # top of AVX512F
+        # AVX512F is taken to mean hardware support for EVEX encoded instructions,
+        # 512bit registers, and the instructions themselves. All further AVX512 features
+        # are built on top of AVX512F
         AVX512F: [AVX512DQ, AVX512IFMA, AVX512PF, AVX512ER, AVX512CD,
-                  AVX512BW, AVX512VL, AVX512VBMI, AVX512_4VNNIW,
-                  AVX512_4FMAPS, AVX512_VPOPCNTDQ],
+                  AVX512BW, AVX512VL, AVX512VBMI],
 
         # The features:
         #   * Single Thread Indirect Branch Predictors
@@ -289,8 +283,8 @@ def crunch_numbers(state):
             # To debug, uncomment the following lines:
             # def repl(l):
             #     return "[" + ", ".join((state.names[x] for x in l)) + "]"
-            # sys.stderr.write("Feature %s, seen %s, to_process %s \n" % \
-            #     (state.names[feat], repl(seen), repl(to_process)))
+            # print >>sys.stderr, "Feature %s, seen %s, to_process %s " % \
+            #     (state.names[feat], repl(seen), repl(to_process))
 
             f = to_process.pop(0)
 
@@ -306,34 +300,8 @@ def crunch_numbers(state):
     state.deep_features = featureset_to_uint32s(deps.keys(), nr_entries)
     state.nr_deep_deps = len(state.deep_deps.keys())
 
-    try:
-        _tmp = state.deep_deps.iteritems()
-    except AttributeError:
-        _tmp = state.deep_deps.items()
-
-    for k, v in _tmp:
+    for k, v in state.deep_deps.iteritems():
         state.deep_deps[k] = featureset_to_uint32s(v, nr_entries)
-
-    # Calculate the bitfield name declarations
-    for word in xrange(nr_entries):
-
-        names = []
-        for bit in xrange(32):
-
-            name = state.names.get(word * 32 + bit, "")
-
-            # Prepend an underscore if the name starts with a digit.
-            if name and name[0] in "0123456789":
-                name = "_" + name
-
-            # Don't generate names for features fast-forwarded from other
-            # state
-            if name in ("APIC", "OSXSAVE", "OSPKE"):
-                name = ""
-
-            names.append(name.lower())
-
-        state.bitfields.append("bool " + ":1, ".join(names) + ":1")
 
 
 def write_results(state):
@@ -388,15 +356,6 @@ def write_results(state):
     state.output.write(
 """}
 
-""")
-
-    for idx, text in enumerate(state.bitfields):
-        state.output.write(
-            "#define CPUID_BITFIELD_%d \\\n    %s\n\n"
-            % (idx, text))
-
-    state.output.write(
-"""
 #endif /* __XEN_X86__FEATURESET_DATA__ */
 """)
 
@@ -428,8 +387,7 @@ def open_file_or_fd(val, mode, buffering):
         else:
             return open(val, mode, buffering)
 
-    except StandardError:
-        e = sys.exc_info()[1]
+    except StandardError, e:
         if fd != -1:
             raise Fail("Unable to open fd %d: %s: %s" %
                        (fd, e.__class__.__name__, e))
@@ -472,14 +430,10 @@ def main():
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except Fail:
-        e = sys.exc_info()[1]
-        sys.stderr.write("%s:" % (sys.argv[0],))
-        sys.stderr.write(e)
-        sys.stderr.write("\n")
+    except Fail, e:
+        print >>sys.stderr, "%s:" % (sys.argv[0],), e
         sys.exit(1)
-    except SystemExit:
-        e = sys.exc_info()[1]
+    except SystemExit, e:
         sys.exit(e.code)
     except KeyboardInterrupt:
         sys.exit(2)

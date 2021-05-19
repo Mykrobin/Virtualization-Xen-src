@@ -75,14 +75,14 @@ static inline paddr_t shadow_l4e_get_paddr(shadow_l4e_t sl4e)
 #endif
 
 static inline mfn_t shadow_l1e_get_mfn(shadow_l1e_t sl1e)
-{ return l1e_get_mfn(sl1e); }
+{ return _mfn(l1e_get_pfn(sl1e)); }
 static inline mfn_t shadow_l2e_get_mfn(shadow_l2e_t sl2e)
-{ return l2e_get_mfn(sl2e); }
+{ return _mfn(l2e_get_pfn(sl2e)); }
 static inline mfn_t shadow_l3e_get_mfn(shadow_l3e_t sl3e)
-{ return l3e_get_mfn(sl3e); }
+{ return _mfn(l3e_get_pfn(sl3e)); }
 #if SHADOW_PAGING_LEVELS >= 4
 static inline mfn_t shadow_l4e_get_mfn(shadow_l4e_t sl4e)
-{ return l4e_get_mfn(sl4e); }
+{ return _mfn(l4e_get_pfn(sl4e)); }
 #endif
 
 static inline u32 shadow_l1e_get_flags(shadow_l1e_t sl1e)
@@ -115,14 +115,14 @@ static inline shadow_l4e_t shadow_l4e_empty(void)
 #endif
 
 static inline shadow_l1e_t shadow_l1e_from_mfn(mfn_t mfn, u32 flags)
-{ return l1e_from_mfn(mfn, flags); }
+{ return l1e_from_pfn(mfn_x(mfn), flags); }
 static inline shadow_l2e_t shadow_l2e_from_mfn(mfn_t mfn, u32 flags)
-{ return l2e_from_mfn(mfn, flags); }
+{ return l2e_from_pfn(mfn_x(mfn), flags); }
 static inline shadow_l3e_t shadow_l3e_from_mfn(mfn_t mfn, u32 flags)
-{ return l3e_from_mfn(mfn, flags); }
+{ return l3e_from_pfn(mfn_x(mfn), flags); }
 #if SHADOW_PAGING_LEVELS >= 4
 static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
-{ return l4e_from_mfn(mfn, flags); }
+{ return l4e_from_pfn(mfn_x(mfn), flags); }
 #endif
 
 #define shadow_l1_table_offset(a) l1_table_offset(a)
@@ -248,6 +248,8 @@ static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
 #define sh_unhook_64b_mappings     INTERNAL_NAME(sh_unhook_64b_mappings)
 #define sh_paging_mode             INTERNAL_NAME(sh_paging_mode)
 #define sh_detach_old_tables       INTERNAL_NAME(sh_detach_old_tables)
+#define sh_x86_emulate_write       INTERNAL_NAME(sh_x86_emulate_write)
+#define sh_x86_emulate_cmpxchg     INTERNAL_NAME(sh_x86_emulate_cmpxchg)
 #define sh_audit_l1_table          INTERNAL_NAME(sh_audit_l1_table)
 #define sh_audit_fl1_table         INTERNAL_NAME(sh_audit_fl1_table)
 #define sh_audit_l2_table          INTERNAL_NAME(sh_audit_l2_table)

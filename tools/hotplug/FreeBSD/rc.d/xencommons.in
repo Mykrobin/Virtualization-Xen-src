@@ -3,8 +3,6 @@
 # PROVIDE: xencommons
 # REQUIRE: DAEMON
 
-XENSTORED=@XENSTORED@
-
 . /etc/rc.subr
 
 . @XEN_SCRIPT_DIR@/hotplugpath.sh
@@ -39,7 +37,7 @@ xen_startcmd()
 	local time=0
 	local timeout=30
 
-	xenstored_pid=$(check_pidfile ${XENSTORED_PIDFILE} ${XENSTORED})
+	xenstored_pid=$(check_pidfile ${XENSTORED_PIDFILE} ${sbindir}/xenstored)
 	if test -z "$xenstored_pid"; then
 		printf "Cleaning xenstore database.\n"
 		if [ -z "${XENSTORED_ROOTDIR}" ]; then
@@ -51,7 +49,7 @@ xen_startcmd()
 		if [ -n "${XENSTORED_TRACE}" ]; then
 			XENSTORED_ARGS="${XENSTORED_ARGS} -T @XEN_LOG_DIR@/xenstored-trace.log"
 		fi
-		${XENSTORED} ${XENSTORED_ARGS}
+		${sbindir}/xenstored ${XENSTORED_ARGS}
 		while [ $time -lt $timeout ] && ! `${bindir}/xenstore-read -s / >/dev/null 2>&1` ; do
 			printf "."
 			time=$(($time+1))
@@ -89,7 +87,7 @@ xen_stop()
 
 xen_status()
 {
-	xenstored_pid=$(check_pidfile ${XENSTORED_PIDFILE} ${XENSTORED})
+	xenstored_pid=$(check_pidfile ${XENSTORED_PIDFILE} ${sbindir}/xenstored)
 	if test -n ${xenstored_pid}; then
 		pids="$pids $xenstored_pid"
 	fi

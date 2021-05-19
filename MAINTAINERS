@@ -54,11 +54,11 @@ list. Remember to copy the appropriate stable branch maintainer.
 
 The maintainer for this branch is:
 
-	Jan Beulich <jbeulich@suse.com>
+        Jan Beulich <jbeulich@suse.com>
 
 Tools backport requests should also be copied to:
 
-	Ian Jackson <Ian.Jackson@eu.citrix.com>
+        Ian Jackson <Ian.Jackson@eu.citrix.com>
 
 
 	Unstable Subsystem Maintainers
@@ -67,10 +67,6 @@ Tools backport requests should also be copied to:
 Descriptions of section entries:
 
 	M: Mail patches to: FullName <address@domain>
-	R: Designated reviewer: FullName <address@domain>
-	   Reviewers should be CCed on patches.  However, they do not
-	   have a formal governance role, and are listed here
-	   simply because of their own request.
 	L: Mailing list that is relevant to this area
 	W: Web-page with status/info
 	T: SCM tree type and location.  Type is one of: git, hg, quilt, stgit.
@@ -153,14 +149,12 @@ F:	tools/libacpi/
 
 AMD IOMMU
 M:	Suravee Suthikulpanit <suravee.suthikulpanit@amd.com>
-R:	Brian Woods <brian.woods@amd.com>
 S:	Maintained
 F:	xen/drivers/passthrough/amd/
 
 AMD SVM
 M:	Boris Ostrovsky <boris.ostrovsky@oracle.com>
 M:	Suravee Suthikulpanit <suravee.suthikulpanit@amd.com>
-R:	Brian Woods <brian.woods@amd.com>
 S:	Supported
 F:	xen/arch/x86/hvm/svm/
 F:	xen/arch/x86/cpu/vpmu_amd.c
@@ -179,35 +173,18 @@ S:	Supported
 L:	xen-devel@lists.xen.org
 F:	docs/misc/arm/
 F:	xen/arch/arm/
-F:	xen/drivers/char/arm-uart.c
+F:	xen/include/asm-arm/
 F:	xen/drivers/char/cadence-uart.c
+F:	xen/drivers/char/arm-uart.c
 F:	xen/drivers/char/exynos4210-uart.c
-F:	xen/drivers/char/mvebu-uart.c
 F:	xen/drivers/char/omap-uart.c
 F:	xen/drivers/char/pl011.c
 F:	xen/drivers/char/scif-uart.c
 F:	xen/drivers/passthrough/arm/
-F:	xen/include/asm-arm/
-F:	xen/include/public/arch-arm/
-F:	xen/include/public/arch-arm.h
-
-BLKTAP2
-S:	Orphaned
-F:	tools/blktap2/
-
-Continuous Integration (CI)
-M:	Doug Goldstein <cardoe@cardoe.com>
-W:	https://gitlab.com/xen-project/xen
-W:	https://travis-ci.org/xen-project/xen
-S:	Supported
-F:	.gitlab-ci.yml
-F:	.travis.yml
-F:	automation/
-F:	scripts/travis-build
 
 CPU POOLS
 M:	Juergen Gross <jgross@suse.com>
-M:	Dario Faggioli <dfaggioli@suse.com>
+M:	Dario Faggioli <dario.faggioli@citrix.com>
 S:	Supported
 F:	xen/common/cpupool.c
 
@@ -245,6 +222,7 @@ F:	xen/include/asm-x86/tboot.h
 
 INTEL(R) VT FOR DIRECTED I/O (VT-D)
 M:	Kevin Tian <kevin.tian@intel.com>
+M:	Feng Wu <feng.wu@intel.com>
 S:	Supported
 F:	xen/drivers/passthrough/vtd/
 
@@ -299,6 +277,12 @@ F:  xen/include/asm-*/livepatch.h
 F:  xen/include/xen/livepatch*
 F:  xen/test/livepatch/*
 
+MACHINE CHECK (MCA) & RAS
+M:	Christoph Egger <chegger@amazon.de>
+M:	Liu Jinsong <jinsong.liu@alibaba-inc.com>
+S:	Supported
+F:	xen/arch/x86/cpu/mcheck/
+
 MINI-OS
 M:	Samuel Thibault <samuel.thibault@ens-lyon.org>
 S:	Supported
@@ -307,7 +291,6 @@ T:	git git://xenbits.xen.org/mini-os.git
 F:	config/MiniOS.mk
 
 OCAML TOOLS
-M:	Christian Lindig <christian.lindig@citrix.com>
 M:	David Scott <dave@recoil.org>
 S:	Supported
 F:	tools/ocaml/
@@ -320,22 +303,13 @@ T:	git git://xenbits.xen.org/ovmf.git
 
 POWER MANAGEMENT
 M:	Jan Beulich <jbeulich@suse.com>
+M:	Liu Jinsong <jinsong.liu@alibaba-inc.com>
 S:	Supported
 F:	xen/arch/x86/acpi/
 X:	xen/arch/x86/acpi/boot.c
 X:	xen/arch/x86/acpi/lib.c
 F:	xen/drivers/cpufreq/
 F:	xen/include/acpi/cpufreq/
-
-PUBLIC I/O INTERFACES AND PV DRIVERS DESIGNS
-M:  Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
-S:  Supported
-F:  xen/include/public/io/
-
-PYTHON BINDINGS
-M:	Marek Marczykowski-Górecki <marmarek@invisiblethingslab.com>
-S:	Supported
-F:	tools/python
 
 QEMU-DM
 M:	Ian Jackson <ian.jackson@eu.citrix.com>
@@ -353,6 +327,8 @@ M:	Shriram Rajagopalan <rshriram@cs.ubc.ca>
 M:	Yang Hongyang <imhy.yang@gmail.com>
 S:	Maintained
 F:	docs/README.remus
+F:	tools/blktap2/drivers/block-remus.c
+F:	tools/blktap2/drivers/hashtable*
 F:	tools/libxl/libxl_remus_*
 F:	tools/libxl/libxl_netbuffer.c
 F:	tools/libxl/libxl_nonetbuffer.c
@@ -360,14 +336,14 @@ F:	tools/hotplug/Linux/remus-netbuf-setup
 F:	tools/hotplug/Linux/block-drbd-probe
 
 RTDS SCHEDULER
-M:	Dario Faggioli <dfaggioli@suse.com>
+M:	Dario Faggioli <dario.faggioli@citrix.com>
 M:	Meng Xu <mengxu@cis.upenn.edu>
 S:	Supported
 F:	xen/common/sched_rt.c
 
 SCHEDULING
 M:	George Dunlap <george.dunlap@eu.citrix.com>
-M:	Dario Faggioli <dfaggioli@suse.com>
+M:	Dario Faggioli <dario.faggioli@citrix.com>
 S:	Supported
 F:	xen/common/sched*
 
@@ -408,6 +384,12 @@ F:	xen/common/tmem*
 F:	xen/include/xen/tmem*
 F:	docs/misc/tmem*
 
+TRAVIS CI
+M:	Doug Goldstein <cardoe@cardoe.com>
+W:	https://travis-ci.org/xen-project/xen
+S:	Supported
+F:	.travis.yml
+
 UNMODIFIED LINUX PV DRIVERS
 M:	Jan Beulich <jbeulich@suse.com>
 S:	Obsolete
@@ -427,10 +409,7 @@ S:	Supported
 F:	tools/tests/xen-access
 F:	xen/arch/*/monitor.c
 F:	xen/arch/*/vm_event.c
-F:	xen/arch/arm/mem_access.c
-F:	xen/arch/x86/mm/mem_access.c
 F:	xen/arch/x86/hvm/monitor.c
-F:	xen/arch/x86/hvm/vm_event.c
 F:	xen/common/mem_access.c
 F:	xen/common/monitor.c
 F:	xen/common/vm_event.c
@@ -438,17 +417,16 @@ F:	xen/include/*/mem_access.h
 F:	xen/include/*/monitor.h
 F:	xen/include/*/vm_event.h
 F:	xen/include/asm-x86/hvm/monitor.h
-F:	xen/include/asm-x86/hvm/vm_event.h
 
 VTPM
 M:	Daniel De Graaf <dgdegra@tycho.nsa.gov>
-M:	Quan Xu <quan.xu0@gmail.com>
+M:	Quan Xu <xuquan8@huawei.com>
 S:	Supported
 F:	extras/mini-os/tpm*
 F:	extras/mini-os/include/tpm*
 F:	stubdom/vtpm/
 F:	stubdom/vtpmmgr/
-F:	docs/misc/vtpm-platforms.txt
+F:	docs/misc/vtpm.txt
 
 X86 ARCHITECTURE
 M:	Jan Beulich <jbeulich@suse.com>
@@ -457,12 +435,8 @@ S:	Supported
 L:	xen-devel@lists.xen.org
 F:	xen/arch/x86/
 F:	xen/include/asm-x86/
-F:	xen/include/public/arch-x86/
 F:	tools/firmware/hvmloader/
-F:	tools/firmware/rombios/
-F:	tools/firmware/vgabios/
 F:	tools/tests/x86_emulator/
-F:	tools/fuzz/x86_instruction_emulator/
 
 X86 I/O EMULATION
 M:	Paul Durrant <paul.durrant@citrix.com>
@@ -521,7 +495,6 @@ M:	Andrew Cooper <andrew.cooper3@citrix.com>
 M:	George Dunlap <George.Dunlap@eu.citrix.com>
 M:	Ian Jackson <ian.jackson@eu.citrix.com>
 M:	Jan Beulich <jbeulich@suse.com>
-M:	Julien Grall <julien.grall@arm.com>
 M:	Konrad Rzeszutek Wilk <konrad.wilk@oracle.com>
 M:	Stefano Stabellini <sstabellini@kernel.org>
 M:	Tim Deegan <tim@xen.org>

@@ -93,18 +93,13 @@ static void parse_cpuid(const char *arg, int *cpuid)
 static void parse_cpuid_and_int(int argc, char *argv[],
                                 int *cpuid, int *val, const char *what)
 {
-    if ( argc == 0 )
-    {
-         fprintf(stderr, "Missing %s\n", what);
-         exit(EINVAL);
-    }
-
     if ( argc > 1 )
         parse_cpuid(argv[0], cpuid);
 
-    if ( sscanf(argv[argc > 1], "%d", val) != 1 )
+    if ( argc == 0 || sscanf(argv[argc > 1], "%d", val) != 1 )
     {
-        fprintf(stderr, "Invalid %s '%s'\n", what, argv[argc > 1]);
+        fprintf(stderr, argc ? "Invalid %s '%s'\n" : "Missing %s\n",
+                what, argv[argc > 1]);
         exit(EINVAL);
     }
 }
@@ -1071,24 +1066,14 @@ void set_sched_smt_func(int argc, char *argv[])
 
 void set_vcpu_migration_delay_func(int argc, char *argv[])
 {
-    struct xen_sysctl_credit_schedule sparam;
     int value;
-
-    fprintf(stderr, "WARNING: using xenpm for this purpose is deprecated."
-           " Check out `xl sched-credit -s -m DELAY'\n");
 
     if ( argc != 1 || (value = atoi(argv[0])) < 0 ) {
         fprintf(stderr, "Missing or invalid argument(s)\n");
         exit(EINVAL);
     }
 
-    if ( xc_sched_credit_params_get(xc_handle, 0, &sparam) < 0 ) {
-        fprintf(stderr, "getting Credit scheduler parameters failed\n");
-        exit(EINVAL);
-    }
-    sparam.vcpu_migr_delay_us = value;
-
-    if ( !xc_sched_credit_params_set(xc_handle, 0, &sparam) )
+    if ( !xc_set_vcpu_migration_delay(xc_handle, value) )
         printf("set vcpu migration delay to %d us succeeded\n", value);
     else
         fprintf(stderr, "set vcpu migration delay failed (%d - %s)\n",
@@ -1097,17 +1082,13 @@ void set_vcpu_migration_delay_func(int argc, char *argv[])
 
 void get_vcpu_migration_delay_func(int argc, char *argv[])
 {
-    struct xen_sysctl_credit_schedule sparam;
-
-    fprintf(stderr, "WARNING: using xenpm for this purpose is deprecated."
-           " Check out `xl sched-credit -s'\n");
+    uint32_t value;
 
     if ( argc )
         fprintf(stderr, "Ignoring argument(s)\n");
 
-    if ( !xc_sched_credit_params_get(xc_handle, 0, &sparam) )
-        printf("Scheduler vcpu migration delay is %d us\n",
-               sparam.vcpu_migr_delay_us);
+    if ( !xc_get_vcpu_migration_delay(xc_handle, &value) )
+        printf("Scheduler vcpu migration delay is %d us\n", value);
     else
         fprintf(stderr,
                 "Failed to get scheduler vcpu migration delay (%d - %s)\n",
@@ -1231,7 +1212,7 @@ int main(int argc, char *argv[])
         xc_interface_close(xc_handle);
         return ret;
     }
-    max_cpu_nr = physinfo.max_cpu_id + 1;
+    max_cpu_nr = physinfo.nr_cpus;
 
     /* calculate how many options match with user's input */
     for ( i = 0; i < ARRAY_SIZE(main_options); i++ )

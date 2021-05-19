@@ -56,11 +56,6 @@
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]) + __must_be_array(x))
 
-#define __ACCESS_ONCE(x) ({                             \
-            (void)(typeof(x))0; /* Scalar typecheck. */ \
-            (volatile typeof(x) *)&(x); })
-#define ACCESS_ONCE(x) (*__ACCESS_ONCE(x))
-
 #define MASK_EXTR(v, m) (((v) & (m)) / ((m) & -(m)))
 #define MASK_INSR(v, m) (((v) * ((m) & -(m))) & (m))
 
@@ -71,8 +66,7 @@
 struct domain;
 
 void cmdline_parse(const char *cmdline);
-int runtime_parse(const char *line);
-int parse_bool(const char *s, const char *e);
+int parse_bool(const char *s);
 
 /**
  * Given a specific name, parses a string of the form:
@@ -80,13 +74,6 @@ int parse_bool(const char *s, const char *e);
  * returning 0 or 1 for a recognised boolean, or -1 for an error.
  */
 int parse_boolean(const char *name, const char *s, const char *e);
-
-/**
- * Very similar to strcmp(), but will declare a match if the NUL in 'name'
- * lines up with comma, colon or semicolon in 'frag'.  Designed for picking
- * exact string matches out of a delimited command line list.
- */
-int cmdline_strcmp(const char *frag, const char *name);
 
 /*#define DEBUG_TRACE_DUMP*/
 #ifdef DEBUG_TRACE_DUMP

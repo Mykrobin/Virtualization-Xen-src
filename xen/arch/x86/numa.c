@@ -18,7 +18,7 @@
 #include <xen/sched.h>
 #include <xen/softirq.h>
 
-static int numa_setup(const char *s);
+static int numa_setup(char *s);
 custom_param("numa", numa_setup);
 
 #ifndef Dprintk
@@ -49,7 +49,7 @@ cpumask_t node_to_cpumask[MAX_NUMNODES] __read_mostly;
 
 nodemask_t __read_mostly node_online_map = { { [0] = 1UL } };
 
-bool numa_off;
+bool_t numa_off = 0;
 s8 acpi_numa = 0;
 
 int srat_disabled(void)
@@ -99,7 +99,15 @@ static int __init populate_memnodemap(const struct node *nodes,
 static int __init allocate_cachealigned_memnodemap(void)
 {
     unsigned long size = PFN_UP(memnodemapsize * sizeof(*memnodemap));
-    unsigned long mfn = mfn_x(alloc_boot_pages(size, 1));
+    unsigned long mfn = alloc_boot_pages(size, 1);
+
+    if ( !mfn )
+    {
+        printk(KERN_ERR
+               "NUMA: Unable to allocate Memory to Node hash map\n");
+        memnodemapsize = 0;
+        return -1;
+    }
 
     memnodemap = mfn_to_virt(mfn);
     mfn <<= PAGE_SHIFT;
@@ -291,32 +299,30 @@ void numa_set_node(int cpu, nodeid_t node)
 }
 
 /* [numa=off] */
-static __init int numa_setup(const char *opt)
-{
+static __init int numa_setup(char *opt) 
+{ 
     if ( !strncmp(opt,"off",3) )
-        numa_off = true;
-    else if ( !strncmp(opt,"on",2) )
-        numa_off = false;
+        numa_off = 1;
+    if ( !strncmp(opt,"on",2) )
+        numa_off = 0;
 #ifdef CONFIG_NUMA_EMU
-    else if ( !strncmp(opt, "fake=", 5) )
+    if ( !strncmp(opt, "fake=", 5) )
     {
-        numa_off = false;
+        numa_off = 0;
         numa_fake = simple_strtoul(opt+5,NULL,0);
         if ( numa_fake >= MAX_NUMNODES )
             numa_fake = MAX_NUMNODES;
     }
 #endif
 #ifdef CONFIG_ACPI_NUMA
-    else if ( !strncmp(opt,"noacpi",6) )
+    if ( !strncmp(opt,"noacpi",6) )
     {
-        numa_off = false;
+        numa_off = 0;
         acpi_numa = -1;
     }
 #endif
-    else
-        return -EINVAL;
 
-    return 0;
+    return 1;
 } 
 
 /*
@@ -430,7 +436,7 @@ static void dump_numa(unsigned char key)
         spin_lock(&d->page_alloc_lock);
         page_list_for_each(page, &d->page_list)
         {
-            i = phys_to_nid(page_to_maddr(page));
+            i = phys_to_nid((paddr_t)page_to_mfn(page) << PAGE_SHIFT);
             page_num_node[i]++;
         }
         spin_unlock(&d->page_alloc_lock);

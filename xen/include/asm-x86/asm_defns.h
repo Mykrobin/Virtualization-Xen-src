@@ -15,9 +15,6 @@
 #include <asm/alternative.h>
 
 #ifdef __ASSEMBLY__
-#ifndef CONFIG_INDIRECT_THUNK
-.equ CONFIG_INDIRECT_THUNK, 0
-#endif
 # include <asm/indirect_thunk_asm.h>
 #else
 asm ( "\t.equ CONFIG_INDIRECT_THUNK, "
@@ -71,7 +68,7 @@ void ret_from_intr(void);
 
 #ifdef __ASSEMBLY__
 
-#ifdef HAVE_AS_QUOTED_SYM
+#ifdef HAVE_GAS_QUOTED_SYM
 #define SUBSECTION_LBL(tag)                        \
         .ifndef .L.tag;                            \
         .equ .L.tag, 1;                            \
@@ -135,9 +132,11 @@ void ret_from_intr(void);
         GET_STACK_END(reg);                       \
         addq $STACK_CPUINFO_FIELD(field), %r##reg
 
+#define __GET_CURRENT(reg)                        \
+        movq STACK_CPUINFO_FIELD(current_vcpu)(%r##reg), %r##reg
 #define GET_CURRENT(reg)                          \
         GET_STACK_END(reg);                       \
-        movq STACK_CPUINFO_FIELD(current_vcpu)(%r##reg), %r##reg
+        __GET_CURRENT(reg)
 
 #ifndef NDEBUG
 #define ASSERT_NOT_IN_ATOMIC                                             \
@@ -152,7 +151,7 @@ void ret_from_intr(void);
 
 #else
 
-#ifdef HAVE_AS_QUOTED_SYM
+#ifdef HAVE_GAS_QUOTED_SYM
 #define SUBSECTION_LBL(tag)                                          \
         ".ifndef .L." #tag "\n\t"                                    \
         ".equ .L." #tag ", 1\n\t"                                    \
@@ -195,18 +194,28 @@ void ret_from_intr(void);
 #define __ASM_STAC      .byte 0x0f,0x01,0xcb
 
 #ifdef __ASSEMBLY__
-#define ASM_STAC                                        \
-    ALTERNATIVE __stringify(ASM_NOP3),                  \
-        __stringify(__ASM_STAC), X86_FEATURE_XEN_SMAP
+#define ASM_AC(op)                                                     \
+        661: ASM_NOP3;                                                 \
+        .pushsection .altinstr_replacement, "ax";                      \
+        662: __ASM_##op;                                               \
+        .popsection;                                                   \
+        .pushsection .altinstructions, "a";                            \
+        altinstruction_entry 661b, 661b, X86_FEATURE_ALWAYS, 3, 0;     \
+        altinstruction_entry 661b, 662b, X86_FEATURE_XEN_SMAP, 3, 3;       \
+        .popsection
 
-#define ASM_CLAC                                        \
-    ALTERNATIVE __stringify(ASM_NOP3),                  \
-        __stringify(__ASM_CLAC), X86_FEATURE_XEN_SMAP
+#define ASM_STAC ASM_AC(STAC)
+#define ASM_CLAC ASM_AC(CLAC)
 
-#define CR4_PV32_RESTORE                                \
-    ALTERNATIVE_2 __stringify(ASM_NOP5),                \
-        "call cr4_pv32_restore", X86_FEATURE_XEN_SMEP,  \
-        "call cr4_pv32_restore", X86_FEATURE_XEN_SMAP
+#define CR4_PV32_RESTORE                                           \
+        667: ASM_NOP5;                                             \
+        .pushsection .altinstr_replacement, "ax";                  \
+        668: call cr4_pv32_restore;                                \
+        .section .altinstructions, "a";                            \
+        altinstruction_entry 667b, 667b, X86_FEATURE_ALWAYS, 5, 0; \
+        altinstruction_entry 667b, 668b, X86_FEATURE_XEN_SMEP, 5, 5;   \
+        altinstruction_entry 667b, 668b, X86_FEATURE_XEN_SMAP, 5, 5;   \
+        .popsection
 
 #else
 static always_inline void clac(void)
@@ -287,43 +296,45 @@ static always_inline void stac(void)
 .endif
 
 /*
- * Restore all previously saved registers.
+ * Reload registers not preserved by C code from frame.
  *
- * @adj: extra stack pointer adjustment to be folded into the adjustment done
- *       anyway at the end of the macro
- * @compat: R8-R15 don't need reloading, but they are clobbered for added
- *          safety against information leaks.
+ * @compat: R8-R11 don't need reloading
+ *
+ * For the way it is used in RESTORE_ALL, this macro must preserve EFLAGS.ZF.
  */
-.macro RESTORE_ALL adj=0 compat=0
-.if !\compat
-        movq  UREGS_r15(%rsp), %r15
-        movq  UREGS_r14(%rsp), %r14
-        movq  UREGS_r13(%rsp), %r13
-        movq  UREGS_r12(%rsp), %r12
-.else
-        xor %r15d, %r15d
-        xor %r14d, %r14d
-        xor %r13d, %r13d
-        xor %r12d, %r12d
-.endif
-        LOAD_ONE_REG(bp, \compat)
-        LOAD_ONE_REG(bx, \compat)
+.macro LOAD_C_CLOBBERED compat=0 ax=1
 .if !\compat
         movq  UREGS_r11(%rsp),%r11
         movq  UREGS_r10(%rsp),%r10
         movq  UREGS_r9(%rsp),%r9
         movq  UREGS_r8(%rsp),%r8
-.else
-        xor %r11d, %r11d
-        xor %r10d, %r10d
-        xor %r9d, %r9d
-        xor %r8d, %r8d
 .endif
+.if \ax
         LOAD_ONE_REG(ax, \compat)
+.endif
         LOAD_ONE_REG(cx, \compat)
         LOAD_ONE_REG(dx, \compat)
         LOAD_ONE_REG(si, \compat)
         LOAD_ONE_REG(di, \compat)
+.endm
+
+/*
+ * Restore all previously saved registers.
+ *
+ * @adj: extra stack pointer adjustment to be folded into the adjustment done
+ *       anyway at the end of the macro
+ * @compat: R8-R15 don't need reloading
+ */
+.macro RESTORE_ALL adj=0 compat=0
+.if !\compat
+        movq  UREGS_r15(%rsp),%r15
+        movq  UREGS_r14(%rsp),%r14
+        movq  UREGS_r13(%rsp),%r13
+        movq  UREGS_r12(%rsp),%r12
+.endif
+        LOAD_ONE_REG(bp, \compat)
+        LOAD_ONE_REG(bx, \compat)
+        LOAD_C_CLOBBERED \compat
         subq  $-(UREGS_error_code-UREGS_r15+\adj), %rsp
 .endm
 
@@ -356,18 +367,6 @@ static always_inline void stac(void)
 #else
 #define REX64_PREFIX "rex64/"
 #endif
-
-#define ELFNOTE(name, type, desc)           \
-    .pushsection .note.name, "a", @note   ; \
-    .p2align 2                            ; \
-    .long 2f - 1f       /* namesz */      ; \
-    .long 4f - 3f       /* descsz */      ; \
-    .long type          /* type   */      ; \
-1:  .asciz #name        /* name   */      ; \
-2:  .p2align 2                            ; \
-3:  desc                /* desc   */      ; \
-4:  .p2align 2                            ; \
-    .popsection
 
 #include <asm/spec_ctrl_asm.h>
 

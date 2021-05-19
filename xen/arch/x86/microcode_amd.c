@@ -14,6 +14,7 @@
  *  License version 2. See file COPYING for details.
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/kernel.h>
 #include <xen/init.h>
@@ -217,12 +218,6 @@ static int apply_microcode(unsigned int cpu)
     rdmsrl(MSR_AMD_PATCHLEVEL, rev);
 
     spin_unlock_irqrestore(&microcode_update_lock, flags);
-
-    /*
-     * Some processors leave the ucode blob mapping as UC after the update.
-     * Flush the mapping to regain normal cacheability.
-     */
-    flush_area_local(hdr, FLUSH_TLB_GLOBAL | FLUSH_ORDER(0));
 
     /* check current patch id and patch's id for match */
     if ( hw_err || (rev != hdr->patch_id) )

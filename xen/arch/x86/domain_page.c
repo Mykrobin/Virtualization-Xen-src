@@ -16,20 +16,19 @@
 #include <asm/current.h>
 #include <asm/flushtlb.h>
 #include <asm/hardirq.h>
-#include <asm/setup.h>
 
-static DEFINE_PER_CPU(struct vcpu *, override);
+static struct vcpu *__read_mostly override;
 
 static inline struct vcpu *mapcache_current_vcpu(void)
 {
     /* In the common case we use the mapcache of the running VCPU. */
-    struct vcpu *v = this_cpu(override) ?: current;
+    struct vcpu *v = override ?: current;
 
     /*
      * When current isn't properly set up yet, this is equivalent to
      * running in an idle vCPU (callers must check for NULL).
      */
-    if ( v == INVALID_VCPU )
+    if ( v == (struct vcpu *)0xfffff000 )
         return NULL;
 
     /*
@@ -37,7 +36,7 @@ static inline struct vcpu *mapcache_current_vcpu(void)
      * domain's page tables but current may point at another domain's VCPU.
      * Return NULL as though current is not properly set up yet.
      */
-    if ( efi_rs_using_pgtables() )
+    if ( efi_enabled && efi_rs_using_pgtables() )
         return NULL;
 
     /*
@@ -59,7 +58,7 @@ static inline struct vcpu *mapcache_current_vcpu(void)
 
 void __init mapcache_override_current(struct vcpu *v)
 {
-    this_cpu(override) = v;
+    override = v;
 }
 
 #define mapcache_l2_entry(e) ((e) >> PAGETABLE_ORDER)
@@ -166,7 +165,7 @@ void *map_domain_page(mfn_t mfn)
 
     spin_unlock(&dcache->lock);
 
-    l1e_write(&MAPCACHE_L1ENT(idx), l1e_from_mfn(mfn, __PAGE_HYPERVISOR_RW));
+    l1e_write(&MAPCACHE_L1ENT(idx), l1e_from_pfn(mfn_x(mfn), __PAGE_HYPERVISOR_RW));
 
  out:
     local_irq_restore(flags);
@@ -236,7 +235,8 @@ int mapcache_domain_init(struct domain *d)
     struct mapcache_domain *dcache = &d->arch.pv_domain.mapcache;
     unsigned int bitmap_pages;
 
-    ASSERT(is_pv_domain(d));
+    if ( !is_pv_domain(d) || is_idle_domain(d) )
+        return 0;
 
 #ifdef NDEBUG
     if ( !mem_hotplug && max_page <= PFN_DOWN(__pa(HYPERVISOR_VIRT_END - 1)) )
@@ -304,10 +304,7 @@ int mapcache_vcpu_init(struct vcpu *v)
 
 void *map_domain_page_global(mfn_t mfn)
 {
-    ASSERT(!in_irq() &&
-           ((system_state >= SYS_STATE_boot &&
-             system_state < SYS_STATE_active) ||
-            local_irq_is_enabled()));
+    ASSERT(!in_irq() && local_irq_is_enabled());
 
 #ifdef NDEBUG
     if ( mfn_x(mfn) <= PFN_DOWN(__pa(HYPERVISOR_VIRT_END - 1)) )
@@ -330,13 +327,13 @@ void unmap_domain_page_global(const void *ptr)
 }
 
 /* Translate a map-domain-page'd address to the underlying MFN */
-mfn_t domain_page_map_to_mfn(const void *ptr)
+unsigned long domain_page_map_to_mfn(const void *ptr)
 {
     unsigned long va = (unsigned long)ptr;
     const l1_pgentry_t *pl1e;
 
     if ( va >= DIRECTMAP_VIRT_START )
-        return _mfn(virt_to_mfn(ptr));
+        return virt_to_mfn(ptr);
 
     if ( va >= VMAP_VIRT_START && va < VMAP_VIRT_END )
     {
@@ -349,5 +346,5 @@ mfn_t domain_page_map_to_mfn(const void *ptr)
         pl1e = &__linear_l1_table[l1_linear_offset(va)];
     }
 
-    return l1e_get_mfn(*pl1e);
+    return l1e_get_pfn(*pl1e);
 }

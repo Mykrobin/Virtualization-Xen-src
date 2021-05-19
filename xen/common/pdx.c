@@ -15,6 +15,7 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/bitops.h>
@@ -31,7 +32,7 @@ unsigned int __read_mostly pfn_pdx_hole_shift = 0;
 unsigned long __read_mostly pdx_group_valid[BITS_TO_LONGS(
     (FRAMETABLE_NR + PDX_GROUP_COUNT - 1) / PDX_GROUP_COUNT)] = { [0] = 1 };
 
-bool __mfn_valid(unsigned long mfn)
+int __mfn_valid(unsigned long mfn)
 {
     return likely(mfn < max_page) &&
            likely(!(mfn & pfn_hole_mask)) &&
@@ -42,20 +43,19 @@ bool __mfn_valid(unsigned long mfn)
 /* Sets all bits from the most-significant 1-bit down to the LSB */
 static u64 __init fill_mask(u64 mask)
 {
-    while (mask & (mask + 1))
-        mask |= mask + 1;
-
-    return mask;
+        while (mask & (mask + 1))
+                mask |= mask + 1;
+        return mask;
 }
 
 u64 __init pdx_init_mask(u64 base_addr)
 {
-    return fill_mask(base_addr - 1);
+	return fill_mask(base_addr - 1);
 }
 
 u64 __init pdx_region_mask(u64 base, u64 len)
 {
-    return fill_mask(base ^ (base + len - 1));
+	return fill_mask(base ^ (base + len - 1));
 }
 
 void set_pdx_range(unsigned long smfn, unsigned long emfn)

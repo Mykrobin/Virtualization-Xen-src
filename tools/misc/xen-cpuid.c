@@ -16,12 +16,12 @@ static const char *str_1d[32] =
     [ 4] = "tsc",  [ 5] = "msr",
     [ 6] = "pae",  [ 7] = "mce",
     [ 8] = "cx8",  [ 9] = "apic",
-    /* [10] */     [11] = "sysenter",
+    [10] = "REZ",  [11] = "sysenter",
     [12] = "mtrr", [13] = "pge",
     [14] = "mca",  [15] = "cmov",
     [16] = "pat",  [17] = "pse36",
     [18] = "psn",  [19] = "clflush",
-    /* [20] */     [21] = "ds",
+    [20] = "REZ",  [21] = "ds",
     [22] = "acpi", [23] = "mmx",
     [24] = "fxsr", [25] = "sse",
     [26] = "sse2", [27] = "ss",
@@ -39,7 +39,7 @@ static const char *str_1c[32] =
     [10] = "cntx-id", [11] = "sdgb",
     [12] = "fma",     [13] = "cx16",
     [14] = "xtpr",    [15] = "pdcm",
-    /* [16] */        [17] = "pcid",
+    [16] = "REZ",     [17] = "pcid",
     [18] = "dca",     [19] = "sse41",
     [20] = "sse42",   [21] = "x2apic",
     [22] = "movebe",  [23] = "popcnt",
@@ -56,16 +56,16 @@ static const char *str_e1d[32] =
     [ 4] = "tsc",    [ 5] = "msr",
     [ 6] = "pae",    [ 7] = "mce",
     [ 8] = "cx8",    [ 9] = "apic",
-    /* [10] */       [11] = "syscall",
+    [10] = "REZ",    [11] = "syscall",
     [12] = "mtrr",   [13] = "pge",
     [14] = "mca",    [15] = "cmov",
     [16] = "fcmov",  [17] = "pse36",
-    /* [18] */       [19] = "mp",
-    [20] = "nx",     /* [21] */
+    [18] = "REZ",    [19] = "mp",
+    [20] = "nx",     [21] = "REZ",
     [22] = "mmx+",   [23] = "mmx",
     [24] = "fxsr",   [25] = "fxsr+",
     [26] = "pg1g",   [27] = "rdtscp",
-    /* [28] */       [29] = "lm",
+    [28] = "REZ",    [29] = "lm",
     [30] = "3dnow+", [31] = "3dnow",
 };
 
@@ -78,14 +78,16 @@ static const char *str_e1c[32] =
     [ 8] = "3dnowpf",    [ 9] = "osvw",
     [10] = "ibs",        [11] = "xop",
     [12] = "skinit",     [13] = "wdt",
-    /* [14] */           [15] = "lwp",
+    [14] = "REZ",        [15] = "lwp",
     [16] = "fma4",       [17] = "tce",
-    /* [18] */           [19] = "nodeid",
-    /* [20] */           [21] = "tbm",
+    [18] = "REZ",        [19] = "nodeid",
+    [20] = "REZ",        [21] = "tbm",
     [22] = "topoext",    [23] = "perfctr_core",
-    [24] = "perfctr_nb", /* [25] */
+    [24] = "perfctr_nb", [25] = "REZ",
     [26] = "dbx",        [27] = "perftsc",
     [28] = "pcx_l2i",    [29] = "monitorx",
+
+    [30 ... 31] = "REZ",
 };
 
 static const char *str_7b0[32] =
@@ -93,7 +95,7 @@ static const char *str_7b0[32] =
     [ 0] = "fsgsbase", [ 1] = "tsc-adj",
     [ 2] = "sgx",      [ 3] = "bmi1",
     [ 4] = "hle",      [ 5] = "avx2",
-    [ 6] = "fdp_exn",  [ 7] = "smep",
+    [ 6] = "REZ",      [ 7] = "smep",
     [ 8] = "bmi2",     [ 9] = "erms",
     [10] = "invpcid",  [11] = "rtm",
     [12] = "pqm",      [13] = "depfpp",
@@ -112,42 +114,51 @@ static const char *str_Da1[32] =
 {
     [ 0] = "xsaveopt", [ 1] = "xsavec",
     [ 2] = "xgetbv1",  [ 3] = "xsaves",
+
+    [4 ... 31] = "REZ",
 };
 
 static const char *str_7c0[32] =
 {
     [ 0] = "prechwt1", [ 1] = "avx512vbmi",
-    [ 2] = "umip",     [ 3] = "pku",
+    [ 2] = "REZ",      [ 3] = "pku",
     [ 4] = "ospke",
 
-    [14] = "avx512_vpopcntdq",
-
-    [22] = "rdpid",
+    [5 ... 31] = "REZ",
 };
 
 static const char *str_e7d[32] =
 {
+    [0 ... 7] = "REZ",
+
     [ 8] = "itsc",
-    [10] = "efro",
+
+    [9 ... 31] = "REZ",
 };
 
 static const char *str_e8b[32] =
 {
     [ 0] = "clzero",
 
+    [1 ... 11] = "REZ",
+
     [12] = "ibpb",
+
+    [13 ... 31] = "REZ",
 };
 
 static const char *str_7d0[32] =
 {
-    [ 2] = "avx512_4vnniw", [ 3] = "avx512_4fmaps",
+    [0 ... 9] = "REZ",
 
-    [10] = "md-clear",
-    /* 12 */                [13] = "tsx-force-abort",
+    [10] = "md-clear",      [11] = "REZ",
+    [12] = "REZ",           [13] = "tsx-force-abort",
+
+    [14 ... 25] = "REZ",
 
     [26] = "ibrsb",         [27] = "stibp",
     [28] = "l1d_flush",     [29] = "arch_caps",
-    /* 30 */                [31] = "ssbd",
+    [30] = "REZ",           [31] = "ssbd",
 };
 
 static struct {
@@ -194,12 +205,7 @@ static void dump_leaf(uint32_t leaf, const char **strs)
 
     for ( i = 0; i < 32; ++i )
         if ( leaf & (1u << i) )
-        {
-            if ( strs[i] )
-                printf(" %s", strs[i]);
-            else
-                printf(" <%u>", i);
-        }
+            printf(" %s", strs[i] ?: "???" );
 }
 
 static void decode_featureset(const uint32_t *features,
@@ -230,7 +236,7 @@ static void get_featureset(xc_interface *xch, unsigned int idx)
 {
     struct fsinfo *f = &featuresets[idx];
 
-    f->len = nr_features;
+    f->len = xc_get_cpu_featureset_size();
     f->fs = calloc(nr_features, sizeof(*f->fs));
 
     if ( !f->fs )

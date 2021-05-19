@@ -461,7 +461,6 @@ typedef struct TPM_CAP_VERSION_INFO {
    BYTE* vendorSpecific;
 } TPM_CAP_VERSION_INFO;
 
-static
 inline void free_TPM_CAP_VERSION_INFO(TPM_CAP_VERSION_INFO* v) {
    free(v->vendorSpecific);
    v->vendorSpecific = NULL;
@@ -495,7 +494,6 @@ typedef struct TPM_SYMMETRIC_KEY {
    BYTE* data;
 } TPM_SYMMETRIC_KEY;
 
-static
 inline void free_TPM_SYMMETRIC_KEY_PARMS(TPM_SYMMETRIC_KEY_PARMS* p) {
    free(p->IV);
    p->IV = NULL;
@@ -512,7 +510,6 @@ typedef struct TPM_RSA_KEY_PARMS {
 
 #define TPM_RSA_KEY_PARMS_INIT { 0, 0, 0, NULL }
 
-static
 inline void free_TPM_RSA_KEY_PARMS(TPM_RSA_KEY_PARMS* p) {
    free(p->exponent);
    p->exponent = NULL;
@@ -531,7 +528,6 @@ typedef struct TPM_KEY_PARMS {
 
 #define TPM_KEY_PARMS_INIT { 0, 0, 0, 0 }
 
-static
 inline void free_TPM_KEY_PARMS(TPM_KEY_PARMS* p) {
    if(p->parmSize) {
       switch(p->algorithmID) {
@@ -554,7 +550,6 @@ typedef struct TPM_STORE_PUBKEY {
 
 #define TPM_STORE_PUBKEY_INIT { 0, NULL }
 
-static
 inline void free_TPM_STORE_PUBKEY(TPM_STORE_PUBKEY* p) {
    free(p->key);
    p->key = NULL;
@@ -567,7 +562,6 @@ typedef struct TPM_PUBKEY {
 
 #define TPM_PUBKEY_INIT { TPM_KEY_PARMS_INIT, TPM_STORE_PUBKEY_INIT }
 
-static
 inline void free_TPM_PUBKEY(TPM_PUBKEY* k) {
    free_TPM_KEY_PARMS(&k->algorithmParms);
    free_TPM_STORE_PUBKEY(&k->pubKey);
@@ -580,7 +574,6 @@ typedef struct TPM_PCR_SELECTION {
 
 #define TPM_PCR_SELECTION_INIT { 0, NULL }
 
-static
 inline void free_TPM_PCR_SELECTION(TPM_PCR_SELECTION* p) {
    free(p->pcrSelect);
    p->pcrSelect = NULL;
@@ -601,7 +594,6 @@ typedef struct TPM_PCR_INFO_LONG {
 #define TPM_PCR_INFO_LONG_INIT { 0, 0, 0, TPM_PCR_SELECTION_INIT, \
                                  TPM_PCR_SELECTION_INIT }
 
-static
 inline void free_TPM_PCR_INFO_LONG(TPM_PCR_INFO_LONG* p) {
    free_TPM_PCR_SELECTION(&p->creationPCRSelection);
    free_TPM_PCR_SELECTION(&p->releasePCRSelection);
@@ -615,7 +607,6 @@ typedef struct TPM_PCR_INFO {
 
 #define TPM_PCR_INFO_INIT { TPM_PCR_SELECTION_INIT }
 
-static
 inline void free_TPM_PCR_INFO(TPM_PCR_INFO* p) {
    free_TPM_PCR_SELECTION(&p->pcrSelection);
 }
@@ -628,7 +619,6 @@ typedef struct TPM_PCR_COMPOSITE {
 
 #define TPM_PCR_COMPOSITE_INIT { TPM_PCR_SELECTION_INIT, 0, NULL }
 
-static
 inline void free_TPM_PCR_COMPOSITE(TPM_PCR_COMPOSITE* p) {
    free_TPM_PCR_SELECTION(&p->select);
    free(p->pcrValue);
@@ -653,7 +643,6 @@ typedef struct TPM_KEY {
    .pubKey = TPM_STORE_PUBKEY_INIT, \
    .encDataSize = 0, .encData = NULL }
 
-static
 inline void free_TPM_KEY(TPM_KEY* k) {
    if(k->PCRInfoSize) {
       free_TPM_PCR_INFO(&k->PCRInfo);
@@ -671,7 +660,6 @@ typedef struct TPM_BOUND_DATA {
 
 #define TPM_BOUND_DATA_INIT { .payloadData = NULL }
 
-static
 inline void free_TPM_BOUND_DATA(TPM_BOUND_DATA* d) {
    free(d->payloadData);
    d->payloadData = NULL;
@@ -688,7 +676,6 @@ typedef struct TPM_STORED_DATA {
 #define TPM_STORED_DATA_INIT { .sealInfoSize = 0, sealInfo = TPM_PCR_INFO_INIT,\
    .encDataSize = 0, .encData = NULL }
 
-static
 inline void free_TPM_STORED_DATA(TPM_STORED_DATA* d) {
    if(d->sealInfoSize) {
       free_TPM_PCR_INFO(&d->sealInfo);
@@ -709,7 +696,6 @@ typedef struct TPM_STORED_DATA12 {
 #define TPM_STORED_DATA12_INIT { .sealInfoLongSize = 0, \
    sealInfoLong = TPM_PCR_INFO_INIT, .encDataSize = 0, .encData = NULL }
 
-static
 inline void free_TPM_STORED_DATA12(TPM_STORED_DATA12* d) {
    if(d->sealInfoLongSize) {
       free_TPM_PCR_INFO_LONG(&d->sealInfoLong);

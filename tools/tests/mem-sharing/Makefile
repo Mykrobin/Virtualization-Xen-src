@@ -18,7 +18,7 @@ build: $(TARGETS)
 
 .PHONY: clean
 clean:
-	$(RM) *.o $(TARGETS) *~ $(DEPS_RM)
+	$(RM) *.o $(TARGETS) *~ $(DEPS)
 
 .PHONY: distclean
 distclean: clean
@@ -26,4 +26,4 @@ distclean: clean
 memshrtool: memshrtool.o
 	$(CC) -o $@ $< $(LDFLAGS) $(LDLIBS_libxenctrl)
 
--include $(DEPS_INCLUDE)
+-include $(DEPS)

@@ -15,6 +15,7 @@
 #include <xen/types.h>
 #include <xen/errno.h>
 #include <xen/init.h>
+#include <xen/nmi.h>
 #include <xen/string.h>
 #include <xen/delay.h>
 #include <xen/xenoprof.h>
@@ -23,7 +24,6 @@
 #include <asm/apic.h>
 #include <asm/regs.h>
 #include <asm/current.h>
-#include <asm/nmi.h>
 
 #include "op_counter.h"
 #include "op_x86_model.h"
@@ -323,15 +323,12 @@ static int __init p4_init(char ** cpu_type)
 
 
 static int force_arch_perfmon;
-
 static int force_cpu_type(const char *str)
 {
 	if (!strcmp(str, "arch_perfmon")) {
 		force_arch_perfmon = 1;
 		printk(KERN_INFO "oprofile: forcing architectural perfmon\n");
 	}
-	else
-		return -EINVAL;
 
 	return 0;
 }
@@ -442,7 +439,7 @@ static int __init nmi_init(void)
 			}
 			if (!cpu_type && !arch_perfmon_init(&cpu_type)) {
 				printk("xenoprof: Initialization failed. "
-				       "Intel processor family %d model %d "
+				       "Intel processor family %d model %d"
 				       "is not supported\n", family, _model);
 				return -ENODEV;
 			}

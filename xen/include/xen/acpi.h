@@ -41,17 +41,15 @@
 
 /*
  * Fixmap pages to reserve for ACPI boot-time tables (see asm-x86/fixmap.h or
- * asm-arm/config.h, 64 pages(256KB) is large enough for most cases.)
+ * asm-arm/config.h)
  */
-#define NUM_FIXMAP_ACPI_PAGES  64
+#define NUM_FIXMAP_ACPI_PAGES  4
 
 #define BAD_MADT_ENTRY(entry, end) (                                        \
                 (!(entry)) || (unsigned long)(entry) + sizeof(*(entry)) > (end) ||  \
                 (entry)->header.length < sizeof(*(entry)))
 
 #ifdef CONFIG_ACPI
-
-extern acpi_physical_address rsdp_hint;
 
 enum acpi_interrupt_id {
 	ACPI_INTERRUPT_PMI	= 1,

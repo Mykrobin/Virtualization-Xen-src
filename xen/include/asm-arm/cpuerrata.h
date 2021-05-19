@@ -1,20 +1,23 @@
 #ifndef __ARM_CPUERRATA_H__
 #define __ARM_CPUERRATA_H__
 
+#include <xen/config.h>
 #include <asm/cpufeature.h>
 #include <asm/alternative.h>
 
 void check_local_cpu_errata(void);
 void enable_errata_workarounds(void);
 
+#ifdef CONFIG_HAS_ALTERNATIVE
+
 #define CHECK_WORKAROUND_HELPER(erratum, feature, arch)         \
-static inline bool check_workaround_##erratum(void)             \
+static inline bool_t check_workaround_##erratum(void)           \
 {                                                               \
     if ( !IS_ENABLED(arch) )                                    \
-        return false;                                           \
+        return 0;                                               \
     else                                                        \
     {                                                           \
-        bool ret;                                               \
+        bool_t ret;                                             \
                                                                 \
         asm volatile (ALTERNATIVE("mov %0, #0",                 \
                                   "mov %0, #1",                 \
@@ -24,6 +27,19 @@ static inline bool check_workaround_##erratum(void)             \
         return unlikely(ret);                                   \
     }                                                           \
 }
+
+#else /* CONFIG_HAS_ALTERNATIVE */
+
+#define CHECK_WORKAROUND_HELPER(erratum, feature, arch)         \
+static inline bool_t check_workaround_##erratum(void)           \
+{                                                               \
+    if ( !IS_ENABLED(arch) )                                    \
+        return 0;                                               \
+    else                                                        \
+        return unlikely(cpus_have_cap(feature));                \
+}
+
+#endif
 
 CHECK_WORKAROUND_HELPER(766422, ARM32_WORKAROUND_766422, CONFIG_ARM_32)
 CHECK_WORKAROUND_HELPER(834220, ARM64_WORKAROUND_834220, CONFIG_ARM_64)

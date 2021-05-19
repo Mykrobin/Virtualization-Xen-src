@@ -247,12 +247,11 @@ void vtd_ops_postamble_quirk(struct iommu* iommu)
     }
 }
 
-static int __init parse_snb_timeout(const char *s)
+static void __init parse_snb_timeout(const char *s)
 {
     int t;
-    const char *q = NULL;
 
-    t = parse_bool(s, NULL);
+    t = parse_bool(s);
     if ( t < 0 )
     {
         if ( *s == '\0' )
@@ -260,13 +259,13 @@ static int __init parse_snb_timeout(const char *s)
         else if ( strcmp(s, "cap") == 0 )
             t = SNB_IGD_TIMEOUT;
         else
-            t = strtoul(s, &q, 0);
+            t = strtoul(s, NULL, 0);
     }
     else
         t = t ? SNB_IGD_TIMEOUT_LEGACY : 0;
     snb_igd_timeout = MILLISECS(t);
 
-    return (q && *q) ? -EINVAL : 0;
+    return;
 }
 custom_param("snb_igd_quirk", parse_snb_timeout);
 

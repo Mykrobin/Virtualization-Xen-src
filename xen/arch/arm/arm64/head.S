@@ -20,6 +20,7 @@
  * GNU General Public License for more details.
  */
 
+#include <asm/config.h>
 #include <asm/page.h>
 #include <asm/asm_defns.h>
 #include <asm/early_printk.h>
@@ -31,13 +32,6 @@
 #define PT_MEM_L3 0xf7f /* nG=1 AF=1 SH=11 AP=01 NS=1 ATTR=111 T=1 P=1 */
 #define PT_DEV    0xe71 /* nG=1 AF=1 SH=10 AP=01 NS=1 ATTR=100 T=0 P=1 */
 #define PT_DEV_L3 0xe73 /* nG=1 AF=1 SH=10 AP=01 NS=1 ATTR=100 T=1 P=1 */
-
-#define __HEAD_FLAG_PAGE_SIZE   ((PAGE_SHIFT - 10) / 2)
-
-#define __HEAD_FLAG_PHYS_BASE   1
-
-#define __HEAD_FLAGS            ((__HEAD_FLAG_PAGE_SIZE << 1) | \
-                                 (__HEAD_FLAG_PHYS_BASE << 3))
 
 #if (defined (CONFIG_EARLY_PRINTK)) && (defined (EARLY_PRINTK_INC))
 #include EARLY_PRINTK_INC
@@ -71,7 +65,7 @@
  *  x23 - UART address
  *  x24 - cpuid
  *  x25 - identity map in place
- *  x26 - skip_zero_bss
+ *  x26 -
  *  x27 -
  *  x28 -
  *  x29 -
@@ -91,12 +85,6 @@
 #else /* CONFIG_EARLY_PRINTK */
 #define PRINT(s)
 #endif /* !CONFIG_EARLY_PRINTK */
-
-/* Load the physical address of a symbol into xb */
-.macro load_paddr xb, sym
-        ldr \xb, =\sym
-        add \xb, \xb, x20
-.endm
 
         /*.aarch64*/
 
@@ -127,8 +115,8 @@ efi_head:
         add     x13, x18, #0x16
         b       real_start           /* branch to kernel start */
         .quad   0                    /* Image load offset from start of RAM */
-        .quad   _end - start         /* Effective size of kernel image, little-endian */
-        .quad   __HEAD_FLAGS         /* Informative flags, little-endian */
+        .quad   0                    /* reserved */
+        .quad   0                    /* reserved */
         .quad   0                    /* reserved */
         .quad   0                    /* reserved */
         .quad   0                    /* reserved */
@@ -244,10 +232,6 @@ section_table:
         .long   0xe0500020       /* Characteristics (section flags) */
         .align  5
 real_start:
-        /* BSS should be zeroed when booting without EFI */
-        mov   x26, #0                /* x26 := skip_zero_bss */
-
-real_start_efi:
         msr   DAIFSet, 0xf           /* Disable all interrupts */
 
         /* Save the bootloader arguments in less-clobberable registers */
@@ -260,7 +244,8 @@ real_start_efi:
 
         /* Using the DTB in the .dtb section? */
 #ifdef CONFIG_DTB_FILE
-        load_paddr x21, _sdtb
+        ldr   x21, =_sdtb
+        add   x21, x21, x20          /* x21 := paddr(DTB) */
 #endif
 
         mov   x22, #0                /* x22 := is_secondary_cpu */
@@ -276,8 +261,6 @@ GLOBAL(init_secondary)
         sub   x20, x19, x0           /* x20 := phys-offset */
 
         mov   x22, #1                /* x22 := is_secondary_cpu */
-        /* Boot CPU already zero BSS so skip it on secondary CPUs. */
-        mov   x26, #1                /* X26 := skip_zero_bss */
 
 common_start:
         mov   x24, #0                /* x24 := CPU ID. Initialy zero until we
@@ -293,7 +276,8 @@ common_start:
         /* Non-boot CPUs wait here until __cpu_up is ready for them */
         cbz   x22, 1f
 
-        load_paddr x0, smp_up_cpu
+        ldr   x0, =smp_up_cpu
+        add   x0, x0, x20            /* Apply physical offset */
         dsb   sy
 2:      ldr   x1, [x0]
         cmp   x1, x24
@@ -330,12 +314,14 @@ common_start:
 
 el2:    PRINT("- Xen starting at EL2 -\r\n")
 
-        /* Zero BSS only when requested */
-        cbnz  x26, skip_bss
+        /* Zero BSS On the boot CPU to avoid nasty surprises */
+        cbnz  x22, skip_bss
 
         PRINT("- Zero BSS -\r\n")
-        load_paddr x0, __bss_start    /* Load paddr of start & end of bss */
-        load_paddr x1, __bss_end
+        ldr   x0, =__bss_start       /* Load start & end of bss */
+        ldr   x1, =__bss_end
+        add   x0, x0, x20            /* Apply physical offset */
+        add   x1, x1, x20
 
 1:      str   xzr, [x0], #8
         cmp   x0, x1
@@ -395,11 +381,13 @@ skip_bss:
         cset  x25, eq                /* x25 := identity map in place, or not */
 
         /* Write Xen's PT's paddr into TTBR0_EL2 */
-        load_paddr x4, boot_pgtable
+        ldr   x4, =boot_pgtable
+        add   x4, x4, x20            /* x4 := paddr (boot_pagetable) */
         msr   TTBR0_EL2, x4
 
         /* Setup boot_pgtable: */
-        load_paddr x1, boot_first
+        ldr   x1, =boot_first
+        add   x1, x1, x20            /* x1 := paddr (boot_first) */
 
         /* ... map boot_first in boot_pgtable[0] */
         mov   x3, #PT_PT             /* x2 := table map of boot_first */
@@ -414,14 +402,16 @@ skip_bss:
         /* Level zero does not support superpage mappings, so we have
          * to use an extra first level page in which we create a 1GB mapping.
          */
-        load_paddr x2, boot_first_id
+        ldr   x2, =boot_first_id
+        add   x2, x2, x20            /* x2 := paddr (boot_first_id) */
 
         mov   x3, #PT_PT             /* x2 := table map of boot_first_id */
         orr   x2, x2, x3             /*       + rights for linear PT */
         lsl   x1, x1, #3             /* x1 := Slot offset */
         str   x2, [x4, x1]
 
-        load_paddr x4, boot_first_id
+        ldr   x4, =boot_first_id     /* Next level into boot_first_id */
+        add   x4, x4, x20            /* x4 := paddr(boot_first_id) */
 
         lsr   x1, x19, #FIRST_SHIFT  /* x1 := Offset of base paddr in boot_first_id */
         lsl   x2, x1, #FIRST_SHIFT   /* x2 := Base address for 1GB mapping */
@@ -433,10 +423,12 @@ skip_bss:
         mov   x25, #1                /* x25 := identity map now in place */
 
 1:      /* Setup boot_first: */
-        load_paddr x4, boot_first   /* Next level into boot_first */
+        ldr   x4, =boot_first        /* Next level into boot_first */
+        add   x4, x4, x20            /* x4 := paddr(boot_first) */
 
         /* ... map boot_second in boot_first[0] */
-        load_paddr x1, boot_second
+        ldr   x1, =boot_second
+        add   x1, x1, x20            /* x1 := paddr(boot_second) */
         mov   x3, #PT_PT             /* x2 := table map of boot_second */
         orr   x2, x1, x3             /*       + rights for linear PT */
         str   x2, [x4, #0]           /* Map it in slot 0 */
@@ -455,10 +447,12 @@ skip_bss:
         mov   x25, #1                /* x25 := identity map now in place */
 
 1:      /* Setup boot_second: */
-        load_paddr x4, boot_second
+        ldr   x4, =boot_second       /* Next level into boot_second */
+        add   x4, x4, x20            /* x4 := paddr(boot_second) */
 
         /* ... map boot_third in boot_second[1] */
-        load_paddr x1, boot_third
+        ldr   x1, =boot_third
+        add   x1, x1, x20            /* x1 := paddr(boot_third) */
         mov   x3, #PT_PT             /* x2 := table map of boot_third */
         orr   x2, x1, x3             /*       + rights for linear PT */
         str   x2, [x4, #8]           /* Map it in slot 1 */
@@ -478,7 +472,8 @@ skip_bss:
         mov   x25, #1                /* x25 := identity map now in place */
 
 1:      /* Setup boot_third: */
-        load_paddr x4, boot_third
+        ldr   x4, =boot_third
+        add   x4, x4, x20            /* x4 := paddr (boot_third) */
 
         lsr   x2, x19, #THIRD_SHIFT  /* Base address for 4K mapping */
         lsl   x2, x2, #THIRD_SHIFT
@@ -545,7 +540,8 @@ paging:
 
         /* Map fixmap into boot_second */
         ldr   x4, =boot_second       /* x4 := vaddr (boot_second) */
-        load_paddr x2, xen_fixmap
+        ldr   x2, =xen_fixmap
+        add   x2, x2, x20            /* x2 := paddr (xen_fixmap) */
         mov   x3, #PT_PT
         orr   x2, x2, x3             /* x2 := table map of xen_fixmap */
         ldr   x1, =FIXMAP_ADDR(0)
@@ -645,7 +641,7 @@ ENTRY(relocate_xen)
         dsb   sy        /* So the CPU issues all writes to the range */
 
         mov   x9, x3
-        ldr   x10, =dcache_line_bytes /* x10 := step */
+        ldr   x10, =cacheline_bytes /* x10 := step */
         ldr   x10, [x10]
         mov   x11, x2
 
@@ -785,16 +781,7 @@ ENTRY(efi_xen_start)
         mov   x1, xzr
         mov   x2, xzr
         mov   x3, xzr
-        /*
-         * The EFI stub and Xen may share some information living in
-         * BSS. Don't zero BSS to avoid loosing them.
-         *
-         * Note that the EFI firmware has already zeroed BSS for us
-         * before jump into the stub.
-         */
-        mov   x26, #1               /* x26 := skip_zero_bss */
-
-        b     real_start_efi
+        b     real_start
 ENDPROC(efi_xen_start)
 
 /*

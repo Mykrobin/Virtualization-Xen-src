@@ -88,8 +88,6 @@
 #define XEN_MC_NOTDELIVERED 0x10
 /* Note, XEN_MC_CANNOTHANDLE and XEN_MC_NOTDELIVERED are mutually exclusive. */
 
-/* Applicable to all mc_vcpuid fields below. */
-#define XEN_MC_VCPUID_INVALID 0xffff
 
 #ifndef __ASSEMBLY__
 
@@ -314,8 +312,8 @@ DEFINE_XEN_GUEST_HANDLE(xen_mc_logical_cpu_t);
         struct mcinfo_common *_mic;                             \
                                                                 \
         found = 0;                                              \
-        (_ret) = NULL;                                          \
-        if (_mi == NULL) break;                                 \
+	(_ret) = NULL;						\
+	if (_mi == NULL) break;					\
         _mic = x86_mcinfo_first(_mi);                           \
         for (i = 0; i < x86_mcinfo_nentries(_mi); i++) {        \
             if (_mic->type == (_type)) {                        \
@@ -347,8 +345,8 @@ struct xen_mc_fetch {
     /* IN/OUT variables. */
     uint32_t flags;	/* IN: XEN_MC_NONURGENT, XEN_MC_URGENT,
                            XEN_MC_ACK if ack'ing an earlier fetch */
-                       /* OUT: XEN_MC_OK, XEN_MC_FETCHFAILED,
-                          XEN_MC_NODATA, XEN_MC_NOMATCH */
+			/* OUT: XEN_MC_OK, XEN_MC_FETCHFAILED,
+			   XEN_MC_NODATA, XEN_MC_NOMATCH */
     uint32_t _pad0;
     uint64_t fetch_id;	/* OUT: id for ack, IN: id we are ack'ing */
 
@@ -380,11 +378,11 @@ DEFINE_XEN_GUEST_HANDLE(xen_mc_notifydomain_t);
 
 #define XEN_MC_physcpuinfo 3
 struct xen_mc_physcpuinfo {
-    /* IN/OUT */
-    uint32_t ncpus;
-    uint32_t _pad0;
-    /* OUT */
-    XEN_GUEST_HANDLE(xen_mc_logical_cpu_t) info;
+	/* IN/OUT */
+	uint32_t ncpus;
+	uint32_t _pad0;
+	/* OUT */
+	XEN_GUEST_HANDLE(xen_mc_logical_cpu_t) info;
 };
 
 #define XEN_MC_msrinject    4
@@ -406,7 +404,7 @@ struct xen_mc_msrinject {
 
 #define XEN_MC_mceinject    5
 struct xen_mc_mceinject {
-    unsigned int mceinj_cpunr;      /* target processor id */
+	unsigned int mceinj_cpunr;      /* target processor id */
 };
 
 #if defined(__XEN__) || defined(__XEN_TOOLS__)
@@ -414,13 +412,12 @@ struct xen_mc_mceinject {
 #define XEN_MC_INJECT_TYPE_MASK     0x7
 #define XEN_MC_INJECT_TYPE_MCE      0x0
 #define XEN_MC_INJECT_TYPE_CMCI     0x1
-#define XEN_MC_INJECT_TYPE_LMCE     0x2
 
 #define XEN_MC_INJECT_CPU_BROADCAST 0x8
 
 struct xen_mc_inject_v2 {
-    uint32_t flags;
-    struct xenctl_bitmap cpumap;
+	uint32_t flags;
+	struct xenctl_bitmap cpumap;
 };
 #endif
 

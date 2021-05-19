@@ -52,14 +52,13 @@ define(`create_domain_common', `
 			settime setdomainhandle getvcpucontext set_misc_info };
 	allow $1 $2:domain2 { set_cpuid settsc setscheduler setclaim
 			set_max_evtchn set_vnumainfo get_vnumainfo cacheflush
-			psr_cmt_op psr_alloc soft_reset set_gnttab_limits
-			resource_map };
+			psr_cmt_op psr_cat_op soft_reset };
 	allow $1 $2:security check_context;
 	allow $1 $2:shadow enable;
 	allow $1 $2:mmu { map_read map_write adjust memorymap physmap pinpage mmuext_op updatemp };
 	allow $1 $2:grant setup;
-	allow $1 $2:hvm { getparam hvmctl sethvmc
-			setparam nested altp2mhvm altp2mhvm_op dm };
+	allow $1 $2:hvm { cacheattr getparam hvmctl irqlevel pciroute sethvmc
+			setparam pcilevel trackdirtyvram nested altp2mhvm altp2mhvm_op send_irq };
 ')
 
 # create_domain(priv, target)
@@ -94,7 +93,7 @@ define(`manage_domain', `
 #   (inbound migration is the same as domain creation)
 define(`migrate_domain_out', `
 	allow $1 domxen_t:mmu map_read;
-	allow $1 $2:hvm { gethvmc getparam };
+	allow $1 $2:hvm { gethvmc getparam irqlevel };
 	allow $1 $2:mmu { stat pageinfo map_read };
 	allow $1 $2:domain { getaddrsize getvcpucontext pause destroy };
 	allow $1 $2:domain2 gettsc;
@@ -152,8 +151,7 @@ define(`device_model', `
 
 	allow $1 $2_target:domain { getdomaininfo shutdown };
 	allow $1 $2_target:mmu { map_read map_write adjust physmap target_hack };
-	allow $1 $2_target:hvm { getparam setparam hvmctl dm };
-	allow $1 $2_target:domain2 resource_map;
+	allow $1 $2_target:hvm { getparam setparam trackdirtyvram hvmctl irqlevel pciroute pcilevel cacheattr send_irq };
 ')
 
 # make_device_model(priv, dm_dom, hvm_dom)
@@ -169,32 +167,11 @@ define(`make_device_model', `
 #
 ################################################################################
 
-# use_device_iommu(domain, device)
+# use_device(domain, device)
 #   Allow a device to be used by a domain
-#   only if an IOMMU provides isolation.
-define(`use_device_iommu', `
+define(`use_device', `
     allow $1 $1_self:mmu exchange;
-    allow $1 $2:resource use_iommu;
-    allow $1 domio_t:mmu { map_read map_write };
-')
-
-# use_device_iommu_nointremap(domain, device)
-#   Allow a device to be used by a domain
-#   only if an IOMMU is active, even if it does not support
-#   interrupt remapping.
-#   Allows acceptance of (typically older) less isolating hardware.
-define(`use_device_iommu_nointremap', `
-    allow $1 $1_self:mmu exchange;
-    allow $1 $2:resource { use_iommu use_iommu_nointremap };
-    allow $1 domio_t:mmu { map_read map_write };
-')
-
-# use_device_noiommu(domain, device)
-#   Allow a device to be used by a domain
-#   even without an IOMMU available.
-define(`use_device_noiommu', `
-    allow $1 $1_self:mmu exchange;
-    allow $1 $2:resource { use_iommu use_iommu_nointremap use_noiommu };
+    allow $1 $2:resource use;
     allow $1 domio_t:mmu { map_read map_write };
 ')
 
@@ -203,7 +180,7 @@ define(`use_device_noiommu', `
 define(`admin_device', `
     allow $1 $2:resource { setup stat_device add_device add_irq add_iomem add_ioport remove_device remove_irq remove_iomem remove_ioport plug unplug };
     allow $1 $2:hvm bind_irq;
-    use_device_noiommu($1, $2)
+    use_device($1, $2)
 ')
 
 # delegate_devices(priv-domain, target-domain)

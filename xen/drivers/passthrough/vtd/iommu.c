@@ -48,7 +48,7 @@ struct mapped_rmrr {
 };
 
 /* Possible unfiltered LAPIC/MSI messages from untrusted sources? */
-bool __read_mostly untrusted_msi;
+bool_t __read_mostly untrusted_msi;
 
 int nr_iommus;
 
@@ -192,7 +192,7 @@ u64 alloc_pgtable_maddr(struct acpi_drhd_unit *drhd, unsigned long npages)
     nodeid_t node = NUMA_NO_NODE;
     unsigned int i;
 
-    rhsa = drhd ? drhd_to_rhsa(drhd) : NULL;
+    rhsa = drhd_to_rhsa(drhd);
     if ( rhsa )
         node =  pxm_to_node(rhsa->proximity_domain);
 
@@ -1105,13 +1105,7 @@ static void dma_msi_set_affinity(struct irq_desc *desc, const cpumask_t *mask)
 
     spin_lock_irqsave(&iommu->register_lock, flags);
     dmar_writel(iommu->reg, DMAR_FEDATA_REG, msg.data);
-    dmar_writel(iommu->reg, DMAR_FEADDR_REG, msg.address_lo);
-    /*
-     * When x2APIC is not enabled, DMAR_FEUADDR_REG is reserved and
-     * it's not necessary to update it.
-     */
-    if ( x2apic_enabled )
-        dmar_writel(iommu->reg, DMAR_FEUADDR_REG, msg.address_hi);
+    dmar_writeq(iommu->reg, DMAR_FEADDR_REG, msg.address);
     spin_unlock_irqrestore(&iommu->register_lock, flags);
 }
 
@@ -1339,6 +1333,10 @@ int domain_context_mapping_one(
     u16 seg = iommu->intel->drhd->segment;
     int agaw, rc, ret;
     bool_t flush_dev_iotlb;
+
+    /* dom_io is used as a sentinel for quarantined devices */
+    if ( domain == dom_io )
+        return 0;
 
     ASSERT(pcidevs_locked());
     spin_lock(&iommu->lock);
@@ -1575,6 +1573,10 @@ int domain_context_unmap_one(
     int iommu_domid, rc, ret;
     bool_t flush_dev_iotlb;
 
+    /* dom_io is used as a sentinel for quarantined devices */
+    if ( domain == dom_io )
+        return 0;
+
     ASSERT(pcidevs_locked());
     spin_lock(&iommu->lock);
 
@@ -1706,6 +1708,10 @@ static int domain_context_unmap(struct domain *domain, u8 devfn,
         ret = -EINVAL;
         goto out;
     }
+
+    /* dom_io is used as a sentinel for quarantined devices */
+    if ( domain == dom_io )
+        goto out;
 
     /*
      * if no other devices under the same iommu owned by this domain,
@@ -2292,7 +2298,7 @@ int __init intel_vtd_setup(void)
          * not supported, since we count on this feature to
          * atomically update 16-byte IRTE in posted format.
          */
-        if ( !cap_intr_post(iommu->cap) || !iommu_intremap || !cpu_has_cx16 )
+        if ( !cap_intr_post(iommu->cap) || !cpu_has_cx16 )
             iommu_intpost = 0;
 
         if ( !vtd_ept_page_compatible(iommu) )
@@ -2324,9 +2330,7 @@ int __init intel_vtd_setup(void)
     P(iommu_hap_pt_share, "Shared EPT tables");
 #undef P
 
-    ret = scan_pci_devices();
-    if ( ret )
-        goto error;
+    scan_pci_devices();
 
     ret = init_vtd_hw();
     if ( ret )
@@ -2359,7 +2363,7 @@ static int reassign_device_ownership(
      * by the root complex unless interrupt remapping is enabled.
      */
     if ( (target != hardware_domain) && !iommu_intremap )
-        untrusted_msi = true;
+        untrusted_msi = 1;
 
     /*
      * If the device belongs to the hardware domain, and it has RMRR, don't
@@ -2672,69 +2676,9 @@ static void vtd_dump_p2m_table(struct domain *d)
     vtd_dump_p2m_table_level(hd->arch.pgd_maddr, agaw_to_level(hd->arch.agaw), 0, 0);
 }
 
-static int __init intel_iommu_quarantine_init(struct domain *d)
-{
-    struct domain_iommu *hd = dom_iommu(d);
-    struct dma_pte *parent;
-    unsigned int agaw = width_to_agaw(DEFAULT_DOMAIN_ADDRESS_WIDTH);
-    unsigned int level = agaw_to_level(agaw);
-    int rc;
-
-    if ( hd->arch.pgd_maddr )
-    {
-        ASSERT_UNREACHABLE();
-        return 0;
-    }
-
-    spin_lock(&hd->arch.mapping_lock);
-
-    hd->arch.pgd_maddr = alloc_pgtable_maddr(NULL, 1);
-    if ( !hd->arch.pgd_maddr )
-        goto out;
-
-    parent = map_vtd_domain_page(hd->arch.pgd_maddr);
-    while ( level )
-    {
-        uint64_t maddr;
-        unsigned int offset;
-
-        /*
-         * The pgtable allocator is fine for the leaf page, as well as
-         * page table pages, and the resulting allocations are always
-         * zeroed.
-         */
-        maddr = alloc_pgtable_maddr(NULL, 1);
-        if ( !maddr )
-            break;
-
-        for ( offset = 0; offset < PTE_NUM; offset++ )
-        {
-            struct dma_pte *pte = &parent[offset];
-
-            dma_set_pte_addr(*pte, maddr);
-            dma_set_pte_readable(*pte);
-        }
-        iommu_flush_cache_page(parent, 1);
-
-        unmap_vtd_domain_page(parent);
-        parent = map_vtd_domain_page(maddr);
-        level--;
-    }
-    unmap_vtd_domain_page(parent);
-
- out:
-    spin_unlock(&hd->arch.mapping_lock);
-
-    rc = iommu_flush_iotlb_all(d);
-
-    /* Pages leaked in failure case */
-    return level ? -ENOMEM : rc;
-}
-
 const struct iommu_ops intel_iommu_ops = {
     .init = intel_iommu_domain_init,
     .hwdom_init = intel_iommu_hwdom_init,
-    .quarantine_init = intel_iommu_quarantine_init,
     .add_device = intel_iommu_add_device,
     .enable_device = intel_iommu_enable_device,
     .remove_device = intel_iommu_remove_device,

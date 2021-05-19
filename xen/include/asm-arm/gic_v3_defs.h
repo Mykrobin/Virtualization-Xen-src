@@ -18,8 +18,6 @@
 #ifndef __ASM_ARM_GIC_V3_DEFS_H__
 #define __ASM_ARM_GIC_V3_DEFS_H__
 
-#include <xen/sizes.h>
-
 /*
  * Additional registers defined in GIC v3.
  * Common GICD registers are defined in gic.h
@@ -47,9 +45,6 @@
 
 /* Additional bits in GICD_TYPER defined by GICv3 */
 #define GICD_TYPE_ID_BITS_SHIFT 19
-#define GICD_TYPE_ID_BITS(r)    ((((r) >> GICD_TYPE_ID_BITS_SHIFT) & 0x1f) + 1)
-
-#define GICD_TYPE_LPIS               (1U << 17)
 
 #define GICD_CTLR_RWP                (1UL << 31)
 #define GICD_CTLR_ARE_NS             (1U << 4)
@@ -69,9 +64,6 @@
  */
 #define GICV3_GICD_IIDR_VAL          0x34c
 #define GICV3_GICR_IIDR_VAL          GICV3_GICD_IIDR_VAL
-
-/* Two pages for the RD_base and SGI_base register frame. */
-#define GICV3_GICR_SIZE              (2 * SZ_64K)
 
 #define GICR_CTLR                    (0x0000)
 #define GICR_IIDR                    (0x0004)
@@ -103,91 +95,37 @@
 #define GICR_IGRPMODR0               (0x0D00)
 #define GICR_NSACR                   (0x0E00)
 
-#define GICR_CTLR_ENABLE_LPIS        (1U << 0)
-
 #define GICR_TYPER_PLPIS             (1U << 0)
 #define GICR_TYPER_VLPIS             (1U << 1)
 #define GICR_TYPER_LAST              (1U << 4)
-#define GICR_TYPER_PROC_NUM_SHIFT    8
-#define GICR_TYPER_PROC_NUM_MASK     (0xffff << GICR_TYPER_PROC_NUM_SHIFT)
-
-/* For specifying the inner cacheability type only */
-#define GIC_BASER_CACHE_nCnB         0ULL
-/* For specifying the outer cacheability type only */
-#define GIC_BASER_CACHE_SameAsInner  0ULL
-#define GIC_BASER_CACHE_nC           1ULL
-#define GIC_BASER_CACHE_RaWt         2ULL
-#define GIC_BASER_CACHE_RaWb         3ULL
-#define GIC_BASER_CACHE_WaWt         4ULL
-#define GIC_BASER_CACHE_WaWb         5ULL
-#define GIC_BASER_CACHE_RaWaWt       6ULL
-#define GIC_BASER_CACHE_RaWaWb       7ULL
-#define GIC_BASER_CACHE_MASK         7ULL
-
-#define GIC_BASER_NonShareable       0ULL
-#define GIC_BASER_InnerShareable     1ULL
-#define GIC_BASER_OuterShareable     2ULL
-
-#define GICR_PROPBASER_OUTER_CACHEABILITY_SHIFT         56
-#define GICR_PROPBASER_OUTER_CACHEABILITY_MASK               \
-        (7UL << GICR_PROPBASER_OUTER_CACHEABILITY_SHIFT)
-#define GICR_PROPBASER_SHAREABILITY_SHIFT               10
-#define GICR_PROPBASER_SHAREABILITY_MASK                     \
-        (3UL << GICR_PROPBASER_SHAREABILITY_SHIFT)
-#define GICR_PROPBASER_INNER_CACHEABILITY_SHIFT         7
-#define GICR_PROPBASER_INNER_CACHEABILITY_MASK               \
-        (7UL << GICR_PROPBASER_INNER_CACHEABILITY_SHIFT)
-#define GICR_PROPBASER_RES0_MASK                             \
-        (GENMASK(63, 59) | GENMASK(55, 52) | GENMASK(6, 5))
-
-#define GICR_PENDBASER_SHAREABILITY_SHIFT               10
-#define GICR_PENDBASER_INNER_CACHEABILITY_SHIFT         7
-#define GICR_PENDBASER_OUTER_CACHEABILITY_SHIFT         56
-#define GICR_PENDBASER_SHAREABILITY_MASK                     \
-	(3UL << GICR_PENDBASER_SHAREABILITY_SHIFT)
-#define GICR_PENDBASER_INNER_CACHEABILITY_MASK               \
-	(7UL << GICR_PENDBASER_INNER_CACHEABILITY_SHIFT)
-#define GICR_PENDBASER_OUTER_CACHEABILITY_MASK               \
-        (7UL << GICR_PENDBASER_OUTER_CACHEABILITY_SHIFT)
-#define GICR_PENDBASER_PTZ                              BIT(62)
-#define GICR_PENDBASER_RES0_MASK                             \
-        (BIT(63) | GENMASK(61, 59) | GENMASK(55, 52) |       \
-         GENMASK(15, 12) | GENMASK(6, 0))
 
 #define DEFAULT_PMR_VALUE            0xff
 
-#define LPI_PROP_PRIO_MASK           0xfc
-#define LPI_PROP_RES1                (1 << 1)
-#define LPI_PROP_ENABLED             (1 << 0)
+#define GICH_VMCR_EOI                (1 << 9)
+#define GICH_VMCR_VENG1              (1 << 1)
 
-#define ICH_VMCR_EOI                 (1 << 9)
-#define ICH_VMCR_VENG1               (1 << 1)
-#define ICH_VMCR_PRIORITY_MASK       0xff
-#define ICH_VMCR_PRIORITY_SHIFT      24
+#define GICH_LR_VIRTUAL_MASK         0xffff
+#define GICH_LR_VIRTUAL_SHIFT        0
+#define GICH_LR_PHYSICAL_MASK        0x3ff
+#define GICH_LR_PHYSICAL_SHIFT       32
+#define GICH_LR_STATE_MASK           0x3
+#define GICH_LR_STATE_SHIFT          62
+#define GICH_LR_PRIORITY_MASK        0xff
+#define GICH_LR_PRIORITY_SHIFT       48
+#define GICH_LR_HW_MASK              0x1
+#define GICH_LR_HW_SHIFT             61
+#define GICH_LR_GRP_MASK             0x1
+#define GICH_LR_GRP_SHIFT            60
+#define GICH_LR_MAINTENANCE_IRQ      (1UL<<41)
+#define GICH_LR_GRP1                 (1UL<<60)
+#define GICH_LR_HW                   (1UL<<61)
 
-#define ICH_LR_VIRTUAL_MASK          0xffff
-#define ICH_LR_VIRTUAL_SHIFT         0
-#define ICH_LR_CPUID_MASK            0x7
-#define ICH_LR_CPUID_SHIFT           10
-#define ICH_LR_PHYSICAL_MASK         0x3ff
-#define ICH_LR_PHYSICAL_SHIFT        32
-#define ICH_LR_STATE_MASK            0x3
-#define ICH_LR_STATE_SHIFT           62
-#define ICH_LR_STATE_PENDING         (1ULL << 62)
-#define ICH_LR_STATE_ACTIVE          (1ULL << 63)
-#define ICH_LR_PRIORITY_MASK         0xff
-#define ICH_LR_PRIORITY_SHIFT        48
-#define ICH_LR_HW_MASK               0x1
-#define ICH_LR_HW_SHIFT              61
-#define ICH_LR_GRP_MASK              0x1
-#define ICH_LR_GRP_SHIFT             60
-#define ICH_LR_MAINTENANCE_IRQ       (1UL<<41)
-#define ICH_LR_GRP1                  (1UL<<60)
-#define ICH_LR_HW                    (1UL<<61)
+#define GICH_VTR_NRLRGS              0x3f
+#define GICH_VTR_PRIBITS_MASK        0x7
+#define GICH_VTR_PRIBITS_SHIFT       29
 
-#define ICH_VTR_NRLRGS               0x3f
-#define ICH_VTR_PRIBITS_MASK         0x7
-#define ICH_VTR_PRIBITS_SHIFT        29
+#define GICH_VMCR_PRIORITY_MASK      0xff
+#define GICH_VMCR_PRIORITY_SHIFT     24
 
 #define ICH_SGI_IRQMODE_SHIFT        40
 #define ICH_SGI_IRQMODE_MASK         0x1

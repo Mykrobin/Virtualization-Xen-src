@@ -6,6 +6,7 @@
  * Copyright (c) 2002-2006, K Fraser
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
@@ -62,7 +63,7 @@ long cpu_frequency_change_helper(void *data)
     return cpu_frequency_change((uint64_t)data);
 }
 
-static bool allow_access_msr(unsigned int msr)
+static bool_t allow_access_msr(unsigned int msr)
 {
     switch ( msr )
     {
@@ -70,10 +71,10 @@ static bool allow_access_msr(unsigned int msr)
     case MSR_IA32_CMT_EVTSEL:
     case MSR_IA32_CMT_CTR:
     case MSR_IA32_TSC:
-        return true;
+        return 1;
     }
 
-    return false;
+    return 0;
 }
 
 void check_resource_access(struct resource_access *ra)
@@ -143,8 +144,8 @@ void resource_access(void *info)
                  * If next entry is MSR_IA32_TSC read, then the actual rdtsc
                  * is performed together with current entry, with IRQ disabled.
                  */
-                bool read_tsc = i < ra->nr_done - 1 &&
-                                unlikely(entry[1].idx == MSR_IA32_TSC);
+                bool_t read_tsc = (i < ra->nr_done - 1 &&
+                                   unlikely(entry[1].idx == MSR_IA32_TSC));
 
                 if ( unlikely(read_tsc) )
                     local_irq_save(flags);
@@ -388,7 +389,6 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
         }
         case XEN_FW_VBEDDC_INFO:
             ret = -ESRCH;
-#ifdef CONFIG_VIDEO
             if ( op->u.firmware_info.index != 0 )
                 break;
             if ( *(u32 *)bootsym(boot_edid_info) == 0x13131313 )
@@ -407,7 +407,6 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
                  copy_to_compat(op->u.firmware_info.u.vbeddc_info.edid,
                                 bootsym(boot_edid_info), 128) )
                 ret = -EFAULT;
-#endif
             break;
         case XEN_FW_EFI_INFO:
             ret = efi_get_info(op->u.firmware_info.index,

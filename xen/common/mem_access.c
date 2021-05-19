@@ -24,8 +24,8 @@
 #include <xen/guest_access.h>
 #include <xen/hypercall.h>
 #include <xen/vm_event.h>
-#include <xen/mem_access.h>
 #include <public/memory.h>
+#include <asm/p2m.h>
 #include <xsm/xsm.h>
 
 int mem_access_memop(unsigned long cmd,
@@ -52,7 +52,7 @@ int mem_access_memop(unsigned long cmd,
         goto out;
 
     rc = -ENODEV;
-    if ( unlikely(!vm_event_check_ring(d->vm_event_monitor)) )
+    if ( unlikely(!d->vm_event->monitor.ring_page) )
         goto out;
 
     switch ( mao.op )

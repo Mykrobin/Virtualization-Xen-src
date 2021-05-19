@@ -54,7 +54,7 @@ int libxl__domain_suspend_init(libxl__egc *egc,
                                     domid, port, &dsps->guest_evtchn_lockfd);
 
         if (dsps->guest_evtchn.port < 0) {
-            LOGD(WARN, domid, "Suspend event channel initialization failed");
+            LOG(WARN, "Suspend event channel initialization failed");
             rc = ERROR_FAIL;
             goto out;
         }
@@ -77,7 +77,7 @@ int libxl__domain_suspend_device_model(libxl__gc *gc,
 
     switch (libxl__device_model_version_running(gc, domid)) {
     case LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL: {
-        LOGD(DEBUG, domid, "Saving device model state to %s", filename);
+        LOG(DEBUG, "Saving device model state to %s", filename);
         libxl__qemu_traditional_cmd(gc, domid, "save");
         libxl__wait_for_device_model_deprecated(gc, domid, "paused", NULL, NULL, NULL);
         break;
@@ -86,9 +86,11 @@ int libxl__domain_suspend_device_model(libxl__gc *gc,
         if (libxl__qmp_stop(gc, domid))
             return ERROR_FAIL;
         /* Save DM state into filename */
-        ret = libxl__qmp_save(gc, domid, filename, dsps->live);
+        ret = libxl__qmp_save(gc, domid, filename);
         if (ret)
             unlink(filename);
+        break;
+    case LIBXL_DEVICE_MODEL_VERSION_NONE:
         break;
     default:
         return ERROR_INVAL;
@@ -146,17 +148,17 @@ static void domain_suspend_callback_common(libxl__egc *egc,
     /* Convenience aliases */
     const uint32_t domid = dsps->domid;
 
-    if (dsps->type != LIBXL_DOMAIN_TYPE_PV) {
+    if (dsps->type == LIBXL_DOMAIN_TYPE_HVM) {
         xc_hvm_param_get(CTX->xch, domid, HVM_PARAM_CALLBACK_IRQ, &hvm_pvdrv);
         xc_hvm_param_get(CTX->xch, domid, HVM_PARAM_ACPI_S_STATE, &hvm_s_state);
     }
 
     if ((hvm_s_state == 0) && (dsps->guest_evtchn.port >= 0)) {
-        LOGD(DEBUG, domid, "issuing %s suspend request via event channel",
-            dsps->type != LIBXL_DOMAIN_TYPE_PV ? "PVH/HVM" : "PV");
+        LOG(DEBUG, "issuing %s suspend request via event channel",
+            dsps->type == LIBXL_DOMAIN_TYPE_HVM ? "PVHVM" : "PV");
         ret = xenevtchn_notify(CTX->xce, dsps->guest_evtchn.port);
         if (ret < 0) {
-            LOGD(ERROR, domid, "xenevtchn_notify failed ret=%d", ret);
+            LOG(ERROR, "xenevtchn_notify failed ret=%d", ret);
             rc = ERROR_FAIL;
             goto err;
         }
@@ -174,10 +176,10 @@ static void domain_suspend_callback_common(libxl__egc *egc,
     }
 
     if (dsps->type == LIBXL_DOMAIN_TYPE_HVM && (!hvm_pvdrv || hvm_s_state)) {
-        LOGD(DEBUG, domid, "Calling xc_domain_shutdown on HVM domain");
+        LOG(DEBUG, "Calling xc_domain_shutdown on HVM domain");
         ret = xc_domain_shutdown(CTX->xch, domid, SHUTDOWN_suspend);
         if (ret < 0) {
-            LOGED(ERROR, domid, "xc_domain_shutdown failed");
+            LOGE(ERROR, "xc_domain_shutdown failed");
             rc = ERROR_FAIL;
             goto err;
         }
@@ -187,8 +189,8 @@ static void domain_suspend_callback_common(libxl__egc *egc,
         return;
     }
 
-    LOGD(DEBUG, domid, "issuing %s suspend request via XenBus control node",
-        dsps->type != LIBXL_DOMAIN_TYPE_PV ? "PVH/HVM" : "PV");
+    LOG(DEBUG, "issuing %s suspend request via XenBus control node",
+        dsps->type == LIBXL_DOMAIN_TYPE_HVM ? "PVHVM" : "PV");
 
     libxl__domain_pvcontrol_write(gc, XBT_NULL, domid, "suspend");
 
@@ -258,8 +260,8 @@ static void domain_suspend_common_pvcontrol_suspending(libxl__egc *egc,
 
             rc = libxl__xs_transaction_commit(gc, &t);
             if (!rc) {
-                LOGD(ERROR, dsps->domid,
-                     "guest didn't acknowledge suspend, cancelling request");
+                LOG(ERROR,
+                    "guest didn't acknowledge suspend, cancelling request");
                 goto err;
             }
             if (rc<0) goto err;
@@ -270,7 +272,7 @@ static void domain_suspend_common_pvcontrol_suspending(libxl__egc *egc,
     }
 
     assert(domain_suspend_pvcontrol_acked(state));
-    LOGD(DEBUG, dsps->domid, "guest acknowledged suspend request");
+    LOG(DEBUG, "guest acknowledged suspend request");
 
     libxl__xs_transaction_abort(gc, &t);
     dsps->guest_responded = 1;
@@ -289,7 +291,7 @@ static void domain_suspend_common_wait_guest(libxl__egc *egc,
     STATE_AO_GC(dsps->ao);
     int rc;
 
-    LOGD(DEBUG, dsps->domid, "wait for the guest to suspend");
+    LOG(DEBUG, "wait for the guest to suspend");
 
     rc = libxl__ev_xswatch_register(gc, &dsps->guest_watch,
                                     suspend_common_wait_guest_watch,
@@ -326,12 +328,13 @@ static void suspend_common_wait_guest_check(libxl__egc *egc,
 
     ret = xc_domain_getinfolist(CTX->xch, domid, 1, &info);
     if (ret < 0) {
-        LOGED(ERROR, domid, "unable to check for status of guest");
+        LOGE(ERROR, "unable to check for status of guest %"PRId32"", domid);
         goto err;
     }
 
     if (!(ret == 1 && info.domain == domid)) {
-        LOGED(ERROR, domid, "guest we were suspending has been destroyed");
+        LOGE(ERROR, "guest %"PRId32" we were suspending has been destroyed",
+             domid);
         goto err;
     }
 
@@ -342,12 +345,12 @@ static void suspend_common_wait_guest_check(libxl__egc *egc,
     shutdown_reason = (info.flags >> XEN_DOMINF_shutdownshift)
         & XEN_DOMINF_shutdownmask;
     if (shutdown_reason != SHUTDOWN_suspend) {
-        LOGD(DEBUG, domid, "guest we were suspending has shut down"
-             " with unexpected reason code %d", shutdown_reason);
+        LOG(DEBUG, "guest %"PRId32" we were suspending has shut down"
+            " with unexpected reason code %d", domid, shutdown_reason);
         goto err;
     }
 
-    LOGD(DEBUG, domid, "guest has suspended");
+    LOG(DEBUG, "guest has suspended");
     domain_suspend_common_guest_suspended(egc, dsps);
     return;
 
@@ -361,7 +364,7 @@ static void suspend_common_wait_guest_timeout(libxl__egc *egc,
     libxl__domain_suspend_state *dsps = CONTAINER_OF(ev, *dsps, guest_timeout);
     STATE_AO_GC(dsps->ao);
     if (rc == ERROR_TIMEDOUT) {
-        LOGD(ERROR, dsps->domid, "guest did not suspend, timed out");
+        LOG(ERROR, "guest did not suspend, timed out");
         rc = ERROR_GUEST_TIMEDOUT;
     }
     domain_suspend_common_done(egc, dsps, rc);
@@ -380,8 +383,7 @@ static void domain_suspend_common_guest_suspended(libxl__egc *egc,
     if (dsps->type == LIBXL_DOMAIN_TYPE_HVM) {
         rc = libxl__domain_suspend_device_model(gc, dsps);
         if (rc) {
-            LOGD(ERROR, dsps->domid,
-                 "libxl__domain_suspend_device_model failed ret=%d", rc);
+            LOG(ERROR, "libxl__domain_suspend_device_model failed ret=%d", rc);
             domain_suspend_common_done(egc, dsps, rc);
             return;
         }
@@ -454,6 +456,12 @@ int libxl__domain_resume(libxl__gc *gc, uint32_t domid, int suspend_cancel)
 {
     int rc = 0;
 
+    if (xc_domain_resume(CTX->xch, domid, suspend_cancel)) {
+        LOGE(ERROR, "xc_domain_resume failed for domain %u", domid);
+        rc = ERROR_FAIL;
+        goto out;
+    }
+
     libxl_domain_type type = libxl__domain_type(gc, domid);
     if (type == LIBXL_DOMAIN_TYPE_INVALID) {
         rc = ERROR_FAIL;
@@ -463,19 +471,14 @@ int libxl__domain_resume(libxl__gc *gc, uint32_t domid, int suspend_cancel)
     if (type == LIBXL_DOMAIN_TYPE_HVM) {
         rc = libxl__domain_resume_device_model(gc, domid);
         if (rc) {
-            LOGD(ERROR, domid, "failed to resume device model:%d", rc);
+            LOG(ERROR, "failed to resume device model for domain %u:%d",
+                domid, rc);
             goto out;
         }
     }
 
-    if (xc_domain_resume(CTX->xch, domid, suspend_cancel)) {
-        LOGED(ERROR, domid, "xc_domain_resume failed");
-        rc = ERROR_FAIL;
-        goto out;
-    }
-
     if (!xs_resume_domain(CTX->xsh, domid)) {
-        LOGED(ERROR, domid, "xs_resume_domain failed");
+        LOGE(ERROR, "xs_resume_domain failed for domain %u", domid);
         rc = ERROR_FAIL;
     }
 out:

@@ -22,7 +22,6 @@
 #define INVALID_PFN ((xen_pfn_t)-1)
 #define X86_HVM_NR_SPECIAL_PAGES    8
 #define X86_HVM_END_SPECIAL_REGION  0xff000u
-#define XG_MAX_MODULES 2
 
 /* --- typedefs and structs ---------------------------------------- */
 
@@ -57,32 +56,17 @@ struct xc_dom_phys {
     xen_pfn_t count;
 };
 
-struct xc_dom_module {
-    void *blob;
-    size_t size;
-    void *cmdline;
-    /* If seg.vstart is non zero then the module will be loaded at that
-     * address, otherwise it will automatically placed.
-     *
-     * If automatic placement is used and the module is gzip
-     * compressed then it will be decompressed as it is loaded. If the
-     * module has been explicitly placed then it is loaded as is
-     * otherwise decompressing risks undoing the manual placement.
-     */
-    struct xc_dom_seg seg;
-};
-
 struct xc_dom_image {
     /* files */
     void *kernel_blob;
     size_t kernel_size;
-    unsigned int num_modules;
-    struct xc_dom_module modules[XG_MAX_MODULES];
+    void *ramdisk_blob;
+    size_t ramdisk_size;
     void *devicetree_blob;
     size_t devicetree_size;
 
     size_t max_kernel_size;
-    size_t max_module_size;
+    size_t max_ramdisk_size;
     size_t max_devicetree_size;
 
     /* arguments and parameters */
@@ -96,10 +80,19 @@ struct xc_dom_image {
 
     /* memory layout */
     struct xc_dom_seg kernel_seg;
+    /* If ramdisk_seg.vstart is non zero then the ramdisk will be
+     * loaded at that address, otherwise it will automatically placed.
+     *
+     * If automatic placement is used and the ramdisk is gzip
+     * compressed then it will be decompressed as it is loaded. If the
+     * ramdisk has been explicitly placed then it is loaded as is
+     * otherwise decompressing risks undoing the manual placement.
+     */
+    struct xc_dom_seg ramdisk_seg;
     struct xc_dom_seg p2m_seg;
     struct xc_dom_seg pgtables_seg;
     struct xc_dom_seg devicetree_seg;
-    struct xc_dom_seg start_info_seg;
+    struct xc_dom_seg start_info_seg; /* HVMlite only */
     xen_pfn_t start_info_pfn;
     xen_pfn_t console_pfn;
     xen_pfn_t xenstore_pfn;
@@ -168,13 +161,15 @@ struct xc_dom_image {
     unsigned long flags;
     unsigned int console_evtchn;
     unsigned int xenstore_evtchn;
-    uint32_t console_domid;
-    uint32_t xenstore_domid;
+    domid_t console_domid;
+    domid_t xenstore_domid;
     xen_pfn_t shared_info_mfn;
+    int pvh_enabled;
 
     xc_interface *xch;
-    uint32_t guest_domid;
+    domid_t guest_domid;
     int claim_enabled; /* 0 by default, 1 enables it */
+    int shadow_enabled;
 
     int xen_version;
     xen_capabilities_info_t xen_caps;
@@ -223,13 +218,6 @@ struct xc_dom_image {
 
     /* Extra SMBIOS structures passed to HVMLOADER */
     struct xc_hvm_firmware_module smbios_module;
-
-#if defined(__i386__) || defined(__x86_64__)
-    struct e820entry *e820;
-    unsigned int e820_entries;
-#endif
-
-    xen_pfn_t vuart_gfn;
 };
 
 /* --- pluggable kernel loader ------------------------------------- */
@@ -289,12 +277,12 @@ void xc_dom_release(struct xc_dom_image *dom);
 int xc_dom_rambase_init(struct xc_dom_image *dom, uint64_t rambase);
 int xc_dom_mem_init(struct xc_dom_image *dom, unsigned int mem_mb);
 
-/* Set this larger if you have enormous modules/kernels. Note that
+/* Set this larger if you have enormous ramdisks/kernels. Note that
  * you should trust all kernels not to be maliciously large (e.g. to
  * exhaust all dom0 memory) if you do this (see CVE-2012-4544 /
  * XSA-25). You can also set the default independently for
- * modules/kernels in xc_dom_allocate() or call
- * xc_dom_{kernel,module}_max_size.
+ * ramdisks/kernels in xc_dom_allocate() or call
+ * xc_dom_{kernel,ramdisk}_max_size.
  */
 #ifndef XC_DOM_DECOMPRESS_MAX
 #define XC_DOM_DECOMPRESS_MAX (1024*1024*1024) /* 1GB */
@@ -303,7 +291,8 @@ int xc_dom_mem_init(struct xc_dom_image *dom, unsigned int mem_mb);
 int xc_dom_kernel_check_size(struct xc_dom_image *dom, size_t sz);
 int xc_dom_kernel_max_size(struct xc_dom_image *dom, size_t sz);
 
-int xc_dom_module_max_size(struct xc_dom_image *dom, size_t sz);
+int xc_dom_ramdisk_check_size(struct xc_dom_image *dom, size_t sz);
+int xc_dom_ramdisk_max_size(struct xc_dom_image *dom, size_t sz);
 
 int xc_dom_devicetree_max_size(struct xc_dom_image *dom, size_t sz);
 
@@ -314,12 +303,11 @@ int xc_dom_do_gunzip(xc_interface *xch,
 int xc_dom_try_gunzip(struct xc_dom_image *dom, void **blob, size_t * size);
 
 int xc_dom_kernel_file(struct xc_dom_image *dom, const char *filename);
-int xc_dom_module_file(struct xc_dom_image *dom, const char *filename,
-                       const char *cmdline);
+int xc_dom_ramdisk_file(struct xc_dom_image *dom, const char *filename);
 int xc_dom_kernel_mem(struct xc_dom_image *dom, const void *mem,
                       size_t memsize);
-int xc_dom_module_mem(struct xc_dom_image *dom, const void *mem,
-                       size_t memsize, const char *cmdline);
+int xc_dom_ramdisk_mem(struct xc_dom_image *dom, const void *mem,
+                       size_t memsize);
 int xc_dom_devicetree_file(struct xc_dom_image *dom, const char *filename);
 int xc_dom_devicetree_mem(struct xc_dom_image *dom, const void *mem,
                           size_t memsize);
@@ -330,24 +318,24 @@ int xc_dom_build_image(struct xc_dom_image *dom);
 int xc_dom_update_guest_p2m(struct xc_dom_image *dom);
 
 int xc_dom_boot_xen_init(struct xc_dom_image *dom, xc_interface *xch,
-                         uint32_t domid);
+                     domid_t domid);
 int xc_dom_boot_mem_init(struct xc_dom_image *dom);
 void *xc_dom_boot_domU_map(struct xc_dom_image *dom, xen_pfn_t pfn,
                            xen_pfn_t count);
 int xc_dom_boot_image(struct xc_dom_image *dom);
 int xc_dom_compat_check(struct xc_dom_image *dom);
 int xc_dom_gnttab_init(struct xc_dom_image *dom);
-int xc_dom_gnttab_hvm_seed(xc_interface *xch, uint32_t domid,
+int xc_dom_gnttab_hvm_seed(xc_interface *xch, domid_t domid,
                            xen_pfn_t console_gmfn,
                            xen_pfn_t xenstore_gmfn,
-                           uint32_t console_domid,
-                           uint32_t xenstore_domid);
-int xc_dom_gnttab_seed(xc_interface *xch, uint32_t domid,
+                           domid_t console_domid,
+                           domid_t xenstore_domid);
+int xc_dom_gnttab_seed(xc_interface *xch, domid_t domid,
                        xen_pfn_t console_gmfn,
                        xen_pfn_t xenstore_gmfn,
-                       uint32_t console_domid,
-                       uint32_t xenstore_domid);
-bool xc_dom_translated(const struct xc_dom_image *dom);
+                       domid_t console_domid,
+                       domid_t xenstore_domid);
+int xc_dom_feature_translated(struct xc_dom_image *dom);
 
 /* --- debugging bits ---------------------------------------------- */
 
@@ -433,7 +421,7 @@ static inline void *xc_dom_vaddr_to_ptr(struct xc_dom_image *dom,
 
 static inline xen_pfn_t xc_dom_p2m(struct xc_dom_image *dom, xen_pfn_t pfn)
 {
-    if ( xc_dom_translated(dom) )
+    if ( dom->shadow_enabled || xc_dom_feature_translated(dom) )
         return pfn;
     if (pfn < dom->rambase_pfn || pfn >= dom->rambase_pfn + dom->total_pages)
         return INVALID_MFN;

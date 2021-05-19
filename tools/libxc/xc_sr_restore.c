@@ -825,9 +825,9 @@ static int restore(struct xc_sr_context *ctx)
 
 int xc_domain_restore(xc_interface *xch, int io_fd, uint32_t dom,
                       unsigned int store_evtchn, unsigned long *store_mfn,
-                      uint32_t store_domid, unsigned int console_evtchn,
-                      unsigned long *console_gfn, uint32_t console_domid,
-                      unsigned int hvm, unsigned int pae,
+                      domid_t store_domid, unsigned int console_evtchn,
+                      unsigned long *console_gfn, domid_t console_domid,
+                      unsigned int hvm, unsigned int pae, int superpages,
                       xc_migration_stream_t stream_type,
                       struct restore_callbacks *callbacks, int send_back_fd)
 {
@@ -860,8 +860,9 @@ int xc_domain_restore(xc_interface *xch, int io_fd, uint32_t dom,
                callbacks->restore_results);
     }
 
-    DPRINTF("fd %d, dom %u, hvm %u, pae %u, stream_type %d",
-            io_fd, dom, hvm, pae, stream_type);
+    DPRINTF("fd %d, dom %u, hvm %u, pae %u, superpages %d"
+            ", stream_type %d", io_fd, dom, hvm, pae,
+            superpages, stream_type);
 
     if ( xc_domain_getinfo(xch, dom, 1, &ctx.dominfo) != 1 )
     {

@@ -20,7 +20,6 @@
 #include <xen/smp.h>
 #include <xen/perfc.h>
 #include <asm/atomic.h>
-#include <xen/vpci.h>
 #include <xen/wait.h>
 #include <public/xen.h>
 #include <public/domctl.h>
@@ -140,7 +139,7 @@ void evtchn_destroy_final(struct domain *d); /* from complete_domain_destroy */
 
 struct waitqueue_vcpu;
 
-struct vcpu
+struct vcpu 
 {
     int              vcpu_id;
 
@@ -177,20 +176,20 @@ struct vcpu
     uint64_t last_run_time;
 
     /* Has the FPU been initialised? */
-    bool             fpu_initialised;
+    bool_t           fpu_initialised;
     /* Has the FPU been used since it was last saved? */
-    bool             fpu_dirtied;
+    bool_t           fpu_dirtied;
     /* Initialization completed for this VCPU? */
-    bool             is_initialised;
+    bool_t           is_initialised;
     /* Currently running on a CPU? */
-    bool             is_running;
+    bool_t           is_running;
     /* VCPU should wake fast (do not deep sleep the CPU). */
-    bool             is_urgent;
+    bool_t           is_urgent;
 
 #ifdef VCPU_TRAP_LAST
 #define VCPU_TRAP_NONE    0
     struct {
-        bool             pending;
+        bool_t           pending;
         uint8_t          old_mask;
     }                async_exception_state[VCPU_TRAP_LAST];
 #define async_exception_state(t) async_exception_state[(t)-1]
@@ -198,25 +197,12 @@ struct vcpu
 #endif
 
     /* Require shutdown to be deferred for some asynchronous operation? */
-    bool             defer_shutdown;
+    bool_t           defer_shutdown;
     /* VCPU is paused following shutdown request (d->is_shutting_down)? */
-    bool             paused_for_shutdown;
+    bool_t           paused_for_shutdown;
     /* VCPU need affinity restored */
-    bool             affinity_broken;
+    bool_t           affinity_broken;
 
-    /* A hypercall has been preempted. */
-    bool             hcall_preempted;
-#ifdef CONFIG_COMPAT
-    /* A hypercall is using the compat ABI? */
-    bool             hcall_compat;
-#endif
-
-    /* Does soft affinity actually play a role (given hard affinity)? */
-    bool             soft_aff_effective;
-
-    /* The CPU, if any, which is holding onto this VCPU's state. */
-#define VCPU_CPU_CLEAN (~0u)
-    unsigned int     dirty_cpu;
 
     /*
      * > 0: a single port is being polled;
@@ -236,7 +222,7 @@ struct vcpu
     /* VCPU paused by system controller. */
     int              controller_pause_count;
 
-    /* Grant table map tracking. */
+    /* Maptrack */
     spinlock_t       maptrack_freelist_lock;
     unsigned int     maptrack_head;
     unsigned int     maptrack_tail;
@@ -255,6 +241,9 @@ struct vcpu
     /* Bitmask of CPUs on which this VCPU prefers to run. */
     cpumask_var_t    cpu_soft_affinity;
 
+    /* Bitmask of CPUs which are holding onto this VCPU's state. */
+    cpumask_var_t    vcpu_dirty_cpumask;
+
     /* Tasklet for continue_hypercall_on_cpu(). */
     struct tasklet   continue_hypercall_tasklet;
 
@@ -264,12 +253,9 @@ struct vcpu
     struct waitqueue_vcpu *waitqueue_vcpu;
 
     /* Guest-specified relocation of vcpu_info. */
-    mfn_t            vcpu_info_mfn;
+    unsigned long vcpu_info_mfn;
 
     struct evtchn_fifo_vcpu *evtchn_fifo;
-
-    /* vPCI per-vCPU area, used to store data for long running operations. */
-    struct vpci_vcpu vpci;
 
     struct arch_vcpu arch;
 };
@@ -303,10 +289,24 @@ struct vm_event_domain
     unsigned int last_vcpu_wake_up;
 };
 
+struct vm_event_per_domain
+{
+    /* Memory sharing support */
+    struct vm_event_domain share;
+    /* Memory paging support */
+    struct vm_event_domain paging;
+    /* VM event monitor support */
+    struct vm_event_domain monitor;
+};
+
 struct evtchn_port_ops;
 
+/*
+ * PVH is a PV guest running in an HVM container.  is_hvm_* checks
+ * will be false, but has_hvm_container_* checks will be true.
+ */
 enum guest_type {
-    guest_type_pv, guest_type_hvm
+    guest_type_pv, guest_type_pvh, guest_type_hvm
 };
 
 struct domain
@@ -376,17 +376,17 @@ struct domain
     s8               need_iommu;
 #endif
     /* is node-affinity automatically computed? */
-    bool             auto_node_affinity;
+    bool_t           auto_node_affinity;
     /* Is this guest fully privileged (aka dom0)? */
-    bool             is_privileged;
+    bool_t           is_privileged;
     /* Is this a xenstore domain (not dom0)? */
-    bool             is_xenstore;
+    bool_t           is_xenstore;
     /* Domain's VCPUs are pinned 1:1 to physical CPUs? */
-    bool             is_pinned;
+    bool_t           is_pinned;
     /* Non-migratable and non-restoreable? */
-    bool             disable_migrate;
+    bool_t           disable_migrate;
     /* Is this guest being debugged by dom0? */
-    bool             debugger_attached;
+    bool_t           debugger_attached;
     /*
      * Set to true at the very end of domain creation, when the domain is
      * unpaused for the first time by the systemcontroller.
@@ -409,8 +409,8 @@ struct domain
 
     /* Guest has shut down (inc. reason code)? */
     spinlock_t       shutdown_lock;
-    bool             is_shutting_down; /* in process of shutting down? */
-    bool             is_shut_down;     /* fully shut down? */
+    bool_t           is_shutting_down; /* in process of shutting down? */
+    bool_t           is_shut_down;     /* fully shut down? */
 #define SHUTDOWN_CODE_INVALID ~0u
     unsigned int     shutdown_code;
 
@@ -424,7 +424,7 @@ struct domain
     unsigned long    vm_assist;
 
     /* Bitmask of CPUs which are holding onto this domain's state. */
-    cpumask_var_t    dirty_cpumask;
+    cpumask_var_t    domain_dirty_cpumask;
 
     struct arch_domain arch;
 
@@ -434,7 +434,7 @@ struct domain
     xen_domain_handle_t handle;
 
     /* hvm_print_line() and guest_console_write() logging. */
-#define DOMAIN_PBUF_SIZE 200
+#define DOMAIN_PBUF_SIZE 80
     char       *pbuf;
     unsigned    pbuf_idx;
     spinlock_t  pbuf_lock;
@@ -462,17 +462,7 @@ struct domain
     struct lock_profile_qhead profile_head;
 
     /* Various vm_events */
-
-    /* Memory sharing support */
-#ifdef CONFIG_HAS_MEM_SHARING
-    struct vm_event_domain *vm_event_share;
-#endif
-    /* Memory paging support */
-#ifdef CONFIG_HAS_MEM_PAGING
-    struct vm_event_domain *vm_event_paging;
-#endif
-    /* VM event monitor support */
-    struct vm_event_domain *vm_event_monitor;
+    struct vm_event_per_domain *vm_event;
 
     /*
      * Can be specified by the user. If that is not the case, it is
@@ -500,11 +490,6 @@ extern rcu_read_lock_t domlist_read_lock;
 extern struct vcpu *idle_vcpu[NR_CPUS];
 #define is_idle_domain(d) ((d)->domain_id == DOMID_IDLE)
 #define is_idle_vcpu(v)   (is_idle_domain((v)->domain))
-
-static inline bool is_system_domain(const struct domain *d)
-{
-    return d->domain_id >= DOMID_FIRST_RESERVED;
-}
 
 #define DOMAIN_DESTROYED (1u << 31) /* assumes atomic_t is >= 32 bits */
 #define put_domain(_d) \
@@ -543,15 +528,38 @@ void domain_update_node_affinity(struct domain *d);
 
 /*
  * Create a domain: the configuration is only necessary for real domain
- * (domid < DOMID_FIRST_RESERVED).
+ * (i.e !DOMCRF_dummy, excluded idle domain).
  */
-struct domain *domain_create(domid_t domid,
-                             struct xen_domctl_createdomain *config);
+struct domain *domain_create(domid_t domid, unsigned int domcr_flags,
+                             uint32_t ssidref,
+                             struct xen_arch_domainconfig *config);
+ /* DOMCRF_hvm: Create an HVM domain, as opposed to a PV domain. */
+#define _DOMCRF_hvm           0
+#define DOMCRF_hvm            (1U<<_DOMCRF_hvm)
+ /* DOMCRF_hap: Create a domain with hardware-assisted paging. */
+#define _DOMCRF_hap           1
+#define DOMCRF_hap            (1U<<_DOMCRF_hap)
+ /* DOMCRF_s3_integrity: Create a domain with tboot memory integrity protection
+                        by tboot */
+#define _DOMCRF_s3_integrity  2
+#define DOMCRF_s3_integrity   (1U<<_DOMCRF_s3_integrity)
+ /* DOMCRF_dummy: Create a dummy domain (not scheduled; not on domain list) */
+#define _DOMCRF_dummy         3
+#define DOMCRF_dummy          (1U<<_DOMCRF_dummy)
+ /* DOMCRF_oos_off: dont use out-of-sync optimization for shadow page tables */
+#define _DOMCRF_oos_off         4
+#define DOMCRF_oos_off          (1U<<_DOMCRF_oos_off)
+ /* DOMCRF_pvh: Create PV domain in HVM container. */
+#define _DOMCRF_pvh             5
+#define DOMCRF_pvh              (1U<<_DOMCRF_pvh)
+ /* DOMCRF_xs_domain: xenstore domain */
+#define _DOMCRF_xs_domain       6
+#define DOMCRF_xs_domain        (1U<<_DOMCRF_xs_domain)
 
 /*
  * rcu_lock_domain_by_id() is more efficient than get_domain_by_id().
  * This is the preferred function if the returned domain reference
- * is short lived,  but it cannot be used if the domain reference needs
+ * is short lived,  but it cannot be used if the domain reference needs 
  * to be kept beyond the current scope (e.g., across a softirq).
  * The returned domain reference must be discarded using rcu_unlock_domain().
  */
@@ -574,10 +582,11 @@ int rcu_lock_remote_domain_by_id(domid_t dom, struct domain **d);
  */
 int rcu_lock_live_remote_domain_by_id(domid_t dom, struct domain **d);
 
+/* Finish a RCU critical region started by rcu_lock_domain_by_id(). */
 static inline void rcu_unlock_domain(struct domain *d)
 {
     if ( d != current->domain )
-        rcu_read_unlock(d);
+        rcu_read_unlock(&domlist_read_lock);
 }
 
 static inline struct domain *rcu_lock_domain(struct domain *d)
@@ -595,7 +604,7 @@ static inline struct domain *rcu_lock_current_domain(void)
 struct domain *get_domain_by_id(domid_t dom);
 void domain_destroy(struct domain *d);
 int domain_kill(struct domain *d);
-int domain_shutdown(struct domain *d, u8 reason);
+void domain_shutdown(struct domain *d, u8 reason);
 void domain_resume(struct domain *d);
 void domain_pause_for_debugger(void);
 
@@ -667,7 +676,7 @@ void sync_local_execstate(void);
  * sync_vcpu_execstate() will switch and commit @prev's state.
  */
 void context_switch(
-    struct vcpu *prev,
+    struct vcpu *prev, 
     struct vcpu *next);
 
 /*
@@ -698,30 +707,11 @@ extern void (*dead_idle) (void);
  */
 unsigned long hypercall_create_continuation(
     unsigned int op, const char *format, ...);
+void hypercall_cancel_continuation(void);
 
-static inline void hypercall_cancel_continuation(struct vcpu *v)
-{
-    v->hcall_preempted = false;
-}
-
-/*
- * For long-running operations that must be in hypercall context, check
- * if there is background work to be done that should interrupt this
- * operation.
- */
 #define hypercall_preempt_check() (unlikely(    \
         softirq_pending(smp_processor_id()) |   \
         local_events_need_delivery()            \
-    ))
-
-/*
- * For long-running operations that may be in hypercall context or on
- * the idle vcpu (e.g. during dom0 construction), check if there is
- * background work to be done that should interrupt this operation.
- */
-#define general_preempt_check() (unlikely(                          \
-        softirq_pending(smp_processor_id()) ||                      \
-        (!is_idle_vcpu(current) && local_events_need_delivery())    \
     ))
 
 extern struct domain *domain_list;
@@ -784,26 +774,12 @@ static inline struct domain *next_domain_in_cpupool(
  /* VCPU is being reset. */
 #define _VPF_in_reset        7
 #define VPF_in_reset         (1UL<<_VPF_in_reset)
-/* VCPU is parked. */
-#define _VPF_parked          8
-#define VPF_parked           (1UL<<_VPF_parked)
 
 static inline bool vcpu_runnable(const struct vcpu *v)
 {
     return !(v->pause_flags |
              atomic_read(&v->pause_count) |
              atomic_read(&v->domain->pause_count));
-}
-
-static inline bool is_vcpu_dirty_cpu(unsigned int cpu)
-{
-    BUILD_BUG_ON(NR_CPUS >= VCPU_CPU_CLEAN);
-    return cpu != VCPU_CPU_CLEAN;
-}
-
-static inline bool vcpu_cpu_dirty(const struct vcpu *v)
-{
-    return is_vcpu_dirty_cpu(v->dirty_cpu);
 }
 
 void vcpu_block(void);
@@ -843,9 +819,6 @@ void scheduler_free(struct scheduler *sched);
 int schedule_cpu_switch(unsigned int cpu, struct cpupool *c);
 void vcpu_force_reschedule(struct vcpu *v);
 int cpu_disable_scheduler(unsigned int cpu);
-/* We need it in dom0_setup_vcpu */
-void sched_set_affinity(struct vcpu *v, const cpumask_t *hard,
-                        const cpumask_t *soft);
 int vcpu_set_hard_affinity(struct vcpu *v, const cpumask_t *affinity);
 int vcpu_set_soft_affinity(struct vcpu *v, const cpumask_t *affinity);
 void restore_vcpu_affinity(struct domain *d);
@@ -856,24 +829,17 @@ uint64_t get_cpu_idle_time(unsigned int cpu);
 
 /*
  * Used by idle loop to decide whether there is work to do:
- *  (1) Deal with RCU; (2) or run softirqs; or (3) Play dead;
- *  or (4) Run tasklets.
- *
- * About (3), if a tasklet is enqueued, it will be scheduled
- * really really soon, and hence it's pointless to try to
- * sleep between these two events (that's why we don't call
- * the tasklet_work_to_do() helper).
+ *  (1) Run softirqs; or (2) Play dead; or (3) Run tasklets.
  */
 #define cpu_is_haltable(cpu)                    \
-    (!rcu_needs_cpu(cpu) &&                     \
-     !softirq_pending(cpu) &&                   \
+    (!softirq_pending(cpu) &&                   \
      cpu_online(cpu) &&                         \
      !per_cpu(tasklet_work_to_do, cpu))
 
 void watchdog_domain_init(struct domain *d);
 void watchdog_domain_destroy(struct domain *d);
 
-/*
+/* 
  * Use this check when the following are both true:
  *  - Using this feature or interface requires full access to the hardware
  *    (that is, this would not be suitable for a driver domain)
@@ -888,8 +854,12 @@ void watchdog_domain_destroy(struct domain *d);
 
 #define is_pv_domain(d) ((d)->guest_type == guest_type_pv)
 #define is_pv_vcpu(v)   (is_pv_domain((v)->domain))
+#define is_pvh_domain(d) ((d)->guest_type == guest_type_pvh)
+#define is_pvh_vcpu(v)   (is_pvh_domain((v)->domain))
 #define is_hvm_domain(d) ((d)->guest_type == guest_type_hvm)
 #define is_hvm_vcpu(v)   (is_hvm_domain(v->domain))
+#define has_hvm_container_domain(d) ((d)->guest_type != guest_type_pv)
+#define has_hvm_container_vcpu(v)   (has_hvm_container_domain((v)->domain))
 #define is_pinned_vcpu(v) ((v)->domain->is_pinned || \
                            cpumask_weight((v)->cpu_hard_affinity) == 1)
 #ifdef CONFIG_HAS_PASSTHROUGH
@@ -898,12 +868,15 @@ void watchdog_domain_destroy(struct domain *d);
 #define need_iommu(d)    (0)
 #endif
 
-static inline bool is_vcpu_online(const struct vcpu *v)
+static inline bool_t is_vcpu_online(const struct vcpu *v)
 {
     return !test_bit(_VPF_down, &v->pause_flags);
 }
 
-extern bool sched_smt_power_savings;
+void set_vcpu_migration_delay(unsigned int delay);
+unsigned int get_vcpu_migration_delay(void);
+
+extern bool_t sched_smt_power_savings;
 
 extern enum cpufreq_controller {
     FREQCTL_none, FREQCTL_dom0_kernel, FREQCTL_xen
@@ -920,7 +893,7 @@ int cpupool_do_sysctl(struct xen_sysctl_cpupool_op *op);
 void schedule_dump(struct cpupool *c);
 extern void dump_runq(unsigned char key);
 
-void arch_do_physinfo(struct xen_sysctl_physinfo *pi);
+void arch_do_physinfo(xen_sysctl_physinfo_t *pi);
 
 #endif /* __SCHED_H__ */
 

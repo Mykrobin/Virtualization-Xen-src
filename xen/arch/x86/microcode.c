@@ -21,6 +21,7 @@
  * 2 of the License, or (at your option) any later version.
  */
 
+#include <xen/config.h>
 #include <xen/cpu.h>
 #include <xen/lib.h>
 #include <xen/kernel.h>
@@ -40,6 +41,7 @@
 #include <asm/microcode.h>
 
 static module_t __initdata ucode_mod;
+static void *(*__initdata ucode_mod_map)(const module_t *);
 static signed int __initdata ucode_mod_idx;
 static bool_t __initdata ucode_mod_forced;
 
@@ -72,19 +74,15 @@ void __init microcode_set_module(unsigned int idx)
  * If the EFI has forced which of the multiboot payloads is to be used,
  * no parsing will be attempted.
  */
-static int __init parse_ucode(const char *s)
+static void __init parse_ucode(char *s)
 {
-    const char *q = NULL;
-
     if ( ucode_mod_forced ) /* Forced by EFI */
-       return 0;
+       return;
 
     if ( !strncmp(s, "scan", 4) )
         ucode_scan = 1;
     else
-        ucode_mod_idx = simple_strtol(s, &q, 0);
-
-    return (q && *q) ? -EINVAL : 0;
+        ucode_mod_idx = simple_strtol(s, NULL, 0);
 }
 custom_param("ucode", parse_ucode);
 
@@ -95,7 +93,8 @@ custom_param("ucode", parse_ucode);
 
 void __init microcode_scan_module(
     unsigned long *module_map,
-    const multiboot_info_t *mbi)
+    const multiboot_info_t *mbi,
+    void *(*bootmap)(const module_t *))
 {
     module_t *mod = (module_t *)__va(mbi->mods_addr);
     uint64_t *_blob_start;
@@ -124,7 +123,7 @@ void __init microcode_scan_module(
         if ( !test_bit(i, module_map) )
             continue;
 
-        _blob_start = bootstrap_map(&mod[i]);
+        _blob_start = bootmap(&mod[i]);
         _blob_size = mod[i].mod_end;
         if ( !_blob_start )
         {
@@ -155,17 +154,18 @@ void __init microcode_scan_module(
                 else
                     memcpy(ucode_blob.data, cd.data, cd.size);
         }
-        bootstrap_map(NULL);
+        bootmap(NULL);
         if ( cd.data )
             break;
     }
     return;
 err:
-    bootstrap_map(NULL);
+    bootmap(NULL);
 }
 void __init microcode_grab_module(
     unsigned long *module_map,
-    const multiboot_info_t *mbi)
+    const multiboot_info_t *mbi,
+    void *(*map)(const module_t *))
 {
     module_t *mod = (module_t *)__va(mbi->mods_addr);
 
@@ -175,9 +175,10 @@ void __init microcode_grab_module(
          !__test_and_clear_bit(ucode_mod_idx, module_map) )
         goto scan;
     ucode_mod = mod[ucode_mod_idx];
+    ucode_mod_map = map;
 scan:
     if ( ucode_scan )
-        microcode_scan_module(module_map, mbi);
+        microcode_scan_module(module_map, mbi, map);
 }
 
 const struct microcode_ops *microcode_ops;
@@ -354,7 +355,7 @@ static int __init microcode_init(void)
     }
     else if ( ucode_mod.mod_end )
     {
-        bootstrap_map(NULL);
+        ucode_mod_map(NULL);
         ucode_mod.mod_end = 0;
     }
 
@@ -383,14 +384,9 @@ static struct notifier_block microcode_percpu_nfb = {
 
 int __init early_microcode_update_cpu(bool start_update)
 {
-    unsigned int cpu = smp_processor_id();
-    struct ucode_cpu_info *uci = &per_cpu(ucode_cpu_info, cpu);
     int rc = 0;
     void *data = NULL;
     size_t len;
-
-    if ( !microcode_ops )
-        return -ENOSYS;
 
     if ( ucode_blob.size )
     {
@@ -400,11 +396,8 @@ int __init early_microcode_update_cpu(bool start_update)
     else if ( ucode_mod.mod_end )
     {
         len = ucode_mod.mod_end;
-        data = bootstrap_map(&ucode_mod);
+        data = ucode_mod_map(&ucode_mod);
     }
-
-    microcode_ops->collect_cpu_info(cpu, &uci->cpu_sig);
-
     if ( data )
     {
         if ( start_update && microcode_ops->start_update )
@@ -421,8 +414,6 @@ int __init early_microcode_update_cpu(bool start_update)
 
 int __init early_microcode_init(void)
 {
-    unsigned int cpu = smp_processor_id();
-    struct ucode_cpu_info *uci = &per_cpu(ucode_cpu_info, cpu);
     int rc;
 
     rc = microcode_init_intel();
@@ -435,13 +426,11 @@ int __init early_microcode_init(void)
 
     if ( microcode_ops )
     {
-        microcode_ops->collect_cpu_info(cpu, &uci->cpu_sig);
-
         if ( ucode_mod.mod_end || ucode_blob.size )
             rc = early_microcode_update_cpu(true);
 
         register_cpu_notifier(&microcode_percpu_nfb);
     }
 
-    return rc;
+    return 0;
 }

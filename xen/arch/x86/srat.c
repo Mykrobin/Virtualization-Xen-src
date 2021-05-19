@@ -42,7 +42,7 @@ static struct node node_memblk_range[NR_NODE_MEMBLKS];
 static nodeid_t memblk_nodeid[NR_NODE_MEMBLKS];
 static __initdata DECLARE_BITMAP(memblk_hotplug, NR_NODE_MEMBLKS);
 
-static inline bool node_found(unsigned idx, unsigned pxm)
+static inline bool_t node_found(unsigned idx, unsigned pxm)
 {
 	return ((pxm2node[idx].pxm == pxm) &&
 		(pxm2node[idx].node != NUMA_NO_NODE));
@@ -66,7 +66,7 @@ nodeid_t setup_node(unsigned pxm)
 {
 	nodeid_t node;
 	unsigned idx;
-	static bool warned;
+	static bool_t warned;
 	static unsigned nodes_found;
 
 	BUILD_BUG_ON(MAX_NUMNODES >= NUMA_NO_NODE);
@@ -89,7 +89,7 @@ nodeid_t setup_node(unsigned pxm)
 	if (!warned) {
 		printk(KERN_WARNING "SRAT: Too many proximity domains (%#x)\n",
 		       pxm);
-		warned = true;
+		warned = 1;
 	}
 
 	return NUMA_NO_NODE;
@@ -188,15 +188,19 @@ static __init int slit_valid(struct acpi_table_slit *slit)
 /* Callback for SLIT parsing */
 void __init acpi_numa_slit_init(struct acpi_table_slit *slit)
 {
-	mfn_t mfn;
-
+	unsigned long mfn;
 	if (!slit_valid(slit)) {
 		printk(KERN_INFO "ACPI: SLIT table looks invalid. "
 		       "Not used.\n");
 		return;
 	}
 	mfn = alloc_boot_pages(PFN_UP(slit->header.length), 1);
-	acpi_slit = mfn_to_virt(mfn_x(mfn));
+	if (!mfn) {
+		printk(KERN_ERR "ACPI: Unable to allocate memory for "
+		       "saving ACPI SLIT numa information.\n");
+		return;
+	}
+	acpi_slit = mfn_to_virt(mfn);
 	memcpy(acpi_slit, slit, slit->header.length);
 }
 
@@ -311,8 +315,8 @@ acpi_numa_memory_affinity_init(const struct acpi_srat_mem_affinity *ma)
 	if (i < 0)
 		/* everything fine */;
 	else if (memblk_nodeid[i] == node) {
-		bool mismatch = !(ma->flags & ACPI_SRAT_MEM_HOT_PLUGGABLE) !=
-		                !test_bit(i, memblk_hotplug);
+		bool_t mismatch = !(ma->flags & ACPI_SRAT_MEM_HOT_PLUGGABLE) !=
+		                  !test_bit(i, memblk_hotplug);
 
 		printk("%sSRAT: PXM %u (%"PRIx64"-%"PRIx64") overlaps with itself (%"PRIx64"-%"PRIx64")\n",
 		       mismatch ? KERN_ERR : KERN_WARNING, pxm, start, end,

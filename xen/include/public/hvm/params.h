@@ -135,18 +135,13 @@
 #define _HVMPV_apic_assist 5
 #define HVMPV_apic_assist (1 << _HVMPV_apic_assist)
 
-/* Enable crash MSRs */
-#define _HVMPV_crash_ctl 6
-#define HVMPV_crash_ctl (1 << _HVMPV_crash_ctl)
-
 #define HVMPV_feature_mask \
         (HVMPV_base_freq | \
          HVMPV_no_freq | \
          HVMPV_time_ref_count | \
          HVMPV_reference_tsc | \
          HVMPV_hcall_remote_tlb_flush | \
-         HVMPV_apic_assist | \
-         HVMPV_crash_ctl)
+         HVMPV_apic_assist)
 
 #endif
 
@@ -233,18 +228,8 @@
 /* Location of the VM Generation ID in guest physical address space. */
 #define HVM_PARAM_VM_GENERATION_ID_ADDR 34
 
-/*
- * Set mode for altp2m:
- *  disabled: don't activate altp2m (default)
- *  mixed: allow access to all altp2m ops for both in-guest and external tools
- *  external: allow access to external privileged tools only
- *  limited: guest only has limited access (ie. control VMFUNC and #VE)
- */
+/* Boolean: Enable altp2m */
 #define HVM_PARAM_ALTP2M       35
-#define XEN_ALTP2M_disabled      0
-#define XEN_ALTP2M_mixed         1
-#define XEN_ALTP2M_external      2
-#define XEN_ALTP2M_limited       3
 
 /*
  * Size of the x87 FPU FIP/FDP registers that the hypervisor needs to
@@ -268,17 +253,6 @@
  */
 #define HVM_PARAM_X87_FIP_WIDTH 36
 
-/*
- * TSS (and its size) used on Intel when CR0.PE=0. The address occupies
- * the low 32 bits, while the size is in the high 32 ones.
- */
-#define HVM_PARAM_VM86_TSS_SIZED 37
-
-/* Enable MCA capabilities. */
-#define HVM_PARAM_MCA_CAP 38
-#define XEN_HVM_MCA_CAP_LMCE   (xen_mk_ullong(1) << 0)
-#define XEN_HVM_MCA_CAP_MASK   XEN_HVM_MCA_CAP_LMCE
-
-#define HVM_NR_PARAMS 39
+#define HVM_NR_PARAMS 37
 
 #endif /* __XEN_PUBLIC_HVM_PARAMS_H__ */

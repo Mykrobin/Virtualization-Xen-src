@@ -20,6 +20,7 @@
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/xmalloc.h>
 #include <xen/guest_access.h>

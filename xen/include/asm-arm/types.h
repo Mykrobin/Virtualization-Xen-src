@@ -3,6 +3,7 @@
 
 #ifndef __ASSEMBLY__
 
+#include <xen/config.h>
 
 typedef __signed__ char __s8;
 typedef unsigned char __u8;

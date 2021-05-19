@@ -6,6 +6,7 @@
  * Copyright (c) 2002-2006, K Fraser
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
@@ -86,7 +87,7 @@ long cpu_down_helper(void *data)
     return ret;
 }
 
-void arch_do_physinfo(struct xen_sysctl_physinfo *pi)
+void arch_do_physinfo(xen_sysctl_physinfo_t *pi)
 {
     memcpy(pi->hw_cap, boot_cpu_data.x86_capability,
            min(sizeof(pi->hw_cap), sizeof(boot_cpu_data.x86_capability)));
@@ -185,60 +186,16 @@ long arch_do_sysctl(
 
         break;
 
-    case XEN_SYSCTL_psr_alloc:
-    {
-        uint32_t data[PSR_INFO_ARRAY_SIZE] = { };
-
-        switch ( sysctl->u.psr_alloc.cmd )
+    case XEN_SYSCTL_psr_cat_op:
+        switch ( sysctl->u.psr_cat_op.cmd )
         {
-        case XEN_SYSCTL_PSR_get_l3_info:
-            ret = psr_get_info(sysctl->u.psr_alloc.target,
-                               PSR_TYPE_L3_CBM, data, ARRAY_SIZE(data));
-            if ( ret )
-                break;
+        case XEN_SYSCTL_PSR_CAT_get_l3_info:
+            ret = psr_get_cat_l3_info(sysctl->u.psr_cat_op.target,
+                                      &sysctl->u.psr_cat_op.u.l3_info.cbm_len,
+                                      &sysctl->u.psr_cat_op.u.l3_info.cos_max,
+                                      &sysctl->u.psr_cat_op.u.l3_info.flags);
 
-            sysctl->u.psr_alloc.u.cat_info.cos_max =
-                                      data[PSR_INFO_IDX_COS_MAX];
-            sysctl->u.psr_alloc.u.cat_info.cbm_len =
-                                      data[PSR_INFO_IDX_CAT_CBM_LEN];
-            sysctl->u.psr_alloc.u.cat_info.flags =
-                                      data[PSR_INFO_IDX_CAT_FLAGS];
-
-            if ( __copy_field_to_guest(u_sysctl, sysctl, u.psr_alloc) )
-                ret = -EFAULT;
-            break;
-
-        case XEN_SYSCTL_PSR_get_l2_info:
-            ret = psr_get_info(sysctl->u.psr_alloc.target,
-                               PSR_TYPE_L2_CBM, data, ARRAY_SIZE(data));
-            if ( ret )
-                break;
-
-            sysctl->u.psr_alloc.u.cat_info.cos_max =
-                                      data[PSR_INFO_IDX_COS_MAX];
-            sysctl->u.psr_alloc.u.cat_info.cbm_len =
-                                      data[PSR_INFO_IDX_CAT_CBM_LEN];
-            sysctl->u.psr_alloc.u.cat_info.flags =
-                                      data[PSR_INFO_IDX_CAT_FLAGS];
-
-            if ( __copy_field_to_guest(u_sysctl, sysctl, u.psr_alloc) )
-                ret = -EFAULT;
-            break;
-
-        case XEN_SYSCTL_PSR_get_mba_info:
-            ret = psr_get_info(sysctl->u.psr_alloc.target,
-                               PSR_TYPE_MBA_THRTL, data, ARRAY_SIZE(data));
-            if ( ret )
-                break;
-
-            sysctl->u.psr_alloc.u.mba_info.cos_max =
-                                      data[PSR_INFO_IDX_COS_MAX];
-            sysctl->u.psr_alloc.u.mba_info.thrtl_max =
-                                      data[PSR_INFO_IDX_MBA_THRTL_MAX];
-            sysctl->u.psr_alloc.u.mba_info.flags =
-                                      data[PSR_INFO_IDX_MBA_FLAGS];
-
-            if ( __copy_field_to_guest(u_sysctl, sysctl, u.psr_alloc) )
+            if ( !ret && __copy_field_to_guest(u_sysctl, sysctl, u.psr_cat_op) )
                 ret = -EFAULT;
             break;
 
@@ -247,7 +204,6 @@ long arch_do_sysctl(
             break;
         }
         break;
-    }
 
     case XEN_SYSCTL_get_cpu_levelling_caps:
         sysctl->u.cpu_levelling_caps.caps = levelling_caps;
@@ -257,14 +213,13 @@ long arch_do_sysctl(
 
     case XEN_SYSCTL_get_cpu_featureset:
     {
-        static const struct cpuid_policy *const policy_table[] = {
-            [XEN_SYSCTL_cpu_featureset_raw]  = &raw_cpuid_policy,
-            [XEN_SYSCTL_cpu_featureset_host] = &host_cpuid_policy,
-            [XEN_SYSCTL_cpu_featureset_pv]   = &pv_max_cpuid_policy,
-            [XEN_SYSCTL_cpu_featureset_hvm]  = &hvm_max_cpuid_policy,
+        static const uint32_t *const featureset_table[] = {
+            [XEN_SYSCTL_cpu_featureset_raw]  = raw_featureset,
+            [XEN_SYSCTL_cpu_featureset_host] = host_featureset,
+            [XEN_SYSCTL_cpu_featureset_pv]   = pv_featureset,
+            [XEN_SYSCTL_cpu_featureset_hvm]  = hvm_featureset,
         };
-        const struct cpuid_policy *p = NULL;
-        uint32_t featureset[FSCAPINTS];
+        const uint32_t *featureset = NULL;
         unsigned int nr;
 
         /* Request for maximum number of features? */
@@ -282,14 +237,12 @@ long arch_do_sysctl(
                    FSCAPINTS);
 
         /* Look up requested featureset. */
-        if ( sysctl->u.cpu_featureset.index < ARRAY_SIZE(policy_table) )
-            p = policy_table[sysctl->u.cpu_featureset.index];
+        if ( sysctl->u.cpu_featureset.index < ARRAY_SIZE(featureset_table) )
+            featureset = featureset_table[sysctl->u.cpu_featureset.index];
 
         /* Bad featureset index? */
-        if ( !p )
+        if ( !featureset )
             ret = -EINVAL;
-        else
-            cpuid_policy_to_featureset(p, featureset);
 
         /* Copy the requested featureset into place. */
         if ( !ret && copy_to_guest(sysctl->u.cpu_featureset.features,

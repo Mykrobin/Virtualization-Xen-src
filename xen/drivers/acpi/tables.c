@@ -456,15 +456,14 @@ int __init acpi_table_init(void)
 	return 0;
 }
 
-static int __init acpi_parse_apic_instance(const char *str)
+static int __init acpi_parse_apic_instance(char *str)
 {
-	const char *q;
 
-	acpi_apic_instance = simple_strtoul(str, &q, 0);
+	acpi_apic_instance = simple_strtoul(str, NULL, 0);
 
 	printk(KERN_NOTICE PREFIX "Shall use APIC/MADT table %d\n",
 	       acpi_apic_instance);
 
-	return *q ? -EINVAL : 0;
+	return 0;
 }
 custom_param("acpi_apic_instance", acpi_parse_apic_instance);

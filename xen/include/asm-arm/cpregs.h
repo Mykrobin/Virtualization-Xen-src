@@ -106,7 +106,6 @@
 
 /* CP15 CR0: CPUID and Cache Type Registers */
 #define MIDR            p15,0,c0,c0,0   /* Main ID Register */
-#define CTR             p15,0,c0,c0,1   /* Cache Type Register */
 #define MPIDR           p15,0,c0,c0,5   /* Multiprocessor Affinity Register */
 #define ID_PFR0         p15,0,c0,c1,0   /* Processor Feature Register 0 */
 #define ID_PFR1         p15,0,c0,c1,1   /* Processor Feature Register 1 */
@@ -247,9 +246,6 @@
 /* CP15 CR11: DMA Operations for TCM Access */
 
 /* CP15 CR12:  */
-#define ICC_SGI1R       p15,0,c12       /* Interrupt Controller SGI Group 1 */
-#define ICC_ASGI1R      p15,1,c12       /* Interrupt Controller Alias SGI Group 1 Register */
-#define ICC_SGI0R       p15,2,c12       /* Interrupt Controller SGI Group 0 */
 #define VBAR            p15,0,c12,c0,0  /* Vector Base Address Register */
 #define HVBAR           p15,4,c12,c0,0  /* Hyp. Vector Base Address Register */
 
@@ -304,10 +300,11 @@
 #define CPACR_EL1               CPACR
 #define CPTR_EL2                HCPTR
 #define CSSELR_EL1              CSSELR
-#define CTR_EL0                 CTR
 #define DACR32_EL2              DACR
 #define ESR_EL1                 DFSR
 #define ESR_EL2                 HSR
+#define FAR_EL1                 HIFAR
+#define FAR_EL2                 HIFAR
 #define HCR_EL2                 HCR
 #define HPFAR_EL2               HPFAR
 #define HSTR_EL2                HSTR

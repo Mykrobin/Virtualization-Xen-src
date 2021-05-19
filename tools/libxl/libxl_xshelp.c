@@ -146,7 +146,7 @@ char *libxl__xs_get_dompath(libxl__gc *gc, uint32_t domid)
     libxl_ctx *ctx = libxl__gc_owner(gc);
     char *s = xs_get_domain_path(ctx->xsh, domid);
     if (!s) {
-        LOGED(ERROR, domid, "Failed to get dompath");
+        LOGE(ERROR, "failed to get dompath for %"PRIu32, domid);
         return NULL;
     }
     libxl__ptr_add(gc, s);
@@ -189,20 +189,8 @@ char *libxl__xs_libxl_path(libxl__gc *gc, uint32_t domid)
 {
     char *s = GCSPRINTF("/libxl/%i", domid);
     if (!s)
-        LOGD(ERROR, domid, "cannot allocate create paths");
+        LOG(ERROR, "cannot allocate create paths");
     return s;
-}
-
-int libxl__xs_read_mandatory(libxl__gc *gc, xs_transaction_t t,
-                             const char *path, const char **result_out)
-{
-    char *result = libxl__xs_read(gc, t, path);
-    if (!result) {
-        LOGE(ERROR, "xenstore read failed: `%s'", path);
-        return ERROR_FAIL;
-    }
-    *result_out = result;
-    return 0;
 }
 
 int libxl__xs_read_checked(libxl__gc *gc, xs_transaction_t t,

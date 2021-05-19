@@ -440,7 +440,7 @@ bool_t mtrr_fix_range_msr_set(struct domain *d, struct mtrr_state *m,
 bool_t mtrr_var_range_msr_set(
     struct domain *d, struct mtrr_state *m, uint32_t msr, uint64_t msr_content)
 {
-    uint32_t index, phys_addr;
+    uint32_t index, phys_addr, eax;
     uint64_t msr_mask;
     uint64_t *var_range_base = (uint64_t*)m->var_ranges;
 
@@ -452,7 +452,15 @@ bool_t mtrr_var_range_msr_set(
         return 0;
 
     if ( d == current->domain )
-        phys_addr = d->arch.cpuid->extd.maxphysaddr;
+    {
+        phys_addr = 36;
+        hvm_cpuid(0x80000000, &eax, NULL, NULL, NULL);
+        if ( (eax >> 16) == 0x8000 && eax >= 0x80000008 )
+        {
+            hvm_cpuid(0x80000008, &eax, NULL, NULL, NULL);
+            phys_addr = (uint8_t)eax;
+        }
+    }
     else
         phys_addr = paddr_bits;
     msr_mask = ~((((uint64_t)1) << phys_addr) - 1);
@@ -473,40 +481,35 @@ bool_t mtrr_var_range_msr_set(
     return 1;
 }
 
-bool mtrr_pat_not_equal(const struct vcpu *vd, const struct vcpu *vs)
+bool_t mtrr_pat_not_equal(struct vcpu *vd, struct vcpu *vs)
 {
-    const struct mtrr_state *md = &vd->arch.hvm_vcpu.mtrr;
-    const struct mtrr_state *ms = &vs->arch.hvm_vcpu.mtrr;
+    struct mtrr_state *md = &vd->arch.hvm_vcpu.mtrr;
+    struct mtrr_state *ms = &vs->arch.hvm_vcpu.mtrr;
+    int32_t res;
+    uint8_t num_var_ranges = (uint8_t)md->mtrr_cap;
 
-    if ( (md->enabled ^ ms->enabled) & 2 )
-        return true;
+    /* Test fixed ranges. */
+    res = memcmp(md->fixed_ranges, ms->fixed_ranges,
+            NUM_FIXED_RANGES*sizeof(mtrr_type));
+    if ( res )
+        return 1;
 
-    if ( md->enabled & 2 )
-    {
-        unsigned int num_var_ranges = (uint8_t)md->mtrr_cap;
+    /* Test var ranges. */
+    res = memcmp(md->var_ranges, ms->var_ranges,
+            num_var_ranges*sizeof(struct mtrr_var_range));
+    if ( res )
+        return 1;
 
-        /* Test default type MSR. */
-        if ( md->def_type != ms->def_type )
-            return true;
-
-        /* Test fixed ranges. */
-        if ( (md->enabled ^ ms->enabled) & 1 )
-            return true;
-
-        if ( (md->enabled & 1) &&
-             memcmp(md->fixed_ranges, ms->fixed_ranges,
-                    sizeof(md->fixed_ranges)) )
-            return true;
-
-        /* Test variable ranges. */
-        if ( num_var_ranges != (uint8_t)ms->mtrr_cap ||
-             memcmp(md->var_ranges, ms->var_ranges,
-                    num_var_ranges * sizeof(*md->var_ranges)) )
-            return true;
-    }
+    /* Test default type MSR. */
+    if ( (md->def_type != ms->def_type)
+            && (md->enabled != ms->enabled) )
+        return 1;
 
     /* Test PAT. */
-    return vd->arch.hvm_vcpu.pat_cr != vs->arch.hvm_vcpu.pat_cr;
+    if ( vd->arch.hvm_vcpu.pat_cr != vs->arch.hvm_vcpu.pat_cr )
+        return 1;
+
+    return 0;
 }
 
 struct hvm_mem_pinned_cacheattr_range {
@@ -545,7 +548,7 @@ int hvm_get_mem_pinned_cacheattr(struct domain *d, gfn_t gfn,
     uint64_t mask = ~(uint64_t)0 << order;
     int rc = -ENXIO;
 
-    ASSERT(is_hvm_domain(d));
+    ASSERT(has_hvm_container_domain(d));
 
     rcu_read_lock(&pinned_cacheattr_rcu_lock);
     list_for_each_entry_rcu ( range,
@@ -755,7 +758,7 @@ HVM_REGISTER_SAVE_RESTORE(MTRR, hvm_save_mtrr_msr, hvm_load_mtrr_msr,
 
 void memory_type_changed(struct domain *d)
 {
-    if ( (need_iommu(d) || cache_flush_permitted(d)) && d->vcpu && d->vcpu[0] )
+    if ( need_iommu(d) && d->vcpu && d->vcpu[0] )
     {
         p2m_memory_type_changed(d);
         flush_all(FLUSH_CACHE);
@@ -797,7 +800,7 @@ int epte_get_entry_emt(struct domain *d, unsigned long gfn, mfn_t mfn,
         return MTRR_TYPE_WRBACK;
     }
 
-    if ( !mfn_valid(mfn) )
+    if ( !mfn_valid(mfn_x(mfn)) )
     {
         *ipat = 1;
         return MTRR_TYPE_UNCACHABLE;

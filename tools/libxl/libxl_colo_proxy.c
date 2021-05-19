@@ -18,13 +18,9 @@
 #include "libxl_internal.h"
 
 #include <netlink/netlink.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 
 /* Consistent with the new COLO netlink channel in kernel side */
 #define NETLINK_COLO 28
-#define COLO_DEFAULT_WAIT_TIME 500000
 
 enum colo_netlink_op {
     COLO_QUERY_CHECKPOINT = (NLMSG_MIN_TYPE + 1),
@@ -73,67 +69,10 @@ static int colo_proxy_send(libxl__colo_proxy_state *cps, uint8_t *buff,
 
     ret = sendmsg(cps->sock_fd, &mh, 0);
     if (ret <= 0) {
-        LOGD(ERROR, ao->domid, "can't send msg to kernel by netlink: %s",
+        LOG(ERROR, "can't send msg to kernel by netlink: %s",
             strerror(errno));
     }
 
-    return ret;
-}
-
-static int colo_userspace_proxy_send(libxl__colo_proxy_state *cps,
-                                     uint8_t *buff,
-                                     uint32_t size)
-{
-    int ret = 0;
-    uint32_t len = 0;
-
-    len = htonl(size);
-    ret = send(cps->sock_fd, (uint8_t *)&len, sizeof(len), 0);
-    if (ret != sizeof(len)) {
-        goto err;
-    }
-
-    ret = send(cps->sock_fd, (uint8_t *)buff, size, 0);
-    if (ret != size) {
-        goto err;
-    }
-
-err:
-    return ret;
-}
-
-static int colo_userspace_proxy_recv(libxl__colo_proxy_state *cps,
-                                     char *buff,
-                                     unsigned int timeout_us)
-{
-    struct timeval tv;
-    int ret;
-    uint32_t len = 0;
-    uint32_t size = 0;
-
-    STATE_AO_GC(cps->ao);
-
-    if (timeout_us) {
-        tv.tv_sec = timeout_us / 1000000;
-        tv.tv_usec = timeout_us % 1000000;
-        ret = setsockopt(cps->sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv,
-                         sizeof(tv));
-        if (ret < 0) {
-            LOGD(ERROR, ao->domid,
-                 "colo_userspace_proxy_recv setsockopt error: %s",
-                 strerror(errno));
-        }
-    }
-
-    ret = recv(cps->sock_fd, (uint8_t *)&len, sizeof(len), 0);
-    if (ret < 0) {
-        goto err;
-    }
-
-    size = ntohl(len);
-    ret = recv(cps->sock_fd, buff, size, 0);
-
-err:
     return ret;
 }
 
@@ -169,7 +108,7 @@ next:
     ret = recvmsg(cps->sock_fd, &mh, 0);
     if (ret <= 0) {
         if (errno != EAGAIN && errno != EWOULDBLOCK)
-            LOGED(ERROR, ao->domid, "can't recv msg from kernel by netlink");
+            LOGE(ERROR, "can't recv msg from kernel by netlink");
         goto err;
     }
 
@@ -213,50 +152,9 @@ int colo_proxy_setup(libxl__colo_proxy_state *cps)
 
     STATE_AO_GC(cps->ao);
 
-    /* If enable userspace proxy mode, we don't need setup kernel proxy */
-    if (cps->is_userspace_proxy) {
-        struct sockaddr_in addr;
-        int port;
-        char recvbuff[1024];
-        const char sendbuf[] = "COLO_USERSPACE_PROXY_INIT";
-
-        memset(&addr, 0, sizeof(addr));
-        port = atoi(cps->checkpoint_port);
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-        addr.sin_addr.s_addr = inet_addr(cps->checkpoint_host);
-
-        skfd = socket(AF_INET, SOCK_STREAM, 0);
-        if (skfd < 0) {
-            LOGD(ERROR, ao->domid, "can not create a TCP socket: %s",
-                 strerror(errno));
-            goto out;
-        }
-
-        cps->sock_fd = skfd;
-
-        if (connect(skfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-            LOGD(ERROR, ao->domid, "connect error");
-            goto out;
-        }
-
-        ret = colo_userspace_proxy_send(cps, (uint8_t *)sendbuf, strlen(sendbuf));
-        if (ret < 0)
-            goto out;
-
-        ret = colo_userspace_proxy_recv(cps, recvbuff, COLO_DEFAULT_WAIT_TIME);
-        if (ret < 0) {
-            LOGD(ERROR, ao->domid, "Can't recv msg from qemu colo-compare: %s",
-                 strerror(errno));
-            goto out;
-        }
-
-        return 0;
-    }
-
     skfd = socket(PF_NETLINK, SOCK_RAW, NETLINK_COLO);
     if (skfd < 0) {
-        LOGD(ERROR, ao->domid, "can not create a netlink socket: %s", strerror(errno));
+        LOG(ERROR, "can not create a netlink socket: %s", strerror(errno));
         goto out;
     }
     cps->sock_fd = skfd;
@@ -267,16 +165,16 @@ retry:
     sa.nl_pid = i++;
 
     if (i > 10) {
-        LOGD(ERROR, ao->domid, "netlink bind error");
+        LOG(ERROR, "netlink bind error");
         goto out;
     }
 
     ret = bind(skfd, (struct sockaddr *)&sa, sizeof(sa));
     if (ret < 0 && errno == EADDRINUSE) {
-        LOGD(ERROR, ao->domid, "colo index %d has already in used", sa.nl_pid);
+        LOG(ERROR, "colo index %d has already in used", sa.nl_pid);
         goto retry;
     } else if (ret < 0) {
-        LOGD(ERROR, ao->domid, "netlink bind error");
+        LOG(ERROR, "netlink bind error");
         goto out;
     }
 
@@ -288,8 +186,8 @@ retry:
     /* receive ack */
     size = colo_proxy_recv(cps, &buff, 500000);
     if (size < 0) {
-        LOGD(ERROR, ao->domid, "Can't recv msg from kernel by netlink: %s",
-             strerror(errno));
+        LOG(ERROR, "Can't recv msg from kernel by netlink: %s",
+            strerror(errno));
         goto out;
     }
 
@@ -300,12 +198,12 @@ retry:
             struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(h);
 
             if (size - sizeof(*h) < sizeof(*err)) {
-                LOGD(ERROR, ao->domid, "NLMSG_LENGTH is too short");
+                LOG(ERROR, "NLMSG_LENGTH is too short");
                 goto out;
             }
 
             if (err->error) {
-                LOGD(ERROR, ao->domid, "NLMSG_ERROR contains error %d", err->error);
+                LOG(ERROR, "NLMSG_ERROR contains error %d", err->error);
                 goto out;
             }
         }
@@ -324,13 +222,6 @@ out:
 
 void colo_proxy_teardown(libxl__colo_proxy_state *cps)
 {
-    /*
-     * If enable userspace proxy mode,
-     * we don't need teardown kernel proxy
-     */
-    if (cps->is_userspace_proxy)
-        return;
-
     if (cps->sock_fd >= 0) {
         close(cps->sock_fd);
         cps->sock_fd = -1;
@@ -341,18 +232,6 @@ void colo_proxy_teardown(libxl__colo_proxy_state *cps)
 
 void colo_proxy_preresume(libxl__colo_proxy_state *cps)
 {
-    /*
-     * If enable userspace proxy mode,
-     * we don't need preresume kernel proxy
-     */
-    if (cps->is_userspace_proxy) {
-        const char sendbuf[] = "COLO_CHECKPOINT";
-        colo_userspace_proxy_send(cps,
-                                  (uint8_t *)sendbuf,
-                                  strlen(sendbuf));
-        return;
-    }
-
     colo_proxy_send(cps, NULL, 0, COLO_CHECKPOINT);
     /* TODO: need to handle if the call fails... */
 }
@@ -375,56 +254,29 @@ typedef struct colo_msg {
 int colo_proxy_checkpoint(libxl__colo_proxy_state *cps,
                           unsigned int timeout_us)
 {
-    uint8_t *buff = NULL;
+    uint8_t *buff;
     int64_t size;
     struct nlmsghdr *h;
     struct colo_msg *m;
     int ret = -1;
-    char recvbuff[1024];
 
     STATE_AO_GC(cps->ao);
-
-    /*
-     * Enable userspace proxy to periodical checkpoint mode,
-     * sleeping temporarily for colo userspace proxy mode.
-     * then we will use socket recv instead of this usleep.
-     * In other words, we use socket communicate with Qemu
-     * Proxy part(colo-compare), for example, notify checkpoint
-     * event.
-     */
-    if (cps->is_userspace_proxy) {
-        ret = colo_userspace_proxy_recv(cps, recvbuff, timeout_us);
-        if (ret <= 0) {
-            ret = 0;
-            goto out;
-        }
-
-        if (!strcmp(recvbuff, "DO_CHECKPOINT")) {
-            ret = 1;
-        } else {
-            LOGD(ERROR, ao->domid, "receive qemu colo-compare checkpoint error");
-            ret = 0;
-        }
-        goto out;
-    }
 
     size = colo_proxy_recv(cps, &buff, timeout_us);
 
     /* timeout, return no checkpoint message. */
-    if (size <= 0) {
-        ret = 0;
-        goto out;
-    }
+    if (size <= 0)
+        return 0;
 
     h = (struct nlmsghdr *) buff;
 
     if (h->nlmsg_type == NLMSG_ERROR) {
-        LOGD(ERROR, ao->domid, "receive NLMSG_ERROR");
+        LOG(ERROR, "receive NLMSG_ERROR");
         goto out;
     }
 
     if (h->nlmsg_len < NLMSG_LENGTH(sizeof(*m))) {
-        LOGD(ERROR, ao->domid, "NLMSG_LENGTH is too short");
+        LOG(ERROR, "NLMSG_LENGTH is too short");
         goto out;
     }
 

@@ -34,15 +34,9 @@ install: build
 	$(INSTALL_PROG) xentrace_setmask  $(DESTDIR)$(sbindir)/xentrace_setmask
 	$(INSTALL_PROG) xenmon.py  $(DESTDIR)$(sbindir)/xenmon.py
 
-.PHONY: uninstall
-uninstall:
-	rm -f $(DESTDIR)$(sbindir)/xenbaked
-	rm -f $(DESTDIR)$(sbindir)/xentrace_setmask
-	rm -f $(DESTDIR)$(sbindir)/xenmon.py
-
 .PHONY: clean
 clean:
-	$(RM) -f $(DEPS_RM)
+	$(RM) -f $(DEPS)
 	$(RM) -f xenbaked xenbaked.o
 	$(RM) -f xentrace_setmask setmask.o
 
@@ -55,4 +49,4 @@ xenbaked: xenbaked.o Makefile
 xentrace_setmask: setmask.o Makefile
 	$(CC) $(LDFLAGS) $< -o $@ $(LDLIBS) $(APPEND_LDFLAGS)
 
--include $(DEPS_INCLUDE)
+-include $(DEPS)

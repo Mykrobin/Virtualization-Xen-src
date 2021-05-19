@@ -67,7 +67,7 @@ static int write_hvm_params(struct xc_sr_context *ctx)
         HVM_PARAM_PAGING_RING_PFN,
         HVM_PARAM_MONITOR_RING_PFN,
         HVM_PARAM_SHARING_RING_PFN,
-        HVM_PARAM_VM86_TSS_SIZED,
+        HVM_PARAM_VM86_TSS,
         HVM_PARAM_CONSOLE_PFN,
         HVM_PARAM_ACPI_IOPORTS_LOCATION,
         HVM_PARAM_VIRIDIAN,
@@ -77,7 +77,6 @@ static int write_hvm_params(struct xc_sr_context *ctx)
         HVM_PARAM_IOREQ_SERVER_PFN,
         HVM_PARAM_NR_IOREQ_SERVER_PAGES,
         HVM_PARAM_X87_FIP_WIDTH,
-        HVM_PARAM_MCA_CAP,
     };
 
     xc_interface *xch = ctx->xch;
@@ -148,15 +147,12 @@ static int x86_hvm_setup(struct xc_sr_context *ctx)
         PERROR("Unable to obtain the guest p2m size");
         return -1;
     }
-#ifdef __i386__
-    /* Very large domains (> 1TB) will exhaust virtual address space. */
-    if ( nr_pfns > 0x0fffffff )
+    if ( nr_pfns > ~XEN_DOMCTL_PFINFO_LTAB_MASK )
     {
         errno = E2BIG;
         PERROR("Cannot save this big a guest");
         return -1;
     }
-#endif
 
     ctx->save.p2m_size = nr_pfns;
 

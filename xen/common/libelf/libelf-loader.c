@@ -36,8 +36,7 @@ struct elf_sym_header {
 elf_errorstatus elf_init(struct elf_binary *elf, const char *image_input, size_t size)
 {
     ELF_HANDLE_DECL(elf_shdr) shdr;
-    unsigned i, count, section, link;
-    uint64_t offset;
+    uint64_t i, count, section, offset, link;
 
     if ( !elf_is_elfbinary(image_input, size) )
     {
@@ -90,7 +89,7 @@ elf_errorstatus elf_init(struct elf_binary *elf, const char *image_input, size_t
             continue;
 
         link = elf_uval(elf, shdr, sh_link);
-        if ( link == SHN_UNDEF || link >= count )
+        if ( link == SHN_UNDEF || link >= elf_shdr_count(elf) )
             /* out-of-bounds link value. */
             break;
 
@@ -146,27 +145,6 @@ void elf_set_verbose(struct elf_binary *elf)
     elf->verbose = 1;
 }
 
-static elf_errorstatus elf_memcpy(struct vcpu *v, void *dst, void *src,
-                                  uint64_t size)
-{
-    unsigned int res;
-
-#ifdef CONFIG_X86
-    if ( is_hvm_vcpu(v) )
-    {
-        enum hvm_translation_result rc;
-
-        rc = hvm_copy_to_guest_phys((paddr_t)dst, src, size, v);
-        return rc != HVMTRANS_okay ? -1 : 0;
-    }
-#endif
-
-    res = src ? raw_copy_to_guest(dst, src, size) :
-                raw_clear_guest(dst, size);
-
-    return res ? -1 : 0;
-}
-
 static elf_errorstatus elf_load_image(struct elf_binary *elf, elf_ptrval dst, elf_ptrval src, uint64_t filesz, uint64_t memsz)
 {
     elf_errorstatus rc;
@@ -174,12 +152,10 @@ static elf_errorstatus elf_load_image(struct elf_binary *elf, elf_ptrval dst, el
         return -1;
     /* We trust the dom0 kernel image completely, so we don't care
      * about overruns etc. here. */
-    rc = elf_memcpy(elf->vcpu, ELF_UNSAFE_PTR(dst), ELF_UNSAFE_PTR(src),
-                    filesz);
+    rc = raw_copy_to_guest(ELF_UNSAFE_PTR(dst), ELF_UNSAFE_PTR(src), filesz);
     if ( rc != 0 )
         return -1;
-    rc = elf_memcpy(elf->vcpu, ELF_UNSAFE_PTR(dst + filesz), NULL,
-                    memsz - filesz);
+    rc = raw_clear_guest(ELF_UNSAFE_PTR(dst + filesz), memsz - filesz);
     if ( rc != 0 )
         return -1;
     return 0;
@@ -467,10 +443,11 @@ do {                                                                \
 void elf_parse_binary(struct elf_binary *elf)
 {
     ELF_HANDLE_DECL(elf_phdr) phdr;
-    uint64_t low = -1, high = 0, paddr, memsz;
-    unsigned i, count;
+    uint64_t low = -1;
+    uint64_t high = 0;
+    uint64_t i, count, paddr, memsz;
 
-    count = elf_phdr_count(elf);
+    count = elf_uval(elf, elf->ehdr, e_phnum);
     for ( i = 0; i < count; i++ )
     {
         phdr = elf_phdr_by_index(elf, i);
@@ -497,8 +474,7 @@ void elf_parse_binary(struct elf_binary *elf)
 elf_errorstatus elf_load_binary(struct elf_binary *elf)
 {
     ELF_HANDLE_DECL(elf_phdr) phdr;
-    uint64_t paddr, offset, filesz, memsz;
-    unsigned i, count;
+    uint64_t i, count, paddr, offset, filesz, memsz;
     elf_ptrval dest;
     /*
      * Let bizarre ELFs write the output image up to twice; this
@@ -507,7 +483,7 @@ elf_errorstatus elf_load_binary(struct elf_binary *elf)
      */
     uint64_t remain_allow_copy = (uint64_t)elf->dest_size * 2;
 
-    count = elf_phdr_count(elf);
+    count = elf_uval(elf, elf->ehdr, e_phnum);
     for ( i = 0; i < count; i++ )
     {
         phdr = elf_phdr_by_index(elf, i);
@@ -536,7 +512,7 @@ elf_errorstatus elf_load_binary(struct elf_binary *elf)
         remain_allow_copy -= memsz;
 
         elf_msg(elf,
-                "ELF: phdr %u at %#"ELF_PRPTRVAL" -> %#"ELF_PRPTRVAL"\n",
+                "ELF: phdr %" PRIu64 " at %#"ELF_PRPTRVAL" -> %#"ELF_PRPTRVAL"\n",
                 i, dest, (elf_ptrval)(dest + filesz));
         if ( elf_load_image(elf, dest, ELF_IMAGE_BASE(elf) + offset, filesz, memsz) != 0 )
             return -1;
@@ -559,12 +535,12 @@ uint64_t elf_lookup_addr(struct elf_binary * elf, const char *symbol)
     sym = elf_sym_by_name(elf, symbol);
     if ( !ELF_HANDLE_VALID(sym) )
     {
-        elf_err(elf, "%s: not found: %s\n", __func__, symbol);
+        elf_err(elf, "%s: not found: %s\n", __FUNCTION__, symbol);
         return -1;
     }
 
     value = elf_uval(elf, sym, st_value);
-    elf_msg(elf, "%s: symbol \"%s\" at 0x%" PRIx64 "\n", __func__,
+    elf_msg(elf, "%s: symbol \"%s\" at 0x%" PRIx64 "\n", __FUNCTION__,
             symbol, value);
     return value;
 }

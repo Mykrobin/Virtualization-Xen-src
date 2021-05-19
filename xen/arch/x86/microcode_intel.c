@@ -21,6 +21,7 @@
  * 2 of the License, or (at your option) any later version.
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/kernel.h>
 #include <xen/init.h>
@@ -115,9 +116,8 @@ static int collect_cpu_info(unsigned int cpu_num, struct cpu_signature *csig)
     }
 
     wrmsrl(MSR_IA32_UCODE_REV, 0x0ULL);
-    /* As documented in the SDM: Do a CPUID 1 here */
-    cpuid_eax(1);
-
+    /* see notes above for revision 1.07.  Apparent chip bug */
+    sync_core();
     /* get the current revision from MSR 0x8B */
     rdmsrl(MSR_IA32_UCODE_REV, msr_content);
     csig->rev = (uint32_t)(msr_content >> 32);
@@ -298,8 +298,8 @@ static int apply_microcode(unsigned int cpu)
     wrmsrl(MSR_IA32_UCODE_WRITE, (unsigned long)uci->mc.mc_intel->bits);
     wrmsrl(MSR_IA32_UCODE_REV, 0x0ULL);
 
-    /* As documented in the SDM: Do a CPUID 1 here */
-    cpuid_eax(1);
+    /* see notes above for revision 1.07.  Apparent chip bug */
+    sync_core();
 
     /* get the current revision from MSR 0x8B */
     rdmsrl(MSR_IA32_UCODE_REV, msr_content);
@@ -309,8 +309,7 @@ static int apply_microcode(unsigned int cpu)
     if ( val[1] != uci->mc.mc_intel->hdr.rev )
     {
         printk(KERN_ERR "microcode: CPU%d update from revision "
-               "%#x to %#x failed. Resulting revision is %#x.\n", cpu_num,
-               uci->cpu_sig.rev, uci->mc.mc_intel->hdr.rev, val[1]);
+               "%#x to %#x failed\n", cpu_num, uci->cpu_sig.rev, val[1]);
         return -EIO;
     }
     printk(KERN_INFO "microcode: CPU%d updated from revision "
@@ -388,7 +387,7 @@ static int cpu_request_microcode(unsigned int cpu, const void *buf,
         error = offset;
 
     if ( !error && matching_count )
-        error = apply_microcode(cpu);
+        apply_microcode(cpu);
 
     return error;
 }

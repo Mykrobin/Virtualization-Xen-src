@@ -19,8 +19,6 @@
 
 #include "libxl_osdeps.h" /* must come before any other headers */
 
-#include "xentoolcore_internal.h"
-
 #include "libxl_sr_stream_format.h"
 
 #include <assert.h>
@@ -40,7 +38,7 @@
 #include <ctype.h>
 
 #include <sys/mman.h>
-#include <poll.h>
+#include <sys/poll.h>
 #include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -118,8 +116,6 @@
 #define TAP_DEVICE_SUFFIX "-emu"
 #define DOMID_XS_PATH "domid"
 #define INVALID_DOMID ~0
-#define PVSHIM_BASENAME "xen-shim"
-#define PVSHIM_CMDLINE "pv-shim console=xen,pv"
 
 /* Size macros. */
 #define __AC(X,Y)   (X##Y)
@@ -156,22 +152,13 @@
 #define LIBXL__LOGGING_ENABLED
 
 #ifdef LIBXL__LOGGING_ENABLED
-#define LIBXL__LOG(ctx, loglevel, _f, _a...)   libxl__log(ctx, loglevel, -1, __FILE__, __LINE__, __func__, INVALID_DOMID, _f, ##_a)
-#define LIBXL__LOG_ERRNO(ctx, loglevel, _f, _a...)   libxl__log(ctx, loglevel, errno, __FILE__, __LINE__, __func__, INVALID_DOMID, _f, ##_a)
-#define LIBXL__LOG_ERRNOVAL(ctx, loglevel, errnoval, _f, _a...)   libxl__log(ctx, loglevel, errnoval, __FILE__, __LINE__, __func__, INVALID_DOMID, _f, ##_a)
-
-/* Same log functions as above, but with _d being a domain id. */
-#define LIBXL__LOGD(ctx, loglevel, _d, _f, _a...)   libxl__log(ctx, loglevel, -1, __FILE__, __LINE__, __func__, _d, _f, ##_a)
-#define LIBXL__LOGD_ERRNO(ctx, loglevel, _d, _f, _a...)   libxl__log(ctx, loglevel, errno, __FILE__, __LINE__, __func__, _d, _f, ##_a)
-#define LIBXL__LOGD_ERRNOVAL(ctx, loglevel, errnoval, _d, _f, _a...)   libxl__log(ctx, loglevel, errnoval, __FILE__, __LINE__, __func__, _d, _f, ##_a)
+#define LIBXL__LOG(ctx, loglevel, _f, _a...)   libxl__log(ctx, loglevel, -1, __FILE__, __LINE__, __func__, _f, ##_a)
+#define LIBXL__LOG_ERRNO(ctx, loglevel, _f, _a...)   libxl__log(ctx, loglevel, errno, __FILE__, __LINE__, __func__, _f, ##_a)
+#define LIBXL__LOG_ERRNOVAL(ctx, loglevel, errnoval, _f, _a...)   libxl__log(ctx, loglevel, errnoval, __FILE__, __LINE__, __func__, _f, ##_a)
 #else
 #define LIBXL__LOG(ctx, loglevel, _f, _a...)
 #define LIBXL__LOG_ERRNO(ctx, loglevel, _f, _a...)
 #define LIBXL__LOG_ERRNOVAL(ctx, loglevel, errnoval, _f, _a...)
-
-#define LIBXLD__LOG(ctx, loglevel, _d, _f, _a...)
-#define LIBXLD__LOG_ERRNO(ctx, loglevel, _d, _f, _a...)
-#define LIBXLD__LOG_ERRNOVAL(ctx, loglevel, errnoval, _d, _f, _a...)
 #endif
   /* all of these macros preserve errno (saving and restoring) */
 
@@ -182,16 +169,14 @@
 _hidden void libxl__logv(libxl_ctx *ctx, xentoollog_level msglevel, int errnoval,
              const char *file /* may be 0 */, int line /* ignored if !file */,
              const char *func /* may be 0 */,
-             uint32_t domid /* may be INVALID_DOMID */,
              const char *fmt, va_list al)
-     __attribute__((format(printf,8,0)));
+     __attribute__((format(printf,7,0)));
 
 _hidden void libxl__log(libxl_ctx *ctx, xentoollog_level msglevel, int errnoval,
             const char *file /* may be 0 */, int line /* ignored if !file */,
             const char *func /* may be 0 */,
-            uint32_t domid /* may be INVALID_DOMID */,
             const char *fmt, ...)
-     __attribute__((format(printf,8,9)));
+     __attribute__((format(printf,7,8)));
 
      /* these functions preserve errno (saving and restoring) */
 
@@ -505,10 +490,6 @@ struct libxl__ctx {
     libxl_version_info version_info;
 };
 
-/*
- * libxl__device is a transparent structure that doesn't contain private fields
- * or external memory references, and as such can be copied by assignment.
- */
 typedef struct {
     uint32_t backend_devid;
     uint32_t backend_domid;
@@ -637,7 +618,6 @@ static inline int libxl__gc_is_real(const libxl__gc *gc)
  */
 /* register ptr in gc for free on exit from outermost libxl callframe. */
 
-#define NN(...) __attribute__((nonnull(__VA_ARGS__)))
 #define NN1 __attribute__((nonnull(1)))
  /* It used to be legal to pass NULL for gc_opt.  Get the compiler to
   * warn about this if any slip through. */
@@ -744,13 +724,6 @@ int libxl__xs_printf(libxl__gc *gc, xs_transaction_t t,
 int libxl__xs_mknod(libxl__gc *gc, xs_transaction_t t,
                     const char *path, struct xs_permissions *perms,
                     unsigned int num_perms);
-
-/* On success, *result_out came from the gc.
- * On error, *result_out is undefined.
- * ENOENT is regarded as error.
- */
-int libxl__xs_read_mandatory(libxl__gc *gc, xs_transaction_t t,
-                             const char *path, const char **result_out);
 
 /* On success, *result_out came from the gc.
  * On error, *result_out is undefined.
@@ -1132,35 +1105,29 @@ typedef struct {
     uint32_t console_port;
     uint32_t console_domid;
     unsigned long console_mfn;
-    char *console_tty;
 
     char *saved_state;
 
     libxl__file_reference pv_kernel;
     libxl__file_reference pv_ramdisk;
-    const char * shim_path;
-    const char * shim_cmdline;
     const char * pv_cmdline;
+    bool pvh_enabled;
 
     xen_vmemrange_t *vmemranges;
     uint32_t num_vmemranges;
 
-    xen_pfn_t vuart_gfn;
-    evtchn_port_t vuart_port;
-
-    /* ARM only to deal with broken firmware */
-    uint32_t clock_frequency;
+    xc_domain_configuration_t config;
 } libxl__domain_build_state;
 
 _hidden int libxl__build_pre(libxl__gc *gc, uint32_t domid,
               libxl_domain_config * const d_config,
-              libxl__domain_build_state *state, bool is_reset);
+              libxl__domain_build_state *state);
 _hidden int libxl__build_post(libxl__gc *gc, uint32_t domid,
                libxl_domain_build_info *info, libxl__domain_build_state *state,
                char **vms_ents, char **local_ents);
 
 _hidden int libxl__build_pv(libxl__gc *gc, uint32_t domid,
-             libxl_domain_config *const d_config, libxl__domain_build_state *state);
+             libxl_domain_build_info *info, libxl__domain_build_state *state);
 _hidden int libxl__build_hvm(libxl__gc *gc, uint32_t domid,
               libxl_domain_config *d_config,
               libxl__domain_build_state *state);
@@ -1215,24 +1182,15 @@ _hidden int libxl__device_console_add(libxl__gc *gc, uint32_t domid,
                                       libxl__device_console *console,
                                       libxl__domain_build_state *state,
                                       libxl__device *device);
-_hidden int libxl__device_vuart_add(libxl__gc *gc, uint32_t domid,
-                                    libxl__device_console *console,
-                                    libxl__domain_build_state *state);
 
 /* Returns 1 if device exists, 0 if not, ERROR_* (<0) on error. */
 _hidden int libxl__device_exists(libxl__gc *gc, xs_transaction_t t,
                                  libxl__device *device);
 _hidden int libxl__device_generic_add(libxl__gc *gc, xs_transaction_t t,
         libxl__device *device, char **bents, char **fents, char **ro_fents);
-_hidden char *libxl__domain_device_frontend_path(libxl__gc *gc, uint32_t domid, uint32_t devid,
-                                                 libxl__device_kind device_kind);
 _hidden char *libxl__device_backend_path(libxl__gc *gc, libxl__device *device);
-_hidden char *libxl__domain_device_backend_path(libxl__gc *gc, uint32_t backend_domid,
-                                                uint32_t domid, uint32_t devid,
-                                                libxl__device_kind device_kind);
+_hidden char *libxl__device_frontend_path(libxl__gc *gc, libxl__device *device);
 _hidden char *libxl__device_libxl_path(libxl__gc *gc, libxl__device *device);
-_hidden char *libxl__domain_device_libxl_path(libxl__gc *gc, uint32_t domid, uint32_t devid,
-                                              libxl__device_kind device_kind);
 _hidden int libxl__parse_backend_path(libxl__gc *gc, const char *path,
                                       libxl__device *dev);
 _hidden int libxl__device_destroy(libxl__gc *gc, libxl__device *dev);
@@ -1244,8 +1202,7 @@ _hidden int libxl__init_console_from_channel(libxl__gc *gc,
                                              libxl__device_console *console,
                                              int dev_num,
                                              libxl_device_channel *channel);
-_hidden int libxl__device_nextid(libxl__gc *gc, uint32_t domid,
-                                 libxl__device_kind device);
+_hidden int libxl__device_nextid(libxl__gc *gc, uint32_t domid, char *device);
 _hidden int libxl__resolve_domid(libxl__gc *gc, const char *name,
                                  uint32_t *domid);
 
@@ -1265,6 +1222,14 @@ _hidden int libxl__domain_create_info_setdefault(libxl__gc *gc,
                                         libxl_domain_create_info *c_info);
 _hidden int libxl__domain_build_info_setdefault(libxl__gc *gc,
                                         libxl_domain_build_info *b_info);
+_hidden int libxl__device_disk_setdefault(libxl__gc *gc,
+                                          libxl_device_disk *disk,
+                                          uint32_t domid);
+_hidden int libxl__device_nic_setdefault(libxl__gc *gc, libxl_device_nic *nic,
+                                         uint32_t domid, bool hotplug);
+_hidden int libxl__device_vfb_setdefault(libxl__gc *gc, libxl_device_vfb *vfb);
+_hidden int libxl__device_vkb_setdefault(libxl__gc *gc, libxl_device_vkb *vkb);
+_hidden int libxl__device_pci_setdefault(libxl__gc *gc, libxl_device_pci *pci);
 _hidden void libxl__rdm_setdefault(libxl__gc *gc,
                                    libxl_domain_build_info *b_info);
 
@@ -1659,8 +1624,8 @@ _hidden  void libxl__exec(libxl__gc *gc, int stdinfd, int stdoutfd,
   * on exit (even error exit), domid may be valid and refer to a domain */
 _hidden int libxl__domain_make(libxl__gc *gc,
                                libxl_domain_config *d_config,
-                               libxl__domain_build_state *state,
-                               uint32_t *domid);
+                               uint32_t *domid,
+                               xc_domain_configuration_t *xc_config);
 
 _hidden int libxl__domain_build(libxl__gc *gc,
                                 libxl_domain_config *d_config,
@@ -1726,7 +1691,7 @@ _hidden char *libxl__domid_to_name(libxl__gc *gc, uint32_t domid);
 _hidden char *libxl__cpupoolid_to_name(libxl__gc *gc, uint32_t poolid);
 
 _hidden int libxl__enum_from_string(const libxl_enum_string_table *t,
-                                    const char *s, int *e) NN(2);
+                                    const char *s, int *e);
 
 _hidden yajl_gen_status libxl__yajl_gen_asciiz(yajl_gen hand, const char *str);
 
@@ -1771,6 +1736,10 @@ _hidden char *libxl__blktap_devpath(libxl__gc *gc,
  *   Always logs on failure.
  */
 _hidden int libxl__device_destroy_tapdisk(libxl__gc *gc, const char *params);
+
+_hidden int libxl__device_from_disk(libxl__gc *gc, uint32_t domid,
+                                   const libxl_device_disk *disk,
+                                   libxl__device *device);
 
 /* Calls poll() again - useful to check whether a signaled condition
  * is still true.  Cannot fail.  Returns currently-true revents. */
@@ -1824,8 +1793,7 @@ _hidden int libxl__qmp_stop(libxl__gc *gc, int domid);
 /* Resume QEMU. */
 _hidden int libxl__qmp_resume(libxl__gc *gc, int domid);
 /* Save current QEMU state into fd. */
-_hidden int libxl__qmp_save(libxl__gc *gc, int domid, const char *filename,
-                            bool live);
+_hidden int libxl__qmp_save(libxl__gc *gc, int domid, const char *filename);
 /* Load current QEMU state from file. */
 _hidden int libxl__qmp_restore(libxl__gc *gc, int domid, const char *filename);
 /* Set dirty bitmap logging status */
@@ -1846,9 +1814,9 @@ _hidden int libxl__qmp_nbd_server_add(libxl__gc *gc, int domid,
 _hidden int libxl__qmp_start_replication(libxl__gc *gc, int domid,
                                          bool primary);
 /* Get replication error that occurs when the vm is running */
-_hidden int libxl__qmp_query_xen_replication_status(libxl__gc *gc, int domid);
+_hidden int libxl__qmp_get_replication_error(libxl__gc *gc, int domid);
 /* Do checkpoint */
-_hidden int libxl__qmp_colo_do_checkpoint(libxl__gc *gc, int domid);
+_hidden int libxl__qmp_do_checkpoint(libxl__gc *gc, int domid);
 /* Stop replication */
 _hidden int libxl__qmp_stop_replication(libxl__gc *gc, int domid,
                                         bool primary);
@@ -2670,6 +2638,14 @@ struct libxl__multidev {
  * it's a valid state.
  */
 
+/* Internal function to connect a vkb device */
+_hidden int libxl__device_vkb_add(libxl__gc *gc, uint32_t domid,
+                                  libxl_device_vkb *vkb);
+
+/* Internal function to connect a vfb device */
+_hidden int libxl__device_vfb_add(libxl__gc *gc, uint32_t domid,
+                                  libxl_device_vfb *vfb);
+
 /* Waits for the passed device to reach state XenbusStateInitWait.
  * This is not really useful by itself, but is important when executing
  * hotplug scripts, since we need to be sure the device is in the correct
@@ -3267,7 +3243,6 @@ struct libxl__domain_suspend_state {
     /* set by caller of libxl__domain_suspend_init */
     libxl__ao *ao;
     uint32_t domid;
-    bool live;
 
     /* private */
     libxl_domain_type type;
@@ -3466,72 +3441,6 @@ _hidden void libxl__bootloader_run(libxl__egc*, libxl__bootloader_state *st);
         return AO_INPROGRESS;                                           \
     }
 
-#define LIBXL_DEFINE_UPDATE_DEVID(name)                                 \
-    int libxl__device_##name##_update_devid(libxl__gc *gc,              \
-                                            uint32_t domid,             \
-                                            libxl_device_##name *type)  \
-    {                                                                   \
-        if (type->devid == -1)                                          \
-            type->devid = libxl__device_nextid(gc, domid,               \
-                          libxl__##name##_devtype.type);                \
-        if (type->devid < 0)                                            \
-            return ERROR_FAIL;                                          \
-        return 0;                                                       \
-    }
-
-#define LIBXL_DEFINE_DEVICE_FROM_TYPE(name)                             \
-    int libxl__device_from_##name(libxl__gc *gc, uint32_t domid,        \
-                                  libxl_device_##name *type,            \
-                                  libxl__device *device)                \
-    {                                                                   \
-        device->backend_devid   = type->devid;                          \
-        device->backend_domid   = type->backend_domid;                  \
-        device->backend_kind    = libxl__##name##_devtype.type;         \
-        device->devid           = type->devid;                          \
-        device->domid           = domid;                                \
-        device->kind            = libxl__##name##_devtype.type;         \
-                                                                        \
-        return 0;                                                       \
-    }
-
-#define LIBXL_DEFINE_DEVID_TO_DEVICE(name)                              \
-    int libxl_devid_to_device_##name(libxl_ctx *ctx, uint32_t domid,    \
-                                     int devid,                         \
-                                     libxl_device_##name *type)         \
-    {                                                                   \
-        GC_INIT(ctx);                                                   \
-                                                                        \
-        char *device_path;                                              \
-        const char *tmp;                                                \
-        int rc;                                                         \
-                                                                        \
-        libxl_device_##name##_init(type);                               \
-                                                                        \
-        device_path = GCSPRINTF("%s/device/%s/%d",                      \
-                                libxl__xs_libxl_path(gc, domid),        \
-                                libxl__device_kind_to_string(           \
-                                libxl__##name##_devtype.type),          \
-                                devid);                                 \
-                                                                        \
-        if (libxl__xs_read_mandatory(gc, XBT_NULL, device_path, &tmp)) {\
-            rc = ERROR_NOTFOUND; goto out;                              \
-        }                                                               \
-                                                                        \
-        if (libxl__##name##_devtype.from_xenstore) {                    \
-            rc = libxl__##name##_devtype.from_xenstore(gc, device_path, \
-                                                       devid, type);    \
-            if (rc) goto out;                                           \
-        }                                                               \
-                                                                        \
-        rc = 0;                                                         \
-                                                                        \
-    out:                                                                \
-                                                                        \
-        GC_FREE;                                                        \
-        return rc;                                                      \
-    }
-
-
 #define LIBXL_DEFINE_DEVICE_REMOVE(type)                                \
     LIBXL_DEFINE_DEVICE_REMOVE_EXT(type, generic, remove, 0)            \
     LIBXL_DEFINE_DEVICE_REMOVE_EXT(type, generic, destroy, 1)
@@ -3540,88 +3449,39 @@ _hidden void libxl__bootloader_run(libxl__egc*, libxl__bootloader_state *st);
     LIBXL_DEFINE_DEVICE_REMOVE_EXT(type, type, remove, 0)               \
     LIBXL_DEFINE_DEVICE_REMOVE_EXT(type, type, destroy, 1)
 
-#define LIBXL_DEFINE_DEVICE_LIST(type)                                  \
-    libxl_device_##type *libxl_device_##type##_list(libxl_ctx *ctx,     \
-                                                    uint32_t domid,     \
-                                                    int *num)           \
-    {                                                                   \
-        libxl_device_##type *r;                                         \
-        GC_INIT(ctx);                                                   \
-        r = libxl__device_list(gc, &libxl__##type##_devtype,            \
-                               domid, num);                             \
-        GC_FREE;                                                        \
-        return r;                                                       \
-    }                                                                   \
-                                                                        \
-    void libxl_device_##type##_list_free(libxl_device_##type *list,     \
-                                         int num)                       \
-    {                                                                   \
-        libxl__device_list_free(&libxl__##type##_devtype, list, num);   \
-    }
-
-typedef void (*device_add_fn_t)(libxl__egc *, libxl__ao *, uint32_t,
-                                libxl_domain_config *, libxl__multidev *);
-typedef int (*device_set_default_fn_t)(libxl__gc *, uint32_t, void *, bool);
-typedef int (*device_to_device_fn_t)(libxl__gc *, uint32_t, void *,
-                                     libxl__device *);
-typedef void (*device_init_fn_t)(void *);
-typedef void (*device_copy_fn_t)(libxl_ctx *, void *, void *);
-typedef void (*device_dispose_fn_t)(void *);
-typedef int (*device_compare_fn_t)(void *, void *);
-typedef void (*device_merge_fn_t)(libxl_ctx *, void *, void *);
-typedef int (*device_dm_needed_fn_t)(void *, unsigned);
-typedef void (*device_update_config_fn_t)(libxl__gc *, void *, void *);
-typedef int (*device_update_devid_fn_t)(libxl__gc *, uint32_t, void *);
-typedef int (*device_from_xenstore_fn_t)(libxl__gc *, const char *,
-                                         libxl_devid, void *);
-typedef int (*device_set_xenstore_config_fn_t)(libxl__gc *, uint32_t, void *,
-                                               flexarray_t *, flexarray_t *,
-                                               flexarray_t *);
-
 struct libxl_device_type {
-    libxl__device_kind type;
+    char *type;
     int skip_attach;   /* Skip entry in domcreate_attach_devices() if 1 */
     int ptr_offset;    /* Offset of device array ptr in libxl_domain_config */
     int num_offset;    /* Offset of # of devices in libxl_domain_config */
     int dev_elem_size; /* Size of one device element in array */
-    device_add_fn_t                 add;
-    device_set_default_fn_t         set_default;
-    device_to_device_fn_t           to_device;
-    device_init_fn_t                init;
-    device_copy_fn_t                copy;
-    device_dispose_fn_t             dispose;
-    device_compare_fn_t             compare;
-    device_merge_fn_t               merge;
-    device_dm_needed_fn_t           dm_needed;
-    device_update_config_fn_t       update_config;
-    device_update_devid_fn_t        update_devid;
-    device_from_xenstore_fn_t       from_xenstore;
-    device_set_xenstore_config_fn_t set_xenstore_config;
+    void (*add)(libxl__egc *, libxl__ao *, uint32_t, libxl_domain_config *,
+                libxl__multidev *);
+    void *(*list)(libxl_ctx *, uint32_t, int *);
+    void (*dispose)(void *);
+    int (*compare)(void *, void *);
+    void (*merge)(libxl_ctx *, void *, void *);
+    int (*dm_needed)(void *, unsigned);
+    void (*update_config)(libxl__gc *, void *, void *);
 };
 
-#define DEFINE_DEVICE_TYPE_STRUCT_X(name, sname, kind, ...)                    \
+#define DEFINE_DEVICE_TYPE_STRUCT_X(name, sname, ...)                          \
     const struct libxl_device_type libxl__ ## name ## _devtype = {             \
-        .type          = LIBXL__DEVICE_KIND_ ## kind,                       \
+        .type          = #sname,                                               \
         .ptr_offset    = offsetof(libxl_domain_config, name ## s),             \
         .num_offset    = offsetof(libxl_domain_config, num_ ## name ## s),     \
         .dev_elem_size = sizeof(libxl_device_ ## sname),                       \
         .add           = libxl__add_ ## name ## s,                             \
-        .set_default   = (device_set_default_fn_t)                             \
-                         libxl__device_ ## sname ## _setdefault,               \
-        .to_device     = (device_to_device_fn_t)libxl__device_from_ ## name,   \
-        .init          = (device_init_fn_t)libxl_device_ ## sname ## _init,    \
-        .copy          = (device_copy_fn_t)libxl_device_ ## sname ## _copy,    \
-        .dispose       = (device_dispose_fn_t)                                 \
-                         libxl_device_ ## sname ## _dispose,                   \
-        .compare       = (device_compare_fn_t)                                 \
+        .list          = (void *(*)(libxl_ctx *, uint32_t, int *))             \
+                         libxl_device_ ## sname ## _list,                      \
+        .dispose       = (void (*)(void *))libxl_device_ ## sname ## _dispose, \
+        .compare       = (int (*)(void *, void *))                             \
                          libxl_device_ ## sname ## _compare,                   \
-        .update_devid  = (device_update_devid_fn_t)                            \
-                         libxl__device_ ## sname ## _update_devid,             \
         __VA_ARGS__                                                            \
     }
 
-#define DEFINE_DEVICE_TYPE_STRUCT(name, kind, ...)                             \
-    DEFINE_DEVICE_TYPE_STRUCT_X(name, name, kind, __VA_ARGS__)
+#define DEFINE_DEVICE_TYPE_STRUCT(name, ...)                                   \
+    DEFINE_DEVICE_TYPE_STRUCT_X(name, name, __VA_ARGS__)
 
 static inline void **libxl__device_type_get_ptr(
     const struct libxl_device_type *dt, const libxl_domain_config *d_config)
@@ -3642,17 +3502,12 @@ static inline int *libxl__device_type_get_num(
     return (int *)((void *)d_config + dt->num_offset);
 }
 
-extern const struct libxl_device_type libxl__vfb_devtype;
-extern const struct libxl_device_type libxl__vkb_devtype;
 extern const struct libxl_device_type libxl__disk_devtype;
 extern const struct libxl_device_type libxl__nic_devtype;
 extern const struct libxl_device_type libxl__vtpm_devtype;
 extern const struct libxl_device_type libxl__usbctrl_devtype;
 extern const struct libxl_device_type libxl__usbdev_devtype;
 extern const struct libxl_device_type libxl__pcidev_devtype;
-extern const struct libxl_device_type libxl__vdispl_devtype;
-extern const struct libxl_device_type libxl__p9_devtype;
-extern const struct libxl_device_type libxl__pvcallsif_devtype;
 
 extern const struct libxl_device_type *device_type_tbl[];
 
@@ -3865,7 +3720,7 @@ void libxl__xc_domain_saverestore_async_callback_done(libxl__egc *egc,
 
 
 _hidden void libxl__domain_suspend_common_switch_qemu_logdirty
-                               (uint32_t domid, unsigned int enable, void *data);
+                               (int domid, unsigned int enable, void *data);
 _hidden void libxl__domain_common_switch_qemu_logdirty(libxl__egc *egc,
                                                int domid, unsigned enable,
                                                libxl__logdirty_switch *lds);
@@ -3879,7 +3734,7 @@ _hidden int libxl__restore_emulator_xenstore_data
 _hidden void libxl__xc_domain_restore(libxl__egc *egc,
                                       libxl__domain_create_state *dcs,
                                       libxl__save_helper_state *shs,
-                                      int hvm, int pae);
+                                      int hvm, int pae, int superpages);
 /* If rc==0 then retval is the return value from xc_domain_save
  * and errnoval is the errno value it provided.
  * If rc!=0, retval and errnoval are undefined. */
@@ -3920,6 +3775,36 @@ _hidden void libxl__remus_restore_setup(libxl__egc *egc,
 /*
  * Convenience macros.
  */
+
+/*
+ * CONTAINER_OF work like this.  Given:
+ *    typedef struct {
+ *      ...
+ *      member_type member_name;
+ *      ...
+ *    } outer_type;
+ *    outer_type outer, *outer_var;
+ *    member_type *inner_ptr = &outer->member_name;
+ *
+ * Then, effectively:
+ *    outer_type *CONTAINER_OF(member_type *inner_ptr,
+ *                             *outer_var, // or type name for outer_type
+ *                             member_name);
+ *
+ * So that:
+ *    CONTAINER_OF(inner_ptr, *outer_var, member_name) == &outer
+ *    CONTAINER_OF(inner_ptr, outer_type, member_name) == &outer
+ */
+#define CONTAINER_OF(inner_ptr, outer, member_name)                     \
+    ({                                                                  \
+        typeof(outer) *container_of_;                                   \
+        container_of_ = (void*)((char*)(inner_ptr) -                    \
+                                offsetof(typeof(outer), member_name));  \
+        (void)(&container_of_->member_name ==                           \
+               (typeof(inner_ptr))0) /* type check */;                  \
+        container_of_;                                                  \
+    })
+
 
 #define FILLZERO LIBXL_FILLZERO
 
@@ -3991,34 +3876,21 @@ _hidden void libxl__remus_restore_setup(libxl__egc *egc,
  *    void LOG(<xtl_level_suffix>, const char *fmt, ...);
  *    void LOGE(<xtl_level_suffix>, const char *fmt, ...);
  *    void LOGEV(<xtl_level_suffix>, int errnoval, const char *fmt, ...);
- *
- *    void LOGD(<xtl_level_suffix>, uint32_t domid, const char *fmt, ...);
- *    void LOGED(<xtl_level_suffix>, uint32_t domid, const char *fmt, ...);
- *    void LOGEVD(<xtl_level_suffix>, int errnoval, uint32_t domid, const char *fmt, ...);
  * Use
  *    libxl__gc *gc;
  *
- * Trivial convenience wrappers for LIBXL__LOG, LIBXL__LOG_ERRNO,
- * LIBXL__LOG_ERRNOVAL, LIBXL__LOGD, LIBXL__LOGD_ERRNO and
- * LIBXL__LOGD_ERRNOVAL respectively (and thus for libxl__log).
+ * Trivial convenience wrappers for LIBXL__LOG, LIBXL__LOG_ERRNO and
+ * LIBXL__LOG_ERRNOVAL, respectively (and thus for libxl__log).
  *
  * XTL_<xtl_level_suffix> should exist and be an xentoollog.h log level
  * So <xtl_level_suffix> should be one of
  *   DEBUG VERBOSE DETAIL PROGRESS INFO NOTICE WARN ERROR ERROR CRITICAL
  * Of these, most of libxl uses
  *   DEBUG INFO WARN ERROR
- *
- * The LOG*D family will preprend the log message with a string formatted
- * as follows: 'Domain %PRIu32:'. This should help better automatic sorting
- * of log messages per domain.
  */
 #define LOG(l,f, ...)     LIBXL__LOG(CTX,XTL_##l,(f),##__VA_ARGS__)
 #define LOGE(l,f, ...)    LIBXL__LOG_ERRNO(CTX,XTL_##l,(f),##__VA_ARGS__)
 #define LOGEV(l,e,f, ...) LIBXL__LOG_ERRNOVAL(CTX,XTL_##l,(e),(f),##__VA_ARGS__)
-
-#define LOGD(l,d,f, ...)     LIBXL__LOGD(CTX,XTL_##l,(d),(f),##__VA_ARGS__)
-#define LOGED(l,d,f, ...)    LIBXL__LOGD_ERRNO(CTX,XTL_##l,(d),(f),##__VA_ARGS__)
-#define LOGEVD(l,e,d,f, ...) LIBXL__LOGD_ERRNOVAL(CTX,XTL_##l,(e),(d),(f),##__VA_ARGS__)
 
 
 /* Locking functions.  See comment for "lock" member of libxl__ctx. */
@@ -4344,13 +4216,6 @@ uint64_t libxl__get_targetmem_fudge(libxl__gc *gc,
     return info->video_memkb + mem_target_fudge;
 }
 
-int libxl__get_memory_target(libxl__gc *gc, uint32_t domid,
-                             uint64_t *out_target_memkb,
-                             uint64_t *out_max_memkb);
-void libxl__xcinfo2xlinfo(libxl_ctx *ctx,
-                          const xc_domaininfo_t *xcinfo,
-                          libxl_dominfo *xlinfo);
-
 /* Macros used to compare device identifier. Returns true if the two
  * devices have same identifier. */
 #define COMPARE_DEVID(a, b) ((a)->devid == (b)->devid)
@@ -4361,6 +4226,55 @@ void libxl__xcinfo2xlinfo(libxl_ctx *ctx,
 #define COMPARE_USB(a, b) ((a)->ctrl == (b)->ctrl && \
                            (a)->port == (b)->port)
 #define COMPARE_USBCTRL(a, b) ((a)->devid == (b)->devid)
+
+/* DEVICE_ADD
+ *
+ * Add a device in libxl_domain_config structure
+ *
+ * It takes 6 parameters:
+ *  type:     the type of the device, say nic, vtpm, disk, pci etc
+ *  ptr:      pointer to the start of the array, the array must be
+ *            of type libxl_device_#type
+ *  domid:    domain id of target domain
+ *  dev:      the device that is to be added / removed / updated
+ *  compare:  the COMPARE_* macro used to compare @dev's identifier to
+ *            those in the array pointed to by @ptr
+ *  d_config: pointer to template domain config
+ *
+ * For most device types (nic, vtpm), the array pointer @ptr can be
+ * derived from @type, pci device being the exception, hence we need
+ * to have @ptr.
+ *
+ * If there is already a device with the same identifier in d_config,
+ * that entry is updated.
+ */
+#define DEVICE_ADD(type, ptr, domid, dev, compare, d_config)    \
+    ({                                                          \
+        int DA_x;                                               \
+        libxl_device_##type *DA_p = NULL;                       \
+                                                                \
+        /* Check for existing device */                         \
+        for (DA_x = 0; DA_x < (d_config)->num_##ptr; DA_x++) {  \
+            if (compare(&(d_config)->ptr[DA_x], (dev))) {       \
+                DA_p = &(d_config)->ptr[DA_x];                  \
+                break;                                          \
+            }                                                   \
+        }                                                       \
+                                                                \
+        if (!DA_p) {                                            \
+            (d_config)->ptr =                                   \
+                libxl__realloc(NOGC, (d_config)->ptr,           \
+                               ((d_config)->num_##ptr + 1) *    \
+                               sizeof(libxl_device_##type));    \
+            DA_p = &(d_config)->ptr[(d_config)->num_##ptr];     \
+            (d_config)->num_##ptr++;                            \
+        } else {                                                \
+            libxl_device_##type##_dispose(DA_p);                \
+        }                                                       \
+                                                                \
+        libxl_device_##type##_init(DA_p);                       \
+        libxl_device_##type##_copy(CTX, DA_p, (dev));           \
+    })
 
 /* This function copies X bytes from source to destination bitmap,
  * where X is the smaller of the two sizes.
@@ -4384,39 +4298,11 @@ _hidden int libxl__read_sysfs_file_contents(libxl__gc *gc,
 #define LIBXL_QEMU_USER_PREFIX "xen-qemuuser"
 #define LIBXL_QEMU_USER_BASE   LIBXL_QEMU_USER_PREFIX"-domid"
 #define LIBXL_QEMU_USER_SHARED LIBXL_QEMU_USER_PREFIX"-shared"
-#define LIBXL_QEMU_USER_RANGE_BASE LIBXL_QEMU_USER_PREFIX"-range-base"
 
 static inline bool libxl__acpi_defbool_val(const libxl_domain_build_info *b_info)
 {
     return libxl_defbool_val(b_info->acpi) &&
            libxl_defbool_val(b_info->u.hvm.acpi);
-}
-
-void device_add_domain_config(libxl__gc *gc, libxl_domain_config *d_config,
-                              const struct libxl_device_type *dt, void *type);
-
-void libxl__device_add_async(libxl__egc *egc, uint32_t domid,
-                             const struct libxl_device_type *dt, void *type,
-                             libxl__ao_device *aodev);
-int libxl__device_add(libxl__gc *gc, uint32_t domid,
-                      const struct libxl_device_type *dt, void *type);
-
-/* Caller is responsible for freeing the memory by calling
- * libxl__device_list_free
- */
-void* libxl__device_list(libxl__gc *gc, const struct libxl_device_type *dt,
-                         uint32_t domid, int *num);
-void libxl__device_list_free(const struct libxl_device_type *dt,
-                             void *list, int num);
-
-static inline bool libxl__timer_mode_is_default(libxl_timer_mode *tm)
-{
-    return *tm == LIBXL_TIMER_MODE_DEFAULT;
-}
-
-static inline bool libxl__string_is_default(char **s)
-{
-    return *s == NULL;
 }
 #endif
 

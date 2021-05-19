@@ -1,20 +1,4 @@
-/*
- * Trampoline code relocated to low memory.
- *
- * Care must taken when referencing symbols: they live in the relocated
- * trampoline and in the hypervisor binary. The hypervisor symbols can either
- * be accessed by their virtual address or by the physical address. When
- * using the physical address eventually the physical start address of the
- * hypervisor must be taken into account: after early boot the hypervisor
- * will copy itself to high memory and writes its physical start address to
- * trampoline_xen_phys_start in the low memory trampoline copy.
- *
- * Parts of the trampoline are needed for early boot only, while some other
- * parts are needed as long as the hypervisor is active (e.g. wakeup code
- * after suspend, bringup code for secondary cpus). The permanent parts should
- * not reference any temporary low memory trampoline parts as those parts are
- * not guaranteed to persist.
- */
+        .code16
 
 /* NB. bootsym() is only usable in real mode, or via BOOT_PSEUDORM_DS. */
 #undef bootsym
@@ -33,10 +17,6 @@
         .pushsection .trampoline_seg, "a"; \
         .long 111b - (off) - .;            \
         .popsection
-
-/* Start of the permanent trampoline code. */
-
-        .code16
 
 GLOBAL(trampoline_realmode_entry)
         mov     %cs,%ax
@@ -74,11 +54,6 @@ trampoline_gdt:
         /* 0x0028: real-mode data @ BOOT_TRAMPOLINE */
         .long   0x0000ffff
         .long   0x00009200
-        /*
-         * 0x0030: ring 0 Xen data, 16 MiB size, base
-         * address is computed at runtime.
-         */
-        .quad   0x00c0920000000fff
 
         .pushsection .trampoline_rel, "a"
         .long   trampoline_gdt + BOOT_PSEUDORM_CS + 2 - .
@@ -112,7 +87,7 @@ trampoline_protmode_entry:
         mov     %ecx,%cr4
 
         /* Load pagetable base register. */
-        mov     $sym_offs(idle_pg_table),%eax
+        mov     $sym_phys(idle_pg_table),%eax
         add     bootsym_rel(trampoline_xen_phys_start,4,%eax)
         mov     %eax,%cr3
 
@@ -176,15 +151,6 @@ start64:
 
         jmpq    *%rdi
 
-#include "wakeup.S"
-
-/* The first page of trampoline is permanent, the rest boot-time only. */
-/* Reuse the boot trampoline on the 1st trampoline page as stack for wakeup. */
-        .equ    wakeup_stack, trampoline_start + PAGE_SIZE
-        .global wakeup_stack
-
-/* From here on early boot only. */
-
         .code32
 trampoline_boot_cpu_entry:
         cmpb    $0,bootsym_rel(skip_realmode,5)
@@ -239,9 +205,7 @@ trampoline_boot_cpu_entry:
          */
         call    get_memory_map
         call    get_edd
-#ifdef CONFIG_VIDEO
         call    video
-#endif
 
         mov     $0x0200,%ax
         int     $0x16
@@ -276,26 +240,8 @@ trampoline_boot_cpu_entry:
         /* Jump to the common bootstrap entry point. */
         jmp     trampoline_protmode_entry
 
-#include "video.h"
-
-        .align  2
-/* Keep in sync with cmdline.c:early_boot_opts_t type! */
-early_boot_opts:
 skip_realmode:
         .byte   0
-opt_edd:
-        .byte   0                               /* edd=on/off/skipmbr */
-opt_edid:
-        .byte   0                               /* EDID parsing option (force/no/default). */
-/* Padding. */
-        .byte   0
-
-#ifdef CONFIG_VIDEO
-GLOBAL(boot_vid_mode)
-        .word   VIDEO_80x25                     /* If we don't run at all, assume basic video mode 3 at 80x25. */
-vesa_size:
-        .word   0,0,0                           /* width x depth x height */
-#endif
 
 GLOBAL(kbd_shift_flags)
         .byte   0
@@ -304,6 +250,5 @@ rm_idt: .word   256*4-1, 0, 0
 
 #include "mem.S"
 #include "edd.S"
-#ifdef CONFIG_VIDEO
 #include "video.S"
-#endif
+#include "wakeup.S"

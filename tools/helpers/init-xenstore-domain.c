@@ -105,17 +105,6 @@ static int build(xc_interface *xch)
         fprintf(stderr, "xc_domain_setmaxmem failed\n");
         goto err;
     }
-    /*
-     * 1 grant frame is enough: we don't need many grants.
-     * Mini-OS doesn't like less than 4, though, so use 4.
-     * 128 maptrack frames: 256 entries per frame, enough for 32768 domains.
-     */
-    rv = xc_domain_set_gnttab_limits(xch, domid, 4, 128);
-    if ( rv )
-    {
-        fprintf(stderr, "xc_domain_set_gnttab_limits failed\n");
-        goto err;
-    }
     rv = xc_domain_set_memmap_limit(xch, domid, limit_kb);
     if ( rv )
     {
@@ -145,10 +134,10 @@ static int build(xc_interface *xch)
 
     if ( ramdisk )
     {
-        rv = xc_dom_module_file(dom, ramdisk, NULL);
+        rv = xc_dom_ramdisk_file(dom, ramdisk);
         if ( rv )
         {
-            fprintf(stderr, "xc_dom_module_file failed\n");
+            fprintf(stderr, "xc_dom_ramdisk_file failed\n");
             goto err;
         }
     }

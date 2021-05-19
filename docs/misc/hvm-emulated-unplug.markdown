@@ -32,13 +32,12 @@ drivers):
    blacklisted and should not load.
 
 6. The drivers write a two-byte bitmask of devices to unplug to IO
-   port `0x10`.  The defined bits are:
+   port `0x10`.  The defined fields are:
 
-  * `0` -- All emulated IDE and SCSI disks (not including CD drives).
-  * `1` -- All emulated NICs.
-  * `2` -- All IDE disks except for the primary master (not including CD
-	   drives). This is overridden by bit 0.
-  * `3` -- All emulated NVMe disks.
+  * `1` -- All IDE disks (not including CD drives)
+  * `2` -- All emulated NICs
+  * `4` -- All IDE disks except for the primary master (not including CD
+	   drives)
 
    The relevant emulated devices then disappear from the relevant
    buses.  For most guest operating systems, you want to do this

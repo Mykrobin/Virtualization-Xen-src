@@ -1,3 +1,4 @@
+#include <xen/config.h>
 #include <xen/console.h>
 #include <xen/cpu.h>
 #include <xen/delay.h>

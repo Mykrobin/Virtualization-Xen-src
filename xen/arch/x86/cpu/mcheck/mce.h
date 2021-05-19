@@ -19,8 +19,7 @@
 #define MCE_CRITICAL    2
 
 extern int mce_verbosity;
-/*
- * Define the default level of machine check related print.
+/* Define the default level of machine check related print.
  * When set mce_verbosity=verbose, all mce debug information
  * will be printed, otherwise, those information will not be
  * printed.
@@ -31,59 +30,60 @@ extern int mce_verbosity;
         } while (0)
 
 enum mcheck_type {
-    mcheck_unset = -1,
-    mcheck_none,
-    mcheck_amd_famXX,
-    mcheck_amd_k8,
-    mcheck_intel
+	mcheck_unset = -1,
+	mcheck_none,
+	mcheck_amd_famXX,
+	mcheck_amd_k8,
+	mcheck_intel
 };
 
 extern uint8_t cmci_apic_vector;
-extern bool lmce_support;
 
 /* Init functions */
 enum mcheck_type amd_mcheck_init(struct cpuinfo_x86 *c);
-enum mcheck_type intel_mcheck_init(struct cpuinfo_x86 *c, bool bsp);
+enum mcheck_type intel_mcheck_init(struct cpuinfo_x86 *c, bool_t bsp);
 
+void intel_mcheck_timer(struct cpuinfo_x86 *c);
+void mce_intel_feature_init(struct cpuinfo_x86 *c);
 void amd_nonfatal_mcheck_init(struct cpuinfo_x86 *c);
 
+uint64_t mce_cap_init(void);
 extern unsigned int firstbank;
 
 struct mcinfo_extended *intel_get_extended_msrs(
     struct mcinfo_global *mig, struct mc_info *mi);
 
-bool mce_available(const struct cpuinfo_x86 *c);
+int mce_available(struct cpuinfo_x86 *c);
 unsigned int mce_firstbank(struct cpuinfo_x86 *c);
 /* Helper functions used for collecting error telemetry */
+struct mc_info *x86_mcinfo_getptr(void);
 void noreturn mc_panic(char *s);
 void x86_mc_get_cpu_info(unsigned, uint32_t *, uint16_t *, uint16_t *,
-                         uint32_t *, uint32_t *, uint32_t *, uint32_t *);
+			 uint32_t *, uint32_t *, uint32_t *, uint32_t *);
 
 /* Register a handler for machine check exceptions. */
 typedef void (*x86_mce_vector_t)(const struct cpu_user_regs *regs);
 extern void x86_mce_vector_register(x86_mce_vector_t);
 
-/*
- * Common generic MCE handler that implementations may nominate
- * via x86_mce_vector_register.
- */
+/* Common generic MCE handler that implementations may nominate
+ * via x86_mce_vector_register. */
 extern void mcheck_cmn_handler(const struct cpu_user_regs *regs);
 
 /* Register a handler for judging whether mce is recoverable. */
-typedef bool (*mce_recoverable_t)(uint64_t status);
+typedef int (*mce_recoverable_t)(uint64_t status);
 extern void mce_recoverable_register(mce_recoverable_t);
 
 /* Read an MSR, checking for an interposed value first */
 extern struct intpose_ent *intpose_lookup(unsigned int, uint64_t,
     uint64_t *);
-extern bool intpose_inval(unsigned int, uint64_t);
+extern bool_t intpose_inval(unsigned int, uint64_t);
 
 static inline uint64_t mca_rdmsr(unsigned int msr)
 {
-    uint64_t val;
-    if (intpose_lookup(smp_processor_id(), msr, &val) == NULL)
-        rdmsrl(msr, val);
-    return val;
+	uint64_t val;
+	if (intpose_lookup(smp_processor_id(), msr, &val) == NULL)
+		rdmsrl(msr, val);
+	return val;
 }
 
 /* Write an MSR, invalidating any interposed value */
@@ -93,70 +93,65 @@ static inline uint64_t mca_rdmsr(unsigned int msr)
 } while ( 0 )
 
 
-/*
- * Utility function to "logout" all architectural MCA telemetry from the MCA
+/* Utility function to "logout" all architectural MCA telemetry from the MCA
  * banks of the current processor.  A cookie is returned which may be
  * uses to reference the data so logged (the cookie can be NULL if
  * no logout structures were available).  The caller can also pass a pointer
  * to a structure which will be completed with some summary information
- * of the MCA data observed in the logout operation.
- */
+ * of the MCA data observed in the logout operation. */
 
 enum mca_source {
-    MCA_POLLER,
-    MCA_CMCI_HANDLER,
-    MCA_RESET,
-    MCA_MCE_SCAN
+	MCA_POLLER,
+	MCA_CMCI_HANDLER,
+	MCA_RESET,
+	MCA_MCE_SCAN
 };
 
 struct mca_summary {
-    uint32_t    errcnt; /* number of banks with valid errors */
-    int         ripv;   /* meaningful on #MC */
-    int         eipv;   /* meaningful on #MC */
-    bool        uc;     /* UC flag */
-    bool        pcc;    /* PCC flag */
-    bool        lmce;   /* LMCE flag (Intel only) */
-    bool        recoverable; /* software error recoverable flag */
+	uint32_t	errcnt;	/* number of banks with valid errors */
+	int		ripv;	/* meaningful on #MC */
+	int		eipv;	/* meaningful on #MC */
+	bool_t		uc;	/* UC flag */
+	bool_t		pcc;	/* PCC flag */
+	bool_t		recoverable; /* software error recoverable flag */
 };
 
 DECLARE_PER_CPU(struct mca_banks *, poll_bankmask);
 DECLARE_PER_CPU(struct mca_banks *, no_cmci_banks);
 DECLARE_PER_CPU(struct mca_banks *, mce_clear_banks);
 
-extern bool cmci_support;
-extern bool is_mc_panic;
-extern bool mce_broadcast;
+extern bool_t cmci_support;
+extern bool_t is_mc_panic;
+extern bool_t mce_broadcast;
 extern void mcheck_mca_clearbanks(struct mca_banks *);
 
 extern mctelem_cookie_t mcheck_mca_logout(enum mca_source, struct mca_banks *,
     struct mca_summary *, struct mca_banks *);
 
-/*
- * Register callbacks to be made during bank telemetry logout.
- * Those callbacks are only available to those machine check handlers
+/* Register a callback to be made during bank telemetry logout.
+ * This callback is only available to those machine check handlers
  * that call to the common mcheck_cmn_handler or who use the common
  * telemetry logout function mcheck_mca_logout in error polling.
- */
-
-/* Register a handler for judging whether the bank need to be cleared */
-typedef bool (*mce_need_clearbank_t)(enum mca_source who, u64 status);
-extern void mce_need_clearbank_register(mce_need_clearbank_t);
-
-/*
- * Register a callback to collect additional information (typically non-
+ *
+ * This can be used to collect additional information (typically non-
  * architectural) provided by newer CPU families/models without the need
  * to duplicate the whole handler resulting in various handlers each with
- * its own tweaks and bugs. The callback receives an struct mc_info pointer
- * which it can use with x86_mcinfo_reserve to add additional telemetry,
+ * its own tweaks and bugs.  The callback receives an struct mc_info pointer
+ * which it can use with x86_mcinfo_add to add additional telemetry,
  * the current MCA bank number we are reading telemetry from, and the
  * MCi_STATUS value for that bank.
  */
+
+/* Register a handler for judging whether the bank need to be cleared */
+typedef int (*mce_need_clearbank_t)(enum mca_source who, u64 status);
+extern void mce_need_clearbank_register(mce_need_clearbank_t);
+
 typedef struct mcinfo_extended *(*x86_mce_callback_t)
     (struct mc_info *, uint16_t, uint64_t);
 extern void x86_mce_callback_register(x86_mce_callback_t);
 
-void *x86_mcinfo_reserve(struct mc_info *mi,
-                         unsigned int size, unsigned int type);
+void *x86_mcinfo_add(struct mc_info *mi, void *mcinfo);
+void *x86_mcinfo_reserve(struct mc_info *mi, int size);
 void x86_mcinfo_dump(struct mc_info *mi);
 
 static inline int mce_vendor_bank_msr(const struct vcpu *v, uint32_t msr)
@@ -167,7 +162,6 @@ static inline int mce_vendor_bank_msr(const struct vcpu *v, uint32_t msr)
             msr < MSR_IA32_MCx_CTL2(v->arch.vmce.mcg_cap & MCG_CAP_COUNT) )
             return 1;
         break;
-
     case X86_VENDOR_AMD:
         switch (msr) {
         case MSR_F10_MC4_MISC1:

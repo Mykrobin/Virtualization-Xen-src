@@ -7,10 +7,10 @@
 struct cpu_user_regs;
 
 /* Watchdog boolean from the command line */
-extern bool opt_watchdog;
+extern bool_t opt_watchdog;
 
 /* Watchdog force parameter from the command line */
-extern bool watchdog_force;
+extern bool_t watchdog_force;
  
 typedef int nmi_callback_t(const struct cpu_user_regs *regs, int cpu);
  
@@ -29,4 +29,19 @@ nmi_callback_t *set_nmi_callback(nmi_callback_t *callback);
  */
 void unset_nmi_callback(void);
  
+/**
+ * register_guest_nmi_callback
+ *
+ * The default NMI handler passes the NMI to a guest callback. This
+ * function registers the address of that callback.
+ */
+long register_guest_nmi_callback(unsigned long address);
+
+/**
+ * unregister_guest_nmi_callback
+ *
+ * Unregister a guest NMI handler.
+ */
+long unregister_guest_nmi_callback(void);
+
 #endif /* ASM_NMI_H */

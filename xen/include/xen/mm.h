@@ -57,19 +57,10 @@
 TYPE_SAFE(unsigned long, mfn);
 #define PRI_mfn          "05lx"
 #define INVALID_MFN      _mfn(~0UL)
-/*
- * To be used for global variable initialization. This workaround a bug
- * in GCC < 5.0.
- */
-#define INVALID_MFN_INITIALIZER { ~0UL }
 
 #ifndef mfn_t
 #define mfn_t /* Grep fodder: mfn_t, _mfn() and mfn_x() are defined above */
-#define _mfn
-#define mfn_x
 #undef mfn_t
-#undef _mfn
-#undef mfn_x
 #endif
 
 static inline mfn_t mfn_add(mfn_t mfn, unsigned long i)
@@ -95,19 +86,10 @@ static inline bool_t mfn_eq(mfn_t x, mfn_t y)
 TYPE_SAFE(unsigned long, gfn);
 #define PRI_gfn          "05lx"
 #define INVALID_GFN      _gfn(~0UL)
-/*
- * To be used for global variable initialization. This workaround a bug
- * in GCC < 5.0 https://gcc.gnu.org/bugzilla/show_bug.cgi?id=64856
- */
-#define INVALID_GFN_INITIALIZER { ~0UL }
 
 #ifndef gfn_t
 #define gfn_t /* Grep fodder: gfn_t, _gfn() and gfn_x() are defined above */
-#define _gfn
-#define gfn_x
 #undef gfn_t
-#undef _gfn
-#undef gfn_x
 #endif
 
 static inline gfn_t gfn_add(gfn_t gfn, unsigned long i)
@@ -136,11 +118,7 @@ TYPE_SAFE(unsigned long, pfn);
 
 #ifndef pfn_t
 #define pfn_t /* Grep fodder: pfn_t, _pfn() and pfn_x() are defined above */
-#define _pfn
-#define pfn_x
 #undef pfn_t
-#undef _pfn
-#undef pfn_x
 #endif
 
 struct page_info;
@@ -151,7 +129,8 @@ struct domain *__must_check page_get_owner_and_reference(struct page_info *);
 
 /* Boot-time allocator. Turns into generic allocator after bootstrap. */
 void init_boot_pages(paddr_t ps, paddr_t pe);
-mfn_t alloc_boot_pages(unsigned long nr_pfns, unsigned long pfn_align);
+unsigned long alloc_boot_pages(
+    unsigned long nr_pfns, unsigned long pfn_align);
 void end_boot_allocator(void);
 
 /* Xen suballocator. These functions are interrupt-safe. */
@@ -159,7 +138,6 @@ void init_xenheap_pages(paddr_t ps, paddr_t pe);
 void xenheap_max_mfn(unsigned long mfn);
 void *alloc_xenheap_pages(unsigned int order, unsigned int memflags);
 void free_xenheap_pages(void *v, unsigned int order);
-bool scrub_free_pages(void);
 #define alloc_xenheap_page() (alloc_xenheap_pages(0,0))
 #define free_xenheap_page(v) (free_xenheap_pages(v,0))
 
@@ -173,7 +151,7 @@ bool scrub_free_pages(void);
 /* Map machine page range in Xen virtual address space. */
 int map_pages_to_xen(
     unsigned long virt,
-    mfn_t mfn,
+    unsigned long mfn,
     unsigned long nr_mfns,
     unsigned int flags);
 /* Alter the permissions of a range of Xen virtual address space. */
@@ -183,7 +161,8 @@ int destroy_xen_mappings(unsigned long v, unsigned long e);
  * Create only non-leaf page table entries for the
  * page range in Xen virtual address space.
  */
-int populate_pt_range(unsigned long virt, unsigned long nr_mfns);
+int populate_pt_range(unsigned long virt, unsigned long mfn,
+                      unsigned long nr_mfns);
 /* Claim handling */
 unsigned long domain_adjust_tot_pages(struct domain *d, long pages);
 int domain_set_outstanding_pages(struct domain *d, unsigned long pages);
@@ -205,7 +184,7 @@ int offline_page(unsigned long mfn, int broken, uint32_t *status);
 int query_page_offline(unsigned long mfn, uint32_t *status);
 unsigned long total_free_pages(void);
 
-void heap_init_late(void);
+void scrub_heap_pages(void);
 
 int assign_pages(
     struct domain *d,
@@ -253,11 +232,7 @@ struct npfec {
 #define  MEMF_no_owner    (1U<<_MEMF_no_owner)
 #define _MEMF_no_tlbflush 6
 #define  MEMF_no_tlbflush (1U<<_MEMF_no_tlbflush)
-#define _MEMF_no_icache_flush 7
-#define  MEMF_no_icache_flush (1U<<_MEMF_no_icache_flush)
-#define _MEMF_no_scrub    8
-#define  MEMF_no_scrub    (1U<<_MEMF_no_scrub)
-#define _MEMF_node        16
+#define _MEMF_node        8
 #define  MEMF_node_mask   ((1U << (8 * sizeof(nodeid_t))) - 1)
 #define  MEMF_node(n)     ((((n) + 1) & MEMF_node_mask) << _MEMF_node)
 #define  MEMF_get_node(f) ((((f) >> _MEMF_node) - 1) & MEMF_node_mask)
@@ -285,8 +260,13 @@ struct page_list_head
 # define PAGE_LIST_NULL ((typeof(((struct page_info){}).list.next))~0)
 
 # if !defined(pdx_to_page) && !defined(page_to_pdx)
+#  if defined(__page_to_mfn) || defined(__mfn_to_page)
+#   define page_to_pdx __page_to_mfn
+#   define pdx_to_page __mfn_to_page
+#  else
 #   define page_to_pdx page_to_mfn
 #   define pdx_to_page mfn_to_page
+#  endif
 # endif
 
 # define PAGE_LIST_HEAD_INIT(name) { NULL, NULL }
@@ -581,15 +561,8 @@ int xenmem_add_to_physmap_one(struct domain *d, unsigned int space,
                               union xen_add_to_physmap_batch_extra extra,
                               unsigned long idx, gfn_t gfn);
 
-int xenmem_add_to_physmap(struct domain *d, struct xen_add_to_physmap *xatp,
-                          unsigned int start);
-
-/* Return 0 on success, or negative on error. */
+/* Returns 0 on success, or negative on error. */
 int __must_check guest_remove_page(struct domain *d, unsigned long gmfn);
-int __must_check steal_page(struct domain *d, struct page_info *page,
-                            unsigned int memflags);
-int __must_check donate_page(struct domain *d, struct page_info *page,
-                             unsigned int memflags);
 
 #define RAM_TYPE_CONVENTIONAL 0x00000001
 #define RAM_TYPE_RESERVED     0x00000002
@@ -625,29 +598,14 @@ static inline void accumulate_tlbflush(bool *need_tlbflush,
 
 static inline void filtered_flush_tlb_mask(uint32_t tlbflush_timestamp)
 {
-    cpumask_t mask;
+    cpumask_t mask = cpu_online_map;
 
-    cpumask_copy(&mask, &cpu_online_map);
-    tlbflush_filter(&mask, tlbflush_timestamp);
+    tlbflush_filter(mask, tlbflush_timestamp);
     if ( !cpumask_empty(&mask) )
     {
         perfc_incr(need_flush_tlb_flush);
         flush_tlb_mask(&mask);
     }
-}
-
-enum XENSHARE_flags {
-    SHARE_rw,
-    SHARE_ro,
-};
-void share_xen_page_with_guest(struct page_info *page, struct domain *d,
-                               enum XENSHARE_flags flags);
-int unshare_xen_page_with_guest(struct page_info *page, struct domain *d);
-
-static inline void share_xen_page_with_privileged_guests(
-    struct page_info *page, enum XENSHARE_flags flags)
-{
-    share_xen_page_with_guest(page, dom_xen, flags);
 }
 
 #endif /* __XEN_MM_H__ */

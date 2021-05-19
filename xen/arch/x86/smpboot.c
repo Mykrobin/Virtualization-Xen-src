@@ -4,21 +4,22 @@
  * This inherits a great deal from Linux's SMP boot code:
  *  (c) 1995 Alan Cox, Building #3 <alan@redhat.com>
  *  (c) 1998, 1999, 2000 Ingo Molnar <mingo@redhat.com>
- *
+ * 
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- *
+ * 
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- *
+ * 
  * You should have received a copy of the GNU General Public License
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/kernel.h>
 #include <xen/mm.h>
@@ -38,7 +39,6 @@
 #include <asm/desc.h>
 #include <asm/div64.h>
 #include <asm/flushtlb.h>
-#include <asm/guest.h>
 #include <asm/msr.h>
 #include <asm/mtrr.h>
 #include <asm/spec_ctrl.h>
@@ -56,9 +56,6 @@ unsigned long __read_mostly trampoline_phys;
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_sibling_mask);
 /* representing HT and core siblings of each logical CPU */
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_core_mask);
-
-DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, scratch_cpumask);
-static cpumask_t scratch_cpu0mask;
 
 cpumask_t cpu_online_map __read_mostly;
 EXPORT_SYMBOL(cpu_online_map);
@@ -83,7 +80,7 @@ static enum cpu_state {
     CPU_STATE_CALLIN,   /* slave -> master: Completed phase 2 */
     CPU_STATE_ONLINE    /* master -> slave: Go fully online now. */
 } cpu_state;
-#define set_cpu_state(state) do { smp_mb(); cpu_state = (state); } while (0)
+#define set_cpu_state(state) do { mb(); cpu_state = (state); } while (0)
 
 void *stack_base[NR_CPUS];
 
@@ -92,14 +89,11 @@ void initialize_cpu_data(unsigned int cpu)
     cpu_data[cpu] = boot_cpu_data;
 }
 
-static bool smp_store_cpu_info(unsigned int id)
+static void smp_store_cpu_info(int id)
 {
     unsigned int socket;
 
-    if ( system_state != SYS_STATE_resume )
-        identify_cpu(&cpu_data[id]);
-    else if ( !recheck_cpu_features(id) )
-        return false;
+    identify_cpu(&cpu_data[id]);
 
     socket = cpu_to_socket(id);
     if ( !socket_cpumask[socket] )
@@ -107,15 +101,13 @@ static bool smp_store_cpu_info(unsigned int id)
         socket_cpumask[socket] = secondary_socket_cpumask;
         secondary_socket_cpumask = NULL;
     }
-
-    return true;
 }
 
 /*
  * TSC's upper 32 bits can't be written in earlier CPUs (before
  * Prescott), there is no way to resync one AP against BP.
  */
-bool disable_tsc_sync;
+bool_t disable_tsc_sync;
 
 static atomic_t tsc_count;
 static uint64_t tsc_value;
@@ -135,7 +127,7 @@ static void synchronize_tsc_master(unsigned int slave)
     for ( i = 1; i <= 5; i++ )
     {
         tsc_value = rdtsc_ordered();
-        smp_wmb();
+        wmb();
         atomic_inc(&tsc_count);
         while ( atomic_read(&tsc_count) != (i<<1) )
             cpu_relax();
@@ -160,7 +152,7 @@ static void synchronize_tsc_slave(unsigned int slave)
     {
         while ( atomic_read(&tsc_count) != ((i<<1)-1) )
             cpu_relax();
-        smp_rmb();
+        rmb();
         /*
          * If a CPU has been physically hotplugged, we may as well write
          * to its TSC in spite of X86_FEATURE_TSC_RELIABLE. The platform does
@@ -194,19 +186,12 @@ static void smp_callin(void)
     setup_local_APIC();
 
     /* Save our processor parameters. */
-    if ( !smp_store_cpu_info(cpu) )
-    {
-        printk("CPU%u: Failed to validate features - not coming back online\n",
-               cpu);
-        cpu_error = -ENXIO;
-        goto halt;
-    }
+    smp_store_cpu_info(cpu);
 
     if ( (rc = hvm_cpu_up()) != 0 )
     {
         printk("CPU%d: Failed to initialise HVM. Not coming online.\n", cpu);
         cpu_error = rc;
-    halt:
         clear_local_APIC();
         spin_debug_enable();
         cpu_exit_clear(cpu);
@@ -332,14 +317,14 @@ void start_secondary(void *unused)
      * Just as during early bootstrap, it is convenient here to disable
      * spinlock checking while we have IRQs disabled. This allows us to
      * acquire IRQ-unsafe locks when it would otherwise be disallowed.
-     *
+     * 
      * It is safe because the race we are usually trying to avoid involves
      * a group of CPUs rendezvousing in an IPI handler, where one cannot
      * join because it is spinning with IRQs disabled waiting to acquire a
      * lock held by another in the rendezvous group (the lock must be an
      * IRQ-unsafe lock since the CPU took the IPI after acquiring it, and
      * hence had IRQs enabled). This is a deadlock scenario.
-     *
+     * 
      * However, no CPU can be involved in rendezvous until it is online,
      * hence no such group can be waiting for this CPU until it is
      * visible in cpu_online_map. Hence such a deadlock is not possible.
@@ -378,9 +363,6 @@ void start_secondary(void *unused)
 
     tsx_init(); /* Needs microcode.  May change HLE/RTM feature bits. */
 
-    if ( xen_guest )
-        hypervisor_ap_setup();
-
     smp_callin();
 
     init_percpu_time();
@@ -397,6 +379,7 @@ void start_secondary(void *unused)
     spin_debug_enable();
     set_cpu_sibling_map(cpu);
     notify_cpu_starting(cpu);
+    wmb();
 
     /*
      * We need to hold vector_lock so there the set of online cpus
@@ -412,6 +395,7 @@ void start_secondary(void *unused)
     local_irq_enable();
     mtrr_ap_init();
 
+    wmb();
     startup_cpu_idle_loop();
 }
 
@@ -425,6 +409,10 @@ static int wakeup_secondary_cpu(int phys_apicid, unsigned long start_eip)
     /*
      * Be paranoid about clearing APIC errors.
      */
+    if ( !APIC_INTEGRATED(apic_version[phys_apicid]) )
+        return -ENODEV;
+
+    apic_read_around(APIC_SPIV);
     apic_write(APIC_ESR, 0);
     apic_read(APIC_ESR);
 
@@ -463,8 +451,8 @@ static int wakeup_secondary_cpu(int phys_apicid, unsigned long start_eip)
     else if ( tboot_in_measured_env() )
     {
         /*
-         * With tboot AP is actually spinning in a mini-guest before
-         * receiving INIT. Upon receiving INIT ipi, AP need time to VMExit,
+         * With tboot AP is actually spinning in a mini-guest before 
+         * receiving INIT. Upon receiving INIT ipi, AP need time to VMExit, 
          * update VMCS to tracking SIPIs and VMResume.
          *
          * While AP is in root mode handling the INIT the CPU will drop
@@ -478,6 +466,7 @@ static int wakeup_secondary_cpu(int phys_apicid, unsigned long start_eip)
     for ( i = 0; i < 2; i++ )
     {
         Dprintk("Sending STARTUP #%d.\n", i+1);
+        apic_read_around(APIC_SPIV);
         apic_write(APIC_ESR, 0);
         apic_read(APIC_ESR);
         Dprintk("After apic_write.\n");
@@ -510,6 +499,7 @@ static int wakeup_secondary_cpu(int phys_apicid, unsigned long start_eip)
         /* Due to the Pentium erratum 3AP. */
         if ( maxlvt > 3 )
         {
+            apic_read_around(APIC_SPIV);
             apic_write(APIC_ESR, 0);
         }
         accept_status = (apic_read(APIC_ESR) & 0xEF);
@@ -595,13 +585,13 @@ static int do_boot_cpu(int apicid, int cpu)
         }
         else if ( cpu_state == CPU_STATE_DEAD )
         {
-            smp_rmb();
+            rmb();
             rc = cpu_error;
         }
         else
         {
             boot_error = 1;
-            smp_mb();
+            mb();
             if ( bootsym(trampoline_cpu_started) == 0xA5 )
                 /* trampoline started but...? */
                 printk("Stuck ??\n");
@@ -619,7 +609,7 @@ static int do_boot_cpu(int apicid, int cpu)
 
     /* mark "stuck" area as not stuck */
     bootsym(trampoline_cpu_started) = 0;
-    smp_mb();
+    mb();
 
     smpboot_restore_warm_reset_vector();
 
@@ -636,7 +626,7 @@ unsigned long alloc_stub_page(unsigned int cpu, unsigned long *mfn)
     BUILD_BUG_ON(STUBS_PER_PAGE & (STUBS_PER_PAGE - 1));
 
     if ( *mfn )
-        pg = mfn_to_page(_mfn(*mfn));
+        pg = mfn_to_page(*mfn);
     else
     {
         nodeid_t node = cpu_to_node(cpu);
@@ -658,7 +648,7 @@ unsigned long alloc_stub_page(unsigned int cpu, unsigned long *mfn)
         stub_va = 0;
     }
     else if ( !*mfn )
-        *mfn = mfn_x(page_to_mfn(pg));
+        *mfn = page_to_mfn(pg);
 
     return stub_va;
 }
@@ -831,13 +821,7 @@ static int setup_cpu_root_pgt(unsigned int cpu)
     if ( !rc )
         rc = clone_mapping(idt_tables[cpu], rpt);
     if ( !rc )
-    {
-        struct tss_page *ptr = &per_cpu(tss_page, cpu);
-
-        BUILD_BUG_ON(sizeof(*ptr) != PAGE_SIZE);
-
-        rc = clone_mapping(&ptr->tss, rpt);
-    }
+        rc = clone_mapping(&per_cpu(init_tss, cpu), rpt);
     if ( !rc )
         rc = clone_mapping((void *)per_cpu(stubs.addr, cpu), rpt);
 
@@ -933,16 +917,14 @@ static void cpu_smpboot_free(unsigned int cpu, bool remove)
 
         FREE_CPUMASK_VAR(per_cpu(cpu_sibling_mask, cpu));
         FREE_CPUMASK_VAR(per_cpu(cpu_core_mask, cpu));
-        if ( per_cpu(scratch_cpumask, cpu) != &scratch_cpu0mask )
-            FREE_CPUMASK_VAR(per_cpu(scratch_cpumask, cpu));
     }
 
     cleanup_cpu_root_pgt(cpu);
 
     if ( per_cpu(stubs.addr, cpu) )
     {
-        mfn_t mfn = _mfn(per_cpu(stubs.mfn, cpu));
-        unsigned char *stub_page = map_domain_page(mfn);
+        unsigned long mfn = per_cpu(stubs.mfn, cpu);
+        unsigned char *stub_page = map_domain_page(_mfn(mfn));
         unsigned int i;
 
         memset(stub_page + STUB_BUF_CPU_OFFS(cpu), 0xcc, STUB_BUF_SIZE);
@@ -981,7 +963,6 @@ static int cpu_smpboot_alloc(unsigned int cpu)
     nodeid_t node = cpu_to_node(cpu);
     struct desc_struct *gdt;
     unsigned long stub_page;
-    int rc = -ENOMEM;
 
     if ( node != NUMA_NO_NODE )
         memflags = MEMF_node(node);
@@ -989,13 +970,13 @@ static int cpu_smpboot_alloc(unsigned int cpu)
     if ( stack_base[cpu] == NULL )
         stack_base[cpu] = alloc_xenheap_pages(STACK_ORDER, memflags);
     if ( stack_base[cpu] == NULL )
-        goto out;
+        goto oom;
     memguard_guard_stack(stack_base[cpu]);
 
     order = get_order_from_pages(NR_RESERVED_GDT_PAGES);
     gdt = per_cpu(gdt_table, cpu) ?: alloc_xenheap_pages(order, memflags);
     if ( gdt == NULL )
-        goto out;
+        goto oom;
     per_cpu(gdt_table, cpu) = gdt;
     memcpy(gdt, boot_cpu_gdt_table, NR_RESERVED_GDT_PAGES * PAGE_SIZE);
     BUILD_BUG_ON(NR_CPUS > 0x10000);
@@ -1003,7 +984,7 @@ static int cpu_smpboot_alloc(unsigned int cpu)
 
     per_cpu(compat_gdt_table, cpu) = gdt = alloc_xenheap_pages(order, memflags);
     if ( gdt == NULL )
-        goto out;
+        goto oom;
     memcpy(gdt, boot_cpu_compat_gdt_table, NR_RESERVED_GDT_PAGES * PAGE_SIZE);
     gdt[PER_CPU_GDT_ENTRY - FIRST_RESERVED_GDT_ENTRY].a = cpu;
 
@@ -1011,9 +992,12 @@ static int cpu_smpboot_alloc(unsigned int cpu)
     if ( idt_tables[cpu] == NULL )
         idt_tables[cpu] = alloc_xenheap_pages(order, memflags);
     if ( idt_tables[cpu] == NULL )
-        goto out;
+        goto oom;
     memcpy(idt_tables[cpu], idt_table, IDT_ENTRIES * sizeof(idt_entry_t));
-    disable_each_ist(idt_tables[cpu]);
+    set_ist(&idt_tables[cpu][TRAP_double_fault],  IST_NONE);
+    set_ist(&idt_tables[cpu][TRAP_nmi],           IST_NONE);
+    set_ist(&idt_tables[cpu][TRAP_machine_check], IST_NONE);
+    set_ist(&idt_tables[cpu][TRAP_debug],         IST_NONE);
 
     for ( stub_page = 0, i = cpu & ~(STUBS_PER_PAGE - 1);
           i < nr_cpu_ids && i <= (cpu | (STUBS_PER_PAGE - 1)); ++i )
@@ -1025,30 +1009,23 @@ static int cpu_smpboot_alloc(unsigned int cpu)
     BUG_ON(i == cpu);
     stub_page = alloc_stub_page(cpu, &per_cpu(stubs.mfn, cpu));
     if ( !stub_page )
-        goto out;
+        goto oom;
     per_cpu(stubs.addr, cpu) = stub_page + STUB_BUF_CPU_OFFS(cpu);
 
-    rc = setup_cpu_root_pgt(cpu);
-    if ( rc )
-        goto out;
-    rc = -ENOMEM;
+    if ( setup_cpu_root_pgt(cpu) )
+        goto oom;
 
     if ( secondary_socket_cpumask == NULL &&
          (secondary_socket_cpumask = xzalloc(cpumask_t)) == NULL )
-        goto out;
+        goto oom;
 
-    if ( !(cond_zalloc_cpumask_var(&per_cpu(cpu_sibling_mask, cpu)) &&
-           cond_zalloc_cpumask_var(&per_cpu(cpu_core_mask, cpu)) &&
-           cond_alloc_cpumask_var(&per_cpu(scratch_cpumask, cpu))) )
-        goto out;
+    if ( cond_zalloc_cpumask_var(&per_cpu(cpu_sibling_mask, cpu)) &&
+         cond_zalloc_cpumask_var(&per_cpu(cpu_core_mask, cpu)) )
+        return 0;
 
-    rc = 0;
-
- out:
-    if ( rc )
-        cpu_smpboot_free(cpu, true);
-
-    return rc;
+ oom:
+    cpu_smpboot_free(cpu, true);
+    return -ENOMEM;
 }
 
 static int cpu_smpboot_callback(
@@ -1078,7 +1055,7 @@ static struct notifier_block cpu_smpboot_nfb = {
     .notifier_call = cpu_smpboot_callback
 };
 
-void __init smp_prepare_cpus(void)
+void __init smp_prepare_cpus(unsigned int max_cpus)
 {
     int rc;
 
@@ -1152,7 +1129,8 @@ void __init smp_prepare_cpus(void)
     }
 
     /* If we couldn't find a local APIC, then get out of here now! */
-    if ( !cpu_has_apic )
+    if ( !APIC_INTEGRATED(apic_version[boot_cpu_physical_apicid])
+         || !cpu_has_apic )
     {
         printk(KERN_ERR "BIOS bug, local APIC #%d not detected!...\n",
                boot_cpu_physical_apicid);
@@ -1171,13 +1149,8 @@ void __init smp_prepare_cpus(void)
 
 void __init smp_prepare_boot_cpu(void)
 {
-    unsigned int cpu = smp_processor_id();
-
-    cpumask_set_cpu(cpu, &cpu_online_map);
-    cpumask_set_cpu(cpu, &cpu_present_map);
-#if NR_CPUS > 2 * BITS_PER_LONG
-    per_cpu(scratch_cpumask, cpu) = &scratch_cpu0mask;
-#endif
+    cpumask_set_cpu(smp_processor_id(), &cpu_online_map);
+    cpumask_set_cpu(smp_processor_id(), &cpu_present_map);
 
     get_cpu_info()->use_pv_cr3 = false;
     get_cpu_info()->xen_cr3 = 0;
@@ -1198,7 +1171,7 @@ remove_siblinginfo(int cpu)
         if ( cpumask_weight(per_cpu(cpu_sibling_mask, cpu)) == 1 )
             cpu_data[sibling].booted_cores--;
     }
-
+   
     for_each_cpu(sibling, per_cpu(cpu_sibling_mask, cpu))
         cpumask_clear_cpu(cpu, per_cpu(cpu_sibling_mask, sibling));
     cpumask_clear(per_cpu(cpu_sibling_mask, cpu));
@@ -1302,8 +1275,7 @@ int cpu_add(uint32_t apic_id, uint32_t acpi_id, uint32_t pxm)
     /* Physically added CPUs do not have synchronised TSC. */
     if ( boot_cpu_has(X86_FEATURE_TSC_RELIABLE) )
     {
-        static bool once_only;
-
+        static bool_t once_only;
         if ( !test_and_set_bool(once_only) )
             printk(XENLOG_WARNING
                    " ** New physical CPU %u may have skewed TSC and hence "

@@ -70,7 +70,7 @@ total-mem-bandwidth instead of cache-occupancy). E.g. after a `xl psr-cmt-attach
 
 Cache Allocation Technology (CAT) is a new feature available on Intel
 Broadwell and later server platforms that allows an OS or Hypervisor/VMM to
-partition cache allocation (i.e. L3/L2 cache) based on application priority or
+partition cache allocation (i.e. L3 cache) based on application priority or
 Class of Service (COS). Each COS is configured using capacity bitmasks (CBM)
 which represent cache capacity and indicate the degree of overlap and
 isolation between classes. System cache resource is divided into numbers of
@@ -107,7 +107,7 @@ System CAT information such as maximum COS and CBM length can be obtained by:
 
 The simplest way to change a domain's CBM from its default is running:
 
-`xl psr-cat-set  [OPTIONS] <domid> <cbm>`
+`xl psr-cat-cbm-set  [OPTIONS] <domid> <cbm>`
 
 where cbm is a number to represent the corresponding cache subset can be used.
 A cbm is valid only when:
@@ -119,19 +119,13 @@ A cbm is valid only when:
 In a multi-socket system, the same cbm will be set on each socket by default.
 Per socket cbm can be specified with the `--socket SOCKET` option.
 
-In different systems, the different cache level is supported, e.g. L3 cache or
-L2 cache. Per cache level cbm can be specified with the `--level LEVEL` option.
-
 Setting the CBM may not be successful if insufficient COS is available. In
 such case unused COS(es) may be freed by setting CBM of all related domains to
 its default value(all-ones).
 
 Per domain CBM settings can be shown by:
 
-`xl psr-cat-show [OPTIONS] <domid>`
-
-In different systems, the different cache level is supported, e.g. L3 cache or
-L2 cache. Per cache level cbm can be specified with the `--level LEVEL` option.
+`xl psr-cat-show`
 
 ## Code and Data Prioritization (CDP)
 
@@ -178,75 +172,13 @@ options is invalid.
 Example:
 
 Setting code CBM for a domain:
-`xl psr-cat-set -c <domid> <cbm>`
+`xl psr-cat-cbm-set -c <domid> <cbm>`
 
 Setting data CBM for a domain:
-`xl psr-cat-set -d <domid> <cbm>`
+`xl psr-cat-cbm-set -d <domid> <cbm>`
 
 Setting the same code and data CBM for a domain:
-`xl psr-cat-set <domid> <cbm>`
-
-## Memory Bandwidth Allocation (MBA)
-
-Memory Bandwidth Allocation (MBA) is a new feature available on Intel
-Skylake and later server platforms that allows an OS or Hypervisor/VMM to
-slow misbehaving apps/VMs by using a credit-based throttling mechanism. To
-enforce bandwidth on a specific domain, just set throttling value (THRTL)
-into Class of Service (COS). MBA provides two THRTL mode. One is linear mode
-and the other is non-linear mode.
-
-In the linear mode the input precision is defined as 100-(THRTL_MAX). Values
-not an even multiple of the precision (e.g., 12%) will be rounded down (e.g.,
-to 10% delay by the hardware).
-
-If linear values are not supported then input delay values are powers-of-two
-from zero to the THRTL_MAX value from CPUID. In this case any values not a power
-of two will be rounded down the next nearest power of two.
-
-For example, assuming a system with 2 domains:
-
- * A THRTL of 0x0 for every domain means each domain can access the whole cache
-   without any delay. This is the default.
-
- * Linear mode: Giving one domain a THRTL of 0xC and the other domain's 0 means
-   that the first domain gets 10% delay to access the cache and the other one
-   without any delay.
-
- * Non-linear mode: Giving one domain a THRTL of 0xC and the other domain's 0
-   means that the first domain gets 8% delay to access the cache and the other
-   one without any delay.
-
-For more detailed information please refer to Intel SDM chapter
-"Introduction to Memory Bandwidth Allocation".
-
-In Xen's implementation, THRTL can be configured with libxl/xl interfaces but
-COS is maintained in hypervisor only. The cache partition granularity is per
-domain, each domain has COS=0 assigned by default, the corresponding THRTL is
-0, which means all the cache resource can be accessed without delay.
-
-### xl interfaces
-
-System MBA information such as maximum COS and maximum THRTL can be obtained by:
-
-`xl psr-hwinfo --mba`
-
-The simplest way to change a domain's THRTL from its default is running:
-
-`xl psr-mba-set  [OPTIONS] <domid> <thrtl>`
-
-In a multi-socket system, the same thrtl will be set on each socket by default.
-Per socket thrtl can be specified with the `--socket SOCKET` option.
-
-Setting the THRTL may not be successful if insufficient COS is available. In
-such case unused COS(es) may be freed by setting THRTL of all related domains to
-its default value(0).
-
-Per domain THRTL settings can be shown by:
-
-`xl psr-mba-show [OPTIONS] <domid>`
-
-For linear mode, it shows the decimal value. For non-linear mode, it shows
-hexadecimal value.
+`xl psr-cat-cbm-set <domid> <cbm>`
 
 ## Reference
 

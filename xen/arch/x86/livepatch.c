@@ -10,45 +10,9 @@
 #include <xen/vmap.h>
 #include <xen/livepatch_elf.h>
 #include <xen/livepatch.h>
-#include <xen/sched.h>
 
 #include <asm/nmi.h>
 #include <asm/livepatch.h>
-
-static bool has_active_waitqueue(const struct vm_event_domain *ved)
-{
-    /* ved may be xzalloc()'d without INIT_LIST_HEAD() yet. */
-    return (ved && !list_head_is_null(&ved->wq.list) &&
-            !list_empty(&ved->wq.list));
-}
-
-/*
- * x86's implementation of waitqueue violates the livepatching safey principle
- * of having unwound every CPUs stack before modifying live content.
- *
- * Search through every domain and check that no vCPUs have an active
- * waitqueue.
- */
-int arch_livepatch_safety_check(void)
-{
-    struct domain *d;
-
-    for_each_domain ( d )
-    {
-        if ( has_active_waitqueue(d->vm_event_share) )
-            goto fail;
-        if ( has_active_waitqueue(d->vm_event_paging) )
-            goto fail;
-        if ( has_active_waitqueue(d->vm_event_monitor) )
-            goto fail;
-    }
-
-    return 0;
-
- fail:
-    printk(XENLOG_ERR LIVEPATCH "%pd found with active waitqueue\n", d);
-    return -EBUSY;
-}
 
 int arch_livepatch_quiesce(void)
 {
@@ -82,11 +46,7 @@ int arch_livepatch_verify_func(const struct livepatch_func *func)
     return 0;
 }
 
-/*
- * "noinline" to cause control flow change and thus invalidate I$ and
- * cause refetch after modification.
- */
-void noinline arch_livepatch_apply(struct livepatch_func *func)
+void arch_livepatch_apply(struct livepatch_func *func)
 {
     uint8_t *old_ptr;
     uint8_t insn[sizeof(func->opaque)];
@@ -115,21 +75,15 @@ void noinline arch_livepatch_apply(struct livepatch_func *func)
     memcpy(old_ptr, insn, len);
 }
 
-/*
- * "noinline" to cause control flow change and thus invalidate I$ and
- * cause refetch after modification.
- */
-void noinline arch_livepatch_revert(const struct livepatch_func *func)
+void arch_livepatch_revert(const struct livepatch_func *func)
 {
     memcpy(func->old_addr, func->opaque, livepatch_insn_len(func));
 }
 
-/*
- * "noinline" to cause control flow change and thus invalidate I$ and
- * cause refetch after modification.
- */
-void noinline arch_livepatch_post_action(void)
+/* Serialise the CPU pipeline. */
+void arch_livepatch_post_action(void)
 {
+    cpuid_eax(0);
 }
 
 static nmi_callback_t *saved_nmi_callback;
@@ -197,14 +151,16 @@ int arch_livepatch_perform_rela(struct livepatch_elf *elf,
                                 const struct livepatch_elf_sec *base,
                                 const struct livepatch_elf_sec *rela)
 {
-    unsigned int i;
+    const Elf_RelA *r;
+    unsigned int symndx, i;
+    uint64_t val;
+    uint8_t *dest;
 
     for ( i = 0; i < (rela->sec->sh_size / rela->sec->sh_entsize); i++ )
     {
-        const Elf_RelA *r = rela->data + i * rela->sec->sh_entsize;
-        unsigned int symndx = ELF64_R_SYM(r->r_info);
-        uint8_t *dest = base->load_addr + r->r_offset;
-        uint64_t val;
+        r = rela->data + i * rela->sec->sh_entsize;
+
+        symndx = ELF64_R_SYM(r->r_info);
 
         if ( symndx == STN_UNDEF )
         {
@@ -225,6 +181,7 @@ int arch_livepatch_perform_rela(struct livepatch_elf *elf,
             return -EINVAL;
         }
 
+        dest = base->load_addr + r->r_offset;
         val = r->r_addend + elf->sym[symndx].sym->st_value;
 
         switch ( ELF64_R_TYPE(r->r_info) )

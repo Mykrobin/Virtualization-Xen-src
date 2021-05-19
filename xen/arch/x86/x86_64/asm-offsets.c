@@ -5,6 +5,7 @@
  */
 #define COMPILE_OFFSETS
 
+#include <xen/config.h>
 #include <xen/perfc.h>
 #include <xen/sched.h>
 #include <xen/bitops.h>
@@ -12,7 +13,6 @@
 #include <asm/fixmap.h>
 #include <asm/hardirq.h>
 #include <xen/multiboot.h>
-#include <xen/multiboot2.h>
 
 #define DEFINE(_sym, _val)                                                 \
     asm volatile ("\n.ascii\"==>#define " #_sym " %0 /* " #_val " */<==\"" \
@@ -44,7 +44,7 @@ void __dummy__(void)
     OFFSET(UREGS_saved_upcall_mask, struct cpu_user_regs, saved_upcall_mask);
     OFFSET(UREGS_rip, struct cpu_user_regs, rip);
     OFFSET(UREGS_cs, struct cpu_user_regs, cs);
-    OFFSET(UREGS_eflags, struct cpu_user_regs, rflags);
+    OFFSET(UREGS_eflags, struct cpu_user_regs, eflags);
     OFFSET(UREGS_rsp, struct cpu_user_regs, rsp);
     OFFSET(UREGS_ss, struct cpu_user_regs, ss);
     OFFSET(UREGS_ds, struct cpu_user_regs, ds);
@@ -61,6 +61,7 @@ void __dummy__(void)
     OFFSET(VCPU_domain, struct vcpu, domain);
     OFFSET(VCPU_vcpu_info, struct vcpu, vcpu_info);
     OFFSET(VCPU_trap_bounce, struct vcpu, arch.pv_vcpu.trap_bounce);
+    OFFSET(VCPU_int80_bounce, struct vcpu, arch.pv_vcpu.int80_bounce);
     OFFSET(VCPU_thread_flags, struct vcpu, arch.flags);
     OFFSET(VCPU_event_addr, struct vcpu, arch.pv_vcpu.event_callback_eip);
     OFFSET(VCPU_event_sel, struct vcpu, arch.pv_vcpu.event_callback_cs);
@@ -88,7 +89,7 @@ void __dummy__(void)
     OFFSET(VCPU_iopl, struct vcpu, arch.pv_vcpu.iopl);
     OFFSET(VCPU_guest_context_flags, struct vcpu, arch.vgc_flags);
     OFFSET(VCPU_cr3, struct vcpu, arch.cr3);
-    OFFSET(VCPU_arch_msr, struct vcpu, arch.msr);
+    OFFSET(VCPU_arch_spec_ctrl, struct vcpu, arch.spec_ctrl);
     OFFSET(VCPU_nmi_pending, struct vcpu, nmi_pending);
     OFFSET(VCPU_mce_pending, struct vcpu, mce_pending);
     OFFSET(VCPU_nmi_old_mask, struct vcpu, nmi_state.old_mask);
@@ -102,6 +103,7 @@ void __dummy__(void)
 
     OFFSET(VCPU_svm_vmcb_pa, struct vcpu, arch.hvm_svm.vmcb_pa);
     OFFSET(VCPU_svm_vmcb, struct vcpu, arch.hvm_svm.vmcb);
+    OFFSET(VCPU_svm_vmcb_in_sync, struct vcpu, arch.hvm_svm.vmcb_in_sync);
     BLANK();
 
     OFFSET(VCPU_vmx_launched, struct vcpu, arch.hvm_vmx.launched);
@@ -117,6 +119,12 @@ void __dummy__(void)
     BLANK();
 
     OFFSET(DOMAIN_is_32bit_pv, struct domain, arch.is_32bit_pv);
+    BLANK();
+
+    OFFSET(VMCB_rax, struct vmcb_struct, rax);
+    OFFSET(VMCB_rip, struct vmcb_struct, rip);
+    OFFSET(VMCB_rsp, struct vmcb_struct, rsp);
+    OFFSET(VMCB_rflags, struct vmcb_struct, rflags);
     BLANK();
 
     OFFSET(VCPUINFO_upcall_pending, struct vcpu_info, evtchn_upcall_pending);
@@ -154,15 +162,12 @@ void __dummy__(void)
     OFFSET(TRAPBOUNCE_eip, struct trap_bounce, eip);
     BLANK();
 
-    OFFSET(VCPUMSR_spec_ctrl_raw, struct msr_vcpu_policy, spec_ctrl.raw);
-    BLANK();
-
 #ifdef CONFIG_PERF_COUNTERS
     DEFINE(ASM_PERFC_exceptions, PERFC_exceptions);
     BLANK();
 #endif
 
-    DEFINE(IRQSTAT_shift, ilog2(sizeof(irq_cpustat_t)));
+    DEFINE(IRQSTAT_shift, LOG_2(sizeof(irq_cpustat_t)));
     OFFSET(IRQSTAT_softirq_pending, irq_cpustat_t, __softirq_pending);
     BLANK();
 
@@ -172,20 +177,6 @@ void __dummy__(void)
     OFFSET(MB_flags, multiboot_info_t, flags);
     OFFSET(MB_cmdline, multiboot_info_t, cmdline);
     OFFSET(MB_mem_lower, multiboot_info_t, mem_lower);
-    BLANK();
-
-    DEFINE(MB2_fixed_sizeof, sizeof(multiboot2_fixed_t));
-    OFFSET(MB2_fixed_total_size, multiboot2_fixed_t, total_size);
-    OFFSET(MB2_tag_type, multiboot2_tag_t, type);
-    OFFSET(MB2_tag_size, multiboot2_tag_t, size);
-    OFFSET(MB2_load_base_addr, multiboot2_tag_load_base_addr_t, load_base_addr);
-    OFFSET(MB2_mem_lower, multiboot2_tag_basic_meminfo_t, mem_lower);
-    OFFSET(MB2_efi64_st, multiboot2_tag_efi64_t, pointer);
-    OFFSET(MB2_efi64_ih, multiboot2_tag_efi64_ih_t, pointer);
-    BLANK();
-
-    DEFINE(l2_identmap_sizeof, sizeof(l2_identmap));
-    BLANK();
 
     OFFSET(DOMAIN_vm_assist, struct domain, vm_assist);
 }

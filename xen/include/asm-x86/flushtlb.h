@@ -10,6 +10,7 @@
 #ifndef __FLUSHTLB_H__
 #define __FLUSHTLB_H__
 
+#include <xen/config.h>
 #include <xen/mm.h>
 #include <xen/percpu.h>
 #include <xen/smp.h>
@@ -63,14 +64,13 @@ static inline int NEED_FLUSH(u32 cpu_stamp, u32 lastuse_stamp)
  * Filter the given set of CPUs, removing those that definitely flushed their
  * TLB since @page_timestamp.
  */
-static inline void tlbflush_filter(cpumask_t *mask, uint32_t page_timestamp)
-{
-    unsigned int cpu;
-
-    for_each_cpu ( cpu, mask )
-        if ( !NEED_FLUSH(per_cpu(tlbflush_time, cpu), page_timestamp) )
-            __cpumask_clear_cpu(cpu, mask);
-}
+#define tlbflush_filter(mask, page_timestamp)                           \
+do {                                                                    \
+    unsigned int cpu;                                                   \
+    for_each_cpu ( cpu, &(mask) )                                       \
+        if ( !NEED_FLUSH(per_cpu(tlbflush_time, cpu), page_timestamp) ) \
+            cpumask_clear_cpu(cpu, &(mask));                            \
+} while ( 0 )
 
 void new_tlbflush_clock_period(void);
 
@@ -101,8 +101,6 @@ void switch_cr3_cr4(unsigned long cr3, unsigned long cr4);
 #define FLUSH_CACHE      0x400
  /* VA for the flush has a valid mapping */
 #define FLUSH_VA_VALID   0x800
- /* Flush CPU state */
-#define FLUSH_VCPU_STATE 0x1000
  /* Flush the per-cpu root page table */
 #define FLUSH_ROOT_PGTBL 0x2000
 
@@ -139,7 +137,7 @@ void flush_area_mask(const cpumask_t *, const void *va, unsigned int flags);
 #define flush_root_pgtbl_domain(d)                                       \
 {                                                                        \
     if ( is_pv_domain(d) && (d)->arch.pv_domain.xpti )                   \
-        flush_mask((d)->dirty_cpumask, FLUSH_ROOT_PGTBL);                \
+        flush_mask((d)->domain_dirty_cpumask, FLUSH_ROOT_PGTBL);         \
 }
 
 static inline void flush_page_to_ram(unsigned long mfn, bool sync_icache) {}

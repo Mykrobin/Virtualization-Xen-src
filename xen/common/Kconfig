@@ -32,9 +32,6 @@ config HAS_MEM_SHARING
 config HAS_PDX
 	bool
 
-config HAS_UBSAN
-	bool
-
 config HAS_KEXEC
 	bool
 
@@ -42,9 +39,6 @@ config HAS_GDBSX
 	bool
 
 config HAS_IOPORTS
-	bool
-
-config NEEDS_LIST_SORT
 	bool
 
 config HAS_BUILD_ID
@@ -194,8 +188,7 @@ menu "Schedulers"
 	visible if EXPERT = "y"
 
 config SCHED_CREDIT
-	bool "Credit scheduler support"
-	default y
+	def_bool y
 	---help---
 	  The traditional credit scheduler is a general purpose scheduler.
 
@@ -216,18 +209,10 @@ config SCHED_RTDS
 
 config SCHED_ARINC653
 	bool "ARINC653 scheduler support (EXPERIMENTAL)"
-	default DEBUG
+	default y
 	---help---
 	  The ARINC653 scheduler is a hard real-time scheduler for single
 	  cores, targeted for avionics, drones, and medical devices.
-
-config SCHED_NULL
-	bool "Null scheduler support (EXPERIMENTAL)"
-	default y
-	---help---
-	  The null scheduler is a static, zero overhead scheduler,
-	  for when there always are less vCPUs than pCPUs, typically
-	  in embedded or HPC scenarios.
 
 choice
 	prompt "Default Scheduler?"
@@ -241,8 +226,6 @@ choice
 		bool "RT Scheduler" if SCHED_RTDS
 	config SCHED_ARINC653_DEFAULT
 		bool "ARINC653 Scheduler" if SCHED_ARINC653
-	config SCHED_NULL_DEFAULT
-		bool "Null Scheduler" if SCHED_NULL
 endchoice
 
 config SCHED_DEFAULT
@@ -251,7 +234,6 @@ config SCHED_DEFAULT
 	default "credit2" if SCHED_CREDIT2_DEFAULT
 	default "rtds" if SCHED_RTDS_DEFAULT
 	default "arinc653" if SCHED_ARINC653_DEFAULT
-	default "null" if SCHED_NULL_DEFAULT
 	default "credit"
 
 endmenu
@@ -260,8 +242,8 @@ config CRYPTO
 	bool
 
 config LIVEPATCH
-	bool "Live patching support"
-	default X86
+	bool "Live patching support (TECH PREVIEW)"
+	default n
 	depends on HAS_BUILD_ID = "y"
 	---help---
 	  Allows a running Xen hypervisor to be dynamically patched using
@@ -282,35 +264,4 @@ config FAST_SYMBOL_LOOKUP
 	  The only user of this is Live patching.
 
 	  If unsure, say Y.
-
-config SUPPRESS_DUPLICATE_SYMBOL_WARNINGS
-	bool "Suppress duplicate symbol warnings" if !LIVEPATCH
-	default y if !LIVEPATCH
-	---help---
-	  Multiple symbols with the same name aren't generally a problem
-	  unless Live patching is to be used, so these warnings can be
-	  suppressed by enabling this option.  Certain other options (known
-	  to produce many duplicate names) may select this to avoid the
-	  build becoming overly verbose.
-
-config CMDLINE
-	string "Built-in hypervisor command string" if EXPERT = "y"
-	default ""
-	---help---
-	  Enter arguments here that should be compiled into the hypervisor
-	  image and used at boot time. When the system boots, this string
-	  will be parsed prior to the bootloader command line. So if a
-	  non-cumulative option is set both in this string and in the
-	  bootloader command line, only the latter one will take effect.
-
-config CMDLINE_OVERRIDE
-	bool "Built-in command line overrides bootloader arguments"
-	default n
-	depends on CMDLINE != ""
-	---help---
-	  Set this option to 'Y' to have the hypervisor ignore the bootloader
-	  command line, and use ONLY the built-in command line.
-
-	  This is used to work around broken bootloaders. This should
-	  be set to 'N' under normal conditions.
 endmenu

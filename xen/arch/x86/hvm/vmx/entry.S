@@ -16,8 +16,7 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-        .file "vmx/entry.S"
-
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/softirq.h>
 #include <asm/types.h>
@@ -48,7 +47,7 @@ ENTRY(vmx_asm_vmexit_handler)
             xor %edx, %edx
             wrmsr
         .endm
-        ALTERNATIVE "", restore_lbr, X86_FEATURE_XEN_LBR
+        ALTERNATIVE __stringify(ASM_NOP14), restore_lbr, X86_FEATURE_XEN_LBR
 
         mov  %rsp,%rdi
         call vmx_vmexit_handler
@@ -78,11 +77,8 @@ UNLIKELY_END(realmode)
 
         mov  %rsp,%rdi
         call vmx_vmenter_helper
-        test %al, %al
-        jz .Lvmx_vmentry_restart
 
-        mov VCPU_arch_msr(%rbx), %rax
-        mov VCPUMSR_spec_ctrl_raw(%rax), %eax
+        mov VCPU_arch_spec_ctrl(%rbx), %eax
 
         /* WARNING! `ret`, `call *`, `jmp *` not safe beyond this point. */
         SPEC_CTRL_EXIT_TO_HVM   /* Req: a=spec_ctrl %rsp=regs/cpuinfo, Clob: cd */
@@ -132,10 +128,6 @@ UNLIKELY_END(realmode)
 
 ENTRY(vmx_asm_do_vmentry)
         GET_CURRENT(bx)
-        jmp  .Lvmx_do_vmentry
-
-.Lvmx_vmentry_restart:
-        sti
         jmp  .Lvmx_do_vmentry
 
 .Lvmx_goto_emulator:

@@ -225,6 +225,10 @@ XEN_BUILD_TIME=hh:mm:ss
 SMBIOS_REL_DATE=mm/dd/yyyy
 VGABIOS_REL_DATE="dd Mon yyyy"
 
+The following variables can be used to tweak some aspects of the
+hypervisor build.
+lto=y
+
 During tools build external repos will be cloned into the source tree.
 This variable can be used to point to a different git binary to be used.
 GIT=
@@ -246,10 +250,6 @@ pass RPM_OPT_FLAGS.
 EXTRA_CFLAGS_XEN_TOOLS=
 EXTRA_CFLAGS_QEMU_TRADITIONAL=
 EXTRA_CFLAGS_QEMU_XEN=
-
-Additional CFLAGS may be supplied to the build of the hypervisor by
-using this variable.
-EXTRA_CFLAGS_XEN_CORE=
 
 This variable can be used to use DIR/include and DIR/lib during build.
 This is the same as PREPEND_LIB and PREPEND_INCLUDES. APPEND_LIB and
@@ -279,6 +279,9 @@ This option is enabled by default if XSM is enabled and the compiler
 (checkpolicy) is found.  The location of this executable can be set
 using the environment variable.
 CHECKPOLICY=
+
+Do a build for coverage.
+coverage=y
 
 Use clang instead of GCC.
 clang=y

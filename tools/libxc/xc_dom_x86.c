@@ -35,8 +35,6 @@
 #include <xen/arch-x86/hvm/start_info.h>
 #include <xen/io/protocols.h>
 
-#include <xen-tools/libs.h>
-
 #include "xg_private.h"
 #include "xc_dom.h"
 #include "xenctrl.h"
@@ -75,8 +73,8 @@
 #define round_up(addr, mask)     ((addr) | (mask))
 #define round_pg_up(addr)  (((addr) + PAGE_SIZE_X86 - 1) & ~(PAGE_SIZE_X86 - 1))
 
-#define HVMLOADER_MODULE_MAX_COUNT 2
-#define HVMLOADER_MODULE_CMDLINE_SIZE MAX_GUEST_CMDLINE
+#define HVMLOADER_MODULE_MAX_COUNT 1
+#define HVMLOADER_MODULE_NAME_SIZE 10
 
 struct xc_dom_params {
     unsigned levels;
@@ -378,7 +376,7 @@ static x86_pgentry_t get_pg_prot_x86(struct xc_dom_image *dom, int l,
     unsigned m;
 
     prot = domx86->params->lvl_prot[l];
-    if ( l > 0 )
+    if ( l > 0 || dom->pvh_enabled )
         return prot;
 
     for ( m = 0; m < domx86->n_mappings; m++ )
@@ -539,24 +537,24 @@ static int alloc_p2m_list_x86_64(struct xc_dom_image *dom)
 
 /* ------------------------------------------------------------------------ */
 
-static int alloc_magic_pages_pv(struct xc_dom_image *dom)
+static int alloc_magic_pages(struct xc_dom_image *dom)
 {
+    /* allocate special pages */
     dom->start_info_pfn = xc_dom_alloc_page(dom, "start info");
     if ( dom->start_info_pfn == INVALID_PFN )
         return -1;
-
     dom->xenstore_pfn = xc_dom_alloc_page(dom, "xenstore");
     if ( dom->xenstore_pfn == INVALID_PFN )
         return -1;
-    xc_clear_domain_page(dom->xch, dom->guest_domid,
-                         xc_dom_p2m(dom, dom->xenstore_pfn));
-
     dom->console_pfn = xc_dom_alloc_page(dom, "console");
     if ( dom->console_pfn == INVALID_PFN )
         return -1;
-    xc_clear_domain_page(dom->xch, dom->guest_domid,
-                         xc_dom_p2m(dom, dom->console_pfn));
-
+    if ( xc_dom_feature_translated(dom) )
+    {
+        dom->shared_info_pfn = xc_dom_alloc_page(dom, "shared info");
+        if ( dom->shared_info_pfn == INVALID_PFN )
+            return -1;
+    }
     dom->alloc_bootstack = 1;
 
     return 0;
@@ -632,15 +630,6 @@ static int alloc_magic_pages_hvm(struct xc_dom_image *dom)
     xc_hvm_param_set(xch, domid, HVM_PARAM_SHARING_RING_PFN,
                      special_pfn(SPECIALPAGE_SHARING));
 
-    start_info_size +=
-        sizeof(struct hvm_modlist_entry) * HVMLOADER_MODULE_MAX_COUNT;
-
-    start_info_size +=
-        HVMLOADER_MODULE_CMDLINE_SIZE * HVMLOADER_MODULE_MAX_COUNT;
-
-    start_info_size +=
-        dom->e820_entries * sizeof(struct hvm_memmap_table_entry);
-
     if ( !dom->device_model )
     {
         if ( dom->cmdline )
@@ -648,9 +637,22 @@ static int alloc_magic_pages_hvm(struct xc_dom_image *dom)
             dom->cmdline_size = ROUNDUP(strlen(dom->cmdline) + 1, 8);
             start_info_size += dom->cmdline_size;
         }
+
+        /* Limited to one module. */
+        if ( dom->ramdisk_blob )
+            start_info_size += sizeof(struct hvm_modlist_entry);
     }
     else
     {
+        start_info_size +=
+            sizeof(struct hvm_modlist_entry) * HVMLOADER_MODULE_MAX_COUNT;
+        /*
+         * Add extra space to write modules name.
+         * The HVMLOADER_MODULE_NAME_SIZE accounts for NUL byte.
+         */
+        start_info_size +=
+            HVMLOADER_MODULE_NAME_SIZE * HVMLOADER_MODULE_MAX_COUNT;
+
         /*
          * Allocate and clear additional ioreq server pages. The default
          * server will use the IOREQ and BUFIOREQ special pages above.
@@ -701,11 +703,7 @@ static int alloc_magic_pages_hvm(struct xc_dom_image *dom)
                      special_pfn(SPECIALPAGE_IDENT_PT) << PAGE_SHIFT);
 
     dom->console_pfn = special_pfn(SPECIALPAGE_CONSOLE);
-    xc_clear_domain_page(dom->xch, dom->guest_domid, dom->console_pfn);
-
     dom->xenstore_pfn = special_pfn(SPECIALPAGE_XENSTORE);
-    xc_clear_domain_page(dom->xch, dom->guest_domid, dom->xenstore_pfn);
-
     dom->parms.virt_hypercall = -1;
 
     rc = 0;
@@ -725,7 +723,8 @@ static int start_info_x86_32(struct xc_dom_image *dom)
     start_info_x86_32_t *start_info =
         xc_dom_pfn_to_ptr(dom, dom->start_info_pfn, 1);
     xen_pfn_t shinfo =
-        xc_dom_translated(dom) ? dom->shared_info_pfn : dom->shared_info_mfn;
+        xc_dom_feature_translated(dom) ? dom->shared_info_pfn : dom->
+        shared_info_mfn;
 
     DOMPRINTF_CALLED(dom->xch);
 
@@ -750,7 +749,7 @@ static int start_info_x86_32(struct xc_dom_image *dom)
     start_info->console.domU.mfn = xc_dom_p2m(dom, dom->console_pfn);
     start_info->console.domU.evtchn = dom->console_evtchn;
 
-    if ( dom->modules[0].blob )
+    if ( dom->ramdisk_blob )
     {
         start_info->mod_start = dom->initrd_start;
         start_info->mod_len = dom->initrd_len;
@@ -771,7 +770,8 @@ static int start_info_x86_64(struct xc_dom_image *dom)
     start_info_x86_64_t *start_info =
         xc_dom_pfn_to_ptr(dom, dom->start_info_pfn, 1);
     xen_pfn_t shinfo =
-        xc_dom_translated(dom) ? dom->shared_info_pfn : dom->shared_info_mfn;
+        xc_dom_feature_translated(dom) ? dom->shared_info_pfn : dom->
+        shared_info_mfn;
 
     DOMPRINTF_CALLED(dom->xch);
 
@@ -801,7 +801,7 @@ static int start_info_x86_64(struct xc_dom_image *dom)
     start_info->console.domU.mfn = xc_dom_p2m(dom, dom->console_pfn);
     start_info->console.domU.evtchn = dom->console_evtchn;
 
-    if ( dom->modules[0].blob )
+    if ( dom->ramdisk_blob )
     {
         start_info->mod_start = dom->initrd_start;
         start_info->mod_len = dom->initrd_len;
@@ -876,15 +876,18 @@ static int vcpu_x86_32(struct xc_dom_image *dom)
     DOMPRINTF("%s: cr3: pfn 0x%" PRIpfn " mfn 0x%" PRIpfn "",
               __FUNCTION__, dom->pgtables_seg.pfn, cr3_pfn);
 
-    ctxt->user_regs.ds = FLAT_KERNEL_DS_X86_32;
-    ctxt->user_regs.es = FLAT_KERNEL_DS_X86_32;
-    ctxt->user_regs.fs = FLAT_KERNEL_DS_X86_32;
-    ctxt->user_regs.gs = FLAT_KERNEL_DS_X86_32;
-    ctxt->user_regs.ss = FLAT_KERNEL_SS_X86_32;
-    ctxt->user_regs.cs = FLAT_KERNEL_CS_X86_32;
+    if ( !dom->pvh_enabled )
+    {
+        ctxt->user_regs.ds = FLAT_KERNEL_DS_X86_32;
+        ctxt->user_regs.es = FLAT_KERNEL_DS_X86_32;
+        ctxt->user_regs.fs = FLAT_KERNEL_DS_X86_32;
+        ctxt->user_regs.gs = FLAT_KERNEL_DS_X86_32;
+        ctxt->user_regs.ss = FLAT_KERNEL_SS_X86_32;
+        ctxt->user_regs.cs = FLAT_KERNEL_CS_X86_32;
 
-    ctxt->kernel_ss = ctxt->user_regs.ss;
-    ctxt->kernel_sp = ctxt->user_regs.esp;
+        ctxt->kernel_ss = ctxt->user_regs.ss;
+        ctxt->kernel_sp = ctxt->user_regs.esp;
+    }
 
     rc = xc_vcpu_setcontext(dom->xch, dom->guest_domid, 0, &any_ctx);
     if ( rc != 0 )
@@ -922,15 +925,18 @@ static int vcpu_x86_64(struct xc_dom_image *dom)
     DOMPRINTF("%s: cr3: pfn 0x%" PRIpfn " mfn 0x%" PRIpfn "",
               __FUNCTION__, dom->pgtables_seg.pfn, cr3_pfn);
 
-    ctxt->user_regs.ds = FLAT_KERNEL_DS_X86_64;
-    ctxt->user_regs.es = FLAT_KERNEL_DS_X86_64;
-    ctxt->user_regs.fs = FLAT_KERNEL_DS_X86_64;
-    ctxt->user_regs.gs = FLAT_KERNEL_DS_X86_64;
-    ctxt->user_regs.ss = FLAT_KERNEL_SS_X86_64;
-    ctxt->user_regs.cs = FLAT_KERNEL_CS_X86_64;
+    if ( !dom->pvh_enabled )
+    {
+        ctxt->user_regs.ds = FLAT_KERNEL_DS_X86_64;
+        ctxt->user_regs.es = FLAT_KERNEL_DS_X86_64;
+        ctxt->user_regs.fs = FLAT_KERNEL_DS_X86_64;
+        ctxt->user_regs.gs = FLAT_KERNEL_DS_X86_64;
+        ctxt->user_regs.ss = FLAT_KERNEL_SS_X86_64;
+        ctxt->user_regs.cs = FLAT_KERNEL_CS_X86_64;
 
-    ctxt->kernel_ss = ctxt->user_regs.ss;
-    ctxt->kernel_sp = ctxt->user_regs.esp;
+        ctxt->kernel_ss = ctxt->user_regs.ss;
+        ctxt->kernel_sp = ctxt->user_regs.esp;
+    }
 
     rc = xc_vcpu_setcontext(dom->xch, dom->guest_domid, 0, &any_ctx);
     if ( rc != 0 )
@@ -1044,7 +1050,7 @@ static int vcpu_hvm(struct xc_dom_image *dom)
 
 /* ------------------------------------------------------------------------ */
 
-static int x86_compat(xc_interface *xch, uint32_t domid, char *guest_type)
+static int x86_compat(xc_interface *xch, domid_t domid, char *guest_type)
 {
     static const struct {
         char           *guest;
@@ -1075,6 +1081,29 @@ static int x86_compat(xc_interface *xch, uint32_t domid, char *guest_type)
     return rc;
 }
 
+static int x86_shadow(xc_interface *xch, domid_t domid)
+{
+    int rc, mode;
+
+    DOMPRINTF_CALLED(xch);
+
+    mode = XEN_DOMCTL_SHADOW_ENABLE_REFCOUNT |
+        XEN_DOMCTL_SHADOW_ENABLE_TRANSLATE;
+
+    rc = xc_shadow_control(xch, domid,
+                           XEN_DOMCTL_SHADOW_OP_ENABLE,
+                           NULL, 0, NULL, mode, NULL);
+    if ( rc != 0 )
+    {
+        xc_dom_panic(xch, XC_INTERNAL_ERROR,
+                     "%s: SHADOW_OP_ENABLE (mode=0x%x) failed (rc=%d)",
+                     __FUNCTION__, mode, rc);
+        return rc;
+    }
+    xc_dom_printf(xch, "%s: shadow enabled (mode=0x%x)", __FUNCTION__, mode);
+    return rc;
+}
+
 static int meminit_pv(struct xc_dom_image *dom)
 {
     int rc;
@@ -1089,6 +1118,13 @@ static int meminit_pv(struct xc_dom_image *dom)
     rc = x86_compat(dom->xch, dom->guest_domid, dom->guest_type);
     if ( rc )
         return rc;
+    if ( xc_dom_feature_translated(dom) && !dom->pvh_enabled )
+    {
+        dom->shadow_enabled = 1;
+        rc = x86_shadow(dom->xch, dom->guest_domid);
+        if ( rc )
+            return rc;
+    }
 
     /* try to claim pages for early warning of insufficient memory avail */
     if ( dom->claim_enabled )
@@ -1247,7 +1283,7 @@ static int meminit_hvm(struct xc_dom_image *dom)
     unsigned long target_pages = dom->target_pages;
     unsigned long cur_pages, cur_pfn;
     int rc;
-    unsigned long stat_normal_pages = 0, stat_2mb_pages = 0,
+    unsigned long stat_normal_pages = 0, stat_2mb_pages = 0, 
         stat_1gb_pages = 0;
     unsigned int memflags = 0;
     int claim_enabled = dom->claim_enabled;
@@ -1313,8 +1349,6 @@ static int meminit_hvm(struct xc_dom_image *dom)
     p2m_size = 0;
     for ( i = 0; i < nr_vmemranges; i++ )
     {
-        DOMPRINTF("range: start=0x%"PRIx64" end=0x%"PRIx64, vmemranges[i].start, vmemranges[i].end);
-
         total_pages += ((vmemranges[i].end - vmemranges[i].start)
                         >> PAGE_SHIFT);
         p2m_size = p2m_size > (vmemranges[i].end >> PAGE_SHIFT) ?
@@ -1560,14 +1594,40 @@ static int meminit_hvm(struct xc_dom_image *dom)
 
 static int bootearly(struct xc_dom_image *dom)
 {
-    if ( dom->container_type == XC_DOM_PV_CONTAINER &&
-         elf_xen_feature_get(XENFEAT_auto_translated_physmap, dom->f_active) )
-    {
-        DOMPRINTF("PV Autotranslate guests no longer supported");
-        errno = EOPNOTSUPP;
-        return -1;
-    }
+    DOMPRINTF("%s: doing nothing", __FUNCTION__);
+    return 0;
+}
 
+/*
+ * Map grant table frames into guest physmap. PVH manages grant during boot
+ * via HVM mechanisms.
+ */
+static int map_grant_table_frames(struct xc_dom_image *dom)
+{
+    int i, rc;
+
+    if ( dom->pvh_enabled )
+        return 0;
+
+    for ( i = 0; ; i++ )
+    {
+        rc = xc_domain_add_to_physmap(dom->xch, dom->guest_domid,
+                                      XENMAPSPACE_grant_table,
+                                      i, dom->p2m_size + i);
+        if ( rc != 0 )
+        {
+            if ( (i > 0) && (errno == EINVAL) )
+            {
+                DOMPRINTF("%s: %d grant tables mapped", __FUNCTION__, i);
+                break;
+            }
+            xc_dom_panic(dom->xch, XC_INTERNAL_ERROR,
+                         "%s: mapping grant tables failed " "(pfn=0x%" PRIpfn
+                         ", rc=%d, errno=%d)", __FUNCTION__, dom->p2m_size + i,
+                         rc, errno);
+            return rc;
+        }
+    }
     return 0;
 }
 
@@ -1590,20 +1650,47 @@ static int bootlate_pv(struct xc_dom_image *dom)
         if ( !strcmp(types[i].guest, dom->guest_type) )
             pgd_type = types[i].pgd_type;
 
-    /* Drop references to all initial page tables before pinning. */
-    xc_dom_unmap_one(dom, dom->pgtables_seg.pfn);
-    xc_dom_unmap_one(dom, dom->p2m_seg.pfn);
-    rc = pin_table(dom->xch, pgd_type,
-                   xc_dom_p2m(dom, dom->pgtables_seg.pfn),
-                   dom->guest_domid);
-    if ( rc != 0 )
+    if ( !xc_dom_feature_translated(dom) )
     {
-        xc_dom_panic(dom->xch, XC_INTERNAL_ERROR,
-                     "%s: pin_table failed (pfn 0x%" PRIpfn ", rc=%d)",
-                     __FUNCTION__, dom->pgtables_seg.pfn, rc);
-        return rc;
+        /* paravirtualized guest */
+
+        /* Drop references to all initial page tables before pinning. */
+        xc_dom_unmap_one(dom, dom->pgtables_seg.pfn);
+        xc_dom_unmap_one(dom, dom->p2m_seg.pfn);
+        rc = pin_table(dom->xch, pgd_type,
+                       xc_dom_p2m(dom, dom->pgtables_seg.pfn),
+                       dom->guest_domid);
+        if ( rc != 0 )
+        {
+            xc_dom_panic(dom->xch, XC_INTERNAL_ERROR,
+                         "%s: pin_table failed (pfn 0x%" PRIpfn ", rc=%d)",
+                         __FUNCTION__, dom->pgtables_seg.pfn, rc);
+            return rc;
+        }
+        shinfo = dom->shared_info_mfn;
     }
-    shinfo = dom->shared_info_mfn;
+    else
+    {
+        /* paravirtualized guest with auto-translation */
+
+        /* Map shared info frame into guest physmap. */
+        rc = xc_domain_add_to_physmap(dom->xch, dom->guest_domid,
+                                      XENMAPSPACE_shared_info,
+                                      0, dom->shared_info_pfn);
+        if ( rc != 0 )
+        {
+            xc_dom_panic(dom->xch, XC_INTERNAL_ERROR, "%s: mapping"
+                         " shared_info failed (pfn=0x%" PRIpfn ", rc=%d, errno: %d)",
+                         __FUNCTION__, dom->shared_info_pfn, rc, errno);
+            return rc;
+        }
+
+        rc = map_grant_table_frames(dom);
+        if ( rc != 0 )
+            return rc;
+
+        shinfo = dom->shared_info_pfn;
+    }
 
     /* setup shared_info page */
     DOMPRINTF("%s: shared_info: pfn 0x%" PRIpfn ", mfn 0x%" PRIpfn "",
@@ -1645,7 +1732,7 @@ static int alloc_pgtables_hvm(struct xc_dom_image *dom)
  */
 static void add_module_to_list(struct xc_dom_image *dom,
                                struct xc_hvm_firmware_module *module,
-                               const char *cmdline,
+                               const char *name,
                                struct hvm_modlist_entry *modlist,
                                struct hvm_start_info *start_info)
 {
@@ -1660,19 +1747,16 @@ static void add_module_to_list(struct xc_dom_image *dom,
         return;
 
     assert(start_info->nr_modules < HVMLOADER_MODULE_MAX_COUNT);
+    assert(strnlen(name, HVMLOADER_MODULE_NAME_SIZE)
+           < HVMLOADER_MODULE_NAME_SIZE);
 
     modlist[index].paddr = module->guest_addr_out;
     modlist[index].size = module->length;
 
-    if ( cmdline )
-    {
-        assert(strnlen(cmdline, HVMLOADER_MODULE_CMDLINE_SIZE)
-               < HVMLOADER_MODULE_CMDLINE_SIZE);
-        strncpy(modules_cmdline_start + HVMLOADER_MODULE_CMDLINE_SIZE * index,
-                cmdline, HVMLOADER_MODULE_CMDLINE_SIZE);
-        modlist[index].cmdline_paddr = modules_cmdline_paddr +
-                                       HVMLOADER_MODULE_CMDLINE_SIZE * index;
-    }
+    strncpy(modules_cmdline_start + HVMLOADER_MODULE_NAME_SIZE * index,
+            name, HVMLOADER_MODULE_NAME_SIZE);
+    modlist[index].cmdline_paddr =
+        modules_cmdline_paddr + HVMLOADER_MODULE_NAME_SIZE * index;
 
     start_info->nr_modules++;
 }
@@ -1682,13 +1766,21 @@ static int bootlate_hvm(struct xc_dom_image *dom)
     uint32_t domid = dom->guest_domid;
     xc_interface *xch = dom->xch;
     struct hvm_start_info *start_info;
-    size_t modsize;
+    size_t start_info_size;
     struct hvm_modlist_entry *modlist;
-    struct hvm_memmap_table_entry *memmap;
-    unsigned int i;
 
-    start_info = xc_map_foreign_range(xch, domid, dom->start_info_seg.pages <<
-                                                  XC_DOM_PAGE_SHIFT(dom),
+    start_info_size = sizeof(*start_info) + dom->cmdline_size;
+    if ( dom->ramdisk_blob )
+        start_info_size += sizeof(struct hvm_modlist_entry);
+
+    if ( start_info_size >
+         dom->start_info_seg.pages << XC_DOM_PAGE_SHIFT(dom) )
+    {
+        DOMPRINTF("Trying to map beyond start_info_seg");
+        return -1;
+    }
+
+    start_info = xc_map_foreign_range(xch, domid, start_info_size,
                                       PROT_READ | PROT_WRITE,
                                       dom->start_info_seg.pfn);
     if ( start_info == NULL )
@@ -1710,18 +1802,12 @@ static int bootlate_hvm(struct xc_dom_image *dom)
                                 ((uintptr_t)cmdline - (uintptr_t)start_info);
         }
 
-        for ( i = 0; i < dom->num_modules; i++ )
+        if ( dom->ramdisk_blob )
         {
-            struct xc_hvm_firmware_module mod;
 
-            DOMPRINTF("Adding module %u", i);
-            mod.guest_addr_out =
-                dom->modules[i].seg.vstart - dom->parms.virt_base;
-            mod.length =
-                dom->modules[i].seg.vend - dom->modules[i].seg.vstart;
-
-            add_module_to_list(dom, &mod, dom->modules[i].cmdline,
-                               modlist, start_info);
+            modlist[0].paddr = dom->ramdisk_seg.vstart - dom->parms.virt_base;
+            modlist[0].size = dom->ramdisk_seg.vend - dom->ramdisk_seg.vstart;
+            start_info->nr_modules = 1;
         }
 
         /* ACPI module 0 is the RSDP */
@@ -1739,31 +1825,9 @@ static int bootlate_hvm(struct xc_dom_image *dom)
                             ((uintptr_t)modlist - (uintptr_t)start_info);
     }
 
-    /*
-     * Check a couple of XEN_HVM_MEMMAP_TYPEs to verify consistency with
-     * their corresponding e820 numerical values.
-     */
-    BUILD_BUG_ON(XEN_HVM_MEMMAP_TYPE_RAM != E820_RAM);
-    BUILD_BUG_ON(XEN_HVM_MEMMAP_TYPE_ACPI != E820_ACPI);
-
-    modsize = HVMLOADER_MODULE_MAX_COUNT *
-        (sizeof(*modlist) + HVMLOADER_MODULE_CMDLINE_SIZE);
-    memmap = (void*)modlist + modsize;
-
-    start_info->memmap_paddr = (dom->start_info_seg.pfn << PAGE_SHIFT) +
-        ((uintptr_t)modlist - (uintptr_t)start_info) + modsize;
-    start_info->memmap_entries = dom->e820_entries;
-    for ( i = 0; i < dom->e820_entries; i++ )
-    {
-        memmap[i].addr = dom->e820[i].addr;
-        memmap[i].size = dom->e820[i].size;
-        memmap[i].type = dom->e820[i].type;
-    }
-
     start_info->magic = XEN_HVM_START_MAGIC_VALUE;
-    start_info->version = 1;
 
-    munmap(start_info, dom->start_info_seg.pages << XC_DOM_PAGE_SHIFT(dom));
+    munmap(start_info, start_info_size);
 
     if ( dom->device_model )
     {
@@ -1780,10 +1844,13 @@ static int bootlate_hvm(struct xc_dom_image *dom)
     return 0;
 }
 
-bool xc_dom_translated(const struct xc_dom_image *dom)
+int xc_dom_feature_translated(struct xc_dom_image *dom)
 {
-    /* HVM guests are translated.  PV guests are not. */
-    return dom->container_type == XC_DOM_HVM_CONTAINER;
+    /* Guests running inside HVM containers are always auto-translated. */
+    if ( dom->container_type == XC_DOM_HVM_CONTAINER )
+        return 1;
+
+    return elf_xen_feature_get(XENFEAT_auto_translated_physmap, dom->f_active);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1795,7 +1862,7 @@ static struct xc_dom_arch xc_dom_32_pae = {
     .sizeof_pfn = 4,
     .p2m_base_supported = 0,
     .arch_private_size = sizeof(struct xc_dom_image_x86),
-    .alloc_magic_pages = alloc_magic_pages_pv,
+    .alloc_magic_pages = alloc_magic_pages,
     .alloc_pgtables = alloc_pgtables_x86_32_pae,
     .alloc_p2m_list = alloc_p2m_list_x86_32,
     .setup_pgtables = setup_pgtables_x86_32_pae,
@@ -1814,7 +1881,7 @@ static struct xc_dom_arch xc_dom_64 = {
     .sizeof_pfn = 8,
     .p2m_base_supported = 1,
     .arch_private_size = sizeof(struct xc_dom_image_x86),
-    .alloc_magic_pages = alloc_magic_pages_pv,
+    .alloc_magic_pages = alloc_magic_pages,
     .alloc_pgtables = alloc_pgtables_x86_64,
     .alloc_p2m_list = alloc_p2m_list_x86_64,
     .setup_pgtables = setup_pgtables_x86_64,

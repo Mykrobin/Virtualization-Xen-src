@@ -31,15 +31,6 @@ install: all
 	$(INSTALL_DATA) fsimage_plugin.h $(DESTDIR)$(includedir)
 	$(INSTALL_DATA) fsimage_grub.h $(DESTDIR)$(includedir)
 
-.PHONY: uninstall
-uninstall:
-	rm -f $(DESTDIR)$(includedir)/fsimage_grub.h
-	rm -f $(DESTDIR)$(includedir)/fsimage_plugin.h
-	rm -f $(DESTDIR)$(includedir)/fsimage.h
-	rm -f $(DESTDIR)$(libdir)/libfsimage.so
-	rm -f $(DESTDIR)$(libdir)/libfsimage.so.$(MAJOR)
-	rm -f $(DESTDIR)$(libdir)/libfsimage.so.$(MAJOR).$(MINOR)
-
 clean distclean::
 	rm -f $(LIB)
 
@@ -51,5 +42,5 @@ libfsimage.so.$(MAJOR): libfsimage.so.$(MAJOR).$(MINOR)
 libfsimage.so.$(MAJOR).$(MINOR): $(PIC_OBJS)
 	$(CC) $(LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libfsimage.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $^ $(PTHREAD_LIBS) $(APPEND_LDFLAGS)
 
--include $(DEPS_INCLUDE)
+-include $(DEPS)
 

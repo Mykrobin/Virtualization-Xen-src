@@ -6,6 +6,7 @@
  * Copyright (c) 2002-2006, K A Fraser
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/err.h>
@@ -14,7 +15,6 @@
 #include <xen/sched-if.h>
 #include <xen/domain.h>
 #include <xen/event.h>
-#include <xen/grant_table.h>
 #include <xen/domain_page.h>
 #include <xen/trace.h>
 #include <xen/console.h>
@@ -195,6 +195,9 @@ void getdomaininfo(struct domain *d, struct xen_domctl_getdomaininfo *info)
     case guest_type_hvm:
         info->flags |= XEN_DOMINF_hvm_guest;
         break;
+    case guest_type_pvh:
+        info->flags |= XEN_DOMINF_pvh_guest;
+        break;
     default:
         break;
     }
@@ -244,7 +247,7 @@ void domctl_lock_release(void)
 }
 
 static inline
-int vcpuaffinity_params_invalid(const struct xen_domctl_vcpuaffinity *vcpuaff)
+int vcpuaffinity_params_invalid(const xen_domctl_vcpuaffinity_t *vcpuaff)
 {
     return vcpuaff->flags == 0 ||
            ((vcpuaff->flags & XEN_VCPUAFFINITY_HARD) &&
@@ -392,6 +395,11 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 
     switch ( op->cmd )
     {
+    case XEN_DOMCTL_createdomain:
+    case XEN_DOMCTL_test_assign_device:
+    case XEN_DOMCTL_gdbsx_guestmemio:
+        d = NULL;
+        break;
     case XEN_DOMCTL_assign_device:
     case XEN_DOMCTL_deassign_device:
         if ( op->domain == DOMID_IO )
@@ -401,15 +409,6 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         }
         else if ( op->domain == DOMID_INVALID )
             return -ESRCH;
-        /* fall through */
-    case XEN_DOMCTL_test_assign_device:
-        if ( op->domain == DOMID_INVALID )
-        {
-    case XEN_DOMCTL_createdomain:
-    case XEN_DOMCTL_gdbsx_guestmemio:
-            d = NULL;
-            break;
-        }
         /* fall through */
     default:
         d = rcu_lock_domain_by_id(op->domain);
@@ -508,10 +507,12 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
     {
         domid_t        dom;
         static domid_t rover = 0;
+        unsigned int domcr_flags;
 
         ret = -EINVAL;
         if ( (op->u.createdomain.flags &
              ~(XEN_DOMCTL_CDF_hvm_guest
+               | XEN_DOMCTL_CDF_pvh_guest
                | XEN_DOMCTL_CDF_hap
                | XEN_DOMCTL_CDF_s3_integrity
                | XEN_DOMCTL_CDF_oos_off
@@ -542,7 +543,26 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
             rover = dom;
         }
 
-        d = domain_create(dom, &op->u.createdomain);
+        if ( (op->u.createdomain.flags & XEN_DOMCTL_CDF_hvm_guest)
+             && (op->u.createdomain.flags & XEN_DOMCTL_CDF_pvh_guest) )
+            return -EINVAL;
+
+        domcr_flags = 0;
+        if ( op->u.createdomain.flags & XEN_DOMCTL_CDF_hvm_guest )
+            domcr_flags |= DOMCRF_hvm;
+        if ( op->u.createdomain.flags & XEN_DOMCTL_CDF_pvh_guest )
+            domcr_flags |= DOMCRF_pvh;
+        if ( op->u.createdomain.flags & XEN_DOMCTL_CDF_hap )
+            domcr_flags |= DOMCRF_hap;
+        if ( op->u.createdomain.flags & XEN_DOMCTL_CDF_s3_integrity )
+            domcr_flags |= DOMCRF_s3_integrity;
+        if ( op->u.createdomain.flags & XEN_DOMCTL_CDF_oos_off )
+            domcr_flags |= DOMCRF_oos_off;
+        if ( op->u.createdomain.flags & XEN_DOMCTL_CDF_xs_domain )
+            domcr_flags |= DOMCRF_xs_domain;
+
+        d = domain_create(dom, domcr_flags, op->u.createdomain.ssidref,
+                          &op->u.createdomain.config);
         if ( IS_ERR(d) )
         {
             ret = PTR_ERR(d);
@@ -551,6 +571,10 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         }
 
         ret = 0;
+
+        memcpy(d->handle, op->u.createdomain.handle,
+               sizeof(xen_domain_handle_t));
+
         op->domain = d->domain_id;
         copyback = 1;
         d = NULL;
@@ -657,14 +681,11 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         break;
 
     case XEN_DOMCTL_destroydomain:
-        domctl_lock_release();
-        domain_lock(d);
         ret = domain_kill(d);
-        domain_unlock(d);
         if ( ret == -ERESTART )
             ret = hypercall_create_continuation(
                 __HYPERVISOR_domctl, "h", u_domctl);
-        goto domctl_out_unlock_domonly;
+        break;
 
     case XEN_DOMCTL_setnodeaffinity:
     {
@@ -686,7 +707,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
     case XEN_DOMCTL_getvcpuaffinity:
     {
         struct vcpu *v;
-        struct xen_domctl_vcpuaffinity *vcpuaff = &op->u.vcpuaffinity;
+        xen_domctl_vcpuaffinity_t *vcpuaff = &op->u.vcpuaffinity;
 
         ret = -EINVAL;
         if ( vcpuaff->vcpu >= d->max_vcpus )
@@ -703,7 +724,7 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         if ( op->cmd == XEN_DOMCTL_setvcpuaffinity )
         {
             cpumask_var_t new_affinity, old_affinity;
-            cpumask_t *online = cpupool_domain_cpumask(v->domain);
+            cpumask_t *online = cpupool_domain_cpumask(v->domain);;
 
             /*
              * We want to be able to restore hard affinity if we are trying
@@ -1071,11 +1092,8 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
             break;
         }
 
-        ret = -EOPNOTSUPP;
-        if ( is_hvm_domain(e) )
-            ret = xsm_set_target(XSM_HOOK, d, e);
-        if ( ret )
-        {
+        ret = xsm_set_target(XSM_HOOK, d, e);
+        if ( ret ) {
             put_domain(e);
             break;
         }
@@ -1093,6 +1111,10 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         ret = vm_event_domctl(d, &op->u.vm_event_op,
                               guest_handle_cast(u_domctl, void));
         copyback = 1;
+        break;
+
+    case XEN_DOMCTL_disable_migrate:
+        d->disable_migrate = op->u.disable_migrate.disable;
         break;
 
 #ifdef CONFIG_HAS_MEM_ACCESS
@@ -1143,11 +1165,6 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         ret = monitor_domctl(d, &op->u.monitor_op);
         if ( !ret )
             copyback = 1;
-        break;
-
-    case XEN_DOMCTL_set_gnttab_limits:
-        ret = grant_table_set_limits(d, op->u.set_gnttab_limits.grant_frames,
-                                     op->u.set_gnttab_limits.maptrack_frames);
         break;
 
     default:

@@ -198,9 +198,11 @@ struct xc_sr_context
             /* Further debugging information in the stream. */
             bool debug;
 
-            unsigned long p2m_size;
+            /* Parameters for tweaking live migration. */
+            unsigned max_iterations;
+            unsigned dirty_threshold;
 
-            struct precopy_stats stats;
+            unsigned long p2m_size;
 
             xen_pfn_t *batch_pfns;
             unsigned nr_batch_pfns;
@@ -250,7 +252,7 @@ struct xc_sr_context
              */
             xen_pfn_t    xenstore_gfn,    console_gfn;
             unsigned int xenstore_evtchn, console_evtchn;
-            uint32_t     xenstore_domid,  console_domid;
+            domid_t      xenstore_domid,  console_domid;
 
             /* Bitmap of currently populated PFNs during restore. */
             unsigned long *populated_pfns;

@@ -23,7 +23,6 @@
 #include <xen/hvm/e820.h>
 #include <sys/types.h>
 #include <pwd.h>
-#include <grp.h>
 
 static const char *libxl_tapif_script(libxl__gc *gc)
 {
@@ -456,7 +455,7 @@ static int libxl__build_device_model_args_old(libxl__gc *gc,
         if (vnc->listen) {
             if (strchr(vnc->listen, ':') != NULL) {
                 if (vnc->display) {
-                    LOGD(ERROR, domid, "vncdisplay set, vnclisten contains display");
+                    LOG(ERROR, "vncdisplay set, vnclisten contains display");
                     return ERROR_INVAL;
                 }
                 vncarg = vnc->listen;
@@ -503,15 +502,15 @@ static int libxl__build_device_model_args_old(libxl__gc *gc,
         char *s;
 
         if (b_info->kernel) {
-            LOGD(ERROR, domid, "HVM direct kernel boot is not supported by "
-                 "qemu-xen-traditional");
+            LOG(ERROR, "HVM direct kernel boot is not supported by "
+                "qemu-xen-traditional");
             return ERROR_INVAL;
         }
 
         if (b_info->u.hvm.serial || b_info->u.hvm.serial_list) {
             if ( b_info->u.hvm.serial && b_info->u.hvm.serial_list )
             {
-                LOGD(ERROR, domid, "Both serial and serial_list set");
+                LOG(ERROR, "Both serial and serial_list set");
                 return ERROR_INVAL;
             }
             if (b_info->u.hvm.serial) {
@@ -551,7 +550,7 @@ static int libxl__build_device_model_args_old(libxl__gc *gc,
         case LIBXL_VGA_INTERFACE_TYPE_QXL:
             break;
         default:
-            LOGD(ERROR, domid, "Invalid emulated video card specified");
+            LOG(ERROR, "Invalid emulated video card specified");
             return ERROR_INVAL;
         }
 
@@ -560,10 +559,10 @@ static int libxl__build_device_model_args_old(libxl__gc *gc,
         }
         if (libxl_defbool_val(b_info->u.hvm.usb)
             || b_info->u.hvm.usbdevice
-            || libxl_string_list_length(&b_info->u.hvm.usbdevice_list)) {
-            if (b_info->u.hvm.usbdevice
-                && libxl_string_list_length(&b_info->u.hvm.usbdevice_list)) {
-                LOGD(ERROR, domid, "Both usbdevice and usbdevice_list set");
+            || b_info->u.hvm.usbdevice_list) {
+            if ( b_info->u.hvm.usbdevice && b_info->u.hvm.usbdevice_list )
+            {
+                LOG(ERROR, "Both usbdevice and usbdevice_list set");
                 return ERROR_INVAL;
             }
             flexarray_append(dm_args, "-usb");
@@ -633,19 +632,13 @@ static int libxl__build_device_model_args_old(libxl__gc *gc,
                 flexarray_append(dm_args, "-gfx_passthru");
                 break;
             default:
-                LOGD(ERROR, domid, "unsupported gfx_passthru_kind.");
+                LOG(ERROR, "unsupported gfx_passthru_kind.");
                 return ERROR_INVAL;
             }
         }
     } else {
         if (!sdl && !vnc)
             flexarray_append(dm_args, "-nographic");
-    }
-
-    if (libxl_defbool_val(b_info->dm_restrict)) {
-        LOGD(ERROR, domid,
-             "dm_restrict not supported by qemu-xen-traditional");
-        return ERROR_INVAL;
     }
 
     if (state->saved_state) {
@@ -655,7 +648,6 @@ static int libxl__build_device_model_args_old(libxl__gc *gc,
         flexarray_append(dm_args, b_info->extra[i]);
     flexarray_append(dm_args, "-M");
     switch (b_info->type) {
-    case LIBXL_DOMAIN_TYPE_PVH:
     case LIBXL_DOMAIN_TYPE_PV:
         flexarray_append(dm_args, "xenpv");
         for (i = 0; b_info->extra_pv && b_info->extra_pv[i] != NULL; i++)
@@ -737,53 +729,36 @@ libxl__detect_gfx_passthru_kind(libxl__gc *gc,
     return LIBXL_GFX_PASSTHRU_KIND_DEFAULT;
 }
 
-/*
- *  userlookup_helper_getpwnam(libxl__gc*, const char *user,
- *                             struct passwd **pwd_r);
- *
- *  userlookup_helper_getpwuid(libxl__gc*, uid_t uid,
- *                             struct passwd **pwd_r);
- *
- *  returns 1 if the user was found, 0 if it was not, -1 on error
- */
-#define DEFINE_USERLOOKUP_HELPER(NAME,SPEC_TYPE,STRUCTNAME,SYSCONF)     \
-    static int userlookup_helper_##NAME(libxl__gc *gc,                  \
-                                        SPEC_TYPE spec,                 \
-                                        struct STRUCTNAME *resultbuf,   \
-                                        struct STRUCTNAME **out)        \
-    {                                                                   \
-        struct STRUCTNAME *resultp = NULL;                              \
-        char *buf = NULL;                                               \
-        long buf_size;                                                  \
-        int ret;                                                        \
-                                                                        \
-        buf_size = sysconf(SYSCONF);                                    \
-        if (buf_size < 0) {                                             \
-            buf_size = 2048;                                            \
-            LOG(DEBUG,                                                  \
-    "sysconf failed, setting the initial buffer size to %ld",           \
-                buf_size);                                              \
-        }                                                               \
-                                                                        \
-        while (1) {                                                     \
-            buf = libxl__realloc(gc, buf, buf_size);                    \
-            ret = NAME##_r(spec, resultbuf, buf, buf_size, &resultp);   \
-            if (ret == ERANGE) {                                        \
-                buf_size += 128;                                        \
-                continue;                                               \
-            }                                                           \
-            if (ret != 0)                                               \
-                return ERROR_FAIL;                                      \
-            if (resultp != NULL) {                                      \
-                if (out) *out = resultp;                                \
-                return 1;                                               \
-            }                                                           \
-            return 0;                                                   \
-        }                                                               \
+/* return 1 if the user was found, 0 if it was not, -1 on error */
+static int libxl__dm_runas_helper(libxl__gc *gc, const char *username)
+{
+    struct passwd pwd, *user = NULL;
+    char *buf = NULL;
+    long buf_size;
+    int ret;
+
+    buf_size = sysconf(_SC_GETPW_R_SIZE_MAX);
+    if (buf_size < 0) {
+        buf_size = 2048;
+        LOG(DEBUG,
+"sysconf(_SC_GETPW_R_SIZE_MAX) failed, setting the initial buffer size to %ld",
+            buf_size);
     }
 
-DEFINE_USERLOOKUP_HELPER(getpwnam, const char*, passwd, _SC_GETPW_R_SIZE_MAX);
-DEFINE_USERLOOKUP_HELPER(getpwuid, uid_t,       passwd, _SC_GETPW_R_SIZE_MAX);
+    while (1) {
+        buf = libxl__realloc(gc, buf, buf_size);
+        ret = getpwnam_r(username, &pwd, buf, buf_size, &user);
+        if (ret == ERANGE) {
+            buf_size += 128;
+            continue;
+        }
+        if (ret != 0)
+            return ERROR_FAIL;
+        if (user != NULL)
+            return 1;
+        return 0;
+    }
+}
 
 /* colo mode */
 enum {
@@ -795,50 +770,64 @@ enum {
 static char *qemu_disk_scsi_drive_string(libxl__gc *gc, const char *target_path,
                                          int unit, const char *format,
                                          const libxl_device_disk *disk,
-                                         int colo_mode, const char **id_ptr)
+                                         int colo_mode)
 {
     char *drive = NULL;
-    char *common = GCSPRINTF("if=none,readonly=%s,cache=writeback",
+    char *common = GCSPRINTF("cache=writeback,readonly=%s",
                              disk->readwrite ? "off" : "on");
     const char *exportname = disk->colo_export;
     const char *active_disk = disk->active_disk;
     const char *hidden_disk = disk->hidden_disk;
-    const char *id;
 
     switch (colo_mode) {
     case LIBXL__COLO_NONE:
-        id = GCSPRINTF("scsi0-hd%d", unit);
-        drive = GCSPRINTF("file=%s,id=%s,format=%s,%s",
-                          target_path, id, format, common);
+        drive = libxl__sprintf
+            (gc, "%s,file=%s,if=scsi,bus=0,unit=%d,format=%s",
+             common, target_path, unit, format);
         break;
     case LIBXL__COLO_PRIMARY:
-        id = exportname;
+        /*
+         * primary:
+         *  -dirve if=scsi,bus=0,unit=x,cache=writeback,driver=quorum,\
+         *  id=exportname,\
+         *  children.0.file.filename=target_path,\
+         *  children.0.driver=format,\
+         *  read-pattern=fifo,\
+         *  vote-threshold=1
+         */
         drive = GCSPRINTF(
-            "%s,id=%s,driver=quorum,"
+            "%s,if=scsi,bus=0,unit=%d,,driver=quorum,"
+            "id=%s,"
             "children.0.file.filename=%s,"
             "children.0.driver=%s,"
             "read-pattern=fifo,"
             "vote-threshold=1",
-            common, id, target_path, format);
+            common, unit, exportname, target_path, format);
         break;
     case LIBXL__COLO_SECONDARY:
-        id = "top-colo";
+        /*
+         * secondary:
+         *  -drive if=scsi,bus=0,unit=x,cache=writeback,driver=replication,\
+         *  mode=secondary,\
+         *  file.driver=qcow2,\
+         *  file.file.filename=active_disk,\
+         *  file.backing.driver=qcow2,\
+         *  file.backing.file.filename=hidden_disk,\
+         *  file.backing.backing=exportname,
+         */
         drive = GCSPRINTF(
-            "%s,id=%s,driver=replication,"
+            "%s,if=scsi,bus=0,unit=%d,driver=replication,"
             "mode=secondary,"
-            "top-id=top-colo,"
             "file.driver=qcow2,"
             "file.file.filename=%s,"
             "file.backing.driver=qcow2,"
             "file.backing.file.filename=%s,"
             "file.backing.backing=%s",
-            common, id, active_disk, hidden_disk, exportname);
+            common, unit, active_disk, hidden_disk, exportname);
         break;
     default:
         abort();
     }
-
-    *id_ptr = id;
 
     return drive;
 }
@@ -852,7 +841,7 @@ static char *qemu_disk_ide_drive_string(libxl__gc *gc, const char *target_path,
     const char *exportname = disk->colo_export;
     const char *active_disk = disk->active_disk;
     const char *hidden_disk = disk->hidden_disk;
-
+    
     assert(disk->readwrite); /* should have been checked earlier */
 
     switch (colo_mode) {
@@ -892,10 +881,8 @@ static char *qemu_disk_ide_drive_string(libxl__gc *gc, const char *target_path,
          *  file.backing.backing=exportname,
          */
         drive = GCSPRINTF(
-            "if=ide,index=%d,id=top-colo,media=disk,cache=writeback,"
-            "driver=replication,"
+            "if=ide,index=%d,media=disk,cache=writeback,driver=replication,"
             "mode=secondary,"
-            "top-id=top-colo,"
             "file.driver=qcow2,"
             "file.file.filename=%s,"
             "file.backing.driver=qcow2,"
@@ -932,7 +919,6 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
     uint64_t ram_size;
     const char *path, *chardev;
     char *user = NULL;
-    struct passwd *user_base, user_pwbuf;
 
     dm_args = flexarray_make(gc, 16, 1);
     dm_envs = flexarray_make(gc, 16, 1);
@@ -976,7 +962,7 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
                 break;
             default:
                 /* We've forgotten to add the clause */
-                LOGD(ERROR, guest_domid, "%s: unknown channel connection %d",
+                LOG(ERROR, "%s: unknown channel connection %d",
                     __func__, connection);
                 return ERROR_INVAL;
         }
@@ -996,7 +982,7 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
      */
     flexarray_append(dm_args, "-no-user-config");
 
-    if (b_info->type != LIBXL_DOMAIN_TYPE_HVM) {
+    if (b_info->type == LIBXL_DOMAIN_TYPE_PV) {
         flexarray_append(dm_args, "-xen-attach");
     }
 
@@ -1020,8 +1006,7 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
         if (vnc->listen) {
             if (strchr(vnc->listen, ':') != NULL) {
                 if (vnc->display) {
-                    LOGD(ERROR, guest_domid,
-                         "vncdisplay set, vnclisten contains display");
+                    LOG(ERROR, "vncdisplay set, vnclisten contains display");
                     return ERROR_INVAL;
                 }
                 vncarg = vnc->listen;
@@ -1079,23 +1064,10 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
         if (b_info->cmdline)
             flexarray_vappend(dm_args, "-append", b_info->cmdline, NULL);
 
-        /* Find out early if one of the disk is on the scsi bus and add a scsi
-         * controller. This is done ahead to keep the same behavior as previous
-         * version of QEMU (have the controller on the same PCI slot). */
-        for (i = 0; i < num_disks; i++) {
-            if (disks[i].is_cdrom) {
-                continue;
-            }
-            if (strncmp(disks[i].vdev, "sd", 2) == 0) {
-                flexarray_vappend(dm_args, "-device", "lsi53c895a", NULL);
-                break;
-            }
-        }
-
         if (b_info->u.hvm.serial || b_info->u.hvm.serial_list) {
             if ( b_info->u.hvm.serial && b_info->u.hvm.serial_list )
             {
-                LOGD(ERROR, guest_domid, "Both serial and serial_list set");
+                LOG(ERROR, "Both serial and serial_list set");
                 return ERROR_INVAL;
             }
             if (b_info->u.hvm.serial) {
@@ -1153,7 +1125,7 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
                 (b_info->video_memkb/2/1024), (b_info->video_memkb/2/1024) ) );
             break;
         default:
-            LOGD(ERROR, guest_domid, "Invalid emulated video card specified");
+            LOG(ERROR, "Invalid emulated video card specified");
             return ERROR_INVAL;
         }
 
@@ -1163,10 +1135,10 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
         }
         if (libxl_defbool_val(b_info->u.hvm.usb)
             || b_info->u.hvm.usbdevice
-            || libxl_string_list_length(&b_info->u.hvm.usbdevice_list)) {
-            if (b_info->u.hvm.usbdevice
-                && libxl_string_list_length(&b_info->u.hvm.usbdevice_list)) {
-                LOGD(ERROR, guest_domid, "Both usbdevice and usbdevice_list set");
+            || b_info->u.hvm.usbdevice_list) {
+            if ( b_info->u.hvm.usbdevice && b_info->u.hvm.usbdevice_list )
+            {
+                LOG(ERROR, "Both usbdevice and usbdevice_list set");
                 return ERROR_INVAL;
             }
             flexarray_append(dm_args, "-usb");
@@ -1203,7 +1175,7 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
                     "-device", "nec-usb-xhci,id=usb", NULL);
                 break;
             default:
-                LOGD(ERROR, guest_domid, "usbversion parameter is invalid, "
+                LOG(ERROR, "usbversion parameter is invalid, "
                     "must be between 1 and 3");
                 return ERROR_INVAL;
             }
@@ -1216,7 +1188,7 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
                         GCSPRINTF("usb-redir,chardev=usbrc%d,"
                         "id=usbrc%d", i, i), NULL);
             } else {
-                LOGD(ERROR, guest_domid, "usbredirection parameter is invalid, "
+                LOG(ERROR, "usbredirection parameter is invalid, "
                     "it must be between 1 and 4");
                 return ERROR_INVAL;
             }
@@ -1258,145 +1230,7 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
                                            nics[i].devid, ifname,
                                            libxl_tapif_script(gc),
                                            libxl_tapif_script(gc)));
-
-                /* Userspace COLO Proxy need this */
-#define APPEND_COLO_SOCK_SERVER(sock_id, sock_ip, sock_port) ({             \
-    if (nics[i].colo_##sock_id &&                                           \
-        nics[i].colo_##sock_ip &&                                           \
-        nics[i].colo_##sock_port) {                                         \
-        flexarray_append(dm_args, "-chardev");                              \
-        flexarray_append(dm_args,                                           \
-            GCSPRINTF("socket,id=%s,host=%s,port=%s,server,nowait",         \
-                      nics[i].colo_##sock_id,                               \
-                      nics[i].colo_##sock_ip,                               \
-                      nics[i].colo_##sock_port));                           \
-        }                                                                   \
-})
-
-#define APPEND_COLO_SOCK_CLIENT(sock_id, sock_ip, sock_port) ({             \
-    if (nics[i].colo_##sock_id &&                                           \
-        nics[i].colo_##sock_ip &&                                           \
-        nics[i].colo_##sock_port) {                                         \
-        flexarray_append(dm_args, "-chardev");                              \
-        flexarray_append(dm_args,                                           \
-            GCSPRINTF("socket,id=%s,host=%s,port=%s",                       \
-                      nics[i].colo_##sock_id,                               \
-                      nics[i].colo_##sock_ip,                               \
-                      nics[i].colo_##sock_port));                           \
-        }                                                                   \
-})
-
-                if (state->saved_state) {
-                    /* secondary colo run */
-
-                    APPEND_COLO_SOCK_CLIENT(sock_sec_redirector0_id,
-                                            sock_sec_redirector0_ip,
-                                            sock_sec_redirector0_port);
-
-                    APPEND_COLO_SOCK_CLIENT(sock_sec_redirector1_id,
-                                            sock_sec_redirector1_ip,
-                                            sock_sec_redirector1_port);
-
-                    if (nics[i].colo_filter_sec_redirector0_queue &&
-                        nics[i].colo_filter_sec_redirector0_indev) {
-                        flexarray_append(dm_args, "-object");
-                        flexarray_append(dm_args,
-                           GCSPRINTF("filter-redirector,id=rs1,netdev=net%d,queue=%s,indev=%s",
-                                     nics[i].devid,
-                                     nics[i].colo_filter_sec_redirector0_queue,
-                                     nics[i].colo_filter_sec_redirector0_indev));
-                    }
-                    if (nics[i].colo_filter_sec_redirector1_queue &&
-                        nics[i].colo_filter_sec_redirector1_outdev) {
-                        flexarray_append(dm_args, "-object");
-                        flexarray_append(dm_args,
-                           GCSPRINTF("filter-redirector,id=rs2,netdev=net%d,queue=%s,outdev=%s",
-                                     nics[i].devid,
-                                     nics[i].colo_filter_sec_redirector1_queue,
-                                     nics[i].colo_filter_sec_redirector1_outdev));
-                    }
-                    if (nics[i].colo_filter_sec_rewriter0_queue) {
-                        flexarray_append(dm_args, "-object");
-                        flexarray_append(dm_args,
-                           GCSPRINTF("filter-rewriter,id=rs3,netdev=net%d,queue=%s",
-                                     nics[i].devid,
-                                     nics[i].colo_filter_sec_rewriter0_queue));
-                    }
-                } else {
-                    /* primary colo run */
-
-                    APPEND_COLO_SOCK_SERVER(sock_mirror_id,
-                                            sock_mirror_ip,
-                                            sock_mirror_port);
-
-                    APPEND_COLO_SOCK_SERVER(sock_compare_pri_in_id,
-                                            sock_compare_pri_in_ip,
-                                            sock_compare_pri_in_port);
-
-                    APPEND_COLO_SOCK_SERVER(sock_compare_sec_in_id,
-                                            sock_compare_sec_in_ip,
-                                            sock_compare_sec_in_port);
-
-                    APPEND_COLO_SOCK_SERVER(sock_compare_notify_id,
-                                            sock_compare_notify_ip,
-                                            sock_compare_notify_port);
-
-                    APPEND_COLO_SOCK_SERVER(sock_redirector0_id,
-                                            sock_redirector0_ip,
-                                            sock_redirector0_port);
-
-                    APPEND_COLO_SOCK_CLIENT(sock_redirector1_id,
-                                            sock_redirector1_ip,
-                                            sock_redirector1_port);
-
-                    APPEND_COLO_SOCK_CLIENT(sock_redirector2_id,
-                                            sock_redirector2_ip,
-                                            sock_redirector2_port);
-
-                    if (nics[i].colo_filter_mirror_queue &&
-                        nics[i].colo_filter_mirror_outdev) {
-                        flexarray_append(dm_args, "-object");
-                        flexarray_append(dm_args,
-                           GCSPRINTF("filter-mirror,id=m1,netdev=net%d,queue=%s,outdev=%s",
-                                     nics[i].devid,
-                                     nics[i].colo_filter_mirror_queue,
-                                     nics[i].colo_filter_mirror_outdev));
-                    }
-                    if (nics[i].colo_filter_redirector0_queue &&
-                        nics[i].colo_filter_redirector0_indev) {
-                        flexarray_append(dm_args, "-object");
-                        flexarray_append(dm_args,
-                           GCSPRINTF("filter-redirector,id=r1,netdev=net%d,queue=%s,indev=%s",
-                                     nics[i].devid,
-                                     nics[i].colo_filter_redirector0_queue,
-                                     nics[i].colo_filter_redirector0_indev));
-                    }
-                    if (nics[i].colo_filter_redirector1_queue &&
-                        nics[i].colo_filter_redirector1_outdev) {
-                        flexarray_append(dm_args, "-object");
-                        flexarray_append(dm_args,
-                          GCSPRINTF("filter-redirector,id=r2,netdev=net%d,queue=%s,outdev=%s",
-                                     nics[i].devid,
-                                     nics[i].colo_filter_redirector1_queue,
-                                     nics[i].colo_filter_redirector1_outdev));
-                    }
-                    if (nics[i].colo_compare_pri_in &&
-                        nics[i].colo_compare_sec_in &&
-                        nics[i].colo_compare_out &&
-                        nics[i].colo_compare_notify_dev) {
-                        flexarray_append(dm_args, "-object");
-                        flexarray_append(dm_args,
-                           GCSPRINTF("colo-compare,id=c1,primary_in=%s,secondary_in=%s,outdev=%s,notify_dev=%s",
-                                     nics[i].colo_compare_pri_in,
-                                     nics[i].colo_compare_sec_in,
-                                     nics[i].colo_compare_out,
-                                     nics[i].colo_compare_notify_dev));
-                    }
-                }
                 ioemu_nics++;
-
-#undef APPEND_COLO_SOCK_SERVER
-#undef APPEND_COLO_SOCK_CLIENT
             }
         }
         /* If we have no emulated nics, tell qemu not to create any */
@@ -1410,9 +1244,6 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
         }
     }
 
-    if (libxl_defbool_val(b_info->dm_restrict))
-        flexarray_append(dm_args, "-xen-domid-restrict");
-
     if (state->saved_state) {
         /* This file descriptor is meant to be used by QEMU */
         *dm_state_fd = open(state->saved_state, O_RDONLY);
@@ -1424,7 +1255,6 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
 
     flexarray_append(dm_args, "-machine");
     switch (b_info->type) {
-    case LIBXL_DOMAIN_TYPE_PVH:
     case LIBXL_DOMAIN_TYPE_PV:
         flexarray_append(dm_args, "xenpv");
         for (i = 0; b_info->extra_pv && b_info->extra_pv[i] != NULL; i++)
@@ -1444,8 +1274,8 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
                 (b_info->u.hvm.mmio_hole_memkb << 10);
 
             if (max_ram_below_4g > HVM_BELOW_4G_MMIO_START) {
-                LOGD(WARN, guest_domid, "mmio_hole_memkb=%"PRIu64
-                     " invalid ignored.\n",
+                LOG(WARN, "mmio_hole_memkb=%"PRIu64
+                    " invalid ignored.\n",
                     b_info->u.hvm.mmio_hole_memkb);
             } else {
                 machinearg = GCSPRINTF("%s,max-ram-below-4g=%"PRIu64,
@@ -1461,10 +1291,10 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
                 machinearg = GCSPRINTF("%s,igd-passthru=on", machinearg);
                 break;
             case LIBXL_GFX_PASSTHRU_KIND_DEFAULT:
-                LOGD(ERROR, guest_domid, "unable to detect required gfx_passthru_kind");
+                LOG(ERROR, "unable to detect required gfx_passthru_kind");
                 return ERROR_FAIL;
             default:
-                LOGD(ERROR, guest_domid, "invalid value for gfx_passthru_kind");
+                LOG(ERROR, "invalid value for gfx_passthru_kind");
                 return ERROR_INVAL;
             }
         }
@@ -1494,8 +1324,8 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
             int colo_mode;
 
             if (dev_number == -1) {
-                LOGD(WARN, guest_domid, "unable to determine"" disk number for %s",
-                     disks[i].vdev);
+                LOG(WARN, "unable to determine"" disk number for %s",
+                    disks[i].vdev);
                 continue;
             }
 
@@ -1510,17 +1340,17 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
 
             if (disks[i].format == LIBXL_DISK_FORMAT_EMPTY) {
                 if (!disks[i].is_cdrom) {
-                    LOGD(WARN, guest_domid, "Cannot support empty disk format for %s",
-                         disks[i].vdev);
+                    LOG(WARN, "Cannot support empty disk format for %s",
+                        disks[i].vdev);
                     continue;
                 }
             } else {
                 if (format == NULL) {
-                    LOGD(WARN, guest_domid,
-                         "Unable to determine disk image format: %s\n"
-                         "Disk will be available via PV drivers but not as an"
-                         "emulated disk.",
-                         disks[i].vdev);
+                    LOG(WARN,
+                        "Unable to determine disk image format: %s\n"
+                        "Disk will be available via PV drivers but not as an"
+                        "emulated disk.",
+                        disks[i].vdev);
                     continue;
                 }
 
@@ -1540,10 +1370,10 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
                                                  guest_domid, &disks[i], true);
 
                 if (!target_path) {
-                    LOGD(WARN, guest_domid, "No way to get local access disk to image: %s\n"
-                         "Disk will be available via PV drivers but not as an"
-                         "emulated disk.",
-                         disks[i].vdev);
+                    LOG(WARN, "No way to get local access disk to image: %s\n"
+                        "Disk will be available via PV drivers but not as an"
+                        "emulated disk.",
+                        disks[i].vdev);
                     continue;
                 }
             }
@@ -1574,7 +1404,6 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
                 }
 
                 if (strncmp(disks[i].vdev, "sd", 2) == 0) {
-                    const char *drive_id;
                     if (colo_mode == LIBXL__COLO_SECONDARY) {
                         drive = libxl__sprintf
                             (gc, "if=none,driver=%s,file=%s,id=%s,readonly=%s",
@@ -1587,18 +1416,10 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
                     drive = qemu_disk_scsi_drive_string(gc, target_path, disk,
                                                         format,
                                                         &disks[i],
-                                                        colo_mode,
-                                                        &drive_id),
-                    flexarray_vappend(dm_args,
-                        "-drive", drive,
-                        "-device", GCSPRINTF("scsi-disk,drive=%s,scsi-id=%d",
-                                             drive_id, disk),
-                        NULL);
-                    continue;
+                                                        colo_mode);
                 } else if (disk < 6 && b_info->u.hvm.hdtype == LIBXL_HDTYPE_AHCI) {
                     if (!disks[i].readwrite) {
-                        LOGD(ERROR, guest_domid,
-                             "qemu-xen doesn't support read-only AHCI disk drivers");
+                        LOG(ERROR, "qemu-xen doesn't support read-only AHCI disk drivers");
                         return ERROR_INVAL;
                     }
                     flexarray_vappend(dm_args, "-drive",
@@ -1609,8 +1430,7 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
                     continue;
                 } else if (disk < 4) {
                     if (!disks[i].readwrite) {
-                        LOGD(ERROR, guest_domid,
-                             "qemu-xen doesn't support read-only IDE disk drivers");
+                        LOG(ERROR, "qemu-xen doesn't support read-only IDE disk drivers");
                         return ERROR_INVAL;
                     }
                     if (colo_mode == LIBXL__COLO_SECONDARY) {
@@ -1651,60 +1471,26 @@ static int libxl__build_device_model_args_new(libxl__gc *gc,
             goto end_search;
         }
 
-        if (!libxl_defbool_val(b_info->dm_restrict)) {
-            LOGD(DEBUG, guest_domid,
-                 "dm_restrict disabled, starting QEMU as root");
-            goto end_search;
-        }
-
         user = GCSPRINTF("%s%d", LIBXL_QEMU_USER_BASE, guest_domid);
-        ret = userlookup_helper_getpwnam(gc, user, &user_pwbuf, 0);
+        ret = libxl__dm_runas_helper(gc, user);
         if (ret < 0)
             return ret;
         if (ret > 0)
             goto end_search;
 
-        ret = userlookup_helper_getpwnam(gc, LIBXL_QEMU_USER_RANGE_BASE,
-                                         &user_pwbuf, &user_base);
-        if (ret < 0)
-            return ret;
-        if (ret > 0) {
-            struct passwd *user_clash, user_clash_pwbuf;
-            uid_t intended_uid = user_base->pw_uid + guest_domid;
-            ret = userlookup_helper_getpwuid(gc, intended_uid,
-                                             &user_clash_pwbuf, &user_clash);
-            if (ret < 0)
-                return ret;
-            if (ret > 0) {
-                LOGD(ERROR, guest_domid,
-                     "wanted to use uid %ld (%s + %d) but that is user %s !",
-                     (long)intended_uid, LIBXL_QEMU_USER_RANGE_BASE,
-                     guest_domid, user_clash->pw_name);
-                return ERROR_FAIL;
-            }
-            LOGD(DEBUG, guest_domid, "using uid %ld", (long)intended_uid);
-            flexarray_append(dm_args, "-runas");
-            flexarray_append(dm_args,
-                             GCSPRINTF("%ld:%ld", (long)intended_uid,
-                                       (long)user_base->pw_gid));
-            user = NULL; /* we have taken care of it */
-            goto end_search;
-        }
-
         user = LIBXL_QEMU_USER_SHARED;
-        ret = userlookup_helper_getpwnam(gc, user, &user_pwbuf, 0);
+        ret = libxl__dm_runas_helper(gc, user);
         if (ret < 0)
             return ret;
         if (ret > 0) {
-            LOGD(WARN, guest_domid, "Could not find user %s%d, falling back to %s",
+            LOG(WARN, "Could not find user %s%d, falling back to %s",
                     LIBXL_QEMU_USER_BASE, guest_domid, LIBXL_QEMU_USER_SHARED);
             goto end_search;
         }
 
-        LOGD(ERROR, guest_domid,
-             "Could not find user %s%d or %s, cannot restrict",
-             LIBXL_QEMU_USER_BASE, guest_domid, LIBXL_QEMU_USER_SHARED);
-        return ERROR_INVAL;
+        user = NULL;
+        LOG(DEBUG, "Could not find user %s, starting QEMU as root",
+            LIBXL_QEMU_USER_SHARED);
 
 end_search:
         if (user != NULL && strcmp(user, "root")) {
@@ -1743,8 +1529,8 @@ static int libxl__build_device_model_args(libxl__gc *gc,
                                                   args, envs,
                                                   state, dm_state_fd);
     default:
-        LOGED(ERROR, guest_domid, "unknown device model version %d",
-              guest_config->b_info.device_model_version);
+        LOGE(ERROR, "unknown device model version %d",
+             guest_config->b_info.device_model_version);
         return ERROR_INVAL;
     }
 }
@@ -1906,9 +1692,6 @@ void libxl__spawn_stub_dm(libxl__egc *egc, libxl__stub_dm_spawn_state *sdss)
         guest_config->b_info.video_memkb;
     dm_config->b_info.target_memkb = dm_config->b_info.max_memkb;
 
-    dm_config->b_info.max_grant_frames = guest_config->b_info.max_grant_frames;
-    dm_config->b_info.max_maptrack_frames = 0;
-
     dm_config->b_info.u.pv.features = "";
 
     dm_config->b_info.device_model_version =
@@ -1932,17 +1715,13 @@ void libxl__spawn_stub_dm(libxl__egc *egc, libxl__stub_dm_spawn_state *sdss)
     ret = libxl__domain_build_info_setdefault(gc, &dm_config->b_info);
     if (ret) goto out;
 
-    if (libxl_defbool_val(guest_config->b_info.u.hvm.vnc.enable)
-        || libxl_defbool_val(guest_config->b_info.u.hvm.spice.enable)
-        || libxl_defbool_val(guest_config->b_info.u.hvm.sdl.enable)) {
-        GCNEW(vfb);
-        GCNEW(vkb);
-        libxl__vfb_and_vkb_from_hvm_guest_config(gc, guest_config, vfb, vkb);
-        dm_config->vfbs = vfb;
-        dm_config->num_vfbs = 1;
-        dm_config->vkbs = vkb;
-        dm_config->num_vkbs = 1;
-    }
+    GCNEW(vfb);
+    GCNEW(vkb);
+    libxl__vfb_and_vkb_from_hvm_guest_config(gc, guest_config, vfb, vkb);
+    dm_config->vfbs = vfb;
+    dm_config->num_vfbs = 1;
+    dm_config->vkbs = vkb;
+    dm_config->num_vkbs = 1;
 
     stubdom_state->pv_kernel.path
         = libxl__abs_path(gc, "ioemu-stubdom.gz", libxl__xenfirmwaredir_path());
@@ -1950,8 +1729,8 @@ void libxl__spawn_stub_dm(libxl__egc *egc, libxl__stub_dm_spawn_state *sdss)
     stubdom_state->pv_ramdisk.path = "";
 
     /* fixme: this function can leak the stubdom if it fails */
-    ret = libxl__domain_make(gc, dm_config, stubdom_state,
-                             &sdss->pvqemu.guest_domid);
+    ret = libxl__domain_make(gc, dm_config, &sdss->pvqemu.guest_domid,
+                             &stubdom_state->config);
     if (ret)
         goto out;
     uint32_t dm_domid = sdss->pvqemu.guest_domid;
@@ -1978,8 +1757,7 @@ void libxl__spawn_stub_dm(libxl__egc *egc, libxl__stub_dm_spawn_state *sdss)
                      "%d", guest_domid);
     ret = xc_domain_set_target(ctx->xch, dm_domid, guest_domid);
     if (ret<0) {
-        LOGED(ERROR, guest_domid, "setting target domain %d -> %d",
-              dm_domid, guest_domid);
+        LOGE(ERROR, "setting target domain %d -> %d", dm_domid, guest_domid);
         ret = ERROR_FAIL;
         goto out;
     }
@@ -2027,10 +1805,9 @@ static void spawn_stub_launch_dm(libxl__egc *egc,
     libxl__domain_build_state *const d_state = sdss->dm.build_state;
     libxl__domain_build_state *const stubdom_state = &sdss->dm_state;
     uint32_t dm_domid = sdss->pvqemu.guest_domid;
-    int need_qemu;
 
     if (ret) {
-        LOGD(ERROR, guest_domid, "error connecting disk devices");
+        LOG(ERROR, "error connecting disk devices");
         goto out;
      }
 
@@ -2039,21 +1816,17 @@ static void spawn_stub_launch_dm(libxl__egc *egc,
          * called libxl_device_nic_add at this point, but qemu needs
          * the nic information to be complete.
          */
-        ret = libxl__nic_devtype.set_default(gc, dm_domid, &dm_config->nics[i],
-                                             false);
+        ret = libxl__device_nic_setdefault(gc, &dm_config->nics[i], dm_domid,
+                                           false);
         if (ret)
             goto out;
     }
-    if (dm_config->num_vfbs) {
-        ret = libxl__device_add(gc, dm_domid, &libxl__vfb_devtype,
-                                &dm_config->vfbs[0]);
-        if (ret) goto out;
-    }
-    if (dm_config->num_vkbs) {
-        ret = libxl__device_add(gc, dm_domid, &libxl__vkb_devtype,
-                                &dm_config->vkbs[0]);
-        if (ret) goto out;
-    }
+    ret = libxl__device_vfb_add(gc, dm_domid, &dm_config->vfbs[0]);
+    if (ret)
+        goto out;
+    ret = libxl__device_vkb_add(gc, dm_domid, &dm_config->vkbs[0]);
+    if (ret)
+        goto out;
 
     if (guest_config->b_info.u.hvm.serial)
         num_console++;
@@ -2061,6 +1834,7 @@ static void spawn_stub_launch_dm(libxl__egc *egc,
     console = libxl__calloc(gc, num_console, sizeof(libxl__device_console));
 
     for (i = 0; i < num_console; i++) {
+        libxl__device device;
         console[i].devid = i;
         console[i].consback = LIBXL__CONSOLE_BACKEND_IOEMU;
         /* STUBDOM_CONSOLE_LOGGING (console 0) is for minios logging
@@ -2077,9 +1851,6 @@ static void spawn_stub_launch_dm(libxl__egc *egc,
                 if (ret) goto out;
                 console[i].output = GCSPRINTF("file:%s", filename);
                 free(filename);
-                /* will be changed back to LIBXL__CONSOLE_BACKEND_IOEMU if qemu
-                 * will be in use */
-                console[i].consback = LIBXL__CONSOLE_BACKEND_XENCONSOLED;
                 break;
             case STUBDOM_CONSOLE_SAVE:
                 console[i].output = GCSPRINTF("file:%s",
@@ -2094,14 +1865,6 @@ static void spawn_stub_launch_dm(libxl__egc *egc,
                 console[i].output = "pty";
                 break;
         }
-    }
-
-    need_qemu = libxl__need_xenpv_qemu(gc, dm_config);
-
-    for (i = 0; i < num_console; i++) {
-        libxl__device device;
-        if (need_qemu)
-            console[i].consback = LIBXL__CONSOLE_BACKEND_IOEMU;
         ret = libxl__device_console_add(gc, dm_domid, &console[i],
                         i == STUBDOM_CONSOLE_LOGGING ? stubdom_state : NULL,
                         &device);
@@ -2115,12 +1878,7 @@ static void spawn_stub_launch_dm(libxl__egc *egc,
     sdss->pvqemu.build_state = &sdss->dm_state;
     sdss->pvqemu.callback = spawn_stubdom_pvqemu_cb;
 
-    if (!need_qemu) {
-        /* If dom0 qemu not needed, do not launch it */
-        spawn_stubdom_pvqemu_cb(egc, &sdss->pvqemu, 0);
-    } else {
-        libxl__spawn_local_dm(egc, &sdss->pvqemu);
-    }
+    libxl__spawn_local_dm(egc, &sdss->pvqemu);
 
     return;
 
@@ -2164,8 +1922,7 @@ static void stubdom_pvqemu_cb(libxl__egc *egc,
     libxl__xswait_init(&sdss->xswait);
 
     if (rc) {
-        LOGED(ERROR, sdss->dm.guest_domid,
-              "error connecting nics devices");
+        LOGE(ERROR, "error connecting nics devices");
         goto out;
     }
 
@@ -2196,8 +1953,7 @@ static void stubdom_xswait_cb(libxl__egc *egc, libxl__xswait_state *xswait,
 
     if (rc) {
         if (rc == ERROR_TIMEDOUT)
-            LOGD(ERROR, sdss->dm.guest_domid,
-                 "%s: startup timed out", xswait->what);
+            LOG(ERROR, "%s: startup timed out", xswait->what);
         goto out;
     }
 
@@ -2258,7 +2014,7 @@ void libxl__spawn_local_dm(libxl__egc *egc, libxl__dm_spawn_state *dmss)
         goto out;
     }
     if (access(dm, X_OK) < 0) {
-        LOGED(ERROR, domid, "device model %s is not executable", dm);
+        LOGE(ERROR, "device model %s is not executable", dm);
         rc = ERROR_FAIL;
         goto out;
     }
@@ -2301,7 +2057,7 @@ void libxl__spawn_local_dm(libxl__egc *egc, libxl__dm_spawn_state *dmss)
     }
     null = open("/dev/null", O_RDONLY);
     if (null < 0) {
-        LOGED(ERROR, domid, "unable to open /dev/null");
+        LOGE(ERROR, "unable to open /dev/null");
         rc = ERROR_FAIL;
         goto out_close;
     }
@@ -2328,13 +2084,13 @@ retry_transaction:
         }
     }
 
-    LOGD(DEBUG, domid, "Spawning device-model %s with arguments:", dm);
+    LOG(DEBUG, "Spawning device-model %s with arguments:", dm);
     for (arg = args; *arg; arg++)
-        LOGD(DEBUG, domid, "  %s", *arg);
+        LOG(DEBUG, "  %s", *arg);
     if (*envs) {
-        LOGD(DEBUG, domid, "Spawning device-model %s with additional environment:", dm);
+        LOG(DEBUG, "Spawning device-model %s with additional environment:", dm);
         for (arg = envs; *arg; arg += 2)
-            LOGD(DEBUG, domid, "  %s=%s", arg[0], arg[1]);
+            LOG(DEBUG, "  %s=%s", arg[0], arg[1]);
     }
 
     spawn->what = GCSPRINTF("domain %d device model", domid);
@@ -2423,15 +2179,14 @@ static void device_model_spawn_outcome(libxl__egc *egc,
     int ret2;
 
     if (rc)
-        LOGD(ERROR, dmss->guest_domid,
-             "%s: spawn failed (rc=%d)", dmss->spawn.what, rc);
+        LOG(ERROR, "%s: spawn failed (rc=%d)", dmss->spawn.what, rc);
 
     libxl__domain_build_state *state = dmss->build_state;
 
     if (state->saved_state) {
         ret2 = unlink(state->saved_state);
         if (ret2) {
-            LOGED(ERROR, dmss->guest_domid, "%s: failed to remove device-model state %s",
+            LOGE(ERROR, "%s: failed to remove device-model state %s",
                  dmss->spawn.what, state->saved_state);
             rc = ERROR_FAIL;
             goto out;
@@ -2577,7 +2332,7 @@ int libxl__destroy_device_model(libxl__gc *gc, uint32_t domid)
 {
     char *path = DEVICE_MODEL_XS_PATH(gc, LIBXL_TOOLSTACK_DOMID, domid, "");
     if (!xs_rm(CTX->xsh, XBT_NULL, path))
-        LOGD(ERROR, domid, "xs_rm failed for %s", path);
+        LOG(ERROR, "xs_rm failed for %s", path);
     /* We should try to destroy the device model anyway. */
     return kill_device_model(gc,
                 GCSPRINTF("/local/domain/%d/image/device-model-pid", domid));
@@ -2596,7 +2351,7 @@ int libxl__need_xenpv_qemu(libxl__gc *gc, libxl_domain_config *d_config)
         goto out;
     }
 
-    if (d_config->num_vfbs > 0 || d_config->num_p9s > 0) {
+    if (d_config->num_vfbs > 0) {
         ret = 1;
         goto out;
     }
@@ -2658,7 +2413,7 @@ int libxl__dm_check_start(libxl__gc *gc, libxl_domain_config *d_config,
     if (!rc)
         return 0;
 
-    LOGD(ERROR, domid, "device model required but not running");
+    LOG(ERROR, "device model required but not running");
     rc = ERROR_FAIL;
 
 out:

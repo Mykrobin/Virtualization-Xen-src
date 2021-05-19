@@ -17,6 +17,7 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/acpi.h>
 #include <xen/iommu.h>

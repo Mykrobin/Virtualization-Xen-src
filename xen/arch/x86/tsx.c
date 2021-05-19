@@ -17,7 +17,7 @@ int8_t __read_mostly cpu_has_tsx_ctrl = -1;
 
 static int __init parse_tsx(const char *s)
 {
-    int rc = 0, val = parse_bool(s, NULL);
+    int rc = 0, val = parse_bool(s);
 
     if ( val >= 0 )
         opt_tsx = val;

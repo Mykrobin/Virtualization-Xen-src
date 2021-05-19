@@ -15,6 +15,7 @@
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/kernel.h>
+#include <xen/config.h>
 #include <xen/smp.h>
 #include <xen/errno.h>
 #include <xen/sched.h>
@@ -108,23 +109,11 @@ static struct mc_telem_ctl {
 struct mc_telem_cpu_ctl {
 	/*
 	 * Per-CPU processing lists, used for deferred (softirq)
-	 * processing of telemetry.
-	 *
-	 * The two pending lists @lmce_pending and @pending grow at
-	 * the head in the reverse chronological order.
-	 *
-	 * @pending and @lmce_pending on the same CPU are mutually
-	 * exclusive, i.e. deferred MCE on a CPU are either all in
-	 * @lmce_pending or all in @pending. In the former case, all
-	 * deferred MCE are LMCE. In the latter case, both LMCE and
-	 * non-local MCE can be in @pending, and @pending contains at
-	 * least one non-local MCE if it's not empty.
-	 *
-	 * Changes to @pending and @lmce_pending should be performed
-	 * via mctelem_process_deferred() and mctelem_defer(), in order
-	 * to guarantee the above mutual exclusivity.
+	 * processing of telemetry. @pending is indexed by the
+	 * CPU that the telemetry belongs to. @processing is indexed
+	 * by the CPU that is processing the telemetry.
 	 */
-	struct mctelem_ent *pending, *lmce_pending;
+	struct mctelem_ent *pending;
 	struct mctelem_ent *processing;
 };
 static DEFINE_PER_CPU(struct mc_telem_cpu_ctl, mctctl);
@@ -145,97 +134,26 @@ static void mctelem_xchg_head(struct mctelem_ent **headp,
 	}
 }
 
-/**
- * Append a telemetry of deferred MCE to a per-cpu pending list,
- * either @pending or @lmce_pending, according to rules below:
- *  - if @pending is not empty, then the new telemetry will be
- *    appended to @pending;
- *  - if @pending is empty and the new telemetry is for a deferred
- *    LMCE, then the new telemetry will be appended to @lmce_pending;
- *  - if @pending is empty and the new telemetry is for a deferred
- *    non-local MCE, all existing telemetries in @lmce_pending will be
- *    moved to @pending and then the new telemetry will be appended to
- *    @pending.
- *
- * This function must be called with MCIP bit set, so that it does not
- * need to worry about MC# re-occurring in this function.
- *
- * As a result, this function can preserve the mutual exclusivity
- * between @pending and @lmce_pending (see their comments in struct
- * mc_telem_cpu_ctl).
- *
- * Parameters:
- *  @cookie: telemetry of the deferred MCE
- *  @lmce:   indicate whether the telemetry is for LMCE
- */
-void mctelem_defer(mctelem_cookie_t cookie, bool lmce)
+
+void mctelem_defer(mctelem_cookie_t cookie)
 {
 	struct mctelem_ent *tep = COOKIE2MCTE(cookie);
-	struct mc_telem_cpu_ctl *mctctl = &this_cpu(mctctl);
 
-	ASSERT(mctctl->pending == NULL || mctctl->lmce_pending == NULL);
-
-	if (mctctl->pending)
-		mctelem_xchg_head(&mctctl->pending, &tep->mcte_next, tep);
-	else if (lmce)
-		mctelem_xchg_head(&mctctl->lmce_pending, &tep->mcte_next, tep);
-	else {
-		/*
-		 * LMCE is supported on Skylake-server and later CPUs, on
-		 * which mce_broadcast is always true. Therefore, non-empty
-		 * mctctl->lmce_pending in this branch implies a broadcasting
-		 * MC# is being handled, every CPU is in the exception
-		 * context, and no one is consuming mctctl->pending at this
-		 * moment. As a result, the following two exchanges together
-		 * can be treated as atomic.
-		 */
-		if (mctctl->lmce_pending)
-			mctelem_xchg_head(&mctctl->lmce_pending,
-					  &mctctl->pending, NULL);
-		mctelem_xchg_head(&mctctl->pending, &tep->mcte_next, tep);
-	}
+	mctelem_xchg_head(&this_cpu(mctctl.pending), &tep->mcte_next, tep);
 }
 
-/**
- * Move telemetries of deferred MCE from the per-cpu pending list on
- * this or another CPU to the per-cpu processing list on this CPU, and
- * then process all deferred MCE on the processing list.
- *
- * This function can be called with MCIP bit set (e.g. from MC#
- * handler) or cleared (from MCE softirq handler). In the latter case,
- * MC# may re-occur in this function.
- *
- * Parameters:
- *  @cpu:  indicate the CPU where the pending list is
- *  @fn:   the function to handle the deferred MCE
- *  @lmce: indicate which pending list on @cpu is handled
- */
 void mctelem_process_deferred(unsigned int cpu,
-			      int (*fn)(mctelem_cookie_t),
-			      bool lmce)
+			      int (*fn)(mctelem_cookie_t))
 {
 	struct mctelem_ent *tep;
 	struct mctelem_ent *head, *prev;
-	struct mc_telem_cpu_ctl *mctctl = &per_cpu(mctctl, cpu);
 	int ret;
 
 	/*
-	 * First, unhook the list of telemetry structures, and
+	 * First, unhook the list of telemetry structures, and	
 	 * hook it up to the processing list head for this CPU.
-	 *
-	 * If @lmce is true and a non-local MC# occurs before the
-	 * following atomic exchange, @lmce will not hold after
-	 * resumption, because all telemetries in @lmce_pending on
-	 * @cpu are moved to @pending on @cpu in mcheck_cmn_handler().
-	 * In such a case, no telemetries will be handled in this
-	 * function after resumption. Another round of MCE softirq,
-	 * which was raised by above mcheck_cmn_handler(), will handle
-	 * those moved telemetries in @pending on @cpu.
-	 *
-	 * Any MC# occurring after the following atomic exchange will be
-	 * handled by another round of MCE softirq.
 	 */
-	mctelem_xchg_head(lmce ? &mctctl->lmce_pending : &mctctl->pending,
+	mctelem_xchg_head(&per_cpu(mctctl.pending, cpu),
 			  &this_cpu(mctctl.processing), NULL);
 
 	head = this_cpu(mctctl.processing);
@@ -272,16 +190,11 @@ void mctelem_process_deferred(unsigned int cpu,
 	}
 }
 
-bool mctelem_has_deferred(unsigned int cpu)
+int mctelem_has_deferred(unsigned int cpu)
 {
 	if (per_cpu(mctctl.pending, cpu) != NULL)
-		return true;
-	return false;
-}
-
-bool mctelem_has_deferred_lmce(unsigned int cpu)
-{
-	return per_cpu(mctctl.lmce_pending, cpu) != NULL;
+		return 1;
+	return 0;
 }
 
 /* Free an entry to its native free list; the entry must not be linked on
@@ -339,7 +252,7 @@ void __init mctelem_init(unsigned int datasz)
 {
 	char *datarr;
 	unsigned int i;
-
+	
 	BUILD_BUG_ON(MC_URGENT != 0 || MC_NONURGENT != 1 || MC_NCLASSES != 2);
 
 	datasz = (datasz & ~0xf) + 0x10;	/* 16 byte roundup */
@@ -501,9 +414,9 @@ static void mctelem_append_processing(mctelem_class_t which)
 		ltep->mcte_prev = *procltp;
 		*procltp = dangling[target];
 	}
-	smp_wmb();
+	wmb();
 	dangling[target] = NULL;
-	smp_wmb();
+	wmb();
 }
 
 mctelem_cookie_t mctelem_consume_oldest_begin(mctelem_class_t which)
@@ -520,6 +433,7 @@ mctelem_cookie_t mctelem_consume_oldest_begin(mctelem_class_t which)
 	}
 
 	mctelem_processing_hold(tep);
+	wmb();
 	spin_unlock(&processing_lock);
 	return MCTE2COOKIE(tep);
 }
@@ -530,6 +444,7 @@ void mctelem_consume_oldest_end(mctelem_cookie_t cookie)
 
 	spin_lock(&processing_lock);
 	mctelem_processing_release(tep);
+	wmb();
 	spin_unlock(&processing_lock);
 }
 
@@ -545,15 +460,6 @@ void mctelem_ack(mctelem_class_t which, mctelem_cookie_t cookie)
 	spin_lock(&processing_lock);
 	if (tep == mctctl.mctc_processing_head[target])
 		mctelem_processing_release(tep);
+	wmb();
 	spin_unlock(&processing_lock);
 }
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * indent-tabs-mode: t
- * tab-width: 8
- * End:
- */

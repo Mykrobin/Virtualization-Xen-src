@@ -17,19 +17,7 @@
 #include <assert.h>
 #include <errno.h>
 
-#include <sys/mman.h>
-
 #include "private.h"
-
-static int all_restrict_cb(Xentoolcore__Active_Handle *ah, domid_t domid) {
-    xenforeignmemory_handle *fmem = CONTAINER_OF(ah, *fmem, tc_ah);
-
-    if (fmem->fd < 0)
-        /* just in case */
-        return 0;
-
-    return xenforeignmemory_restrict(fmem, domid);
-}
 
 xenforeignmemory_handle *xenforeignmemory_open(xentoollog_logger *logger,
                                                unsigned open_flags)
@@ -42,9 +30,6 @@ xenforeignmemory_handle *xenforeignmemory_open(xentoollog_logger *logger,
     fmem->fd = -1;
     fmem->logger = logger;
     fmem->logger_tofree = NULL;
-
-    fmem->tc_ah.restrict_callback = all_restrict_cb;
-    xentoolcore__register_active_handle(&fmem->tc_ah);
 
     if (!fmem->logger) {
         fmem->logger = fmem->logger_tofree =
@@ -59,7 +44,6 @@ xenforeignmemory_handle *xenforeignmemory_open(xentoollog_logger *logger,
     return fmem;
 
 err:
-    xentoolcore__deregister_active_handle(&fmem->tc_ah);
     osdep_xenforeignmemory_close(fmem);
     xtl_logger_destroy(fmem->logger_tofree);
     free(fmem);
@@ -73,17 +57,16 @@ int xenforeignmemory_close(xenforeignmemory_handle *fmem)
     if ( !fmem )
         return 0;
 
-    xentoolcore__deregister_active_handle(&fmem->tc_ah);
     rc = osdep_xenforeignmemory_close(fmem);
     xtl_logger_destroy(fmem->logger_tofree);
     free(fmem);
     return rc;
 }
 
-void *xenforeignmemory_map2(xenforeignmemory_handle *fmem,
-                            uint32_t dom, void *addr,
-                            int prot, int flags, size_t num,
-                            const xen_pfn_t arr[/*num*/], int err[/*num*/])
+void *xenforeignmemory_map(xenforeignmemory_handle *fmem,
+                           uint32_t dom, int prot,
+                           size_t num,
+                           const xen_pfn_t arr[/*num*/], int err[/*num*/])
 {
     void *ret;
     int *err_to_free = NULL;
@@ -94,7 +77,7 @@ void *xenforeignmemory_map2(xenforeignmemory_handle *fmem,
     if ( err == NULL )
         return NULL;
 
-    ret = osdep_xenforeignmemory_map(fmem, dom, addr, prot, flags, num, arr, err);
+    ret = osdep_xenforeignmemory_map(fmem, dom, prot, num, arr, err);
 
     if ( ret && err_to_free )
     {
@@ -117,75 +100,10 @@ void *xenforeignmemory_map2(xenforeignmemory_handle *fmem,
     return ret;
 }
 
-void *xenforeignmemory_map(xenforeignmemory_handle *fmem,
-                           uint32_t dom, int prot,
-                           size_t num,
-                           const xen_pfn_t arr[/*num*/], int err[/*num*/])
-{
-    return xenforeignmemory_map2(fmem, dom, NULL, prot, 0, num, arr, err);
-}
-
 int xenforeignmemory_unmap(xenforeignmemory_handle *fmem,
                            void *addr, size_t num)
 {
     return osdep_xenforeignmemory_unmap(fmem, addr, num);
-}
-
-int xenforeignmemory_restrict(xenforeignmemory_handle *fmem,
-                              domid_t domid)
-{
-    return osdep_xenforeignmemory_restrict(fmem, domid);
-}
-
-xenforeignmemory_resource_handle *xenforeignmemory_map_resource(
-    xenforeignmemory_handle *fmem, domid_t domid, unsigned int type,
-    unsigned int id, unsigned long frame, unsigned long nr_frames,
-    void **paddr, int prot, int flags)
-{
-    xenforeignmemory_resource_handle *fres;
-    int rc;
-
-    /* Check flags only contains POSIX defined values */
-    if ( flags & ~(MAP_SHARED | MAP_PRIVATE) )
-    {
-        errno = EINVAL;
-        return NULL;
-    }
-
-    fres = calloc(1, sizeof(*fres));
-    if ( !fres )
-    {
-        errno = ENOMEM;
-        return NULL;
-    }
-
-    fres->domid = domid;
-    fres->type = type;
-    fres->id = id;
-    fres->frame = frame;
-    fres->nr_frames = nr_frames;
-    fres->addr = *paddr;
-    fres->prot = prot;
-    fres->flags = flags;
-
-    rc = osdep_xenforeignmemory_map_resource(fmem, fres);
-    if ( rc )
-    {
-        free(fres);
-        fres = NULL;
-    } else
-        *paddr = fres->addr;
-
-    return fres;
-}
-
-int xenforeignmemory_unmap_resource(
-    xenforeignmemory_handle *fmem, xenforeignmemory_resource_handle *fres)
-{
-    int rc = osdep_xenforeignmemory_unmap_resource(fmem, fres);
-
-    free(fres);
-    return rc;
 }
 
 /*

@@ -22,25 +22,25 @@
 void handle_event(void);
 
 /* domid, mfn, eventchn, path */
-int do_introduce(struct connection *conn, struct buffered_data *in);
+void do_introduce(struct connection *conn, struct buffered_data *in);
 
 /* domid */
-int do_is_domain_introduced(struct connection *conn, struct buffered_data *in);
+void do_is_domain_introduced(struct connection *conn, struct buffered_data *in);
 
 /* domid */
-int do_release(struct connection *conn, struct buffered_data *in);
+void do_release(struct connection *conn, struct buffered_data *in);
 
 /* domid */
-int do_resume(struct connection *conn, struct buffered_data *in);
+void do_resume(struct connection *conn, struct buffered_data *in);
 
 /* domid, target */
-int do_set_target(struct connection *conn, struct buffered_data *in);
+void do_set_target(struct connection *conn, struct buffered_data *in);
 
 /* domid */
-int do_get_domain_path(struct connection *conn, struct buffered_data *in);
+void do_get_domain_path(struct connection *conn, struct buffered_data *in);
 
 /* Allow guest to reset all watches */
-int do_reset_watches(struct connection *conn, struct buffered_data *in);
+void do_reset_watches(struct connection *conn, struct buffered_data *in);
 
 void domain_init(void);
 
@@ -59,7 +59,7 @@ bool domain_is_unprivileged(struct connection *conn);
 /* Quota manipulation */
 void domain_entry_inc(struct connection *conn, struct node *);
 void domain_entry_dec(struct connection *conn, struct node *);
-int domain_entry_fix(unsigned int domid, int num, bool update);
+void domain_entry_fix(unsigned int domid, int num);
 int domain_entry(struct connection *conn);
 void domain_watch_inc(struct connection *conn);
 void domain_watch_dec(struct connection *conn);

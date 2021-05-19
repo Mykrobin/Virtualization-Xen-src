@@ -2,7 +2,6 @@
 #define XENCALL_PRIVATE_H
 
 #include <xentoollog.h>
-#include <xentoolcore_internal.h>
 
 #include <xencall.h>
 
@@ -20,13 +19,7 @@
 struct xencall_handle {
     xentoollog_logger *logger, *logger_tofree;
     unsigned flags;
-
-                     /* partially     with /dev/     no /dev/      */
-                     /* initialised   xen/hypercall  xen/hypercall */
-    int fd;          /*    any           >= 0           >= 0       */
-    int buf_fd;      /*    any           >= 0           -1         */
-
-    Xentoolcore__Active_Handle tc_ah;
+    int fd;
 
     /*
      * A simple cache of unused, single page, hypercall buffers

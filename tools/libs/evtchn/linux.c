@@ -21,11 +21,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <stdint.h>
 
 #include <sys/ioctl.h>
 
-#include <xen/xen.h>
 #include <xen/sys/evtchn.h>
 
 #include "private.h"
@@ -49,13 +47,6 @@ int osdep_evtchn_close(xenevtchn_handle *xce)
         return 0;
 
     return close(xce->fd);
-}
-
-int osdep_evtchn_restrict(xenevtchn_handle *xce, domid_t domid)
-{
-    struct ioctl_evtchn_restrict_domid restrict_domid = { domid };
-
-    return ioctl(xce->fd, IOCTL_EVTCHN_RESTRICT_DOMID, &restrict_domid);
 }
 
 int xenevtchn_fd(xenevtchn_handle *xce)

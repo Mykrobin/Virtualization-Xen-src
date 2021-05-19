@@ -53,7 +53,7 @@ acpi_map_gic_cpu_interface(struct acpi_madt_generic_interrupt *processor)
     int i;
     int rc;
     u64 mpidr = processor->arm_mpidr & MPIDR_HWID_MASK;
-    bool enabled = processor->flags & ACPI_MADT_ENABLED;
+    bool_t enabled = !!(processor->flags & ACPI_MADT_ENABLED);
 
     if ( mpidr == MPIDR_INVALID )
     {
@@ -190,23 +190,19 @@ static int __init acpi_parse_fadt(struct acpi_table_header *table)
     return -EINVAL;
 }
 
-static bool __initdata param_acpi_off;
-static bool __initdata param_acpi_force;
+static bool_t __initdata param_acpi_off;
+static bool_t __initdata param_acpi_force;
 
-static int __init parse_acpi_param(const char *arg)
+static void __init parse_acpi_param(char *arg)
 {
     if ( !arg )
-        return -EINVAL;
+        return;
 
     /* Interpret the parameter for use within Xen. */
-    if ( !parse_bool(arg, NULL) )
+    if ( !parse_bool(arg) )
         param_acpi_off = true;
     else if ( !strcmp(arg, "force") ) /* force ACPI to be enabled */
         param_acpi_force = true;
-    else
-        return -EINVAL;
-
-    return 0;
 }
 custom_param("acpi", parse_acpi_param);
 
@@ -238,7 +234,7 @@ static int __init dt_scan_depth1_nodes(const void *fdt, int node,
  */
 int __init acpi_boot_table_init(void)
 {
-    int error = 0;
+    int error;
 
     /*
      * Enable ACPI instead of device tree unless
@@ -249,7 +245,10 @@ int __init acpi_boot_table_init(void)
     if ( param_acpi_off || ( !param_acpi_force
                              && device_tree_for_each_node(device_tree_flattened,
                                                    dt_scan_depth1_nodes, NULL)))
-        goto disable;
+    {
+        disable_acpi();
+        return 0;
+    }
 
     /*
      * ACPI is disabled at this point. Enable it in order to parse
@@ -261,22 +260,16 @@ int __init acpi_boot_table_init(void)
     error = acpi_table_init();
     if ( error )
     {
-        printk("%s: Unable to initialize table parser (%d)\n",
-               __FUNCTION__, error);
-        goto disable;
+        disable_acpi();
+        return error;
     }
 
-    error = acpi_table_parse(ACPI_SIG_FADT, acpi_parse_fadt);
-    if ( error )
+    if ( acpi_table_parse(ACPI_SIG_FADT, acpi_parse_fadt) )
     {
-        printk("%s: FADT not found (%d)\n", __FUNCTION__, error);
-        goto disable;
+        /* disable ACPI if no FADT is found */
+        disable_acpi();
+        printk("Can't find FADT\n");
     }
 
     return 0;
-
-disable:
-    disable_acpi();
-
-    return error;
 }

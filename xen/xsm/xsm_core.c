@@ -19,10 +19,6 @@
 
 #ifdef CONFIG_XSM
 
-#ifdef CONFIG_MULTIBOOT
-#include <asm/setup.h>
-#endif
-
 #ifdef CONFIG_HAS_DEVICE_TREE
 #include <asm/setup.h>
 #endif
@@ -117,7 +113,8 @@ static int __init xsm_core_init(const void *policy_buffer, size_t policy_size)
 
 #ifdef CONFIG_MULTIBOOT
 int __init xsm_multiboot_init(unsigned long *module_map,
-                              const multiboot_info_t *mbi)
+                              const multiboot_info_t *mbi,
+                              void *(*bootstrap_map)(const module_t *))
 {
     int ret = 0;
     void *policy_buffer = NULL;
@@ -127,7 +124,7 @@ int __init xsm_multiboot_init(unsigned long *module_map,
 
     if ( XSM_MAGIC )
     {
-        ret = xsm_multiboot_policy_init(module_map, mbi,
+        ret = xsm_multiboot_policy_init(module_map, mbi, bootstrap_map,
                                         &policy_buffer, &policy_size);
         if ( ret )
         {

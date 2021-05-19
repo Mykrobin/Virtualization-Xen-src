@@ -66,7 +66,7 @@ gdb_arch_resume(struct cpu_user_regs *regs,
                 struct gdb_context *ctx)
 {
     if ( addr != -1UL )
-        regs->rip = addr;
+        regs->eip = addr;
 
     regs->eflags &= ~X86_EFLAGS_TF;
 

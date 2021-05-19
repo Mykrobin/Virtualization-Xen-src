@@ -38,19 +38,7 @@ int xc_gnttab_op(xc_interface *xch, int cmd, void * op, int op_size, int count)
     return ret;
 }
 
-int xc_gnttab_query_size(xc_interface *xch, struct gnttab_query_size *query)
-{
-    int rc;
-
-    rc = xc_gnttab_op(xch, GNTTABOP_query_size, query, sizeof(*query), 1);
-
-    if ( rc || (query->status != GNTST_okay) )
-        ERROR("Could not query dom %u's grant size\n", query->dom);
-
-    return rc;
-}
-
-int xc_gnttab_get_version(xc_interface *xch, uint32_t domid)
+int xc_gnttab_get_version(xc_interface *xch, int domid)
 {
     struct gnttab_get_version query;
     int rc;
@@ -64,7 +52,7 @@ int xc_gnttab_get_version(xc_interface *xch, uint32_t domid)
         return query.version;
 }
 
-static void *_gnttab_map_table(xc_interface *xch, uint32_t domid, int *gnt_num)
+static void *_gnttab_map_table(xc_interface *xch, int domid, int *gnt_num)
 {
     int rc, i;
     struct gnttab_query_size query;
@@ -134,7 +122,7 @@ err:
     return gnt;
 }
 
-grant_entry_v1_t *xc_gnttab_map_table_v1(xc_interface *xch, uint32_t domid,
+grant_entry_v1_t *xc_gnttab_map_table_v1(xc_interface *xch, int domid,
                                          int *gnt_num)
 {
     if (xc_gnttab_get_version(xch, domid) == 2)
@@ -142,7 +130,7 @@ grant_entry_v1_t *xc_gnttab_map_table_v1(xc_interface *xch, uint32_t domid,
     return _gnttab_map_table(xch, domid, gnt_num);
 }
 
-grant_entry_v2_t *xc_gnttab_map_table_v2(xc_interface *xch, uint32_t domid,
+grant_entry_v2_t *xc_gnttab_map_table_v2(xc_interface *xch, int domid,
                                          int *gnt_num)
 {
     if (xc_gnttab_get_version(xch, domid) != 2)

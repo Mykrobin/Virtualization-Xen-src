@@ -27,7 +27,7 @@
                                                                         \
     pid = libxl__ev_child_fork(gc, child, callback);                    \
     if (pid == -1) {                                                    \
-        LOGD(ERROR, ao->domid, "unable to fork");                       \
+        LOG(ERROR, "unable to fork");                                   \
         goto out;                                                       \
     }                                                                   \
                                                                         \
@@ -64,13 +64,6 @@ struct libxl__colo_proxy_state {
 
     int sock_fd;
     int index;
-    /*
-     * Private, True means use userspace colo proxy
-     *          False means use kernel colo proxy.
-     */
-    bool is_userspace_proxy;
-    const char *checkpoint_host;
-    const char *checkpoint_port;
 };
 
 struct libxl__colo_save_state {

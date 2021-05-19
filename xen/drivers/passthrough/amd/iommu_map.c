@@ -17,6 +17,7 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/acpi.h>
 #include <xen/sched.h>
 #include <asm/p2m.h>
@@ -477,7 +478,7 @@ static int iommu_pde_from_gfn(struct domain *d, unsigned long pfn,
     if ( pfn >> (PTE_PER_TABLE_SHIFT * level) )
         return 0;
 
-    next_table_mfn = mfn_x(page_to_mfn(table));
+    next_table_mfn = page_to_mfn(table);
 
     if ( level == IOMMU_PAGING_MODE_LEVEL_1 )
     {
@@ -519,7 +520,7 @@ static int iommu_pde_from_gfn(struct domain *d, unsigned long pfn,
                 return 1;
             }
 
-            next_table_mfn = mfn_x(page_to_mfn(table));
+            next_table_mfn = page_to_mfn(table);
             set_iommu_pde_present((u32*)pde, next_table_mfn, next_level, 
                                   !!IOMMUF_writable, !!IOMMUF_readable);
 
@@ -549,7 +550,7 @@ static int iommu_pde_from_gfn(struct domain *d, unsigned long pfn,
                     unmap_domain_page(next_table_vaddr);
                     return 1;
                 }
-                next_table_mfn = mfn_x(page_to_mfn(table));
+                next_table_mfn = page_to_mfn(table);
                 set_iommu_pde_present((u32*)pde, next_table_mfn, next_level,
                                       !!IOMMUF_writable, !!IOMMUF_readable);
             }
@@ -574,9 +575,10 @@ int amd_iommu_map_page(struct domain *d, unsigned long gfn, unsigned long mfn,
 {
     bool_t need_flush = 0;
     struct domain_iommu *hd = dom_iommu(d);
-    int rc;
     unsigned long pt_mfn[7];
     unsigned int merge_level;
+
+    BUG_ON( !hd->arch.root_table );
 
     if ( iommu_use_hap_pt(d) )
         return 0;
@@ -584,15 +586,6 @@ int amd_iommu_map_page(struct domain *d, unsigned long gfn, unsigned long mfn,
     memset(pt_mfn, 0, sizeof(pt_mfn));
 
     spin_lock(&hd->arch.mapping_lock);
-
-    rc = amd_iommu_alloc_root(hd);
-    if ( rc )
-    {
-        spin_unlock(&hd->arch.mapping_lock);
-        AMD_IOMMU_DEBUG("Root table alloc failed, gfn = %lx\n", gfn);
-        domain_crash(d);
-        return rc;
-    }
 
     if ( iommu_pde_from_gfn(d, gfn, pt_mfn, true) || (pt_mfn[1] == 0) )
     {
@@ -647,7 +640,7 @@ int amd_iommu_map_page(struct domain *d, unsigned long gfn, unsigned long mfn,
         }
 
         /* Deallocate lower level page table */
-        free_amd_iommu_pgtable(mfn_to_page(_mfn(pt_mfn[merge_level - 1])));
+        free_amd_iommu_pgtable(mfn_to_page(pt_mfn[merge_level - 1]));
     }
 
 out:
@@ -660,18 +653,14 @@ int amd_iommu_unmap_page(struct domain *d, unsigned long gfn)
     unsigned long pt_mfn[7];
     struct domain_iommu *hd = dom_iommu(d);
 
+    BUG_ON( !hd->arch.root_table );
+
     if ( iommu_use_hap_pt(d) )
         return 0;
 
     memset(pt_mfn, 0, sizeof(pt_mfn));
 
     spin_lock(&hd->arch.mapping_lock);
-
-    if ( !hd->arch.root_table )
-    {
-        spin_unlock(&hd->arch.mapping_lock);
-        return 0;
-    }
 
     if ( iommu_pde_from_gfn(d, gfn, pt_mfn, false) )
     {
@@ -728,7 +717,7 @@ void amd_iommu_share_p2m(struct domain *d)
     mfn_t pgd_mfn;
 
     pgd_mfn = pagetable_get_mfn(p2m_get_pagetable(p2m_get_hostp2m(d)));
-    p2m_table = mfn_to_page(pgd_mfn);
+    p2m_table = mfn_to_page(mfn_x(pgd_mfn));
 
     if ( hd->arch.root_table != p2m_table )
     {
@@ -740,66 +729,4 @@ void amd_iommu_share_p2m(struct domain *d)
         AMD_IOMMU_DEBUG("Share p2m table with iommu: p2m table = %#lx\n",
                         mfn_x(pgd_mfn));
     }
-}
-
-int __init amd_iommu_quarantine_init(struct domain *d)
-{
-    struct domain_iommu *hd = dom_iommu(d);
-    unsigned long max_gfn =
-        PFN_DOWN((1ul << DEFAULT_DOMAIN_ADDRESS_WIDTH) - 1);
-    unsigned int level = amd_iommu_get_paging_mode(max_gfn);
-    uint64_t *table;
-
-    if ( hd->arch.root_table )
-    {
-        ASSERT_UNREACHABLE();
-        return 0;
-    }
-
-    spin_lock(&hd->arch.mapping_lock);
-
-    hd->arch.root_table = alloc_amd_iommu_pgtable();
-    if ( !hd->arch.root_table )
-        goto out;
-
-    table = __map_domain_page(hd->arch.root_table);
-    while ( level )
-    {
-        struct page_info *pg;
-        unsigned int i;
-
-        /*
-         * The pgtable allocator is fine for the leaf page, as well as
-         * page table pages, and the resulting allocations are always
-         * zeroed.
-         */
-        pg = alloc_amd_iommu_pgtable();
-        if ( !pg )
-            break;
-
-        for ( i = 0; i < PTE_PER_TABLE_SIZE; i++ )
-        {
-            uint32_t *pde = (uint32_t *)&table[i];
-
-            /*
-             * PDEs are essentially a subset of PTEs, so this function
-             * is fine to use even at the leaf.
-             */
-            set_iommu_pde_present(pde, mfn_x(page_to_mfn(pg)), level - 1,
-                                  false, true);
-        }
-
-        unmap_domain_page(table);
-        table = __map_domain_page(pg);
-        level--;
-    }
-    unmap_domain_page(table);
-
- out:
-    spin_unlock(&hd->arch.mapping_lock);
-
-    amd_iommu_flush_all_pages(d);
-
-    /* Pages leaked in failure case */
-    return level ? -ENOMEM : 0;
 }

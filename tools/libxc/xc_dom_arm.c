@@ -26,11 +26,10 @@
 #include "xg_private.h"
 #include "xc_dom.h"
 
-#define NR_MAGIC_PAGES 4
+#define NR_MAGIC_PAGES 3
 #define CONSOLE_PFN_OFFSET 0
 #define XENSTORE_PFN_OFFSET 1
 #define MEMACCESS_PFN_OFFSET 2
-#define VUART_PFN_OFFSET 3
 
 #define LPAE_SHIFT 9
 
@@ -86,13 +85,10 @@ static int alloc_magic_pages(struct xc_dom_image *dom)
 
     dom->console_pfn = base + CONSOLE_PFN_OFFSET;
     dom->xenstore_pfn = base + XENSTORE_PFN_OFFSET;
-    dom->vuart_gfn = base + VUART_PFN_OFFSET;
 
     xc_clear_domain_page(dom->xch, dom->guest_domid, dom->console_pfn);
     xc_clear_domain_page(dom->xch, dom->guest_domid, dom->xenstore_pfn);
     xc_clear_domain_page(dom->xch, dom->guest_domid, base + MEMACCESS_PFN_OFFSET);
-    xc_clear_domain_page(dom->xch, dom->guest_domid, dom->vuart_gfn);
-
     xc_hvm_param_set(dom->xch, dom->guest_domid, HVM_PARAM_CONSOLE_PFN,
             dom->console_pfn);
     xc_hvm_param_set(dom->xch, dom->guest_domid, HVM_PARAM_STORE_PFN,
@@ -213,7 +209,7 @@ static int vcpu_arm64(struct xc_dom_image *dom)
 
 /* ------------------------------------------------------------------------ */
 
-static int set_mode(xc_interface *xch, uint32_t domid, char *guest_type)
+static int set_mode(xc_interface *xch, domid_t domid, char *guest_type)
 {
     static const struct {
         char           *guest;
@@ -390,8 +386,8 @@ static int meminit(struct xc_dom_image *dom)
     const uint64_t kernsize = kernend - kernbase;
     const uint64_t dtb_size = dom->devicetree_blob ?
         ROUNDUP(dom->devicetree_size, XC_PAGE_SHIFT) : 0;
-    const uint64_t ramdisk_size = dom->modules[0].blob ?
-        ROUNDUP(dom->modules[0].size, XC_PAGE_SHIFT) : 0;
+    const uint64_t ramdisk_size = dom->ramdisk_blob ?
+        ROUNDUP(dom->ramdisk_size, XC_PAGE_SHIFT) : 0;
     const uint64_t modsize = dtb_size + ramdisk_size;
     const uint64_t ram128mb = bankbase[0] + (128<<20);
 
@@ -424,6 +420,8 @@ static int meminit(struct xc_dom_image *dom)
     rc = set_mode(dom->xch, dom->guest_domid, dom->guest_type);
     if ( rc )
         return rc;
+
+    dom->shadow_enabled = 1;
 
     for ( i = 0; ramsize && i < GUEST_RAM_BANKS; i++ )
     {
@@ -483,12 +481,12 @@ static int meminit(struct xc_dom_image *dom)
      */
     if ( ramdisk_size )
     {
-        dom->modules[0].seg.vstart = modbase;
-        dom->modules[0].seg.vend = modbase + ramdisk_size;
+        dom->ramdisk_seg.vstart = modbase;
+        dom->ramdisk_seg.vend = modbase + ramdisk_size;
 
         DOMPRINTF("%s: ramdisk: 0x%" PRIx64 " -> 0x%" PRIx64 "",
                   __FUNCTION__,
-                  dom->modules[0].seg.vstart, dom->modules[0].seg.vend);
+                  dom->ramdisk_seg.vstart, dom->ramdisk_seg.vend);
 
         modbase += ramdisk_size;
     }
@@ -508,9 +506,9 @@ static int meminit(struct xc_dom_image *dom)
     return 0;
 }
 
-bool xc_dom_translated(const struct xc_dom_image *dom)
+int xc_dom_feature_translated(struct xc_dom_image *dom)
 {
-    return true;
+    return 1;
 }
 
 /* ------------------------------------------------------------------------ */

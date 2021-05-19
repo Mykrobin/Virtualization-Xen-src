@@ -6,7 +6,7 @@
 #define MIN_FDT_ALIGN 8
 #define MAX_FDT_SIZE SZ_2M
 
-#define NR_MEM_BANKS 128
+#define NR_MEM_BANKS 64
 
 #define MAX_MODULES 5 /* Current maximum useful modules */
 
@@ -46,9 +46,6 @@ struct bootmodules {
 struct bootinfo {
     struct meminfo mem;
     struct bootmodules modules;
-#ifdef CONFIG_ACPI
-    struct meminfo acpi;
-#endif
 };
 
 extern struct bootinfo bootinfo;

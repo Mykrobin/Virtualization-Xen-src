@@ -22,6 +22,7 @@
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/lib.h>
 #include <xen/types.h>

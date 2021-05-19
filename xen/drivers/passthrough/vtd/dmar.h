@@ -117,11 +117,10 @@ do {                                                \
             break;                                  \
         if ( NOW() > start_time + DMAR_OPERATION_TIMEOUT ) {    \
             if ( !kexecing )                                    \
-            {                                                   \
-                dump_execution_state();                         \
-                panic("DMAR hardware malfunction");             \
-            }                                                   \
-            break;                                              \
+                panic("%s:%d:%s: DMAR hardware is malfunctional",\
+                      __FILE__, __LINE__, __func__);            \
+            else                                                \
+                break;                                          \
         }                                                       \
         cpu_relax();                                            \
     }                                                           \

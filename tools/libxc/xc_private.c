@@ -67,14 +67,9 @@ struct xc_interface_core *xc_interface_open(xentoollog_logger *logger,
     if ( xch->fmem == NULL )
         goto err;
 
-    xch->dmod = xendevicemodel_open(xch->error_handler, 0);
-    if ( xch->dmod == NULL )
-        goto err;
-
     return xch;
 
  err:
-    xenforeignmemory_close(xch->fmem);
     xencall_close(xch->xcall);
     xtl_logger_destroy(xch->error_handler_tofree);
     if (xch != &xch_buf) free(xch);
@@ -93,9 +88,6 @@ int xc_interface_close(xc_interface *xch)
 
     rc = xenforeignmemory_close(xch->fmem);
     if (rc) PERROR("Could not close foreign memory interface");
-
-    rc = xendevicemodel_close(xch->dmod);
-    if (rc) PERROR("Could not close device model interface");
 
     xtl_logger_destroy(xch->dombuild_logger_tofree);
     xtl_logger_destroy(xch->error_handler_tofree);
@@ -221,10 +213,10 @@ int xc_get_pfn_type_batch(xc_interface *xch, uint32_t dom,
     if ( xc_hypercall_bounce_pre(xch, arr) )
         return -1;
     domctl.cmd = XEN_DOMCTL_getpageframeinfo3;
-    domctl.domain = dom;
+    domctl.domain = (domid_t)dom;
     domctl.u.getpageframeinfo3.num = num;
     set_xen_guest_handle(domctl.u.getpageframeinfo3.array, arr);
-    rc = do_domctl_retry_efault(xch, &domctl);
+    rc = do_domctl(xch, &domctl);
     xc_hypercall_bounce_post(xch, arr);
     return rc;
 }
@@ -233,7 +225,7 @@ int xc_mmuext_op(
     xc_interface *xch,
     struct mmuext_op *op,
     unsigned int nr_ops,
-    uint32_t dom)
+    domid_t dom)
 {
     DECLARE_HYPERCALL_BOUNCE(op, nr_ops*sizeof(*op), XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
     long ret = -1;
@@ -344,12 +336,12 @@ int xc_maximum_ram_page(xc_interface *xch, unsigned long *max_mfn)
     return rc;
 }
 
-long long xc_domain_get_cpu_usage(xc_interface *xch, uint32_t domid, int vcpu)
+long long xc_domain_get_cpu_usage( xc_interface *xch, domid_t domid, int vcpu )
 {
     DECLARE_DOMCTL;
 
     domctl.cmd = XEN_DOMCTL_getvcpuinfo;
-    domctl.domain = domid;
+    domctl.domain = (domid_t)domid;
     domctl.u.getvcpuinfo.vcpu   = (uint16_t)vcpu;
     if ( (do_domctl(xch, &domctl) < 0) )
     {
@@ -385,6 +377,33 @@ int xc_machphys_mfn_list(xc_interface *xch,
     xc_hypercall_bounce_post(xch, extent_start);
 
     return rc;
+}
+
+int xc_get_pfn_list(xc_interface *xch,
+                    uint32_t domid,
+                    uint64_t *pfn_buf,
+                    unsigned long max_pfns)
+{
+    DECLARE_DOMCTL;
+    DECLARE_HYPERCALL_BOUNCE(pfn_buf, max_pfns * sizeof(*pfn_buf), XC_HYPERCALL_BUFFER_BOUNCE_OUT);
+    int ret;
+
+    if ( xc_hypercall_bounce_pre(xch, pfn_buf) )
+    {
+        PERROR("xc_get_pfn_list: pfn_buf bounce failed");
+        return -1;
+    }
+
+    domctl.cmd = XEN_DOMCTL_getmemlist;
+    domctl.domain   = (domid_t)domid;
+    domctl.u.getmemlist.max_pfns = max_pfns;
+    set_xen_guest_handle(domctl.u.getmemlist.buffer, pfn_buf);
+
+    ret = do_domctl(xch, &domctl);
+
+    xc_hypercall_bounce_post(xch, pfn_buf);
+
+    return (ret < 0) ? -1 : domctl.u.getmemlist.num_pfns;
 }
 
 long xc_get_tot_pages(xc_interface *xch, uint32_t domid)

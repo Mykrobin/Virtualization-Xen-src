@@ -17,6 +17,7 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/spinlock.h>
 #include <xen/irq.h>
@@ -26,8 +27,6 @@
 
 #include <asm/gic.h>
 #include <asm/vgic.h>
-
-const unsigned int nr_irqs = NR_IRQS;
 
 static unsigned int local_irqs_type[NR_LOCAL_IRQS];
 static DEFINE_SPINLOCK(local_irqs_type_lock);
@@ -44,14 +43,7 @@ static void ack_none(struct irq_desc *irq)
     printk("unexpected IRQ trap at irq %02x\n", irq->irq);
 }
 
-static void end_none(struct irq_desc *irq)
-{
-    /*
-     * Still allow a CPU to end an interrupt if we receive a spurious
-     * interrupt. This will prevent the CPU to lose interrupt forever.
-     */
-    gic_hw_ops->gic_host_irq_type->end(irq);
-}
+static void end_none(struct irq_desc *irq) { }
 
 hw_irq_controller no_irq_type = {
     .typename = "none",
@@ -232,7 +224,7 @@ void do_IRQ(struct cpu_user_regs *regs, unsigned int irq, int is_fiq)
          * The irq cannot be a PPI, we only support delivery of SPIs to
          * guests.
 	 */
-        vgic_inject_irq(info->d, NULL, info->virq, true);
+        vgic_vcpu_inject_spi(info->d, info->virq);
         goto out_no_end;
     }
 
@@ -324,7 +316,7 @@ void release_irq(unsigned int irq, const void *dev_id)
 static int __setup_irq(struct irq_desc *desc, unsigned int irqflags,
                        struct irqaction *new)
 {
-    bool shared = irqflags & IRQF_SHARED;
+    bool_t shared = !!(irqflags & IRQF_SHARED);
 
     ASSERT(new != NULL);
 
@@ -353,7 +345,7 @@ int setup_irq(unsigned int irq, unsigned int irqflags, struct irqaction *new)
     int rc;
     unsigned long flags;
     struct irq_desc *desc;
-    bool disabled;
+    bool_t disabled;
 
     desc = irq_to_desc(irq);
 
@@ -396,10 +388,10 @@ err:
     return rc;
 }
 
-bool is_assignable_irq(unsigned int irq)
+bool_t is_assignable_irq(unsigned int irq)
 {
     /* For now, we can only route SPIs to the guest */
-    return (irq >= NR_LOCAL_IRQS) && (irq < gic_number_lines());
+    return ((irq >= NR_LOCAL_IRQS) && (irq < gic_number_lines()));
 }
 
 /*
@@ -408,7 +400,7 @@ bool is_assignable_irq(unsigned int irq)
  *
  * XXX: See whether it is possible to let any domain configure the type.
  */
-bool irq_type_set_by_domain(const struct domain *d)
+bool_t irq_type_set_by_domain(const struct domain *d)
 {
     return (d == hardware_domain);
 }
@@ -489,17 +481,20 @@ int route_irq_to_guest(struct domain *d, unsigned int virq,
         {
             struct domain *ad = irq_get_domain(desc);
 
-            if ( d != ad )
+            if ( d == ad )
+            {
+                if ( irq_get_guest_info(desc)->virq != virq )
+                {
+                    printk(XENLOG_G_ERR
+                           "d%u: IRQ %u is already assigned to vIRQ %u\n",
+                           d->domain_id, irq, irq_get_guest_info(desc)->virq);
+                    retval = -EBUSY;
+                }
+            }
+            else
             {
                 printk(XENLOG_G_ERR "IRQ %u is already used by domain %u\n",
                        irq, ad->domain_id);
-                retval = -EBUSY;
-            }
-            else if ( irq_get_guest_info(desc)->virq != virq )
-            {
-                printk(XENLOG_G_ERR
-                       "d%u: IRQ %u is already assigned to vIRQ %u\n",
-                       d->domain_id, irq, irq_get_guest_info(desc)->virq);
                 retval = -EBUSY;
             }
         }
@@ -541,15 +536,18 @@ int release_guest_irq(struct domain *d, unsigned int virq)
     struct irq_desc *desc;
     struct irq_guest *info;
     unsigned long flags;
+    struct pending_irq *p;
     int ret;
 
     /* Only SPIs are supported */
     if ( virq < NR_LOCAL_IRQS || virq >= vgic_num_irqs(d) )
         return -EINVAL;
 
-    desc = vgic_get_hw_irq_desc(d, NULL, virq);
-    if ( !desc )
+    p = spi_to_pending(d, virq);
+    if ( !p->desc )
         return -EINVAL;
+
+    desc = p->desc;
 
     spin_lock_irqsave(&desc->lock, flags);
 
@@ -608,7 +606,7 @@ void pirq_set_affinity(struct domain *d, int pirq, const cpumask_t *mask)
     BUG();
 }
 
-static bool irq_validate_new_type(unsigned int curr, unsigned new)
+static bool_t irq_validate_new_type(unsigned int curr, unsigned new)
 {
     return (curr == IRQ_TYPE_INVALID || curr == new );
 }

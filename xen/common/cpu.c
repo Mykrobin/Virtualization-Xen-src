@@ -1,3 +1,4 @@
+#include <xen/config.h>
 #include <xen/cpumask.h>
 #include <xen/cpu.h>
 #include <xen/event.h>

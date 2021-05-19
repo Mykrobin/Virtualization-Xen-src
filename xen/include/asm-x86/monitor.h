@@ -33,12 +33,6 @@ struct monitor_msr_bitmap {
 };
 
 static inline
-void arch_monitor_allow_userspace(struct domain *d, bool allow_userspace)
-{
-    d->arch.monitor.guest_request_userspace_enabled = allow_userspace;
-}
-
-static inline
 int arch_monitor_domctl_op(struct domain *d, struct xen_domctl_monitor_op *mop)
 {
     int rc = 0;
@@ -71,31 +65,22 @@ static inline uint32_t arch_monitor_get_capabilities(struct domain *d)
     uint32_t capabilities = 0;
 
     /*
-     * At the moment only Intel and AMD HVM domains are supported. However,
-     * event delivery could be extended to PV domains.
+     * At the moment only Intel HVM domains are supported. However, event
+     * delivery could be extended to AMD and PV domains.
      */
-    if ( !is_hvm_domain(d) )
+    if ( !is_hvm_domain(d) || !cpu_has_vmx )
         return capabilities;
 
-    capabilities = ((1U << XEN_DOMCTL_MONITOR_EVENT_GUEST_REQUEST) |
-                    (1U << XEN_DOMCTL_MONITOR_EVENT_SOFTWARE_BREAKPOINT) |
-                    (1U << XEN_DOMCTL_MONITOR_EVENT_MOV_TO_MSR) |
-                    (1U << XEN_DOMCTL_MONITOR_EVENT_INTERRUPT) |
-                    (1U << XEN_DOMCTL_MONITOR_EVENT_CPUID) |
-                    (1U << XEN_DOMCTL_MONITOR_EVENT_DEBUG_EXCEPTION) |
-                    (1U << XEN_DOMCTL_MONITOR_EVENT_WRITE_CTRLREG));
+    capabilities = (1U << XEN_DOMCTL_MONITOR_EVENT_WRITE_CTRLREG) |
+                   (1U << XEN_DOMCTL_MONITOR_EVENT_MOV_TO_MSR) |
+                   (1U << XEN_DOMCTL_MONITOR_EVENT_SOFTWARE_BREAKPOINT) |
+                   (1U << XEN_DOMCTL_MONITOR_EVENT_GUEST_REQUEST) |
+                   (1U << XEN_DOMCTL_MONITOR_EVENT_DEBUG_EXCEPTION) |
+                   (1U << XEN_DOMCTL_MONITOR_EVENT_CPUID);
 
-    if ( cpu_has_vmx )
-    {
-        capabilities |= (1U << XEN_DOMCTL_MONITOR_EVENT_EMUL_UNIMPLEMENTED);
-
-        /* Since we know this is on VMX, we can just call the hvm func */
-        if ( hvm_is_singlestep_supported() )
-            capabilities |= (1U << XEN_DOMCTL_MONITOR_EVENT_SINGLESTEP);
-    }
-
-    if ( hvm_funcs.set_descriptor_access_exiting )
-        capabilities |= (1U << XEN_DOMCTL_MONITOR_EVENT_DESC_ACCESS);
+    /* Since we know this is on VMX, we can just call the hvm func */
+    if ( hvm_is_singlestep_supported() )
+        capabilities |= (1U << XEN_DOMCTL_MONITOR_EVENT_SINGLESTEP);
 
     return capabilities;
 }
@@ -107,7 +92,6 @@ int arch_monitor_init_domain(struct domain *d);
 
 void arch_monitor_cleanup_domain(struct domain *d);
 
-bool monitored_msr(const struct domain *d, u32 msr);
-bool monitored_msr_onchangeonly(const struct domain *d, u32 msr);
+bool_t monitored_msr(const struct domain *d, u32 msr);
 
 #endif /* __ASM_X86_MONITOR_H__ */

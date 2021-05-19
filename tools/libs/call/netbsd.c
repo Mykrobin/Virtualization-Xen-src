@@ -110,11 +110,6 @@ int do_xen_hypercall(xencall_handle *xcall, privcmd_hypercall_t *hypercall)
         return hypercall->retval;
 }
 
-int xencall_buffers_never_fault(xencall_handle *xcall)
-{
-    return 1;
-}
-
 /*
  * Local variables:
  * mode: C

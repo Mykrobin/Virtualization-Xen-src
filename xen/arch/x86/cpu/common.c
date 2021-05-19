@@ -1,3 +1,4 @@
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/string.h>
 #include <xen/delay.h>
@@ -115,90 +116,12 @@ static const struct cpu_dev default_cpu = {
 };
 static const struct cpu_dev *this_cpu = &default_cpu;
 
-static DEFINE_PER_CPU(uint64_t, msr_misc_features);
-void (* __read_mostly ctxt_switch_masking)(const struct vcpu *next);
-
-bool __init probe_cpuid_faulting(void)
+static void default_ctxt_switch_levelling(const struct vcpu *next)
 {
-	uint64_t val;
-	int rc;
-
-	if ((rc = rdmsr_safe(MSR_INTEL_PLATFORM_INFO, val)) == 0)
-	{
-		struct msr_domain_policy *dp = &raw_msr_domain_policy;
-
-		dp->plaform_info.available = true;
-		if (val & MSR_PLATFORM_INFO_CPUID_FAULTING)
-			dp->plaform_info.cpuid_faulting = true;
-	}
-
-	if (rc ||
-	    !(val & MSR_PLATFORM_INFO_CPUID_FAULTING) ||
-	    rdmsr_safe(MSR_INTEL_MISC_FEATURES_ENABLES,
-		       this_cpu(msr_misc_features)))
-	{
-		setup_clear_cpu_cap(X86_FEATURE_CPUID_FAULTING);
-		return false;
-	}
-
-	expected_levelling_cap |= LCAP_faulting;
-	levelling_caps |=  LCAP_faulting;
-	setup_force_cpu_cap(X86_FEATURE_CPUID_FAULTING);
-
-	return true;
+	/* Nop */
 }
-
-static void set_cpuid_faulting(bool enable)
-{
-	uint64_t *this_misc_features = &this_cpu(msr_misc_features);
-	uint64_t val = *this_misc_features;
-
-	if (!!(val & MSR_MISC_FEATURES_CPUID_FAULTING) == enable)
-		return;
-
-	val ^= MSR_MISC_FEATURES_CPUID_FAULTING;
-
-	wrmsrl(MSR_INTEL_MISC_FEATURES_ENABLES, val);
-	*this_misc_features = val;
-}
-
-void ctxt_switch_levelling(const struct vcpu *next)
-{
-	const struct domain *nextd = next ? next->domain : NULL;
-
-	if (cpu_has_cpuid_faulting) {
-		/*
-		 * No need to alter the faulting setting if we are switching
-		 * to idle; it won't affect any code running in idle context.
-		 */
-		if (nextd && is_idle_domain(nextd))
-			return;
-		/*
-		 * We *should* be enabling faulting for the control domain.
-		 *
-		 * Unfortunately, the domain builder (having only ever been a
-		 * PV guest) expects to be able to see host cpuid state in a
-		 * native CPUID instruction, to correctly build a CPUID policy
-		 * for HVM guests (notably the xstate leaves).
-		 *
-		 * This logic is fundimentally broken for HVM toolstack
-		 * domains, and faulting causes PV guests to behave like HVM
-		 * guests from their point of view.
-		 *
-		 * Future development plans will move responsibility for
-		 * generating the maximum full cpuid policy into Xen, at which
-		 * this problem will disappear.
-		 */
-		set_cpuid_faulting(nextd && !is_control_domain(nextd) &&
-				   (is_pv_domain(nextd) ||
-				    next->arch.msr->
-				    misc_features_enables.cpuid_faulting));
-		return;
-	}
-
-	if (ctxt_switch_masking)
-		ctxt_switch_masking(next);
-}
+void (* __read_mostly ctxt_switch_levelling)(const struct vcpu *next) =
+	default_ctxt_switch_levelling;
 
 bool_t opt_cpu_info;
 boolean_param("cpuinfo", opt_cpu_info);
@@ -259,18 +182,16 @@ void display_cacheinfo(struct cpuinfo_x86 *c)
 		       l2size, ecx & 0xFF);
 }
 
-int get_cpu_vendor(uint32_t b, uint32_t c, uint32_t d, enum get_cpu_vendor mode)
+int get_cpu_vendor(const char v[], enum get_cpu_vendor mode)
 {
 	int i;
 	static int printed;
 
 	for (i = 0; i < X86_VENDOR_NUM; i++) {
 		if (cpu_devs[i]) {
-			struct {
-				uint32_t b, d, c;
-			} *ptr = (void *)cpu_devs[i]->c_ident;
-
-			if (ptr->b == b && ptr->c == c && ptr->d == d) {
+			if (!strcmp(v,cpu_devs[i]->c_ident[0]) ||
+			    (cpu_devs[i]->c_ident[1] && 
+			     !strcmp(v,cpu_devs[i]->c_ident[1]))) {
 				if (mode == gcv_host)
 					this_cpu = cpu_devs[i];
 				return i;
@@ -320,16 +241,21 @@ static void __init early_cpu_detect(void)
 	c->x86_cache_alignment = 32;
 
 	/* Get vendor name */
-	cpuid(0x00000000, &c->cpuid_level, &ebx, &ecx, &edx);
-	*(u32 *)&c->x86_vendor_id[0] = ebx;
-	*(u32 *)&c->x86_vendor_id[8] = ecx;
-	*(u32 *)&c->x86_vendor_id[4] = edx;
+	cpuid(0x00000000, &c->cpuid_level,
+	      (int *)&c->x86_vendor_id[0],
+	      (int *)&c->x86_vendor_id[8],
+	      (int *)&c->x86_vendor_id[4]);
 
-	c->x86_vendor = get_cpu_vendor(ebx, ecx, edx, gcv_host);
+	c->x86_vendor = get_cpu_vendor(c->x86_vendor_id, gcv_host);
 
 	cpuid(0x00000001, &eax, &ebx, &ecx, &edx);
-	c->x86 = get_cpu_family(eax, &c->x86_model, &c->x86_mask);
-
+	c->x86 = (eax >> 8) & 15;
+	c->x86_model = (eax >> 4) & 15;
+	if (c->x86 == 0xf)
+		c->x86 += (eax >> 20) & 0xff;
+	if (c->x86 >= 0x6)
+		c->x86_model += ((eax >> 16) & 0xF) << 4;
+	c->x86_mask = eax & 15;
 	edx &= ~cleared_caps[cpufeat_word(X86_FEATURE_FPU)];
 	ecx &= ~cleared_caps[cpufeat_word(X86_FEATURE_SSE3)];
 	if (edx & cpufeat_mask(X86_FEATURE_CLFLUSH))
@@ -368,18 +294,24 @@ static void generic_identify(struct cpuinfo_x86 *c)
 	u32 eax, ebx, ecx, edx, tmp;
 
 	/* Get vendor name */
-	cpuid(0x00000000, &c->cpuid_level, &ebx, &ecx, &edx);
-	*(u32 *)&c->x86_vendor_id[0] = ebx;
-	*(u32 *)&c->x86_vendor_id[8] = ecx;
-	*(u32 *)&c->x86_vendor_id[4] = edx;
+	cpuid(0x00000000, &c->cpuid_level,
+	      (int *)&c->x86_vendor_id[0],
+	      (int *)&c->x86_vendor_id[8],
+	      (int *)&c->x86_vendor_id[4]);
 
-	c->x86_vendor = get_cpu_vendor(ebx, ecx, edx, gcv_host);
+	c->x86_vendor = get_cpu_vendor(c->x86_vendor_id, gcv_host);
 	/* Initialize the standard set of capabilities */
 	/* Note that the vendor-specific code below might override */
 
 	/* Model and family information. */
 	cpuid(0x00000001, &eax, &ebx, &ecx, &edx);
-	c->x86 = get_cpu_family(eax, &c->x86_model, &c->x86_mask);
+	c->x86 = (eax >> 8) & 15;
+	c->x86_model = (eax >> 4) & 15;
+	if (c->x86 == 0xf)
+		c->x86 += (eax >> 20) & 0xff;
+	if (c->x86 >= 0x6)
+		c->x86_model += ((eax >> 16) & 0xF) << 4;
+	c->x86_mask = eax & 15;
 	c->apicid = phys_pkg_id((ebx >> 24) & 0xFF, 0);
 	c->phys_proc_id = c->apicid;
 
@@ -425,7 +357,7 @@ static void generic_identify(struct cpuinfo_x86 *c)
 		cpuid_count(0x00000007, 0, &tmp,
 			    &c->x86_capability[cpufeat_word(X86_FEATURE_FSGSBASE)],
 			    &c->x86_capability[cpufeat_word(X86_FEATURE_PKU)],
-			    &c->x86_capability[cpufeat_word(X86_FEATURE_AVX512_4VNNIW)]);
+			    &c->x86_capability[cpufeat_word(X86_FEATURE_IBRSB)]);
 }
 
 /*
@@ -472,7 +404,7 @@ void identify_cpu(struct cpuinfo_x86 *c)
 		this_cpu->c_init(c);
 
 
-   	if (c == &boot_cpu_data && !opt_pku)
+   	if ( !opt_pku )
 		setup_clear_cpu_cap(X86_FEATURE_PKU);
 
 	/*
@@ -506,9 +438,6 @@ void identify_cpu(struct cpuinfo_x86 *c)
 	printk("\n");
 #endif
 
-	if (system_state == SYS_STATE_resume)
-		return;
-
 	/*
 	 * On SMP, boot_cpu_data holds the common feature set between
 	 * all CPUs; so make sure that we indicate which features are
@@ -520,9 +449,9 @@ void identify_cpu(struct cpuinfo_x86 *c)
 		for ( i = 0 ; i < NCAPINTS ; i++ )
 			boot_cpu_data.x86_capability[i] &= c->x86_capability[i];
 
-		mcheck_init(c, false);
+		mcheck_init(c, 0);
 	} else {
-		mcheck_init(c, true);
+		mcheck_init(c, 1);
 
 		mtrr_bp_init();
 	}
@@ -734,7 +663,7 @@ void load_system_tables(void)
 	unsigned long stack_bottom = get_stack_bottom(),
 		stack_top = stack_bottom & ~(STACK_SIZE - 1);
 
-	struct tss64 *tss = &this_cpu(tss_page).tss;
+	struct tss_struct *tss = &this_cpu(init_tss);
 	struct desc_struct *gdt =
 		this_cpu(gdt_table) - FIRST_RESERVED_GDT_ENTRY;
 	struct desc_struct *compat_gdt =
@@ -749,44 +678,36 @@ void load_system_tables(void)
 		.limit = (IDT_ENTRIES * sizeof(idt_entry_t)) - 1,
 	};
 
-	*tss = (struct tss64){
-		/* Main stack for interrupts/exceptions. */
-		.rsp0 = stack_bottom,
+	/* Main stack for interrupts/exceptions. */
+	tss->rsp0 = stack_bottom;
+	tss->bitmap = IOBMP_INVALID_OFFSET;
 
-		/* Ring 1 and 2 stacks poisoned. */
-		.rsp1 = 0x8600111111111111ul,
-		.rsp2 = 0x8600111111111111ul,
+	/* MCE, NMI and Double Fault handlers get their own stacks. */
+	tss->ist[IST_MCE - 1] = stack_top + IST_MCE * PAGE_SIZE;
+	tss->ist[IST_DF  - 1] = stack_top + IST_DF  * PAGE_SIZE;
+	tss->ist[IST_NMI - 1] = stack_top + IST_NMI * PAGE_SIZE;
+	tss->ist[IST_DB  - 1] = stack_top + IST_DB  * PAGE_SIZE;
 
-		/*
-		 * MCE, NMI and Double Fault handlers get their own stacks.
-		 * All others poisoned.
-		 */
-		.ist = {
-			[IST_MCE - 1] = stack_top + IST_MCE * PAGE_SIZE,
-			[IST_DF  - 1] = stack_top + IST_DF  * PAGE_SIZE,
-			[IST_NMI - 1] = stack_top + IST_NMI * PAGE_SIZE,
-			[IST_DB  - 1] = stack_top + IST_DB  * PAGE_SIZE,
+	_set_tssldt_desc(
+		gdt + TSS_ENTRY,
+		(unsigned long)tss,
+		offsetof(struct tss_struct, __cacheline_filler) - 1,
+		SYS_DESC_tss_avail);
+	_set_tssldt_desc(
+		compat_gdt + TSS_ENTRY,
+		(unsigned long)tss,
+		offsetof(struct tss_struct, __cacheline_filler) - 1,
+		SYS_DESC_tss_busy);
 
-			[IST_MAX ... ARRAY_SIZE(tss->ist) - 1] =
-				0x8600111111111111ul,
-		},
+	asm volatile ("lgdt %0"  : : "m"  (gdtr) );
+	asm volatile ("lidt %0"  : : "m"  (idtr) );
+	asm volatile ("ltr  %w0" : : "rm" (TSS_ENTRY << 3) );
+	asm volatile ("lldt %w0" : : "rm" (0) );
 
-		.bitmap = IOBMP_INVALID_OFFSET,
-	};
-
-	BUILD_BUG_ON(sizeof(*tss) <= 0x67); /* Mandated by the architecture. */
-
-	_set_tssldt_desc(gdt + TSS_ENTRY, (unsigned long)tss,
-			 sizeof(*tss) - 1, SYS_DESC_tss_avail);
-	_set_tssldt_desc(compat_gdt + TSS_ENTRY, (unsigned long)tss,
-			 sizeof(*tss) - 1, SYS_DESC_tss_busy);
-
-	lgdt(&gdtr);
-	lidt(&idtr);
-	ltr(TSS_ENTRY << 3);
-	lldt(0);
-
-	enable_each_ist(idt_tables[cpu]);
+	set_ist(&idt_tables[cpu][TRAP_double_fault],  IST_DF);
+	set_ist(&idt_tables[cpu][TRAP_nmi],	      IST_NMI);
+	set_ist(&idt_tables[cpu][TRAP_machine_check], IST_MCE);
+	set_ist(&idt_tables[cpu][TRAP_debug],         IST_DB);
 
 	/*
 	 * Bottom-of-stack must be 16-byte aligned!

@@ -7,6 +7,7 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/kernel.h>
@@ -16,8 +17,8 @@
 #include <xsm/xsm.h>
 #include <asm/setup.h>
 
-static bool __init device_tree_node_matches(const void *fdt, int node,
-                                            const char *match)
+static bool_t __init device_tree_node_matches(const void *fdt, int node,
+                                              const char *match)
 {
     const char *name;
     size_t match_len;
@@ -31,8 +32,8 @@ static bool __init device_tree_node_matches(const void *fdt, int node,
         && (name[match_len] == '@' || name[match_len] == '\0');
 }
 
-static bool __init device_tree_node_compatible(const void *fdt, int node,
-                                               const char *match)
+static bool_t __init device_tree_node_compatible(const void *fdt, int node,
+                                                 const char *match)
 {
     int len, l;
     int mlen;
@@ -42,17 +43,17 @@ static bool __init device_tree_node_compatible(const void *fdt, int node,
 
     prop = fdt_getprop(fdt, node, "compatible", &len);
     if ( prop == NULL )
-        return false;
+        return 0;
 
     while ( len > 0 ) {
         if ( !dt_compat_cmp(prop, match) )
-            return true;
+            return 1;
         l = strlen(prop) + 1;
         prop += l;
         len -= l;
     }
 
-    return false;
+    return 0;
 }
 
 static void __init device_tree_get_reg(const __be32 **cell, u32 address_cells,
@@ -167,21 +168,13 @@ static void __init process_multiboot_node(const void *fdt, int node,
                                           const char *name,
                                           u32 address_cells, u32 size_cells)
 {
-    static int __initdata kind_guess = 0;
+    static int kind_guess = 0;
     const struct fdt_property *prop;
     const __be32 *cell;
     bootmodule_kind kind;
     paddr_t start, size;
     const char *cmdline;
     int len;
-    /* sizeof("/chosen/") + DT_MAX_NAME + '/' + DT_MAX_NAME + '/0' => 92 */
-    char path[92];
-    int ret;
-
-    /* Check that the node is under "/chosen" (first 7 chars of path) */
-    ret = fdt_get_path(fdt, node, path, sizeof (path));
-    if ( ret != 0 || strncmp(path, "/chosen", 7) )
-        return;
 
     prop = fdt_get_property(fdt, node, "reg", &len);
     if ( !prop )
@@ -294,8 +287,8 @@ static int __init early_scan_node(const void *fdt,
 {
     if ( device_tree_node_matches(fdt, node, "memory") )
         process_memory_node(fdt, node, name, address_cells, size_cells);
-    else if ( depth <= 3 && (device_tree_node_compatible(fdt, node, "xen,multiboot-module" ) ||
-              device_tree_node_compatible(fdt, node, "multiboot,module" )))
+    else if ( device_tree_node_compatible(fdt, node, "xen,multiboot-module" ) ||
+              device_tree_node_compatible(fdt, node, "multiboot,module" ))
         process_multiboot_node(fdt, node, name, address_cells, size_cells);
     else if ( depth == 1 && device_tree_node_matches(fdt, node, "chosen") )
         process_chosen_node(fdt, node, name, address_cells, size_cells);

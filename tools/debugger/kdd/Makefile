@@ -16,7 +16,7 @@ kdd: $(OBJS)
 
 .PHONY: clean
 clean:
-	rm -f $(OBJS) $(DEPS_RM) kdd
+	rm -f $(OBJS) $(DEPS) kdd
 
 .PHONY: distclean
 distclean: clean
@@ -25,7 +25,3 @@ distclean: clean
 install: all
 	[ -d $(DESTDIR)$(sbindir) ] || $(INSTALL_DIR) $(DESTDIR)$(sbindir)
 	$(INSTALL_PROG) kdd $(DESTDIR)$(sbindir)/kdd
-
-.PHONY: uninstall
-uninstall:
-	rm -f $(DESTDIR)$(sbindir)/kdd

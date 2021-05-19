@@ -48,15 +48,15 @@ int init_subkind_nic(libxl__checkpoint_devices_state *cds)
 
     rs->nlsock = nl_socket_alloc();
     if (!rs->nlsock) {
-        LOGD(ERROR, dss->domid, "cannot allocate nl socket");
+        LOG(ERROR, "cannot allocate nl socket");
         rc = ERROR_FAIL;
         goto out;
     }
 
     ret = nl_connect(rs->nlsock, NETLINK_ROUTE);
     if (ret) {
-        LOGD(ERROR, dss->domid, "failed to open netlink socket: %s",
-             nl_geterror(ret));
+        LOG(ERROR, "failed to open netlink socket: %s",
+            nl_geterror(ret));
         rc = ERROR_FAIL;
         goto out;
     }
@@ -64,8 +64,8 @@ int init_subkind_nic(libxl__checkpoint_devices_state *cds)
     /* get list of all qdiscs installed on network devs. */
     ret = rtnl_qdisc_alloc_cache(rs->nlsock, &rs->qdisc_cache);
     if (ret) {
-        LOGD(ERROR, dss->domid, "failed to allocate qdisc cache: %s",
-             nl_geterror(ret));
+        LOG(ERROR, "failed to allocate qdisc cache: %s",
+            nl_geterror(ret));
         rc = ERROR_FAIL;
         goto out;
     }
@@ -126,10 +126,8 @@ static const char *get_vifname(libxl__checkpoint_device *dev,
     /* Convenience aliases */
     const uint32_t domid = dev->cds->domid;
 
-    path = GCSPRINTF("%s/vifname",
-                     libxl__domain_device_backend_path(gc, 0, domid,
-                     nic->devid, LIBXL__DEVICE_KIND_VIF));
-
+    path = GCSPRINTF("%s/backend/vif/%d/%d/vifname",
+                     libxl__xs_get_dompath(gc, 0), domid, nic->devid);
     rc = libxl__xs_read_checked(gc, XBT_NULL, path, &vifname);
     if (!rc && !vifname) {
         vifname = libxl__device_nic_devname(gc, domid,
@@ -164,8 +162,7 @@ static int init_qdisc(libxl__checkpoint_devices_state *cds,
      */
     ret = nl_cache_refill(rs->nlsock, rs->qdisc_cache);
     if (ret) {
-        LOGD(ERROR, cds->domid,
-             "cannot refill qdisc cache: %s", nl_geterror(ret));
+        LOG(ERROR, "cannot refill qdisc cache: %s", nl_geterror(ret));
         rc = ERROR_FAIL;
         goto out;
     }
@@ -173,8 +170,7 @@ static int init_qdisc(libxl__checkpoint_devices_state *cds,
     /* get a handle to the REMUS_IFB interface */
     ret = rtnl_link_get_kernel(rs->nlsock, 0, remus_nic->ifb, &ifb);
     if (ret) {
-        LOGD(ERROR, cds->domid,
-             "cannot obtain handle for %s: %s", remus_nic->ifb,
+        LOG(ERROR, "cannot obtain handle for %s: %s", remus_nic->ifb,
             nl_geterror(ret));
         rc = ERROR_FAIL;
         goto out;
@@ -182,8 +178,7 @@ static int init_qdisc(libxl__checkpoint_devices_state *cds,
 
     ifindex = rtnl_link_get_ifindex(ifb);
     if (!ifindex) {
-        LOGD(ERROR, cds->domid,
-             "interface %s has no index", remus_nic->ifb);
+        LOG(ERROR, "interface %s has no index", remus_nic->ifb);
         rc = ERROR_FAIL;
         goto out;
     }
@@ -201,15 +196,13 @@ static int init_qdisc(libxl__checkpoint_devices_state *cds,
         const char *tc_kind = rtnl_tc_get_kind(TC_CAST(qdisc));
         /* Sanity check: Ensure that the root qdisc is a plug qdisc. */
         if (!tc_kind || strcmp(tc_kind, "plug")) {
-            LOGD(ERROR, cds->domid,
-                 "plug qdisc is not installed on %s", remus_nic->ifb);
+            LOG(ERROR, "plug qdisc is not installed on %s", remus_nic->ifb);
             rc = ERROR_FAIL;
             goto out;
         }
         remus_nic->qdisc = qdisc;
     } else {
-        LOGD(ERROR, cds->domid,
-             "Cannot get qdisc handle from ifb %s", remus_nic->ifb);
+        LOG(ERROR, "Cannot get qdisc handle from ifb %s", remus_nic->ifb);
         rc = ERROR_FAIL;
         goto out;
     }
@@ -373,8 +366,8 @@ static void netbuf_setup_script_cb(libxl__egc *egc,
         goto out;
 
     if (!(*ifb)) {
-        LOGD(ERROR, domid, "Cannot get ifb dev name for domain %u dev %s",
-             domid, vif);
+        LOG(ERROR, "Cannot get ifb dev name for domain %u dev %s",
+            domid, vif);
         rc = ERROR_FAIL;
         goto out;
     }
@@ -389,8 +382,8 @@ static void netbuf_setup_script_cb(libxl__egc *egc,
         goto out;
 
     if (hotplug_error) {
-        LOGD(ERROR, domid, "netbuf script %s setup failed for vif %s: %s",
-             rs->netbufscript, vif, hotplug_error);
+        LOG(ERROR, "netbuf script %s setup failed for vif %s: %s",
+            rs->netbufscript, vif, hotplug_error);
         rc = ERROR_FAIL;
         goto out;
     }
@@ -400,7 +393,7 @@ static void netbuf_setup_script_cb(libxl__egc *egc,
         goto out;
     }
 
-    LOGD(DEBUG, domid, "%s will buffer packets from vif %s", *ifb, vif);
+    LOG(DEBUG, "%s will buffer packets from vif %s", *ifb, vif);
     rc = init_qdisc(cds, remus_nic);
 
 out:
@@ -482,10 +475,10 @@ static int remus_netbuf_op(libxl__remus_device_nic *remus_nic,
 
 out:
     if (rc)
-        LOGD(ERROR, cds-> domid, "Remus: cannot do netbuf op %s on %s:%s",
-             ((buffer_op == tc_buffer_start) ?
-             "start_new_epoch" : "release_prev_epoch"),
-             remus_nic->ifb, nl_geterror(ret));
+        LOG(ERROR, "Remus: cannot do netbuf op %s on %s:%s",
+            ((buffer_op == tc_buffer_start) ?
+            "start_new_epoch" : "release_prev_epoch"),
+            remus_nic->ifb, nl_geterror(ret));
     return rc;
 }
 

@@ -35,7 +35,7 @@ void hvm_init_guest_time(struct domain *d)
     pl->last_guest_time = 0;
 }
 
-uint64_t hvm_get_guest_time_fixed(const struct vcpu *v, uint64_t at_tsc)
+u64 hvm_get_guest_time_fixed(struct vcpu *v, u64 at_tsc)
 {
     struct pl_time *pl = v->domain->arch.hvm_domain.pl_time;
     u64 now;
@@ -79,7 +79,6 @@ static int pt_irq_vector(struct periodic_time *pt, enum hvm_intsrc src)
 {
     struct vcpu *v = pt->vcpu;
     unsigned int gsi, isa_irq;
-    int vector;
 
     if ( pt->source == PTSRC_lapic )
         return pt->irq;
@@ -92,16 +91,7 @@ static int pt_irq_vector(struct periodic_time *pt, enum hvm_intsrc src)
                 + (isa_irq & 7));
 
     ASSERT(src == hvm_intsrc_lapic);
-    vector = vioapic_get_vector(v->domain, gsi);
-    if ( vector < 0 )
-    {
-        dprintk(XENLOG_WARNING, "d%u: invalid GSI (%u) for platform timer\n",
-                v->domain->domain_id, gsi);
-        domain_crash(v->domain);
-        return -1;
-    }
-
-    return vector;
+    return domain_vioapic(v->domain)->redirtbl[gsi].fields.vector;
 }
 
 static int pt_irq_masked(struct periodic_time *pt)
@@ -132,20 +122,7 @@ static int pt_irq_masked(struct periodic_time *pt)
 
     /* Fallthrough to check if the interrupt is masked on the IO APIC. */
     case PTSRC_ioapic:
-    {
-        int mask = vioapic_get_mask(v->domain, gsi);
-
-        if ( mask < 0 )
-        {
-            dprintk(XENLOG_WARNING,
-                    "d%d: invalid GSI (%u) for platform timer\n",
-                    v->domain->domain_id, gsi);
-            domain_crash(v->domain);
-            return -1;
-        }
-
-        return mask;
-    }
+        return domain_vioapic(v->domain)->redirtbl[gsi].fields.mask;
     }
 
     ASSERT_UNREACHABLE();
@@ -323,19 +300,13 @@ int pt_update_irq(struct vcpu *v)
 
     case PTSRC_isa:
         hvm_isa_irq_deassert(v->domain, irq);
+        hvm_isa_irq_assert(v->domain, irq);
+
         if ( platform_legacy_irq(irq) && vlapic_accept_pic_intr(v) &&
              v->domain->arch.hvm_domain.vpic[irq >> 3].int_output )
-            hvm_isa_irq_assert(v->domain, irq, NULL);
-        else
-        {
-            pt_vector = hvm_isa_irq_assert(v->domain, irq, vioapic_get_vector);
-            /*
-             * hvm_isa_irq_assert may not set the corresponding bit in vIRR
-             * when mask field of IOAPIC RTE is set. Check it again.
-             */
-            if ( pt_vector < 0 || !vlapic_test_irq(vcpu_vlapic(v), pt_vector) )
-                pt_vector = -1;
-        }
+            return -1;
+
+        pt_vector = pt_irq_vector(earliest_pt, hvm_intsrc_lapic);
         break;
 
     case PTSRC_ioapic:
@@ -344,8 +315,6 @@ int pt_update_irq(struct vcpu *v)
          * (HPET) are edge-triggered.
          */
         pt_vector = hvm_ioapic_assert(v->domain, irq, false);
-        if ( pt_vector < 0 || !vlapic_test_irq(vcpu_vlapic(v), pt_vector) )
-            pt_vector = -1;
         break;
     }
 
@@ -446,8 +415,7 @@ void create_periodic_time(
 {
     if ( !pt->source ||
          (pt->irq >= NR_ISAIRQS && pt->source == PTSRC_isa) ||
-         (pt->irq >= hvm_domain_irq(v->domain)->nr_gsis &&
-          pt->source == PTSRC_ioapic) )
+         (pt->irq >= VIOAPIC_NUM_PINS && pt->source == PTSRC_ioapic) )
     {
         ASSERT_UNREACHABLE();
         return;

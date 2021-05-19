@@ -10,6 +10,7 @@
  *  ASM optimised string functions
  */
 
+#include <xen/config.h>
 
 #include "assembler.h"
 

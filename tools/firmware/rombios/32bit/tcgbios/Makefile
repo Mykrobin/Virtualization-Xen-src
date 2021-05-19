@@ -12,7 +12,7 @@ all: $(TARGET)
 
 .PHONY: clean
 clean:
-	rm -rf *.o $(TARGET) $(DEPS_RM)
+	rm -rf *.o $(TARGET) $(DEPS)
 
 .PHONY: distclean
 distclean: clean
@@ -20,4 +20,4 @@ distclean: clean
 $(TARGET): tcgbios.o tpm_drivers.o
 	$(LD) $(LDFLAGS_DIRECT) -r $^ -o $@
 
--include $(DEPS_INCLUDE)
+-include $(DEPS)

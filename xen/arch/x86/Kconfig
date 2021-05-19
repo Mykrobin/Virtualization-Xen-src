@@ -5,7 +5,6 @@ config X86
 	def_bool y
 	select ACPI
 	select ACPI_LEGACY_TABLES_LOOKUP
-	select ARCH_SUPPORTS_INT128
 	select COMPAT
 	select CORE_PARKING
 	select HAS_ALTERNATIVE
@@ -22,9 +21,8 @@ config X86
 	select HAS_PASSTHROUGH
 	select HAS_PCI
 	select HAS_PDX
-	select HAS_UBSAN
-	select HAS_VPCI if !PV_SHIM_EXCLUSIVE
 	select NUMA
+	select VGA
 
 config ARCH_DEFCONFIG
 	string
@@ -34,12 +32,8 @@ menu "Architecture Features"
 
 source "arch/Kconfig"
 
-config PV
-	def_bool y
-
 config PV_LINEAR_PT
        bool "Support for PV linear pagetables"
-       depends on PV
        default y
        ---help---
          Linear pagetables (also called "recursive pagetables") refers
@@ -56,9 +50,6 @@ config PV_LINEAR_PT
          surface.
 
          If unsure, say Y.
-
-config HVM
-	def_bool y
 
 config SHADOW_PAGING
         bool "Shadow Paging"
@@ -118,45 +109,6 @@ config TBOOT
 	  Technology (TXT)
 
 	  If unsure, say Y.
-
-config XEN_GUEST
-	def_bool n
-	prompt "Xen Guest"
-	---help---
-	  Support for Xen detecting when it is running under Xen.
-
-	  If unsure, say N.
-
-config PVH_GUEST
-	def_bool n
-	prompt "PVH Guest"
-	depends on XEN_GUEST
-	---help---
-	  Support booting using the PVH ABI.
-
-	  If unsure, say N.
-
-config PV_SHIM
-	def_bool n
-	prompt "PV Shim"
-	depends on PV && XEN_GUEST
-	---help---
-	  Build Xen with a mode which acts as a shim to allow PV guest to run
-	  in an HVM/PVH container. This mode can only be enabled with command
-	  line option.
-
-	  If unsure, say N.
-
-config PV_SHIM_EXCLUSIVE
-	def_bool n
-	prompt "PV Shim Exclusive"
-	depends on PV_SHIM
-	---help---
-	  Build Xen in a way which unconditionally assumes PV_SHIM mode.  This
-	  option is only intended for use when building a dedicated PV Shim
-	  firmware, and will not function correctly in other scenarios.
-
-	  If unsure, say N.
 endmenu
 
 source "common/Kconfig"

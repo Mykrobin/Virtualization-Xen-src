@@ -1,14 +1,12 @@
+#include <xen/config.h>
 #include <asm/asm_defns.h>
 #include <asm/regs.h>
-#include <asm/alternative.h>
-#include <asm/smccc.h>
-#include <asm/macros.h>
 #include <public/xen.h>
 
 /*
  * Register aliases.
  */
-lr      .req    x30             /* link register */
+lr      .req    x30             // link register
 
 /*
  * Stack pushing/popping (register pairs only). Equivalent to store decrement
@@ -92,12 +90,8 @@ lr      .req    x30             /* link register */
         .endm
 /*
  * Save state on entry to hypervisor, restore on exit
- *
- * save_x0_x1: Does the macro needs to save x0/x1? Defaults to 1
- * If 0, we rely on the on x0/x1 to have been saved at the correct
- * position on the stack before.
  */
-        .macro  entry, hyp, compat, save_x0_x1=1
+        .macro  entry, hyp, compat
         sub     sp, sp, #(UREGS_SPSR_el1 - UREGS_LR) /* CPSR, PC, SP, LR */
         push    x28, x29
         push    x26, x27
@@ -113,16 +107,7 @@ lr      .req    x30             /* link register */
         push    x6, x7
         push    x4, x5
         push    x2, x3
-        /*
-         * The caller may already have saved x0/x1 on the stack at the
-         * correct address and corrupt them with another value. Only
-         * save them if save_x0_x1 == 1.
-         */
-        .if \save_x0_x1 == 1
         push    x0, x1
-        .else
-        sub     sp, sp, #16
-        .endif
 
         .if \hyp == 1        /* Hypervisor mode */
 
@@ -201,111 +186,78 @@ hyp_error_invalid:
  * all interrupts are kept masked.
  */
 hyp_error:
+        /*
+         * Only two possibilities:
+         * 1) Either we come from the exit path, having just unmasked
+         *    PSTATE.A: change the return code to an EL2 fault, and
+         *    carry on, as we're already in a sane state to handle it.
+         * 2) Or we come from anywhere else, and that's a bug: we panic.
+         */
         entry   hyp=1
+
+        /*
+         * The ELR_EL2 may be modified by an interrupt, so we have to use the
+         * saved value in cpu_user_regs to check whether we come from 1) or
+         * not.
+         */
+        ldr     x0, [sp, #UREGS_PC]
+        adr     x1, abort_guest_exit_start
+        cmp     x0, x1
+        adr     x1, abort_guest_exit_end
+        ccmp    x0, x1, #4, ne
         mov     x0, sp
-        bl      do_trap_hyp_serror
+        mov     x1, #BAD_ERROR
+
+        /*
+         * Not equal, the exception come from 2). It's a bug, we have to
+         * panic the hypervisor.
+         */
+        b.ne    do_bad_mode
+
+        /*
+         * Otherwise, the exception come from 1). It happened because of
+         * the guest. Crash this guest.
+         */
+        bl      do_trap_guest_error
         exit    hyp=1
 
 /*
  * Synchronous exception received while running in the hypervisor mode.
  *
- * While the exception could be executed with all the interrupts (e.g.
- * IRQ) unmasked, the interrupted context may have purposefully masked
- * some of them. So we want to inherit the state from the interrupted
- * context.
+ * While the exception can be executed with IRQ unmasked, the interrupt
+ * context may have purposefully masked it. So we want to inherit the
+ * state from the interrupted context.
  */
 hyp_sync:
         entry   hyp=1
 
-        /* Inherit interrupts */
+        /* Inherit IRQ state and keep the other interrupts masked. */
         mrs     x0, SPSR_el2
-        and     x0, x0, #(PSR_DBG_MASK | PSR_ABT_MASK | PSR_IRQ_MASK | PSR_FIQ_MASK)
+        and     x0, x0, #PSR_IRQ_MASK
+        mov     x1, #(PSR_DBG_MASK | PSR_ABT_MASK | PSR_FIQ_MASK)
+        orr     x0, x0, x1
         msr     daif, x0
 
         mov     x0, sp
         bl      do_trap_hyp_sync
         exit    hyp=1
 
-/*
- * IRQ received while running in the hypervisor mode.
- *
- * While the exception could be executed with all the interrupts but IRQ
- * unmasked, the interrupted context may have purposefully masked some
- * of them. So we want to inherit the state from the interrupt context
- * and keep IRQ masked.
- *
- * XXX: We may want to consider an ordering between interrupts (e.g. if
- * SError are masked, then IRQ should be masked too). However, this
- * would require some rework in some paths (e.g. panic, livepatch) to
- * ensure the ordering is enforced everywhere.
- */
+/* IRQ received while running in the hypervisor mode. */
 hyp_irq:
         entry   hyp=1
-
-        /* Inherit D, A, F interrupts and keep I masked */
-        mrs     x0, SPSR_el2
-        mov     x1, #(PSR_DBG_MASK | PSR_ABT_MASK | PSR_FIQ_MASK)
-        and     x0, x0, x1
-        orr     x0, x0, #PSR_IRQ_MASK
-        msr     daif, x0
-
         mov     x0, sp
         bl      do_trap_irq
         exit    hyp=1
 
 guest_sync:
+        entry   hyp=0, compat=0
+        bl      check_pending_vserror
         /*
-         * Save x0, x1 in advance
+         * If x0 is Non-zero, a vSError took place, the initial exception
+         * doesn't have any significance to be handled. Exit ASAP
          */
-        stp     x0, x1, [sp, #-(UREGS_kernel_sizeof - UREGS_X0)]
-
-        /*
-         * x1 is used because x0 may contain the function identifier.
-         * This avoids to restore x0 from the stack.
-         */
-        mrs     x1, esr_el2
-        lsr     x1, x1, #HSR_EC_SHIFT           /* x1 = ESR_EL2.EC */
-        cmp     x1, #HSR_EC_HVC64
-        b.ne    1f                              /* Not a HVC skip fastpath. */
-
-        mrs     x1, esr_el2
-        and     x1, x1, #0xffff                 /* Check the immediate [0:16] */
-        cbnz    x1, 1f                          /* should be 0 for HVC #0 */
-
-        /*
-         * Fastest path possible for ARM_SMCCC_ARCH_WORKAROUND_1.
-         * The workaround has already been applied on the exception
-         * entry from the guest, so let's quickly get back to the guest.
-         *
-         * Note that eor is used because the function identifier cannot
-         * be encoded as an immediate for cmp.
-         */
-        eor     w0, w0, #ARM_SMCCC_ARCH_WORKAROUND_1_FID
-        cbnz    w0, 1f
-
-        /*
-         * Clobber both x0 and x1 to prevent leakage. Note that thanks
-         * the eor, x0 = 0.
-         */
-        mov     x1, xzr
-        eret
-        sb
-
-1:
-        /*
-         * x0/x1 may have been scratch by the fast path above, so avoid
-         * to save them.
-         */
-        entry   hyp=0, compat=0, save_x0_x1=0
-        /*
-         * The vSError will be checked while SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT
-         * is not set. If a vSError took place, the initial exception will be
-         * skipped. Exit ASAP
-         */
-        ALTERNATIVE("bl check_pending_vserror; cbnz x0, 1f",
-                    "nop; nop",
-                    SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT)
-        msr     daifclr, #6
+        cbnz    x0, 1f
+        msr     daifclr, #2
         mov     x0, sp
         bl      do_trap_guest_sync
 1:
@@ -313,15 +265,12 @@ guest_sync:
 
 guest_irq:
         entry   hyp=0, compat=0
+        bl      check_pending_vserror
         /*
-         * The vSError will be checked while SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT
-         * is not set. If a vSError took place, the initial exception will be
-         * skipped. Exit ASAP
+         * If x0 is Non-zero, a vSError took place, the initial exception
+         * doesn't have any significance to be handled. Exit ASAP
          */
-        ALTERNATIVE("bl check_pending_vserror; cbnz x0, 1f",
-                    "nop; nop",
-                    SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT)
-        msr     daifclr, #4
+        cbnz    x0, 1f
         mov     x0, sp
         bl      do_trap_irq
 1:
@@ -333,22 +282,20 @@ guest_fiq_invalid:
 
 guest_error:
         entry   hyp=0, compat=0
-        msr     daifclr, #6
+        msr     daifclr, #2
         mov     x0, sp
-        bl      do_trap_guest_serror
+        bl      do_trap_guest_error
         exit    hyp=0, compat=0
 
 guest_sync_compat:
         entry   hyp=0, compat=1
+        bl      check_pending_vserror
         /*
-         * The vSError will be checked while SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT
-         * is not set. If a vSError took place, the initial exception will be
-         * skipped. Exit ASAP
+         * If x0 is Non-zero, a vSError took place, the initial exception
+         * doesn't have any significance to be handled. Exit ASAP
          */
-        ALTERNATIVE("bl check_pending_vserror; cbnz x0, 1f",
-                    "nop; nop",
-                    SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT)
-        msr     daifclr, #6
+        cbnz    x0, 1f
+        msr     daifclr, #2
         mov     x0, sp
         bl      do_trap_guest_sync
 1:
@@ -356,15 +303,12 @@ guest_sync_compat:
 
 guest_irq_compat:
         entry   hyp=0, compat=1
+        bl      check_pending_vserror
         /*
-         * The vSError will be checked while SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT
-         * is not set. If a vSError took place, the initial exception will be
-         * skipped. Exit ASAP
+         * If x0 is Non-zero, a vSError took place, the initial exception
+         * doesn't have any significance to be handled. Exit ASAP
          */
-        ALTERNATIVE("bl check_pending_vserror; cbnz x0, 1f",
-                    "nop; nop",
-                    SKIP_SYNCHRONIZE_SERROR_ENTRY_EXIT)
-        msr     daifclr, #4
+        cbnz    x0, 1f
         mov     x0, sp
         bl      do_trap_irq
 1:
@@ -376,9 +320,9 @@ guest_fiq_invalid_compat:
 
 guest_error_compat:
         entry   hyp=0, compat=1
-        msr     daifclr, #6
+        msr     daifclr, #2
         mov     x0, sp
-        bl      do_trap_guest_serror
+        bl      do_trap_guest_error
         exit    hyp=0, compat=1
 
 ENTRY(return_to_new_vcpu32)
@@ -389,8 +333,8 @@ ENTRY(return_to_new_vcpu64)
 return_from_trap:
         msr     daifset, #2 /* Mask interrupts */
 
-        ldr     x21, [sp, #UREGS_PC]            /* load ELR */
-        ldr     w22, [sp, #UREGS_CPSR]          /* load SPSR */
+        ldr     x21, [sp, #UREGS_PC]            // load ELR
+        ldr     w22, [sp, #UREGS_CPSR]          // load SPSR
 
         pop     x0, x1
         pop     x2, x3
@@ -398,7 +342,7 @@ return_from_trap:
         pop     x6, x7
         pop     x8, x9
 
-        msr     elr_el2, x21                    /* set up the return data */
+        msr     elr_el2, x21                    // set up the return data
         msr     spsr_el2, x22
 
         pop     x10, x11
@@ -415,7 +359,6 @@ return_from_trap:
         ldr     lr, [sp], #(UREGS_SPSR_el1 - UREGS_LR) /* CPSR, PC, SP, LR */
 
         eret
-        sb
 
 /*
  * This function is used to check pending virtual SError in the gap of
@@ -450,12 +393,10 @@ check_pending_vserror:
          * exception handler, and the elr_el2 will be set to
          * abort_guest_exit_start or abort_guest_exit_end.
          */
-        .global abort_guest_exit_start
 abort_guest_exit_start:
 
         isb
 
-        .global abort_guest_exit_end
 abort_guest_exit_end:
         /* Mask PSTATE asynchronous abort bit, close the checking window. */
         msr     daifset, #4
@@ -485,25 +426,25 @@ abort_guest_exit_end:
 
         .align  11
 ENTRY(hyp_traps_vector)
-        ventry  hyp_sync_invalid            /* Synchronous EL2t */
-        ventry  hyp_irq_invalid             /* IRQ EL2t */
-        ventry  hyp_fiq_invalid             /* FIQ EL2t */
-        ventry  hyp_error_invalid           /* Error EL2t */
+        ventry  hyp_sync_invalid                // Synchronous EL2t
+        ventry  hyp_irq_invalid                 // IRQ EL2t
+        ventry  hyp_fiq_invalid                 // FIQ EL2t
+        ventry  hyp_error_invalid               // Error EL2t
 
-        ventry  hyp_sync                    /* Synchronous EL2h */
-        ventry  hyp_irq                     /* IRQ EL2h */
-        ventry  hyp_fiq_invalid             /* FIQ EL2h */
-        ventry  hyp_error                   /* Error EL2h */
+        ventry  hyp_sync                        // Synchronous EL2h
+        ventry  hyp_irq                         // IRQ EL2h
+        ventry  hyp_fiq_invalid                 // FIQ EL2h
+        ventry  hyp_error                       // Error EL2h
 
-        ventry  guest_sync                  /* Synchronous 64-bit EL0/EL1 */
-        ventry  guest_irq                   /* IRQ 64-bit EL0/EL1 */
-        ventry  guest_fiq_invalid           /* FIQ 64-bit EL0/EL1 */
-        ventry  guest_error                 /* Error 64-bit EL0/EL1 */
+        ventry  guest_sync                      // Synchronous 64-bit EL0/EL1
+        ventry  guest_irq                       // IRQ 64-bit EL0/EL1
+        ventry  guest_fiq_invalid               // FIQ 64-bit EL0/EL1
+        ventry  guest_error                     // Error 64-bit EL0/EL1
 
-        ventry  guest_sync_compat           /* Synchronous 32-bit EL0/EL1 */
-        ventry  guest_irq_compat            /* IRQ 32-bit EL0/EL1 */
-        ventry  guest_fiq_invalid_compat    /* FIQ 32-bit EL0/EL1 */
-        ventry  guest_error_compat          /* Error 32-bit EL0/EL1 */
+        ventry  guest_sync_compat               // Synchronous 32-bit EL0/EL1
+        ventry  guest_irq_compat                // IRQ 32-bit EL0/EL1
+        ventry  guest_fiq_invalid_compat        // FIQ 32-bit EL0/EL1
+        ventry  guest_error_compat              // Error 32-bit EL0/EL1
 
 /*
  * struct vcpu *__context_switch(struct vcpu *prev, struct vcpu *next)
@@ -516,7 +457,7 @@ ENTRY(hyp_traps_vector)
 ENTRY(__context_switch)
         add     x8, x0, #VCPU_arch_saved_context
         mov     x9, sp
-        stp     x19, x20, [x8], #16         /* store callee-saved registers */
+        stp     x19, x20, [x8], #16             // store callee-saved registers
         stp     x21, x22, [x8], #16
         stp     x23, x24, [x8], #16
         stp     x25, x26, [x8], #16
@@ -525,7 +466,7 @@ ENTRY(__context_switch)
         str     lr, [x8]
 
         add     x8, x1, #VCPU_arch_saved_context
-        ldp     x19, x20, [x8], #16         /* restore callee-saved registers */
+        ldp     x19, x20, [x8], #16             // restore callee-saved registers
         ldp     x21, x22, [x8], #16
         ldp     x23, x24, [x8], #16
         ldp     x25, x26, [x8], #16

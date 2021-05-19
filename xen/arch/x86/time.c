@@ -9,16 +9,17 @@
  * Copyright (c) 1991, 1992, 1995  Linus Torvalds
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/event.h>
 #include <xen/sched.h>
 #include <xen/lib.h>
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/time.h>
 #include <xen/timer.h>
 #include <xen/smp.h>
 #include <xen/irq.h>
-#include <xen/pci_ids.h>
 #include <xen/softirq.h>
 #include <xen/efi.h>
 #include <xen/cpuidle.h>
@@ -30,7 +31,6 @@
 #include <asm/mpspec.h>
 #include <asm/processor.h>
 #include <asm/fixmap.h>
-#include <asm/guest.h>
 #include <asm/mc146818rtc.h>
 #include <asm/div64.h>
 #include <asm/acpi.h>
@@ -69,6 +69,7 @@ struct platform_timesource {
 };
 
 static DEFINE_PER_CPU(struct cpu_time, cpu_time);
+DEFINE_PER_CPU(uint32_t, tsc_aux);
 
 /* Calibrate all CPUs to platform timer every EPOCH. */
 #define EPOCH MILLISECS(1000)
@@ -84,7 +85,7 @@ static struct timer calibration_timer;
 static DEFINE_SPINLOCK(pit_lock);
 static u16 pit_stamp16;
 static u32 pit_stamp32;
-static bool __read_mostly using_pit;
+static bool_t __read_mostly using_pit;
 
 /* Boot timestamp, filled in head.S */
 u64 __initdata boot_tsc_stamp;
@@ -197,7 +198,7 @@ static void timer_interrupt(int irq, void *dev_id, struct cpu_user_regs *regs)
         return;
 
     /* Only for start-of-day interruopt tests in io_apic.c. */
-    pit0_ticks++;
+    (*(volatile unsigned long *)&pit0_ticks)++;
 
     /* Rough hack to allow accurate timers to sort-of-work with no APIC. */
     if ( !cpu_has_apic )
@@ -306,7 +307,7 @@ static s64 __init init_pit(struct platform_timesource *pts)
     u64 start, end;
     unsigned long count;
 
-    using_pit = true;
+    using_pit = 1;
 
     /* Set the Gate high, disable speaker. */
     outb((portb & ~0x02) | 0x01, 0x61);
@@ -365,41 +366,12 @@ static u64 read_hpet_count(void)
     return hpet_read32(HPET_COUNTER);
 }
 
-static int64_t __init init_hpet(struct platform_timesource *pts)
+static s64 __init init_hpet(struct platform_timesource *pts)
 {
-    uint64_t hpet_rate, start;
-    uint32_t count, target;
+    u64 hpet_rate = hpet_setup(), start;
+    u32 count, target;
 
-    if ( hpet_address && strcmp(opt_clocksource, pts->id) &&
-         cpuidle_using_deep_cstate() )
-    {
-        if ( pci_conf_read16(0, 0, 0x1f, 0,
-                             PCI_VENDOR_ID) == PCI_VENDOR_ID_INTEL )
-            switch ( pci_conf_read16(0, 0, 0x1f, 0, PCI_DEVICE_ID) )
-            {
-            /* HPET on Bay Trail platforms will halt in deep C states. */
-            case 0x0f1c:
-            /* HPET on Cherry Trail platforms will halt in deep C states. */
-            case 0x229c:
-                hpet_address = 0;
-                break;
-            }
-
-        /*
-         * Some Coffee Lake platforms have a skewed HPET timer once the SoCs
-         * entered PC10.
-         */
-        if ( pci_conf_read16(0, 0, 0, 0,
-                             PCI_VENDOR_ID) == PCI_VENDOR_ID_INTEL &&
-             pci_conf_read16(0, 0, 0, 0,
-                             PCI_DEVICE_ID) == 0x3ec4 )
-            hpet_address = 0;
-
-        if ( !hpet_address )
-            printk("Disabling HPET for being unreliable\n");
-    }
-
-    if ( (hpet_rate = hpet_setup()) == 0 )
+    if ( hpet_rate == 0 )
         return 0;
 
     pts->frequency = hpet_rate;
@@ -556,91 +528,6 @@ static struct platform_timesource __initdata plt_tsc =
     .init = init_tsc,
 };
 
-#ifdef CONFIG_XEN_GUEST
-/************************************************************
- * PLATFORM TIMER 5: XEN PV CLOCK SOURCE
- *
- * Xen clock source is a variant of TSC source.
- */
-
-static uint64_t xen_timer_cpu_frequency(void)
-{
-    struct vcpu_time_info *info = &this_cpu(vcpu_info)->time;
-    uint64_t freq;
-
-    freq = 1000000000ULL << 32;
-    do_div(freq, info->tsc_to_system_mul);
-    if ( info->tsc_shift < 0 )
-        freq <<= -info->tsc_shift;
-    else
-        freq >>= info->tsc_shift;
-
-    return freq;
-}
-
-static int64_t __init init_xen_timer(struct platform_timesource *pts)
-{
-    if ( !xen_guest )
-        return 0;
-
-    pts->frequency = xen_timer_cpu_frequency();
-
-    return pts->frequency;
-}
-
-static always_inline uint64_t read_cycle(const struct vcpu_time_info *info,
-                                         uint64_t tsc)
-{
-    uint64_t delta = tsc - info->tsc_timestamp;
-    struct time_scale ts = {
-        .shift    = info->tsc_shift,
-        .mul_frac = info->tsc_to_system_mul,
-    };
-    uint64_t offset = scale_delta(delta, &ts);
-
-    return info->system_time + offset;
-}
-
-static uint64_t read_xen_timer(void)
-{
-    struct vcpu_time_info *info = &this_cpu(vcpu_info)->time;
-    uint32_t version;
-    uint64_t ret;
-    uint64_t last;
-    static uint64_t last_value;
-
-    do {
-        version = info->version & ~1;
-        /* Make sure version is read before the data */
-        smp_rmb();
-
-        ret = read_cycle(info, rdtsc_ordered());
-        /* Ignore fancy flags for now */
-
-        /* Make sure version is reread after the data */
-        smp_rmb();
-    } while ( unlikely(version != info->version) );
-
-    /* Maintain a monotonic global value */
-    do {
-        last = read_atomic(&last_value);
-        if ( ret < last )
-            return last;
-    } while ( unlikely(cmpxchg(&last_value, last, ret) != last) );
-
-    return ret;
-}
-
-static struct platform_timesource __initdata plt_xen_timer =
-{
-    .id = "xen",
-    .name = "XEN PV CLOCK",
-    .read_counter = read_xen_timer,
-    .init = init_xen_timer,
-    .counter_bits = 63,
-};
-#endif
-
 /************************************************************
  * GENERIC PLATFORM TIMER INFRASTRUCTURE
  */
@@ -693,8 +580,7 @@ static void plt_overflow(void *unused)
     }
     if ( i != 0 )
     {
-        static bool warned_once;
-
+        static bool_t warned_once;
         if ( !test_and_set_bool(warned_once) )
             printk("Platform timer appears to have unexpectedly wrapped "
                    "%u%s times.\n", i, (i == 10) ? " or more" : "");
@@ -788,9 +674,6 @@ static s64 __init try_platform_timer(struct platform_timesource *pts)
 static u64 __init init_platform_timer(void)
 {
     static struct platform_timesource * __initdata plt_timers[] = {
-#ifdef CONFIG_XEN_GUEST
-        &plt_xen_timer,
-#endif
         &plt_hpet, &plt_pmtimer, &plt_pit
     };
 
@@ -827,8 +710,7 @@ static u64 __init init_platform_timer(void)
         }
     }
 
-    if ( rc <= 0 )
-        panic("Unable to find usable platform timer");
+    BUG_ON(rc <= 0);
 
     printk("Platform timer is %s %s\n",
            freq_string(pts->frequency), pts->name);
@@ -930,10 +812,10 @@ static unsigned long get_cmos_time(void)
     unsigned long res, flags;
     struct rtc_time rtc;
     unsigned int seconds = 60;
-    static bool __read_mostly cmos_rtc_probe;
+    static bool_t __read_mostly cmos_rtc_probe;
     boolean_param("cmos-rtc-probe", cmos_rtc_probe);
 
-    if ( efi_enabled(EFI_RS) )
+    if ( efi_enabled )
     {
         res = efi_get_time();
         if ( res )
@@ -941,7 +823,7 @@ static unsigned long get_cmos_time(void)
     }
 
     if ( likely(!(acpi_gbl_FADT.boot_flags & ACPI_FADT_NO_CMOS_RTC)) )
-        cmos_rtc_probe = false;
+        cmos_rtc_probe = 0;
     else if ( system_state < SYS_STATE_smp_boot && !cmos_rtc_probe )
         panic("System with no CMOS RTC advertised must be booted from EFI"
               " (or with command line option \"cmos-rtc-probe\")");
@@ -979,7 +861,7 @@ static unsigned long get_cmos_time(void)
         if ( seconds < 60 )
         {
             if ( rtc.sec != seconds )
-                cmos_rtc_probe = false;
+                cmos_rtc_probe = 0;
             break;
         }
 
@@ -992,30 +874,6 @@ static unsigned long get_cmos_time(void)
         panic("No CMOS RTC found - system must be booted from EFI");
 
     return mktime(rtc.year, rtc.mon, rtc.day, rtc.hour, rtc.min, rtc.sec);
-}
-
-static unsigned long get_wallclock_time(void)
-{
-#ifdef CONFIG_XEN_GUEST
-    if ( xen_guest )
-    {
-        struct shared_info *sh_info = XEN_shared_info;
-        uint32_t wc_version;
-        uint64_t wc_sec;
-
-        do {
-            wc_version = sh_info->wc_version & ~1;
-            smp_rmb();
-
-            wc_sec  = sh_info->wc_sec;
-            smp_rmb();
-        } while ( wc_version != sh_info->wc_version );
-
-        return wc_sec + read_xen_timer() / 1000000000;
-    }
-#endif
-
-    return get_cmos_time();
 }
 
 /***************************************************************************
@@ -1085,7 +943,7 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
     }
     else
     {
-        if ( is_hvm_domain(d) && hvm_tsc_scaling_supported )
+        if ( has_hvm_container_domain(d) && hvm_tsc_scaling_supported )
         {
             tsc_stamp            = hvm_scale_tsc(d, t->stamp.local_tsc);
             _u.tsc_to_system_mul = d->arch.vtsc_to_ns.mul_frac;
@@ -1120,10 +978,10 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
 
     /* 1. Update guest kernel version. */
     _u.version = u->version = version_update_begin(u->version);
-    smp_wmb();
+    wmb();
     /* 2. Update all other guest kernel fields. */
     *u = _u;
-    smp_wmb();
+    wmb();
     /* 3. Update guest kernel version. */
     u->version = version_update_end(u->version);
 
@@ -1132,34 +990,34 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
         v->arch.pv_vcpu.pending_system_time = _u;
 }
 
-bool update_secondary_system_time(struct vcpu *v,
-                                  struct vcpu_time_info *u)
+bool_t update_secondary_system_time(struct vcpu *v,
+                                    struct vcpu_time_info *u)
 {
     XEN_GUEST_HANDLE(vcpu_time_info_t) user_u = v->arch.time_info_guest;
-    struct guest_memory_policy policy = { .nested_guest_mode = false };
+    smap_check_policy_t saved_policy;
 
     if ( guest_handle_is_null(user_u) )
-        return true;
+        return 1;
 
-    update_guest_memory_policy(v, &policy);
+    saved_policy = smap_policy_change(v, SMAP_CHECK_ENABLED);
 
     /* 1. Update userspace version. */
     if ( __copy_field_to_guest(user_u, u, version) == sizeof(u->version) )
     {
-        update_guest_memory_policy(v, &policy);
-        return false;
+        smap_policy_change(v, saved_policy);
+        return 0;
     }
-    smp_wmb();
+    wmb();
     /* 2. Update all other userspace fields. */
     __copy_to_guest(user_u, u, 1);
-    smp_wmb();
+    wmb();
     /* 3. Update userspace version. */
     u->version = version_update_end(u->version);
     __copy_field_to_guest(user_u, u, version);
 
-    update_guest_memory_policy(v, &policy);
+    smap_policy_change(v, saved_policy);
 
-    return true;
+    return 1;
 }
 
 void update_vcpu_system_time(struct vcpu *v)
@@ -1711,7 +1569,7 @@ static void __init tsc_check_writability(void)
         cpuidle_disable_deep_cstate();
 
     /* synchronize_tsc_slave() must do nothing */
-    disable_tsc_sync = true;
+    disable_tsc_sync = 1;
 }
 
 static void __init reset_percpu_time(void *unused)
@@ -1781,25 +1639,8 @@ static int __init verify_tsc_reliability(void)
 
             printk("Switched to Platform timer %s TSC\n",
                    freq_string(plt_src.frequency));
-            return 0;
         }
     }
-
-    /*
-     * Re-run the TSC writability check if it didn't run to completion, as
-     * X86_FEATURE_TSC_RELIABLE may have been cleared by now. This is needed
-     * for determining which rendezvous function to use (below).
-     */
-    if ( !disable_tsc_sync )
-        tsc_check_writability();
-
-    /*
-     * While with constant-rate TSCs the scale factor can be shared, when TSCs
-     * are not marked as 'reliable', re-sync during rendezvous.
-     */
-    if ( boot_cpu_has(X86_FEATURE_CONSTANT_TSC) &&
-         !boot_cpu_has(X86_FEATURE_TSC_RELIABLE) )
-        time_calibration_rendezvous_fn = time_calibration_tsc_rendezvous;
 
     return 0;
 }
@@ -1810,10 +1651,18 @@ int __init init_xen_time(void)
 {
     tsc_check_writability();
 
+    /* If we have constant-rate TSCs then scale factor can be shared. */
+    if ( boot_cpu_has(X86_FEATURE_CONSTANT_TSC) )
+    {
+        /* If TSCs are not marked as 'reliable', re-sync during rendezvous. */
+        if ( !boot_cpu_has(X86_FEATURE_TSC_RELIABLE) )
+            time_calibration_rendezvous_fn = time_calibration_tsc_rendezvous;
+    }
+
     open_softirq(TIME_CALIBRATE_SOFTIRQ, local_time_calibration);
 
-    /* NB. get_wallclock_time() can take over one second to execute. */
-    do_settime(get_wallclock_time(), 0, NOW());
+    /* NB. get_cmos_time() can take over one second to execute. */
+    do_settime(get_cmos_time(), 0, NOW());
 
     /* Finish platform timer initialization. */
     try_platform_timer_tail(false);
@@ -1923,7 +1772,7 @@ int time_suspend(void)
 {
     if ( smp_processor_id() == 0 )
     {
-        cmos_utc_offset = -get_wallclock_time();
+        cmos_utc_offset = -get_cmos_time();
         cmos_utc_offset += get_sec();
         kill_timer(&calibration_timer);
 
@@ -1950,7 +1799,7 @@ int time_resume(void)
 
     set_timer(&calibration_timer, NOW() + EPOCH);
 
-    do_settime(get_wallclock_time() + cmos_utc_offset, 0, NOW());
+    do_settime(get_cmos_time() + cmos_utc_offset, 0, NOW());
 
     update_vcpu_system_time(current);
 
@@ -2013,7 +1862,7 @@ int hwdom_pit_access(struct ioreq *ioreq)
  * tsc=skewed: Assume TSCs are individually reliable, but skewed across CPUs.
  * tsc=stable:socket: Assume TSCs are reliable across sockets.
  */
-static int __init tsc_parse(const char *s)
+static void __init tsc_parse(const char *s)
 {
     if ( !strcmp(s, "unstable") )
     {
@@ -2025,10 +1874,6 @@ static int __init tsc_parse(const char *s)
         setup_clear_cpu_cap(X86_FEATURE_TSC_RELIABLE);
     else if ( !strcmp(s, "stable:socket") )
         tsc_flags |= TSC_RELIABLE_SOCKET;
-    else
-        return -EINVAL;
-
-    return 0;
 }
 custom_param("tsc", tsc_parse);
 
@@ -2053,7 +1898,7 @@ u64 gtsc_to_gtime(struct domain *d, u64 tsc)
     return time;
 }
 
-uint64_t pv_soft_rdtsc(const struct vcpu *v, const struct cpu_user_regs *regs)
+void pv_soft_rdtsc(struct vcpu *v, struct cpu_user_regs *regs, int rdtscp)
 {
     s_time_t now = get_s_time();
     struct domain *d = v->domain;
@@ -2074,7 +1919,14 @@ uint64_t pv_soft_rdtsc(const struct vcpu *v, const struct cpu_user_regs *regs)
 
     spin_unlock(&d->arch.vtsc_lock);
 
-    return gtime_to_gtsc(d, now);
+    now = gtime_to_gtsc(d, now);
+
+    regs->eax = (uint32_t)now;
+    regs->edx = (uint32_t)(now >> 32);
+
+    if ( rdtscp )
+         regs->ecx =
+             (d->arch.tsc_mode == TSC_MODE_PVRDTSCP) ? d->arch.incarnation : 0;
 }
 
 bool clocksource_is_tsc(void)
@@ -2087,6 +1939,42 @@ int host_tsc_is_safe(void)
     return boot_cpu_has(X86_FEATURE_TSC_RELIABLE);
 }
 
+void cpuid_time_leaf(uint32_t sub_idx, uint32_t *eax, uint32_t *ebx,
+                      uint32_t *ecx, uint32_t *edx)
+{
+    struct domain *d = current->domain;
+    uint64_t offset;
+
+    switch ( sub_idx )
+    {
+    case 0: /* features */
+        *eax = (!!d->arch.vtsc << 0) |
+               (!!host_tsc_is_safe() << 1) |
+               (!!boot_cpu_has(X86_FEATURE_RDTSCP) << 2);
+        *ebx = d->arch.tsc_mode;
+        *ecx = d->arch.tsc_khz;
+        *edx = d->arch.incarnation;
+        break;
+    case 1: /* scale and offset */
+        if ( !d->arch.vtsc )
+            offset = d->arch.vtsc_offset;
+        else
+            /* offset already applied to value returned by virtual rdtscp */
+            offset = 0;
+        *eax = (uint32_t)offset;
+        *ebx = (uint32_t)(offset >> 32);
+        *ecx = d->arch.vtsc_to_ns.mul_frac;
+        *edx = (s8)d->arch.vtsc_to_ns.shift;
+        break;
+    case 2: /* physical cpu_khz */
+        *eax = cpu_khz;
+        *ebx = *ecx = *edx = 0;
+        break;
+    default:
+        *eax = *ebx = *ecx = *edx = 0;
+    }
+}
+
 /*
  * called to collect tsc-related data only for save file or live
  * migrate; called after last rdtsc is done on this incarnation
@@ -2095,8 +1983,8 @@ void tsc_get_info(struct domain *d, uint32_t *tsc_mode,
                   uint64_t *elapsed_nsec, uint32_t *gtsc_khz,
                   uint32_t *incarnation)
 {
-    bool enable_tsc_scaling = is_hvm_domain(d) &&
-                              hvm_tsc_scaling_supported && !d->arch.vtsc;
+    bool_t enable_tsc_scaling = has_hvm_container_domain(d) &&
+                                hvm_tsc_scaling_supported && !d->arch.vtsc;
 
     *incarnation = d->arch.incarnation;
     *tsc_mode = d->arch.tsc_mode;
@@ -2153,35 +2041,59 @@ void tsc_set_info(struct domain *d,
                   uint32_t tsc_mode, uint64_t elapsed_nsec,
                   uint32_t gtsc_khz, uint32_t incarnation)
 {
-    ASSERT(!is_system_domain(d));
-
-    if ( is_hardware_domain(d) )
+    if ( is_idle_domain(d) || is_hardware_domain(d) )
     {
         d->arch.vtsc = 0;
         return;
     }
+    if ( is_pvh_domain(d) )
+    {
+        /*
+         * PVH fixme: support more tsc modes.
+         *
+         * NB: The reason this is disabled here appears to be with
+         * additional support required to do the PV RDTSC emulation.
+         * Since we're no longer taking the PV emulation path for
+         * anything, we may be able to remove this restriction.
+         *
+         * pvhfixme: Experiments show that "default" works for PVH,
+         * but "always_emulate" does not for some reason.  Figure out
+         * why.
+         */
+        switch ( tsc_mode )
+        {
+        case TSC_MODE_NEVER_EMULATE:
+            break;
+        default:
+            printk(XENLOG_WARNING
+                   "PVH currently does not support tsc emulation. Setting timer_mode = never_emulate\n");
+            /* FALLTHRU */
+        case TSC_MODE_DEFAULT:
+            tsc_mode = TSC_MODE_NEVER_EMULATE;
+            break;
+        }
+    }
 
     switch ( d->arch.tsc_mode = tsc_mode )
     {
-        bool enable_tsc_scaling;
+        bool_t enable_tsc_scaling;
 
     case TSC_MODE_DEFAULT:
     case TSC_MODE_ALWAYS_EMULATE:
         d->arch.vtsc_offset = get_s_time() - elapsed_nsec;
         d->arch.tsc_khz = gtsc_khz ?: cpu_khz;
         set_time_scale(&d->arch.vtsc_to_ns, d->arch.tsc_khz * 1000);
-
         /*
-         * In default mode use native TSC if the host has safe TSC and
-         * host and guest frequencies are the same (either "naturally" or
-         * - for HVM/PVH - via TSC scaling).
-         * When a guest is created, gtsc_khz is passed in as zero, making
-         * d->arch.tsc_khz == cpu_khz. Thus no need to check incarnation.
+         * In default mode use native TSC if the host has safe TSC and:
+         *  HVM/PVH: host and guest frequencies are the same (either
+         *           "naturally" or via TSC scaling)
+         *  PV: guest has not migrated yet (and thus arch.tsc_khz == cpu_khz)
          */
         if ( tsc_mode == TSC_MODE_DEFAULT && host_tsc_is_safe() &&
-             (d->arch.tsc_khz == cpu_khz ||
-              (is_hvm_domain(d) &&
-               hvm_get_tsc_scaling_ratio(d->arch.tsc_khz))) )
+             (has_hvm_container_domain(d) ?
+              (d->arch.tsc_khz == cpu_khz ||
+               hvm_get_tsc_scaling_ratio(d->arch.tsc_khz)) :
+              incarnation == 0) )
         {
     case TSC_MODE_NEVER_EMULATE:
             d->arch.vtsc = 0;
@@ -2193,7 +2105,8 @@ void tsc_set_info(struct domain *d,
     case TSC_MODE_PVRDTSCP:
         d->arch.vtsc = !boot_cpu_has(X86_FEATURE_RDTSCP) ||
                        !host_tsc_is_safe();
-        enable_tsc_scaling = is_hvm_domain(d) && !d->arch.vtsc &&
+        enable_tsc_scaling = has_hvm_container_domain(d) &&
+                             !d->arch.vtsc &&
                              hvm_get_tsc_scaling_ratio(gtsc_khz ?: cpu_khz);
         d->arch.tsc_khz = (enable_tsc_scaling && gtsc_khz) ? gtsc_khz : cpu_khz;
         set_time_scale(&d->arch.vtsc_to_ns, d->arch.tsc_khz * 1000 );
@@ -2210,7 +2123,7 @@ void tsc_set_info(struct domain *d,
         break;
     }
     d->arch.incarnation = incarnation + 1;
-    if ( is_hvm_domain(d) )
+    if ( has_hvm_container_domain(d) )
     {
         if ( hvm_tsc_scaling_supported && !d->arch.vtsc )
             d->arch.hvm_domain.tsc_scaling_ratio =
@@ -2233,8 +2146,6 @@ void tsc_set_info(struct domain *d,
                                      d->arch.hvm_domain.sync_tsc);
         }
     }
-
-    recalculate_cpuid_policy(d);
 }
 
 /* vtsc may incur measurable performance degradation, diagnose with this */
@@ -2271,11 +2182,12 @@ static void dump_softtsc(unsigned char key)
         if ( d->arch.incarnation )
             printk(",inc=%"PRIu32, d->arch.incarnation);
 #if !defined(NDEBUG) || defined(CONFIG_PERF_COUNTERS)
-        if ( d->arch.vtsc_kerncount | d->arch.vtsc_usercount )
-            printk(",vtsc count: %"PRIu64" kernel,%"PRIu64" user",
+        if ( !(d->arch.vtsc_kerncount | d->arch.vtsc_usercount) )
+            printk("\n");
+        else
+            printk(",vtsc count: %"PRIu64" kernel, %"PRIu64" user\n",
                    d->arch.vtsc_kerncount, d->arch.vtsc_usercount);
 #endif
-        printk("\n");
         domcnt++;
     }
 

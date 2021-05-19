@@ -15,10 +15,12 @@
 #define BITS_PER_BYTE 8
 #define POINTER_ALIGN BYTES_PER_LONG
 
-#define BITS_PER_LLONG 64
-
 #define BITS_PER_XEN_ULONG BITS_PER_LONG
 
+#define CONFIG_PAGING_ASSISTANCE 1
+#define CONFIG_X86_LOCAL_APIC 1
+#define CONFIG_X86_GOOD_APIC 1
+#define CONFIG_X86_IO_APIC 1
 #define CONFIG_X86_PM_TIMER 1
 #define CONFIG_HPET_TIMER 1
 #define CONFIG_X86_MCE_THERMAL 1
@@ -48,8 +50,11 @@
 #define OPT_CONSOLE_STR "vga"
 
 /* Linkage for x86 */
+#define __ALIGN .align 16,0x90
+#define __ALIGN_STR ".align 16,0x90"
 #ifdef __ASSEMBLY__
-#define ALIGN .align 16,0x90
+#define ALIGN __ALIGN
+#define ALIGN_STR __ALIGN_STR
 #define ENTRY(name)                             \
   .globl name;                                  \
   ALIGN;                                        \
@@ -67,12 +72,6 @@
 
 #define STACK_ORDER 3
 #define STACK_SIZE  (PAGE_SIZE << STACK_ORDER)
-
-#define TRAMPOLINE_STACK_SPACE  PAGE_SIZE
-#define TRAMPOLINE_SPACE        (KB(64) - TRAMPOLINE_STACK_SPACE)
-#define WAKEUP_STACK_MIN        3072
-
-#define MBI_SPACE_MIN           (2 * PAGE_SIZE)
 
 /* Primary stack is restricted to 8kB by guard pages. */
 #define PRIMARY_STACK_SIZE 8192
@@ -104,6 +103,8 @@ extern unsigned int video_mode, video_flags;
 extern unsigned short boot_edid_caps;
 extern unsigned char boot_edid_info[128];
 #endif
+
+#define asmlinkage
 
 #include <xen/const.h>
 
@@ -142,15 +143,19 @@ extern unsigned char boot_edid_info[128];
  *  0xffff82d080000000 - 0xffff82d0bfffffff [1GB,   2^30 bytes, PML4:261]
  *    Xen text, static data, bss.
 #ifndef CONFIG_BIGMEM
- *  0xffff82d0c0000000 - 0xffff82dfffffffff [61GB,              PML4:261]
+ *  0xffff82d0c0000000 - 0xffff82dffbffffff [61GB - 64MB,       PML4:261]
  *    Reserved for future use.
+ *  0xffff82dffc000000 - 0xffff82dfffffffff [64MB,  2^26 bytes, PML4:261]
+ *    Super-page information array.
  *  0xffff82e000000000 - 0xffff82ffffffffff [128GB, 2^37 bytes, PML4:261]
  *    Page-frame information array.
  *  0xffff830000000000 - 0xffff87ffffffffff [5TB, 5*2^40 bytes, PML4:262-271]
  *    1:1 direct mapping of all physical memory.
 #else
- *  0xffff82d0c0000000 - 0xffff82ffffffffff [189GB,             PML4:261]
+ *  0xffff82d0c0000000 - 0xffff82ffdfffffff [188.5GB,           PML4:261]
  *    Reserved for future use.
+ *  0xffff82ffe0000000 - 0xffff82ffffffffff [512MB, 2^29 bytes, PML4:261]
+ *    Super-page information array.
  *  0xffff830000000000 - 0xffff847fffffffff [1.5TB, 3*2^39 bytes, PML4:262-264]
  *    Page-frame information array.
  *  0xffff848000000000 - 0xffff87ffffffffff [3.5TB, 7*2^39 bytes, PML4:265-271]
@@ -168,8 +173,12 @@ extern unsigned char boot_edid_info[128];
  *    Guest-defined use.
  *  0x00000000f5800000 - 0x00000000ffffffff [168MB,             PML4:0]
  *    Read-only machine-to-phys translation table (GUEST ACCESSIBLE).
- *  0x0000000100000000 - 0x00007fffffffffff [128TB-4GB,         PML4:0-255]
- *    Unused / Reserved for future use.
+ *  0x0000000100000000 - 0x0000007fffffffff [508GB,             PML4:0]
+ *    Unused.
+ *  0x0000008000000000 - 0x000000ffffffffff [512GB, 2^39 bytes, PML4:1]
+ *    Hypercall argument translation area.
+ *  0x0000010000000000 - 0x00007fffffffffff [127TB, 2^46 bytes, PML4:2-255]
+ *    Reserved for future use.
  */
 
 
@@ -220,6 +229,14 @@ extern unsigned char boot_edid_info[128];
 /* Slot 261: xen text, static data and bss (1GB). */
 #define XEN_VIRT_START          (HIRO_COMPAT_MPT_VIRT_END)
 #define XEN_VIRT_END            (XEN_VIRT_START + GB(1))
+
+/* Slot 261: superpage information array (64MB or 512MB). */
+#define SPAGETABLE_VIRT_END     FRAMETABLE_VIRT_START
+#define SPAGETABLE_NR           (((FRAMETABLE_NR - 1) >> (SUPERPAGE_SHIFT - \
+                                                          PAGE_SHIFT)) + 1)
+#define SPAGETABLE_SIZE         (SPAGETABLE_NR * sizeof(struct spage_info))
+#define SPAGETABLE_VIRT_START   ((SPAGETABLE_VIRT_END - SPAGETABLE_SIZE) & \
+                                 (_AC(-1,UL) << SUPERPAGE_SHIFT))
 
 #ifndef CONFIG_BIGMEM
 /* Slot 261: page-frame information array (128GB). */

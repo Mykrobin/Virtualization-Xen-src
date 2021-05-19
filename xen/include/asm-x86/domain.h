@@ -1,23 +1,23 @@
 #ifndef __ASM_DOMAIN_H__
 #define __ASM_DOMAIN_H__
 
+#include <xen/config.h>
 #include <xen/mm.h>
 #include <xen/radix-tree.h>
 #include <asm/hvm/vcpu.h>
 #include <asm/hvm/domain.h>
 #include <asm/e820.h>
 #include <asm/mce.h>
-#include <asm/vpmu.h>
-#include <asm/x86_emulate.h>
 #include <public/vcpu.h>
 #include <public/hvm/hvm_info_table.h>
 
 #define has_32bit_shinfo(d)    ((d)->arch.has_32bit_shinfo)
 #define is_pv_32bit_domain(d)  ((d)->arch.is_32bit_pv)
 #define is_pv_32bit_vcpu(v)    (is_pv_32bit_domain((v)->domain))
+#define is_pvh_32bit_domain(d) (is_pvh_domain(d) && has_32bit_shinfo(d))
 
-#define is_hvm_pv_evtchn_domain(d) (is_hvm_domain(d) && \
-        (d)->arch.hvm_domain.irq->callback_via_type == HVMIRQ_callback_vector)
+#define is_hvm_pv_evtchn_domain(d) (has_hvm_container_domain(d) && \
+        d->arch.hvm_domain.irq.callback_via_type == HVMIRQ_callback_vector)
 #define is_hvm_pv_evtchn_vcpu(v) (is_hvm_pv_evtchn_domain(v->domain))
 #define is_domain_direct_mapped(d) ((void)(d), 0)
 
@@ -122,10 +122,8 @@ struct shadow_domain {
     /* Has this domain ever used HVMOP_pagetable_dying? */
     bool_t pagetable_dying_op;
 
-#ifdef CONFIG_PV
     /* PV L1 Terminal Fault mitigation. */
     struct tasklet pv_l1tf_tasklet;
-#endif /* CONFIG_PV */
 #endif
 };
 
@@ -135,6 +133,8 @@ struct shadow_vcpu {
     l3_pgentry_t l3table[4] __attribute__((__aligned__(32)));
     /* PAE guests: per-vcpu cache of the top-level *guest* entries */
     l3_pgentry_t gl3e[4] __attribute__((__aligned__(32)));
+    /* Non-PAE guests: pointer to guest top-level pagetable */
+    void *guest_vtable;
     /* Last MFN that we emulated a write to as unshadow heuristics. */
     unsigned long last_emulated_mfn_for_unshadow;
     /* MFN of the last shadow that we shot a writeable mapping in */
@@ -181,11 +181,9 @@ struct log_dirty_domain {
     unsigned int   dirty_count;
 
     /* functions which are paging mode specific */
-    const struct log_dirty_ops {
-        int        (*enable  )(struct domain *d, bool log_global);
-        int        (*disable )(struct domain *d);
-        void       (*clean   )(struct domain *d);
-    } *ops;
+    int            (*enable_log_dirty   )(struct domain *d, bool_t log_global);
+    int            (*disable_log_dirty  )(struct domain *d);
+    void           (*clean_dirty_bitmap )(struct domain *d);
 };
 
 struct paging_domain {
@@ -202,6 +200,9 @@ struct paging_domain {
     struct hap_domain       hap;
     /* log dirty support */
     struct log_dirty_domain log_dirty;
+
+    /* Number of valid bits in a gfn. */
+    unsigned int gfn_bits;
 
     /* preemption handling */
     struct {
@@ -239,6 +240,9 @@ struct paging_vcpu {
     struct shadow_vcpu shadow;
 };
 
+#define MAX_CPUID_INPUT 40
+typedef xen_domctl_cpuid_t cpuid_input_t;
+
 #define MAX_NESTEDP2M 10
 
 #define MAX_ALTP2M      10 /* arbitrary */
@@ -268,6 +272,35 @@ struct pv_domain
 
     struct cpuidmasks *cpuidmasks;
 };
+
+/*
+ * PCID values for the address spaces of 64-bit pv domains:
+ *
+ * We are using 4 PCID values for a 64 bit pv domain subject to XPTI:
+ * - hypervisor active and guest in kernel mode   PCID 0
+ * - hypervisor active and guest in user mode     PCID 1
+ * - guest active and in kernel mode              PCID 2
+ * - guest active and in user mode                PCID 3
+ *
+ * Without XPTI only 2 values are used:
+ * - guest in kernel mode                         PCID 0
+ * - guest in user mode                           PCID 1
+ */
+
+#define PCID_PV_PRIV      0x0000    /* Used for other domains, too. */
+#define PCID_PV_USER      0x0001
+#define PCID_PV_XPTI      0x0002    /* To be ORed to above values. */
+
+/*
+ * Return additional PCID specific cr3 bits.
+ *
+ * Note that X86_CR3_NOFLUSH will not be readable in cr3. Anyone consuming
+ * v->arch.cr3 should mask away X86_CR3_NOFLUSH and X86_CR3_PCIDMASK in case
+ * the value is used to address the root page table.
+ */
+#define get_pcid_bits(v, is_xpti)                                       \
+    (X86_CR3_NOFLUSH | ((is_xpti) ? PCID_PV_XPTI : 0) |                 \
+     (((v)->arch.flags & TF_kernel_mode) ? PCID_PV_PRIV : PCID_PV_USER))
 
 struct monitor_write_data {
     struct {
@@ -325,12 +358,6 @@ struct arch_domain
     } relmem;
     struct page_list_head relmem_list;
 
-    const struct arch_csw {
-        void (*from)(struct vcpu *);
-        void (*to)(struct vcpu *);
-        void (*tail)(struct vcpu *);
-    } *ctxt_switch;
-
     /* nestedhvm: translate l2 guest physical to host physical */
     struct p2m_domain *nested_p2m[MAX_NESTEDP2M];
     mm_lock_t nested_p2m_lock;
@@ -355,6 +382,11 @@ struct arch_domain
     /* Is PHYSDEVOP_eoi to automatically unmask the event channel? */
     bool_t auto_unmask;
 
+    /* Values snooped from updates to cpuids[] (below). */
+    u8 x86;                  /* CPU family */
+    u8 x86_vendor;           /* CPU vendor */
+    u8 x86_model;            /* CPU model */
+
     /*
      * The width of the FIP/FDP register in the FPU that needs to be
      * saved/restored during a context switch.  This is needed because
@@ -370,9 +402,7 @@ struct arch_domain
      */
     uint8_t x87_fip_width;
 
-    /* CPUID and MSR policy objects. */
-    struct cpuid_policy *cpuid;
-    struct msr_domain_policy *msr;
+    cpuid_input_t *cpuids;
 
     struct PITState vpit;
 
@@ -411,19 +441,15 @@ struct arch_domain
 
     /* Arch-specific monitor options */
     struct {
-        unsigned int write_ctrlreg_enabled                                 : 4;
-        unsigned int write_ctrlreg_sync                                    : 4;
-        unsigned int write_ctrlreg_onchangeonly                            : 4;
-        unsigned int singlestep_enabled                                    : 1;
-        unsigned int software_breakpoint_enabled                           : 1;
-        unsigned int debug_exception_enabled                               : 1;
-        unsigned int debug_exception_sync                                  : 1;
-        unsigned int cpuid_enabled                                         : 1;
-        unsigned int descriptor_access_enabled                             : 1;
-        unsigned int guest_request_userspace_enabled                       : 1;
-        unsigned int emul_unimplemented_enabled                            : 1;
+        unsigned int write_ctrlreg_enabled       : 4;
+        unsigned int write_ctrlreg_sync          : 4;
+        unsigned int write_ctrlreg_onchangeonly  : 4;
+        unsigned int singlestep_enabled          : 1;
+        unsigned int software_breakpoint_enabled : 1;
+        unsigned int debug_exception_enabled     : 1;
+        unsigned int debug_exception_sync        : 1;
+        unsigned int cpuid_enabled               : 1;
         struct monitor_msr_bitmap *msr_bitmap;
-        uint64_t write_ctrlreg_mask[4];
     } monitor;
 
     /* Mem_access emulation control */
@@ -442,18 +468,14 @@ struct arch_domain
 #define has_vvga(d)        (!!((d)->arch.emulation_flags & XEN_X86_EMU_VGA))
 #define has_viommu(d)      (!!((d)->arch.emulation_flags & XEN_X86_EMU_IOMMU))
 #define has_vpit(d)        (!!((d)->arch.emulation_flags & XEN_X86_EMU_PIT))
-#define has_pirq(d)        (!!((d)->arch.emulation_flags & \
-                            XEN_X86_EMU_USE_PIRQ))
-#define has_vpci(d)        (!!((d)->arch.emulation_flags & XEN_X86_EMU_VPCI))
 
 #define has_arch_pdevs(d)    (!list_empty(&(d)->arch.pdev_list))
 
 #define gdt_ldt_pt_idx(v) \
       ((v)->vcpu_id >> (PAGETABLE_ORDER - GDT_LDT_VCPU_SHIFT))
-#define pv_gdt_ptes(v) \
-    ((v)->domain->arch.pv_domain.gdt_ldt_l1tab[gdt_ldt_pt_idx(v)] + \
+#define gdt_ldt_ptes(d, v) \
+    ((d)->arch.pv_domain.gdt_ldt_l1tab[gdt_ldt_pt_idx(v)] + \
      (((v)->vcpu_id << GDT_LDT_VCPU_SHIFT) & (L1_PAGETABLE_ENTRIES - 1)))
-#define pv_ldt_ptes(v) (pv_gdt_ptes(v) + 16)
 
 struct pv_vcpu
 {
@@ -493,6 +515,7 @@ struct pv_vcpu
 
     /* Bounce information for propagating an exception to guest OS. */
     struct trap_bounce trap_bounce;
+    struct trap_bounce int80_bounce;
 
     /* I/O-port access bitmap. */
     XEN_GUEST_HANDLE(uint8) iobmp; /* Guest kernel vaddr of the bitmap. */
@@ -513,6 +536,12 @@ struct pv_vcpu
     struct vcpu_time_info pending_system_time;
 };
 
+typedef enum __packed {
+    SMAP_CHECK_HONOR_CPL_AC,    /* honor the guest's CPL and AC */
+    SMAP_CHECK_ENABLED,         /* enable the check */
+    SMAP_CHECK_DISABLED,        /* disable the check */
+} smap_check_policy_t;
+
 struct arch_vcpu
 {
     /*
@@ -528,6 +557,11 @@ struct arch_vcpu
     /* other state */
 
     unsigned long      flags; /* TF_ */
+
+    void (*schedule_tail) (struct vcpu *);
+
+    void (*ctxt_switch_from) (struct vcpu *);
+    void (*ctxt_switch_to) (struct vcpu *);
 
     struct vpmu_struct vpmu;
 
@@ -573,9 +607,20 @@ struct arch_vcpu
     /* Restore all FPU state (lazy and non-lazy state) on context switch? */
     bool fully_eager_fpu;
 
+    /* Has the guest enabled CPUID faulting? */
+    bool cpuid_faulting;
+
+    /*
+     * The SMAP check policy when updating runstate_guest(v) and the
+     * secondary system time.
+     */
+    smap_check_policy_t smap_check_policy;
+
     struct vmce vmce;
 
     struct paging_vcpu paging;
+
+    uint32_t spec_ctrl;
 
     uint32_t gdbsx_vcpu_event;
 
@@ -583,32 +628,46 @@ struct arch_vcpu
     XEN_GUEST_HANDLE(vcpu_time_info_t) time_info_guest;
 
     struct arch_vm_event *vm_event;
-
-    struct msr_vcpu_policy *msr;
-
-    struct {
-        bool next_interrupt_enabled;
-    } monitor;
 };
 
-struct guest_memory_policy
-{
-    bool nested_guest_mode;
-};
-
-void update_guest_memory_policy(struct vcpu *v,
-                                struct guest_memory_policy *policy);
+smap_check_policy_t smap_policy_change(struct vcpu *v,
+                                       smap_check_policy_t new_policy);
 
 /* Shorthands to improve code legibility. */
 #define hvm_vmx         hvm_vcpu.u.vmx
 #define hvm_svm         hvm_vcpu.u.svm
 
-bool update_runstate_area(struct vcpu *);
-bool update_secondary_system_time(struct vcpu *,
-                                  struct vcpu_time_info *);
+bool_t update_runstate_area(struct vcpu *);
+bool_t update_secondary_system_time(struct vcpu *,
+                                    struct vcpu_time_info *);
 
 void vcpu_show_execution_state(struct vcpu *);
 void vcpu_show_registers(const struct vcpu *);
+
+/*
+ * Bits which a PV guest can toggle in its view of cr4.  Some are loaded into
+ * hardware, while some are fully emulated.
+ */
+#define PV_CR4_GUEST_MASK \
+    (X86_CR4_TSD | X86_CR4_DE | X86_CR4_FSGSBASE | X86_CR4_OSXSAVE)
+
+/* Bits which a PV guest may observe from the real hardware settings. */
+#define PV_CR4_GUEST_VISIBLE_MASK \
+    (X86_CR4_PAE | X86_CR4_MCE | X86_CR4_OSFXSR | X86_CR4_OSXMMEXCPT)
+
+/* Given a new cr4 value, construct the resulting guest-visible cr4 value. */
+unsigned long pv_fixup_guest_cr4(const struct vcpu *v, unsigned long cr4);
+
+/* Create a cr4 value to load into hardware, based on vcpu settings. */
+unsigned long pv_make_cr4(const struct vcpu *v);
+
+void domain_cpuid(const struct domain *d,
+                  unsigned int  input,
+                  unsigned int  sub_input,
+                  unsigned int  *eax,
+                  unsigned int  *ebx,
+                  unsigned int  *ecx,
+                  unsigned int  *edx);
 
 #define domain_max_vcpus(d) (is_hvm_domain(d) ? HVM_MAX_VCPUS : MAX_VIRT_CPUS)
 
@@ -626,42 +685,6 @@ void arch_vcpu_regs_init(struct vcpu *v);
 
 struct vcpu_hvm_context;
 int arch_set_info_hvm_guest(struct vcpu *v, const struct vcpu_hvm_context *ctx);
-
-void pv_inject_event(const struct x86_event *event);
-
-static inline void pv_inject_hw_exception(unsigned int vector, int errcode)
-{
-    const struct x86_event event = {
-        .vector = vector,
-        .type = X86_EVENTTYPE_HW_EXCEPTION,
-        .error_code = errcode,
-    };
-
-    pv_inject_event(&event);
-}
-
-static inline void pv_inject_page_fault(int errcode, unsigned long cr2)
-{
-    const struct x86_event event = {
-        .vector = TRAP_page_fault,
-        .type = X86_EVENTTYPE_HW_EXCEPTION,
-        .error_code = errcode,
-        .cr2 = cr2,
-    };
-
-    pv_inject_event(&event);
-}
-
-static inline void pv_inject_sw_interrupt(unsigned int vector)
-{
-    const struct x86_event event = {
-        .vector = vector,
-        .type = X86_EVENTTYPE_SW_INTERRUPT,
-        .error_code = X86_EVENT_NO_EC,
-    };
-
-    pv_inject_event(&event);
-}
 
 #endif /* __ASM_DOMAIN_H__ */
 

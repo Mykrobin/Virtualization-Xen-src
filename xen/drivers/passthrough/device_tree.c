@@ -143,16 +143,15 @@ int iommu_do_dt_domctl(struct xen_domctl *domctl, struct domain *d,
     switch ( domctl->cmd )
     {
     case XEN_DOMCTL_assign_device:
-        ASSERT(d);
-        /* fall through */
-    case XEN_DOMCTL_test_assign_device:
         ret = -ENODEV;
         if ( domctl->u.assign_device.dev != XEN_DOMCTL_DEV_DT )
             break;
 
-        ret = -EINVAL;
-        if ( (d && d->is_dying) || domctl->u.assign_device.flags )
+        if ( unlikely(d->is_dying) )
+        {
+            ret = -EINVAL;
             break;
+        }
 
         ret = dt_find_node_by_gpath(domctl->u.assign_device.u.dt.path,
                                     domctl->u.assign_device.u.dt.size,
@@ -163,17 +162,6 @@ int iommu_do_dt_domctl(struct xen_domctl *domctl, struct domain *d,
         ret = xsm_assign_dtdevice(XSM_HOOK, d, dt_node_full_name(dev));
         if ( ret )
             break;
-
-        if ( domctl->cmd == XEN_DOMCTL_test_assign_device )
-        {
-            if ( iommu_dt_device_is_assigned(dev) )
-            {
-                printk(XENLOG_G_ERR "%s already assigned.\n",
-                       dt_node_full_name(dev));
-                ret = -EINVAL;
-            }
-            break;
-        }
 
         if ( d == dom_io )
             return -EINVAL;
@@ -189,10 +177,6 @@ int iommu_do_dt_domctl(struct xen_domctl *domctl, struct domain *d,
     case XEN_DOMCTL_deassign_device:
         ret = -ENODEV;
         if ( domctl->u.assign_device.dev != XEN_DOMCTL_DEV_DT )
-            break;
-
-        ret = -EINVAL;
-        if ( domctl->u.assign_device.flags )
             break;
 
         ret = dt_find_node_by_gpath(domctl->u.assign_device.u.dt.path,
@@ -212,6 +196,29 @@ int iommu_do_dt_domctl(struct xen_domctl *domctl, struct domain *d,
             printk(XENLOG_G_ERR "XEN_DOMCTL_assign_dt_device: assign \"%s\""
                    " to dom%u failed (%d)\n",
                    dt_node_full_name(dev), d->domain_id, ret);
+        break;
+
+    case XEN_DOMCTL_test_assign_device:
+        ret = -ENODEV;
+        if ( domctl->u.assign_device.dev != XEN_DOMCTL_DEV_DT )
+            break;
+
+        ret = dt_find_node_by_gpath(domctl->u.assign_device.u.dt.path,
+                                    domctl->u.assign_device.u.dt.size,
+                                    &dev);
+        if ( ret )
+            break;
+
+        ret = xsm_test_assign_dtdevice(XSM_HOOK, dt_node_full_name(dev));
+        if ( ret )
+            break;
+
+        if ( iommu_dt_device_is_assigned(dev) )
+        {
+            printk(XENLOG_G_ERR "%s already assigned.\n",
+                   dt_node_full_name(dev));
+            ret = -EINVAL;
+        }
         break;
 
     default:

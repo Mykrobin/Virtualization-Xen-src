@@ -57,17 +57,7 @@
 #define set_xen_guest_handle(hnd, val) set_xen_guest_handle_raw(hnd, val)
 
 #if defined(__i386__)
-# ifdef __XEN__
-__DeFiNe__ __DECL_REG_LO8(which) uint32_t e ## which ## x
-__DeFiNe__ __DECL_REG_LO16(name) union { uint32_t e ## name; }
-# endif
 #include "xen-x86_32.h"
-# ifdef __XEN__
-__UnDeF__ __DECL_REG_LO8
-__UnDeF__ __DECL_REG_LO16
-__DeFiNe__ __DECL_REG_LO8(which) e ## which ## x
-__DeFiNe__ __DECL_REG_LO16(name) e ## name
-# endif
 #elif defined(__x86_64__)
 #include "xen-x86_64.h"
 #endif
@@ -75,7 +65,6 @@ __DeFiNe__ __DECL_REG_LO16(name) e ## name
 #ifndef __ASSEMBLY__
 typedef unsigned long xen_pfn_t;
 #define PRI_xen_pfn "lx"
-#define PRIu_xen_pfn "lu"
 #endif
 
 #define XEN_HAVE_PV_GUEST_ENTRY 1
@@ -160,15 +149,17 @@ DEFINE_XEN_GUEST_HANDLE(trap_info_t);
 typedef uint64_t tsc_timestamp_t; /* RDTSC timestamp */
 
 /*
- * The following is all CPU context. Note that the fpu_ctxt block is filled
+ * The following is all CPU context. Note that the fpu_ctxt block is filled 
  * in by FXSAVE if the CPU has feature FXSR; otherwise FSAVE is used.
  *
- * Also note that when calling DOMCTL_setvcpucontext for HVM guests, not all
- * information in this structure is updated, the fields read include: fpu_ctxt
- * (if VGCT_I387_VALID is set), flags, user_regs and debugreg[*].
+ * Also note that when calling DOMCTL_setvcpucontext and VCPU_initialise
+ * for HVM and PVH guests, not all information in this structure is updated:
  *
- * Note: VCPUOP_initialise for HVM guests is non-symetric with
- * DOMCTL_setvcpucontext, and uses struct vcpu_hvm_context from hvm/hvm_vcpu.h
+ * - For HVM guests, the structures read include: fpu_ctxt (if
+ * VGCT_I387_VALID is set), flags, user_regs, debugreg[*]
+ *
+ * - PVH guests are the same as HVM guests, but additionally use ctrlreg[3] to
+ * set cr3. All other fields not used should be set to 0.
  */
 struct vcpu_guest_context {
     /* FPU registers come first so they can be aligned for FXSAVE/FXRSTOR. */
@@ -292,26 +283,14 @@ struct xen_arch_domainconfig {
 #define XEN_X86_EMU_IOMMU           (1U<<_XEN_X86_EMU_IOMMU)
 #define _XEN_X86_EMU_PIT            8
 #define XEN_X86_EMU_PIT             (1U<<_XEN_X86_EMU_PIT)
-#define _XEN_X86_EMU_USE_PIRQ       9
-#define XEN_X86_EMU_USE_PIRQ        (1U<<_XEN_X86_EMU_USE_PIRQ)
-#define _XEN_X86_EMU_VPCI           10
-#define XEN_X86_EMU_VPCI            (1U<<_XEN_X86_EMU_VPCI)
 
 #define XEN_X86_EMU_ALL             (XEN_X86_EMU_LAPIC | XEN_X86_EMU_HPET |  \
                                      XEN_X86_EMU_PM | XEN_X86_EMU_RTC |      \
                                      XEN_X86_EMU_IOAPIC | XEN_X86_EMU_PIC |  \
                                      XEN_X86_EMU_VGA | XEN_X86_EMU_IOMMU |   \
-                                     XEN_X86_EMU_PIT | XEN_X86_EMU_USE_PIRQ |\
-                                     XEN_X86_EMU_VPCI)
+                                     XEN_X86_EMU_PIT)
     uint32_t emulation_flags;
 };
-
-/* Location of online VCPU bitmap. */
-#define XEN_ACPI_CPU_MAP             0xaf00
-#define XEN_ACPI_CPU_MAP_LEN         ((HVM_MAX_VCPUS + 7) / 8)
-
-/* GPE0 bit set during CPU hotplug */
-#define XEN_ACPI_GPE0_CPUHP_BIT      2
 #endif
 
 #endif /* !__ASSEMBLY__ */

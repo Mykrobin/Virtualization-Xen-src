@@ -72,17 +72,11 @@ install: all
 	ln -sf libvhd.so.$(LIBVHD-MAJOR).$(LIBVHD-MINOR) $(DESTDIR)$(INST-DIR)/libvhd.so.$(LIBVHD-MAJOR)
 	ln -sf libvhd.so.$(LIBVHD-MAJOR) $(DESTDIR)$(INST-DIR)/libvhd.so
 
-uninstall:
-	rm -f $(DESTDIR)$(INST-DIR)/libvhd.so
-	rm -f $(DESTDIR)$(INST-DIR)/libvhd.so.$(LIBVHD-MAJOR)
-	rm -f $(DESTDIR)$(INST-DIR)/libvhd.so.$(LIBVHD-MAJOR).$(LIBVHD-MINOR)
-	rm -f $(DESTDIR)$(INST-DIR)/libvhd.a
-
 clean:
-	rm -rf *.a *.so* *.o *.opic *~ $(DEPS_RM) $(LIBVHD)
+	rm -rf *.a *.so* *.o *.opic *~ $(DEPS) $(LIBVHD)
 
 distclean: clean
 
-.PHONY: all build clean distclean install libvhd uninstall
+.PHONY: all build clean distclean install libvhd
 
--include $(DEPS_INCLUDE)
+-include $(DEPS)

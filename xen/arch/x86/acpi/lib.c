@@ -19,6 +19,7 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/init.h>
 #include <xen/acpi.h>
@@ -49,7 +50,7 @@ char *__acpi_map_table(paddr_t phys, unsigned long size)
 	offset = phys & (PAGE_SIZE - 1);
 	mapped_size = PAGE_SIZE - offset;
 	set_fixmap(FIX_ACPI_END, phys);
-	base = __fix_to_virt(FIX_ACPI_END);
+	base = fix_to_virt(FIX_ACPI_END);
 
 	/*
 	 * Most cases can be covered by the below.

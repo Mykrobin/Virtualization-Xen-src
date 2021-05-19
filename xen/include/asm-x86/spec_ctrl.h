@@ -94,7 +94,7 @@ static always_inline void spec_ctrl_enter_idle(struct cpu_info *info)
      * Note: VERW must be encoded with a memory operand, as it is only that
      * form which causes a flush.
      */
-    alternative_input("", "verw %[sel]", X86_FEATURE_SC_VERW_IDLE,
+    alternative_input(ASM_NOP8, "verw %[sel]", X86_FEATURE_SC_VERW_IDLE,
                       [sel] "m" (info->verw_sel));
 }
 

@@ -6,6 +6,7 @@
  * Copyright (c) 2002-2006, K Fraser
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
@@ -26,8 +27,8 @@
 #include <xen/nodemask.h>
 #include <xsm/xsm.h>
 #include <xen/pmstat.h>
+#include <xen/gcov.h>
 #include <xen/livepatch.h>
-#include <xen/coverage.h>
 
 long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
 {
@@ -250,7 +251,7 @@ long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
 
     case XEN_SYSCTL_physinfo:
     {
-        struct xen_sysctl_physinfo *pi = &op->u.physinfo;
+        xen_sysctl_physinfo_t *pi = &op->u.physinfo;
 
         memset(pi, 0, sizeof(*pi));
         pi->threads_per_core =
@@ -266,7 +267,6 @@ long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
         get_outstanding_claims(&pi->free_pages, &pi->outstanding_pages);
         pi->scrub_pages = 0;
         pi->cpu_khz = cpu_khz;
-        pi->max_mfn = get_upper_mfn_bound();
         arch_do_physinfo(pi);
 
         if ( copy_to_guest(u_sysctl, op, 1) )
@@ -277,7 +277,7 @@ long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
     case XEN_SYSCTL_numainfo:
     {
         unsigned int i, j, num_nodes;
-        struct xen_sysctl_numainfo *ni = &op->u.numainfo;
+        xen_sysctl_numainfo_t *ni = &op->u.numainfo;
         bool_t do_meminfo = !guest_handle_is_null(ni->meminfo);
         bool_t do_distance = !guest_handle_is_null(ni->distance);
 
@@ -285,7 +285,7 @@ long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
 
         if ( do_meminfo || do_distance )
         {
-            struct xen_sysctl_meminfo meminfo = { };
+            xen_sysctl_meminfo_t meminfo = { 0 };
 
             if ( num_nodes > ni->num_nodes )
                 num_nodes = ni->num_nodes;
@@ -347,12 +347,12 @@ long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
     case XEN_SYSCTL_cputopoinfo:
     {
         unsigned int i, num_cpus;
-        struct xen_sysctl_cputopoinfo *ti = &op->u.cputopoinfo;
+        xen_sysctl_cputopoinfo_t *ti = &op->u.cputopoinfo;
 
         num_cpus = cpumask_last(&cpu_online_map) + 1;
         if ( !guest_handle_is_null(ti->cputopo) )
         {
-            struct xen_sysctl_cputopo cputopo = { };
+            xen_sysctl_cputopo_t cputopo = { 0 };
 
             if ( num_cpus > ti->num_cpus )
                 num_cpus = ti->num_cpus;
@@ -396,15 +396,16 @@ long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
     }
     break;
 
+#ifdef CONFIG_GCOV
     case XEN_SYSCTL_coverage_op:
-        ret = sysctl_cov_op(&op->u.coverage_op);
-        copyback = 1;
+        ret = sysctl_coverage_op(&op->u.coverage_op);
         break;
+#endif
 
 #ifdef CONFIG_HAS_PCI
     case XEN_SYSCTL_pcitopoinfo:
     {
-        struct xen_sysctl_pcitopoinfo *ti = &op->u.pcitopoinfo;
+        xen_sysctl_pcitopoinfo_t *ti = &op->u.pcitopoinfo;
         unsigned int i = 0;
 
         if ( guest_handle_is_null(ti->devs) ||
@@ -465,42 +466,6 @@ long do_sysctl(XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)
         if ( ret != -ENOSYS && ret != -EOPNOTSUPP )
             copyback = 1;
         break;
-
-    case XEN_SYSCTL_set_parameter:
-    {
-#define XEN_SET_PARAMETER_MAX_SIZE 1023
-        char *params;
-
-        if ( op->u.set_parameter.pad[0] || op->u.set_parameter.pad[1] ||
-             op->u.set_parameter.pad[2] )
-        {
-            ret = -EINVAL;
-            break;
-        }
-        if ( op->u.set_parameter.size > XEN_SET_PARAMETER_MAX_SIZE )
-        {
-            ret = -E2BIG;
-            break;
-        }
-        params = xmalloc_bytes(op->u.set_parameter.size + 1);
-        if ( !params )
-        {
-            ret = -ENOMEM;
-            break;
-        }
-        if ( copy_from_guest(params, op->u.set_parameter.params,
-                             op->u.set_parameter.size) )
-            ret = -EFAULT;
-        else
-        {
-            params[op->u.set_parameter.size] = 0;
-            ret = runtime_parse(params);
-        }
-
-        xfree(params);
-
-        break;
-    }
 
     default:
         ret = arch_do_sysctl(op, u_sysctl);

@@ -21,7 +21,6 @@
 #include <xen/prefetch.h>
 #include <xen/iommu.h>
 #include <xen/irq.h>
-#include <xen/vm_event.h>
 #include <asm/hvm/irq.h>
 #include <xen/delay.h>
 #include <xen/keyhandler.h>
@@ -31,7 +30,6 @@
 #include <xen/radix-tree.h>
 #include <xen/softirq.h>
 #include <xen/tasklet.h>
-#include <xen/vpci.h>
 #include <xsm/xsm.h>
 #include <asm/msi.h>
 #include "ats.h"
@@ -151,20 +149,17 @@ static struct phantom_dev {
 } phantom_devs[8];
 static unsigned int nr_phantom_devs;
 
-static int __init parse_phantom_dev(const char *str)
-{
-    const char *s;
+static void __init parse_phantom_dev(char *str) {
+    const char *s = str;
     unsigned int seg, bus, slot;
     struct phantom_dev phantom;
 
-    if ( !*str )
-        return -EINVAL;
-    if ( nr_phantom_devs >= ARRAY_SIZE(phantom_devs) )
-        return -E2BIG;
+    if ( !s || !*s || nr_phantom_devs >= ARRAY_SIZE(phantom_devs) )
+        return;
 
-    s = parse_pci(str, &seg, &bus, &slot, NULL);
+    s = parse_pci(s, &seg, &bus, &slot, NULL);
     if ( !s || *s != ',' )
-        return -EINVAL;
+        return;
 
     phantom.seg = seg;
     phantom.bus = bus;
@@ -175,12 +170,10 @@ static int __init parse_phantom_dev(const char *str)
     case 1: case 2: case 4:
         if ( *s )
     default:
-            return -EINVAL;
+            return;
     }
 
     phantom_devs[nr_phantom_devs++] = phantom;
-
-    return 0;
 }
 custom_param("pci-phantom", parse_phantom_dev);
 
@@ -196,10 +189,9 @@ static u16 __read_mostly bridge_ctl_mask;
  *   perr                       don't suppress parity errors (default)
  *   no-perr                    suppress parity errors
  */
-static int __init parse_pci_param(const char *s)
+static void __init parse_pci_param(char *s)
 {
-    const char *ss;
-    int rc = 0;
+    char *ss;
 
     do {
         bool_t on = !!strncmp(s, "no-", 3);
@@ -209,21 +201,19 @@ static int __init parse_pci_param(const char *s)
             s += 3;
 
         ss = strchr(s, ',');
-        if ( !ss )
-            ss = strchr(s, '\0');
+        if ( ss )
+            *ss = '\0';
 
-        if ( !cmdline_strcmp(s, "serr") )
+        if ( !strcmp(s, "serr") )
         {
             cmd_mask = PCI_COMMAND_SERR;
             brctl_mask = PCI_BRIDGE_CTL_SERR | PCI_BRIDGE_CTL_DTMR_SERR;
         }
-        else if ( !cmdline_strcmp(s, "perr") )
+        else if ( !strcmp(s, "perr") )
         {
             cmd_mask = PCI_COMMAND_PARITY;
             brctl_mask = PCI_BRIDGE_CTL_PARITY;
         }
-        else
-            rc = -EINVAL;
 
         if ( on )
         {
@@ -237,9 +227,7 @@ static int __init parse_pci_param(const char *s)
         }
 
         s = ss + 1;
-    } while ( *ss );
-
-    return rc;
+    } while ( ss );
 }
 custom_param("pci", parse_pci_param);
 
@@ -533,8 +521,8 @@ struct pci_dev *pci_get_real_pdev(int seg, int bus, int devfn)
     return pdev;
 }
 
-struct pci_dev *pci_get_pdev_by_domain(const struct domain *d, int seg,
-                                       int bus, int devfn)
+struct pci_dev *pci_get_pdev_by_domain(
+    struct domain *d, int seg, int bus, int devfn)
 {
     struct pci_seg *pseg = get_pseg(seg);
     struct pci_dev *pdev = NULL;
@@ -599,60 +587,6 @@ static void pci_enable_acs(struct pci_dev *pdev)
     pci_conf_write16(seg, bus, dev, func, pos + PCI_ACS_CTRL, ctrl);
 }
 
-static int iommu_add_device(struct pci_dev *pdev);
-static int iommu_enable_device(struct pci_dev *pdev);
-static int iommu_remove_device(struct pci_dev *pdev);
-
-unsigned int pci_size_mem_bar(pci_sbdf_t sbdf, unsigned int pos,
-                              uint64_t *paddr, uint64_t *psize,
-                              unsigned int flags)
-{
-    uint32_t hi = 0, bar = pci_conf_read32(sbdf.seg, sbdf.bus, sbdf.dev,
-                                           sbdf.func, pos);
-    uint64_t size;
-    bool is64bits = !(flags & PCI_BAR_ROM) &&
-        (bar & PCI_BASE_ADDRESS_MEM_TYPE_MASK) == PCI_BASE_ADDRESS_MEM_TYPE_64;
-    uint32_t mask = (flags & PCI_BAR_ROM) ? (uint32_t)PCI_ROM_ADDRESS_MASK
-                                          : (uint32_t)PCI_BASE_ADDRESS_MEM_MASK;
-
-    ASSERT(!((flags & PCI_BAR_VF) && (flags & PCI_BAR_ROM)));
-    ASSERT((flags & PCI_BAR_ROM) ||
-           (bar & PCI_BASE_ADDRESS_SPACE) == PCI_BASE_ADDRESS_SPACE_MEMORY);
-    pci_conf_write32(sbdf.seg, sbdf.bus, sbdf.dev, sbdf.func, pos, ~0);
-    if ( is64bits )
-    {
-        if ( flags & PCI_BAR_LAST )
-        {
-            printk(XENLOG_WARNING
-                   "%sdevice %04x:%02x:%02x.%u with 64-bit %sBAR in last slot\n",
-                   (flags & PCI_BAR_VF) ? "SR-IOV " : "", sbdf.seg, sbdf.bus,
-                   sbdf.dev, sbdf.func, (flags & PCI_BAR_VF) ? "vf " : "");
-            *psize = 0;
-            return 1;
-        }
-        hi = pci_conf_read32(sbdf.seg, sbdf.bus, sbdf.dev, sbdf.func, pos + 4);
-        pci_conf_write32(sbdf.seg, sbdf.bus, sbdf.dev, sbdf.func, pos + 4, ~0);
-    }
-    size = pci_conf_read32(sbdf.seg, sbdf.bus, sbdf.dev, sbdf.func,
-                           pos) & mask;
-    if ( is64bits )
-    {
-        size |= (uint64_t)pci_conf_read32(sbdf.seg, sbdf.bus, sbdf.dev,
-                                          sbdf.func, pos + 4) << 32;
-        pci_conf_write32(sbdf.seg, sbdf.bus, sbdf.dev, sbdf.func, pos + 4, hi);
-    }
-    else if ( size )
-        size |= (uint64_t)~0 << 32;
-    pci_conf_write32(sbdf.seg, sbdf.bus, sbdf.dev, sbdf.func, pos, bar);
-    size = -size;
-
-    if ( paddr )
-        *paddr = (bar & mask) | ((uint64_t)hi << 32);
-    *psize = size;
-
-    return is64bits ? 2 : 1;
-}
-
 int pci_add_device(u16 seg, u8 bus, u8 devfn,
                    const struct pci_dev_info *info, nodeid_t node)
 {
@@ -680,7 +614,10 @@ int pci_add_device(u16 seg, u8 bus, u8 devfn,
     else if ( info->is_extfn )
         pdev_type = "extended function";
     else
+    {
+        info = NULL;
         pdev_type = "device";
+    }
 
     ret = xsm_resource_plug_pci(XSM_PRIV, (seg << 16) | (bus << 8) | devfn);
     if ( ret )
@@ -708,8 +645,7 @@ int pci_add_device(u16 seg, u8 bus, u8 devfn,
         if ( pdev->info.is_virtfn )
             pdev->info.is_extfn = pf_is_extfn;
     }
-
-    if ( !pdev->info.is_virtfn && !pdev->vf_rlen[0] )
+    else if ( !pdev->vf_rlen[0] )
     {
         unsigned int pos = pci_find_ext_capability(seg, bus, devfn,
                                                    PCI_EXT_CAP_ID_SRIOV);
@@ -722,13 +658,11 @@ int pci_add_device(u16 seg, u8 bus, u8 devfn,
             unsigned int i;
 
             BUILD_BUG_ON(ARRAY_SIZE(pdev->vf_rlen) != PCI_SRIOV_NUM_BARS);
-            for ( i = 0; i < PCI_SRIOV_NUM_BARS; )
+            for ( i = 0; i < PCI_SRIOV_NUM_BARS; ++i )
             {
                 unsigned int idx = pos + PCI_SRIOV_BAR + i * 4;
                 u32 bar = pci_conf_read32(seg, bus, slot, func, idx);
-                pci_sbdf_t sbdf = {
-                    .sbdf = PCI_SBDF3(seg, bus, devfn),
-                };
+                u32 hi = 0;
 
                 if ( (bar & PCI_BASE_ADDRESS_SPACE) ==
                      PCI_BASE_ADDRESS_SPACE_IO )
@@ -739,12 +673,38 @@ int pci_add_device(u16 seg, u8 bus, u8 devfn,
                            seg, bus, slot, func, i);
                     continue;
                 }
-                ret = pci_size_mem_bar(sbdf, idx, NULL, &pdev->vf_rlen[i],
-                                       PCI_BAR_VF |
-                                       ((i == PCI_SRIOV_NUM_BARS - 1) ?
-                                        PCI_BAR_LAST : 0));
-                ASSERT(ret);
-                i += ret;
+                pci_conf_write32(seg, bus, slot, func, idx, ~0);
+                if ( (bar & PCI_BASE_ADDRESS_MEM_TYPE_MASK) ==
+                     PCI_BASE_ADDRESS_MEM_TYPE_64 )
+                {
+                    if ( i >= PCI_SRIOV_NUM_BARS )
+                    {
+                        printk(XENLOG_WARNING
+                               "SR-IOV device %04x:%02x:%02x.%u with 64-bit"
+                               " vf BAR in last slot\n",
+                               seg, bus, slot, func);
+                        break;
+                    }
+                    hi = pci_conf_read32(seg, bus, slot, func, idx + 4);
+                    pci_conf_write32(seg, bus, slot, func, idx + 4, ~0);
+                }
+                pdev->vf_rlen[i] = pci_conf_read32(seg, bus, slot, func, idx) &
+                                   PCI_BASE_ADDRESS_MEM_MASK;
+                if ( (bar & PCI_BASE_ADDRESS_MEM_TYPE_MASK) ==
+                     PCI_BASE_ADDRESS_MEM_TYPE_64 )
+                {
+                    pdev->vf_rlen[i] |= (u64)pci_conf_read32(seg, bus,
+                                                             slot, func,
+                                                             idx + 4) << 32;
+                    pci_conf_write32(seg, bus, slot, func, idx + 4, hi);
+                }
+                else if ( pdev->vf_rlen[i] )
+                    pdev->vf_rlen[i] |= (u64)~0 << 32;
+                pci_conf_write32(seg, bus, slot, func, idx, bar);
+                pdev->vf_rlen[i] = -pdev->vf_rlen[i];
+                if ( (bar & PCI_BASE_ADDRESS_MEM_TYPE_MASK) ==
+                     PCI_BASE_ADDRESS_MEM_TYPE_64 )
+                    ++i;
             }
         }
         else
@@ -866,7 +826,7 @@ static int pci_clean_dpci_irqs(struct domain *d)
             return ret;
         }
 
-        hvm_domain_irq(d)->dpci = NULL;
+        d->arch.hvm_domain.irq.dpci = NULL;
         free_hvm_irq_dpci(hvm_irq_dpci);
     }
     spin_unlock(&d->event_lock);
@@ -1073,14 +1033,14 @@ struct setup_hwdom {
     int (*handler)(u8 devfn, struct pci_dev *);
 };
 
-static void __hwdom_init setup_one_hwdom_device(const struct setup_hwdom *ctxt,
-                                                struct pci_dev *pdev)
+static void setup_one_hwdom_device(const struct setup_hwdom *ctxt,
+                                  struct pci_dev *pdev)
 {
     u8 devfn = pdev->devfn;
-    int err;
 
     do {
-        err = ctxt->handler(devfn, pdev);
+        int err = ctxt->handler(devfn, pdev);
+
         if ( err )
         {
             printk(XENLOG_ERR "setup %04x:%02x:%02x.%u for d%d failed (%d)\n",
@@ -1092,11 +1052,6 @@ static void __hwdom_init setup_one_hwdom_device(const struct setup_hwdom *ctxt,
         devfn += pdev->phantom_stride;
     } while ( devfn != pdev->devfn &&
               PCI_SLOT(devfn) == PCI_SLOT(pdev->devfn) );
-
-    err = vpci_add_handlers(pdev);
-    if ( err )
-        printk(XENLOG_ERR "setup of vPCI for d%d failed: %d\n",
-               ctxt->d->domain_id, err);
 }
 
 static int __hwdom_init _setup_hwdom_pci_devices(struct pci_seg *pseg, void *arg)
@@ -1310,7 +1265,7 @@ void iommu_read_msi_from_ire(
         iommu_get_ops()->read_msi_from_ire(msi_desc, msg);
 }
 
-static int iommu_add_device(struct pci_dev *pdev)
+int iommu_add_device(struct pci_dev *pdev)
 {
     const struct domain_iommu *hd;
     int rc;
@@ -1341,7 +1296,7 @@ static int iommu_add_device(struct pci_dev *pdev)
     }
 }
 
-static int iommu_enable_device(struct pci_dev *pdev)
+int iommu_enable_device(struct pci_dev *pdev)
 {
     const struct domain_iommu *hd;
 
@@ -1358,7 +1313,7 @@ static int iommu_enable_device(struct pci_dev *pdev)
     return hd->platform_ops->enable_device(pci_to_dev(pdev));
 }
 
-static int iommu_remove_device(struct pci_dev *pdev)
+int iommu_remove_device(struct pci_dev *pdev)
 {
     const struct domain_iommu *hd;
     u8 devfn;
@@ -1426,9 +1381,8 @@ static int assign_device(struct domain *d, u16 seg, u8 bus, u8 devfn, u32 flag)
     /* Prevent device assign if mem paging or mem sharing have been 
      * enabled for this domain */
     if ( unlikely(!need_iommu(d) && d != dom_io &&
-            ((is_hvm_domain(d) &&
-              d->arch.hvm_domain.mem_sharing_enabled) ||
-             vm_event_check_ring(d->vm_event_paging) ||
+            (d->arch.hvm_domain.mem_sharing_enabled ||
+             d->vm_event->paging.ring_page ||
              p2m_get_hostp2m(d)->global_logdirty)) )
         return -EXDEV;
 
@@ -1458,12 +1412,7 @@ static int assign_device(struct domain *d, u16 seg, u8 bus, u8 devfn, u32 flag)
         goto done;
 
     if ( pdev->msix )
-    {
-        rc = pci_reset_msix_state(pdev);
-        if ( rc )
-            goto done;
         msixtbl_init(d);
-    }
 
     pdev->fault.count = 0;
 
@@ -1633,13 +1582,12 @@ int iommu_do_pci_domctl(
 {
     u16 seg;
     u8 bus, devfn;
+    u32 flag;
     int ret = 0;
     uint32_t machine_sbdf;
 
     switch ( domctl->cmd )
     {
-        unsigned int flags;
-
     case XEN_DOMCTL_get_device_group:
     {
         u32 max_sdevs;
@@ -1672,27 +1620,40 @@ int iommu_do_pci_domctl(
     }
     break;
 
-    case XEN_DOMCTL_assign_device:
-        ASSERT(d);
-        /* fall through */
     case XEN_DOMCTL_test_assign_device:
-        /* Don't support self-assignment of devices. */
-        if ( d == current->domain )
-        {
-            ret = -EINVAL;
-            break;
-        }
-
         ret = -ENODEV;
         if ( domctl->u.assign_device.dev != XEN_DOMCTL_DEV_PCI )
             break;
 
-        ret = -EINVAL;
-        flags = domctl->u.assign_device.flags;
-        if ( domctl->cmd == XEN_DOMCTL_assign_device
-             ? d->is_dying || (flags & ~XEN_DOMCTL_DEV_RDM_RELAXED)
-             : flags )
+        machine_sbdf = domctl->u.assign_device.u.pci.machine_sbdf;
+
+        ret = xsm_test_assign_device(XSM_HOOK, machine_sbdf);
+        if ( ret )
             break;
+
+        seg = machine_sbdf >> 16;
+        bus = PCI_BUS(machine_sbdf);
+        devfn = PCI_DEVFN2(machine_sbdf);
+
+        if ( device_assigned(seg, bus, devfn) )
+        {
+            printk(XENLOG_G_INFO
+                   "%04x:%02x:%02x.%u already assigned, or non-existent\n",
+                   seg, bus, PCI_SLOT(devfn), PCI_FUNC(devfn));
+            ret = -EINVAL;
+        }
+        break;
+
+    case XEN_DOMCTL_assign_device:
+        ret = -ENODEV;
+        if ( domctl->u.assign_device.dev != XEN_DOMCTL_DEV_PCI )
+            break;
+
+        if ( unlikely(d->is_dying) )
+        {
+            ret = -EINVAL;
+            break;
+        }
 
         machine_sbdf = domctl->u.assign_device.u.pci.machine_sbdf;
 
@@ -1703,21 +1664,15 @@ int iommu_do_pci_domctl(
         seg = machine_sbdf >> 16;
         bus = PCI_BUS(machine_sbdf);
         devfn = PCI_DEVFN2(machine_sbdf);
-
-        ret = device_assigned(seg, bus, devfn);
-        if ( domctl->cmd == XEN_DOMCTL_test_assign_device )
+        flag = domctl->u.assign_device.flag;
+        if ( flag & ~XEN_DOMCTL_DEV_RDM_RELAXED )
         {
-            if ( ret )
-            {
-                printk(XENLOG_G_INFO
-                       "%04x:%02x:%02x.%u already assigned, or non-existent\n",
-                       seg, bus, PCI_SLOT(devfn), PCI_FUNC(devfn));
-                ret = -EINVAL;
-            }
+            ret = -EINVAL;
             break;
         }
-        if ( !ret )
-            ret = assign_device(d, seg, bus, devfn, flags);
+
+        ret = device_assigned(seg, bus, devfn) ?:
+              assign_device(d, seg, bus, devfn, flag);
         if ( ret == -ERESTART )
             ret = hypercall_create_continuation(__HYPERVISOR_domctl,
                                                 "h", u_domctl);
@@ -1730,19 +1685,8 @@ int iommu_do_pci_domctl(
         break;
 
     case XEN_DOMCTL_deassign_device:
-        /* Don't support self-deassignment of devices. */
-        if ( d == current->domain )
-        {
-            ret = -EINVAL;
-            break;
-        }
-
         ret = -ENODEV;
         if ( domctl->u.assign_device.dev != XEN_DOMCTL_DEV_PCI )
-            break;
-
-        ret = -EINVAL;
-        if ( domctl->u.assign_device.flags )
             break;
 
         machine_sbdf = domctl->u.assign_device.u.pci.machine_sbdf;

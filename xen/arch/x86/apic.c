@@ -16,6 +16,7 @@
  *    Mikael Pettersson    :    PM converted to driver model.
  */
 
+#include <xen/config.h>
 #include <xen/perfc.h>
 #include <xen/errno.h>
 #include <xen/init.h>
@@ -36,11 +37,9 @@
 #include <mach_apic.h>
 #include <io_ports.h>
 #include <xen/kexec.h>
-#include <asm/guest.h>
-#include <asm/time.h>
 
-static bool __read_mostly tdt_enabled;
-static bool __initdata tdt_enable = true;
+static bool_t tdt_enabled __read_mostly;
+static bool_t tdt_enable __initdata = 1;
 boolean_param("tdt", tdt_enable);
 
 static struct {
@@ -72,7 +71,7 @@ static s8 __initdata enable_local_apic; /* -1=force-disable, +1=force-enable */
  */
 u8 __read_mostly apic_verbosity;
 
-static bool __initdata opt_x2apic = true;
+static bool_t __initdata opt_x2apic = 1;
 boolean_param("x2apic", opt_x2apic);
 
 /*
@@ -81,8 +80,8 @@ boolean_param("x2apic", opt_x2apic);
  */
 static enum apic_mode apic_boot_mode = APIC_MODE_INVALID;
 
-bool __read_mostly x2apic_enabled;
-bool __read_mostly directed_eoi_enabled;
+bool_t __read_mostly x2apic_enabled = 0;
+bool_t __read_mostly directed_eoi_enabled = 0;
 
 static int modern_apic(void)
 {
@@ -132,9 +131,9 @@ void __init apic_intr_init(void)
 }
 
 /* Using APIC to generate smp_local_timer_interrupt? */
-static bool __read_mostly using_apic_timer;
+static bool_t __read_mostly using_apic_timer;
 
-static bool __read_mostly enabled_via_apicbase;
+static bool_t __read_mostly enabled_via_apicbase;
 
 int get_physical_broadcast(void)
 {
@@ -159,7 +158,7 @@ void clear_local_APIC(void)
     maxlvt = get_maxlvt();
 
     /* Work around AMD Erratum 411. This is a nice thing to do anyway. */
-    apic_write(APIC_TMICT, 0);
+    apic_write_around(APIC_TMICT, 0);
 
     /*
      * Masking an LVT entry on a P6 can trigger a local APIC error
@@ -167,52 +166,52 @@ void clear_local_APIC(void)
      */
     if (maxlvt >= 3) {
         v = ERROR_APIC_VECTOR; /* any non-zero vector will do */
-        apic_write(APIC_LVTERR, v | APIC_LVT_MASKED);
+        apic_write_around(APIC_LVTERR, v | APIC_LVT_MASKED);
     }
     /*
      * Careful: we have to set masks only first to deassert
      * any level-triggered sources.
      */
     v = apic_read(APIC_LVTT);
-    apic_write(APIC_LVTT, v | APIC_LVT_MASKED);
+    apic_write_around(APIC_LVTT, v | APIC_LVT_MASKED);
     v = apic_read(APIC_LVT0);
-    apic_write(APIC_LVT0, v | APIC_LVT_MASKED);
+    apic_write_around(APIC_LVT0, v | APIC_LVT_MASKED);
     v = apic_read(APIC_LVT1);
-    apic_write(APIC_LVT1, v | APIC_LVT_MASKED);
+    apic_write_around(APIC_LVT1, v | APIC_LVT_MASKED);
     if (maxlvt >= 4) {
         v = apic_read(APIC_LVTPC);
-        apic_write(APIC_LVTPC, v | APIC_LVT_MASKED);
+        apic_write_around(APIC_LVTPC, v | APIC_LVT_MASKED);
     }
 
 /* lets not touch this if we didn't frob it */
 #ifdef CONFIG_X86_MCE_THERMAL
     if (maxlvt >= 5) {
         v = apic_read(APIC_LVTTHMR);
-        apic_write(APIC_LVTTHMR, v | APIC_LVT_MASKED);
+        apic_write_around(APIC_LVTTHMR, v | APIC_LVT_MASKED);
     }
 #endif
 
     if (maxlvt >= 6) {
         v = apic_read(APIC_CMCI);
-        apic_write(APIC_CMCI, v | APIC_LVT_MASKED);
+        apic_write_around(APIC_CMCI, v | APIC_LVT_MASKED);
     }
     /*
      * Clean APIC state for other OSs:
      */
-    apic_write(APIC_LVTT, APIC_LVT_MASKED);
-    apic_write(APIC_LVT0, APIC_LVT_MASKED);
-    apic_write(APIC_LVT1, APIC_LVT_MASKED);
+    apic_write_around(APIC_LVTT, APIC_LVT_MASKED);
+    apic_write_around(APIC_LVT0, APIC_LVT_MASKED);
+    apic_write_around(APIC_LVT1, APIC_LVT_MASKED);
     if (maxlvt >= 3)
-        apic_write(APIC_LVTERR, APIC_LVT_MASKED);
+        apic_write_around(APIC_LVTERR, APIC_LVT_MASKED);
     if (maxlvt >= 4)
-        apic_write(APIC_LVTPC, APIC_LVT_MASKED);
+        apic_write_around(APIC_LVTPC, APIC_LVT_MASKED);
 
 #ifdef CONFIG_X86_MCE_THERMAL
     if (maxlvt >= 5)
-        apic_write(APIC_LVTTHMR, APIC_LVT_MASKED);
+        apic_write_around(APIC_LVTTHMR, APIC_LVT_MASKED);
 #endif
     if (maxlvt >= 6)
-        apic_write(APIC_CMCI, APIC_LVT_MASKED);
+        apic_write_around(APIC_CMCI, APIC_LVT_MASKED);
 
     if (maxlvt > 3)        /* Due to Pentium errata 3AP and 11AP. */
         apic_write(APIC_ESR, 0);
@@ -261,7 +260,7 @@ void disconnect_bsp_APIC(int virt_wire_setup)
         value &= ~APIC_VECTOR_MASK;
         value |= APIC_SPIV_APIC_ENABLED;
         value |= 0xf;
-        apic_write(APIC_SPIV, value);
+        apic_write_around(APIC_SPIV, value);
 
         if (!virt_wire_setup) {
             /* For LVT0 make it edge triggered, active high, external and enabled */
@@ -271,11 +270,11 @@ void disconnect_bsp_APIC(int virt_wire_setup)
                        APIC_LVT_LEVEL_TRIGGER | APIC_LVT_MASKED );
             value |= APIC_LVT_REMOTE_IRR | APIC_SEND_PENDING;
             value = SET_APIC_DELIVERY_MODE(value, APIC_MODE_EXTINT);
-            apic_write(APIC_LVT0, value);
+            apic_write_around(APIC_LVT0, value);
         }
         else {
             /* Disable LVT0 */
-            apic_write(APIC_LVT0, APIC_LVT_MASKED);
+            apic_write_around(APIC_LVT0, APIC_LVT_MASKED);
         }
 
         /* For LVT1 make it edge triggered, active high, nmi and enabled */
@@ -286,7 +285,7 @@ void disconnect_bsp_APIC(int virt_wire_setup)
             APIC_LVT_LEVEL_TRIGGER | APIC_LVT_MASKED);
         value |= APIC_LVT_REMOTE_IRR | APIC_SEND_PENDING;
         value = SET_APIC_DELIVERY_MODE(value, APIC_MODE_NMI);
-        apic_write(APIC_LVT1, value);
+        apic_write_around(APIC_LVT1, value);
     }
 }
 
@@ -298,7 +297,8 @@ void disable_local_APIC(void)
      * Disable APIC (implies clearing of registers
      * for 82489DX!).
      */
-    apic_write(APIC_SPIV, apic_read(APIC_SPIV) & ~APIC_SPIV_APIC_ENABLED);
+    apic_write_around(APIC_SPIV,
+        apic_read(APIC_SPIV) & ~APIC_SPIV_APIC_ENABLED);
 
     if (enabled_via_apicbase) {
         uint64_t msr_content;
@@ -383,13 +383,13 @@ int __init verify_local_APIC(void)
      */
     if ( reg0 & APIC_LVR_DIRECTED_EOI )
     {
-        if ( ioapic_ack_new && ioapic_ack_forced )
+        if ( ioapic_ack_new == 1 && ioapic_ack_forced == 1 )
             printk("Not enabling directed EOI because ioapic_ack_new has been "
                    "forced on the command line\n");
         else
         {
-            ioapic_ack_new = false;
-            directed_eoi_enabled = true;
+            ioapic_ack_new = 0;
+            directed_eoi_enabled = 1;
             printk("Enabled directed EOI with ioapic_ack_old on!\n");
         }
     }
@@ -425,7 +425,8 @@ void __init sync_Arb_IDs(void)
     apic_wait_icr_idle();
 
     apic_printk(APIC_DEBUG, "Synchronizing Arb IDs.\n");
-    apic_write(APIC_ICR, APIC_DEST_ALLINC | APIC_INT_LEVELTRIG | APIC_DM_INIT);
+    apic_write_around(APIC_ICR, APIC_DEST_ALLINC | APIC_INT_LEVELTRIG
+                      | APIC_DM_INIT);
 }
 
 /*
@@ -460,13 +461,13 @@ void __init init_bsp_APIC(void)
     else
         value |= APIC_SPIV_FOCUS_DISABLED;
     value |= SPURIOUS_APIC_VECTOR;
-    apic_write(APIC_SPIV, value);
+    apic_write_around(APIC_SPIV, value);
 
     /*
      * Set up the virtual wire mode.
      */
-    apic_write(APIC_LVT0, APIC_DM_EXTINT);
-    apic_write(APIC_LVT1, APIC_DM_NMI);
+    apic_write_around(APIC_LVT0, APIC_DM_EXTINT);
+    apic_write_around(APIC_LVT1, APIC_DM_NMI);
 }
 
 static void apic_pm_activate(void)
@@ -522,7 +523,7 @@ out:
 
 void setup_local_APIC(void)
 {
-    unsigned long oldvalue, value, maxlvt;
+    unsigned long oldvalue, value, ver, maxlvt;
     int i, j;
 
     /* Pound the ESR really hard over the head with a big hammer - mbligh */
@@ -533,12 +534,15 @@ void setup_local_APIC(void)
         apic_write(APIC_ESR, 0);
     }
 
+    value = apic_read(APIC_LVR);
+    ver = GET_APIC_VERSION(value);
+
     BUILD_BUG_ON((SPURIOUS_APIC_VECTOR & 0x0f) != 0x0f);
 
     /*
      * Double-check whether this APIC is really registered.
      */
-    if (!apic_id_registered())
+    if (!APIC_INTEGRATED(ver) || !apic_id_registered())
         BUG();
 
     /*
@@ -551,7 +555,7 @@ void setup_local_APIC(void)
     /*
      * Set Task Priority to reject any interrupts below FIRST_DYNAMIC_VECTOR.
      */
-    apic_write(APIC_TASKPRI, (FIRST_DYNAMIC_VECTOR & 0xF0) - 0x10);
+    apic_write_around(APIC_TASKPRI, (FIRST_DYNAMIC_VECTOR & 0xF0) - 0x10);
 
     /*
      * After a crash, we no longer service the interrupts and a pending
@@ -623,7 +627,7 @@ void setup_local_APIC(void)
                     smp_processor_id());
     }
 
-    apic_write(APIC_SPIV, value);
+    apic_write_around(APIC_SPIV, value);
 
     /*
      * Set up LVT0, LVT1:
@@ -645,7 +649,7 @@ void setup_local_APIC(void)
         apic_printk(APIC_VERBOSE, "masked ExtINT on CPU#%d\n",
                     smp_processor_id());
     }
-    apic_write(APIC_LVT0, value);
+    apic_write_around(APIC_LVT0, value);
 
     /*
      * only the BP should see the LINT1 NMI signal, obviously.
@@ -654,7 +658,7 @@ void setup_local_APIC(void)
         value = APIC_DM_NMI;
     else
         value = APIC_DM_NMI | APIC_LVT_MASKED;
-    apic_write(APIC_LVT1, value);
+    apic_write_around(APIC_LVT1, value);
 
     if (!esr_disable) {
         maxlvt = get_maxlvt();
@@ -663,7 +667,7 @@ void setup_local_APIC(void)
         oldvalue = apic_read(APIC_ESR);
 
         value = ERROR_APIC_VECTOR;      // enables sending errors
-        apic_write(APIC_LVTERR, value);
+        apic_write_around(APIC_LVTERR, value);
         /*
          * spec says clear errors after enabling vector.
          */
@@ -787,25 +791,23 @@ int lapic_resume(void)
  * Original code written by Keir Fraser.
  */
 
-static int __init lapic_disable(const char *str)
+static void __init lapic_disable(char *str)
 {
     enable_local_apic = -1;
     setup_clear_cpu_cap(X86_FEATURE_APIC);
-    return 0;
 }
 custom_param("nolapic", lapic_disable);
 boolean_param("lapic", enable_local_apic);
 
-static int __init apic_set_verbosity(const char *str)
+static void __init apic_set_verbosity(char *str)
 {
     if (strcmp("debug", str) == 0)
         apic_verbosity = APIC_DEBUG;
     else if (strcmp("verbose", str) == 0)
         apic_verbosity = APIC_VERBOSE;
     else
-        return -EINVAL;
-
-    return 0;
+        printk(KERN_WARNING "APIC Verbosity level %s not recognised"
+               " use apic_verbosity=verbose or apic_verbosity=debug", str);
 }
 custom_param("apic_verbosity", apic_set_verbosity);
 
@@ -843,7 +845,7 @@ static int __init detect_init_APIC (void)
             msr_content &= ~MSR_IA32_APICBASE_BASE;
             msr_content |= MSR_IA32_APICBASE_ENABLE | APIC_DEFAULT_PHYS_BASE;
             wrmsrl(MSR_IA32_APICBASE, msr_content);
-            enabled_via_apicbase = true;
+            enabled_via_apicbase = 1;
         }
     }
     /*
@@ -944,14 +946,14 @@ void __init x2apic_bsp_setup(void)
 
     force_iommu = 1;
 
+    genapic = apic_x2apic_probe();
+    printk("Switched to APIC driver %s.\n", genapic->name);
+
     if ( !x2apic_enabled )
     {
-        x2apic_enabled = true;
+        x2apic_enabled = 1;
         __enable_x2apic();
     }
-
-    genapic = apic_x2apic_probe();
-    printk("Switched to APIC driver %s\n", genapic->name);
 
 restore_out:
     restore_IO_APIC_setup(ioapic_entries);
@@ -1077,12 +1079,12 @@ static void __setup_APIC_LVTT(unsigned int clocks)
         lvtt_value |= APIC_TIMER_MODE_TSC_DEADLINE;
     }
 
-    apic_write(APIC_LVTT, lvtt_value);
+    apic_write_around(APIC_LVTT, lvtt_value);
 
     tmp_value = apic_read(APIC_TDCR);
-    apic_write(APIC_TDCR, tmp_value | APIC_TDR_DIV_1);
+    apic_write_around(APIC_TDCR, (tmp_value | APIC_TDR_DIV_1));
 
-    apic_write(APIC_TMICT, clocks / APIC_DIVISOR);
+    apic_write_around(APIC_TMICT, clocks/APIC_DIVISOR);
 }
 
 static void setup_APIC_timer(void)
@@ -1091,20 +1093,6 @@ static void setup_APIC_timer(void)
     local_irq_save(flags);
     __setup_APIC_LVTT(0);
     local_irq_restore(flags);
-}
-
-static void wait_tick_pvh(void)
-{
-    u64 lapse_ns = 1000000000ULL / HZ;
-    s_time_t start, curr_time;
-
-    start = NOW();
-
-    /* Won't wrap around */
-    do {
-        cpu_relax();
-        curr_time = NOW();
-    } while ( curr_time - start < lapse_ns );
 }
 
 /*
@@ -1139,15 +1127,12 @@ static int __init calibrate_APIC_clock(void)
      */
     __setup_APIC_LVTT(1000000000);
 
-    if ( !xen_guest )
-        /*
-         * The timer chip counts down to zero. Let's wait
-         * for a wraparound to start exact measurement:
-         * (the current tick might have been already half done)
-         */
-        wait_8254_wraparound();
-    else
-        wait_tick_pvh();
+    /*
+     * The timer chip counts down to zero. Let's wait
+     * for a wraparound to start exact measurement:
+     * (the current tick might have been already half done)
+     */
+    wait_8254_wraparound();
 
     /*
      * We wrapped around just now. Let's start:
@@ -1156,13 +1141,10 @@ static int __init calibrate_APIC_clock(void)
     tt1 = apic_read(APIC_TMCCT);
 
     /*
-     * Let's wait LOOPS ticks:
+     * Let's wait LOOPS wraprounds:
      */
     for (i = 0; i < LOOPS; i++)
-        if ( !xen_guest )
-            wait_8254_wraparound();
-        else
-            wait_tick_pvh();
+        wait_8254_wraparound();
 
     tt2 = apic_read(APIC_TMCCT);
     t2 = rdtsc_ordered();
@@ -1200,7 +1182,7 @@ void __init setup_boot_APIC_clock(void)
 {
     unsigned long flags;
     apic_printk(APIC_VERBOSE, "Using local APIC timer interrupts.\n");
-    using_apic_timer = true;
+    using_apic_timer = 1;
 
     local_irq_save(flags);
 
@@ -1209,7 +1191,7 @@ void __init setup_boot_APIC_clock(void)
     if ( tdt_enable && boot_cpu_has(X86_FEATURE_TSC_DEADLINE) )
     {
         printk(KERN_DEBUG "TSC deadline timer enabled\n");
-        tdt_enabled = true;
+        tdt_enabled = 1;
     }
 
     setup_APIC_timer();
@@ -1228,10 +1210,10 @@ void disable_APIC_timer(void)
         unsigned long v;
 
         /* Work around AMD Erratum 411. This is a nice thing to do anyway. */
-        apic_write(APIC_TMICT, 0);
+        apic_write_around(APIC_TMICT, 0);
 
         v = apic_read(APIC_LVTT);
-        apic_write(APIC_LVTT, v | APIC_LVT_MASKED);
+        apic_write_around(APIC_LVTT, v | APIC_LVT_MASKED);
     }
 }
 
@@ -1241,7 +1223,7 @@ void enable_APIC_timer(void)
         unsigned long v;
         
         v = apic_read(APIC_LVTT);
-        apic_write(APIC_LVTT, v & ~APIC_LVT_MASKED);
+        apic_write_around(APIC_LVTT, v & ~APIC_LVT_MASKED);
     }
 }
 
@@ -1282,12 +1264,12 @@ void apic_timer_interrupt(struct cpu_user_regs * regs)
     raise_softirq(TIMER_SOFTIRQ);
 }
 
-static DEFINE_PER_CPU(bool, state_dump_pending);
+static DEFINE_PER_CPU(bool_t, state_dump_pending);
 
 void smp_send_state_dump(unsigned int cpu)
 {
     /* We overload the spurious interrupt handler to handle the dump. */
-    per_cpu(state_dump_pending, cpu) = true;
+    per_cpu(state_dump_pending, cpu) = 1;
     send_IPI_mask(cpumask_of(cpu), SPURIOUS_APIC_VECTOR);
 }
 
@@ -1304,7 +1286,7 @@ void spurious_interrupt(struct cpu_user_regs *regs)
     if (apic_isr_read(SPURIOUS_APIC_VECTOR)) {
         ack_APIC_irq();
         if (this_cpu(state_dump_pending)) {
-            this_cpu(state_dump_pending) = false;
+            this_cpu(state_dump_pending) = 0;
             dump_execstate(regs);
             goto out;
         }
@@ -1370,17 +1352,17 @@ int __init APIC_init_uniprocessor (void)
         setup_clear_cpu_cap(X86_FEATURE_APIC);
 
     if (!smp_found_config && !cpu_has_apic) {
-        skip_ioapic_setup = true;
+        skip_ioapic_setup = 1;
         return -1;
     }
 
     /*
      * Complain if the BIOS pretends there is one.
      */
-    if (!cpu_has_apic) {
+    if (!cpu_has_apic && APIC_INTEGRATED(apic_version[boot_cpu_physical_apicid])) {
         printk(KERN_ERR "BIOS bug, local APIC #%d not detected!...\n",
                boot_cpu_physical_apicid);
-        skip_ioapic_setup = true;
+        skip_ioapic_setup = 1;
         return -1;
     }
 
@@ -1403,11 +1385,11 @@ int __init APIC_init_uniprocessor (void)
 
     if (nmi_watchdog == NMI_LOCAL_APIC)
         check_nmi_watchdog();
-
+#ifdef CONFIG_X86_IO_APIC
     if (smp_found_config)
         if (!skip_ioapic_setup && nr_ioapics)
             setup_IO_APIC();
-
+#endif
     setup_boot_APIC_clock();
 
     return 0;

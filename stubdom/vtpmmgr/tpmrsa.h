@@ -62,7 +62,6 @@ TPM_RESULT tpmrsa_pub_encrypt_oaep( tpmrsa_context *ctx,
       unsigned char *output );
 
 /* free tpmrsa key */
-static
 inline void tpmrsa_free( tpmrsa_context *ctx ) {
    mpi_free( &ctx->RN ); mpi_free( &ctx->E  ); mpi_free( &ctx->N  );
 }

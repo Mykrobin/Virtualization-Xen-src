@@ -19,10 +19,10 @@
 #define BITS_PER_LONG (BYTES_PER_LONG << 3)
 #define POINTER_ALIGN BYTES_PER_LONG
 
-#define BITS_PER_LLONG 64
-
 /* xen_ulong_t is always 64 bits */
 #define BITS_PER_XEN_ULONG 64
+
+#define CONFIG_PAGING_ASSISTANCE 1
 
 #define CONFIG_PAGING_LEVELS 3
 
@@ -48,12 +48,17 @@
 
 #define INVALID_VCPU_ID MAX_VIRT_CPUS
 
+#define asmlinkage /* Nothing needed */
+
 #define __LINUX_ARM_ARCH__ 7
 #define CONFIG_AEABI
 
 /* Linkage for ARM */
+#define __ALIGN .align 2
+#define __ALIGN_STR ".align 2"
 #ifdef __ASSEMBLY__
-#define ALIGN .align 2
+#define ALIGN __ALIGN
+#define ALIGN_STR __ALIGN_STR
 #define ENTRY(name)                             \
   .globl name;                                  \
   ALIGN;                                        \
@@ -109,7 +114,6 @@
 
 #define XEN_VIRT_START         _AT(vaddr_t,0x00200000)
 #define FIXMAP_ADDR(n)        (_AT(vaddr_t,0x00400000) + (n) * PAGE_SIZE)
-
 #define BOOT_FDT_VIRT_START    _AT(vaddr_t,0x00600000)
 #define BOOT_FDT_SLOT_SIZE     MB(4)
 #define BOOT_FDT_VIRT_END      (BOOT_FDT_VIRT_START + BOOT_FDT_SLOT_SIZE)
@@ -172,8 +176,13 @@
 
 /* Fixmap slots */
 #define FIXMAP_CONSOLE  0  /* The primary UART */
-#define FIXMAP_MISC     1  /* Ephemeral mappings of hardware */
-#define FIXMAP_ACPI_BEGIN  2  /* Start mappings of ACPI tables */
+#define FIXMAP_PT       1  /* Temporary mappings of pagetable pages */
+#define FIXMAP_MISC     2  /* Ephemeral mappings of hardware */
+#define FIXMAP_GICD     3  /* Interrupt controller: distributor registers */
+#define FIXMAP_GICC1    4  /* Interrupt controller: CPU registers (first page) */
+#define FIXMAP_GICC2    5  /* Interrupt controller: CPU registers (second page) */
+#define FIXMAP_GICH     6  /* Interrupt controller: virtual interface control registers */
+#define FIXMAP_ACPI_BEGIN  7  /* Start mappings of ACPI tables */
 #define FIXMAP_ACPI_END    (FIXMAP_ACPI_BEGIN + NUM_FIXMAP_ACPI_PAGES - 1)  /* End mappings of ACPI tables */
 
 #define PAGE_SHIFT              12

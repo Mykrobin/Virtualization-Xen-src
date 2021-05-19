@@ -8,8 +8,6 @@ all:
 install:
 	$(INSTALL_DIR) -p $(DESTDIR)$(includedir)
 
-.PHONY: uninstall
-.uninstall:
 
 .PHONY: clean
 clean:

@@ -17,6 +17,7 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/sched.h>
 #include <asm/regs.h>
@@ -135,16 +136,16 @@ int hvm_process_io_intercept(const struct hvm_io_handler *handler,
             if ( p->data_is_ptr )
             {
                 switch ( hvm_copy_to_guest_phys(p->data + step * i,
-                                                &data, p->size, current) )
+                                                &data, p->size) )
                 {
-                case HVMTRANS_okay:
+                case HVMCOPY_okay:
                     break;
-                case HVMTRANS_bad_gfn_to_mfn:
+                case HVMCOPY_bad_gfn_to_mfn:
                     /* Drop the write as real hardware would. */
                     continue;
-                case HVMTRANS_bad_linear_to_gfn:
-                case HVMTRANS_gfn_paged_out:
-                case HVMTRANS_gfn_shared:
+                case HVMCOPY_bad_gva_to_gfn:
+                case HVMCOPY_gfn_paged_out:
+                case HVMCOPY_gfn_shared:
                     ASSERT_UNREACHABLE();
                     /* fall through */
                 default:
@@ -166,14 +167,14 @@ int hvm_process_io_intercept(const struct hvm_io_handler *handler,
                 switch ( hvm_copy_from_guest_phys(&data, p->data + step * i,
                                                   p->size) )
                 {
-                case HVMTRANS_okay:
+                case HVMCOPY_okay:
                     break;
-                case HVMTRANS_bad_gfn_to_mfn:
+                case HVMCOPY_bad_gfn_to_mfn:
                     data = ~0;
                     break;
-                case HVMTRANS_bad_linear_to_gfn:
-                case HVMTRANS_gfn_paged_out:
-                case HVMTRANS_gfn_shared:
+                case HVMCOPY_bad_gva_to_gfn:
+                case HVMCOPY_gfn_paged_out:
+                case HVMCOPY_gfn_shared:
                     ASSERT_UNREACHABLE();
                     /* fall through */
                 default:
@@ -211,7 +212,7 @@ int hvm_process_io_intercept(const struct hvm_io_handler *handler,
     return rc;
 }
 
-static const struct hvm_io_handler *hvm_find_io_handler(const ioreq_t *p)
+const struct hvm_io_handler *hvm_find_io_handler(ioreq_t *p)
 {
     struct domain *curr_d = current->domain;
     unsigned int i;

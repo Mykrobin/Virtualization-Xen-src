@@ -10,6 +10,7 @@
  * omap platform has some specific configurations
  */
 
+#include <xen/config.h>
 #include <xen/console.h>
 #include <xen/serial.h>
 #include <xen/init.h>

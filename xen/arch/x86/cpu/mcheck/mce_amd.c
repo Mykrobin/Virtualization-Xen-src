@@ -103,14 +103,15 @@ mc_ec2type(uint16_t errorcode)
     return 0;
 }
 
-bool mc_amd_recoverable_scan(uint64_t status)
+int
+mc_amd_recoverable_scan(uint64_t status)
 {
-    bool ret = false;
+    int ret = 0;
     enum mc_ec_type ectype;
     uint16_t errorcode;
 
     if ( !(status & MCi_STATUS_UC) )
-        return true;
+        return 1;
 
     errorcode = status & (MCi_STATUS_MCA | MCi_STATUS_MSEC);
     ectype = mc_ec2type(errorcode);
@@ -120,11 +121,9 @@ bool mc_amd_recoverable_scan(uint64_t status)
     case MC_EC_BUS_TYPE: /* value in addr MSR is physical */
         /* should run cpu offline action */
         break;
-
     case MC_EC_MEM_TYPE: /* value in addr MSR is physical */
-        ret = true; /* run memory page offline action */
+        ret = 1; /* run memory page offline action */
         break;
-
     case MC_EC_TLB_TYPE: /* value in addr MSR is virtual */
         /* should run tlb flush action and retry */
         break;
@@ -133,7 +132,8 @@ bool mc_amd_recoverable_scan(uint64_t status)
     return ret;
 }
 
-bool mc_amd_addrcheck(uint64_t status, uint64_t misc, int addrtype)
+int
+mc_amd_addrcheck(uint64_t status, uint64_t misc, int addrtype)
 {
     enum mc_ec_type ectype;
     uint16_t errorcode;
@@ -146,14 +146,13 @@ bool mc_amd_addrcheck(uint64_t status, uint64_t misc, int addrtype)
     case MC_EC_BUS_TYPE: /* value in addr MSR is physical */
     case MC_EC_MEM_TYPE: /* value in addr MSR is physical */
         return (addrtype == MC_ADDR_PHYSICAL);
-
     case MC_EC_TLB_TYPE: /* value in addr MSR is virtual */
         return (addrtype == MC_ADDR_VIRTUAL);
     }
 
     /* unreached */
     BUG();
-    return false;
+    return 0;
 }
 
 /* MC quirks */
@@ -194,7 +193,6 @@ int mcequirk_amd_apply(enum mcequirk_amd_flags flags)
         wrmsrl(MSR_IA32_MCx_CTL(4), ~(1ULL << 10));
         wrmsrl(MSR_IA32_MCx_STATUS(4), 0ULL);
         break;
-
     case MCEQUIRK_F10_GART:
         if ( rdmsr_safe(MSR_AMD64_MCx_MASK(4), val) == 0 )
                 wrmsr_safe(MSR_AMD64_MCx_MASK(4), val | (1 << 10));
@@ -220,13 +218,15 @@ amd_f10_handler(struct mc_info *mi, uint16_t bank, uint64_t status)
     if ( !(status & MCi_STATUS_MISCV) )
         return NULL;
 
-    mc_ext = x86_mcinfo_reserve(mi, sizeof(*mc_ext), MC_TYPE_EXTENDED);
+    mc_ext = x86_mcinfo_reserve(mi, sizeof(*mc_ext));
     if ( !mc_ext )
     {
         mi->flags |= MCINFO_FLAGS_UNCOMPLETE;
         return NULL;
     }
 
+    mc_ext->common.type = MC_TYPE_EXTENDED;
+    mc_ext->common.size = sizeof(*mc_ext);
     mc_ext->mc_msrs = 3;
 
     mc_ext->mc_msr[0].reg = MSR_F10_MC4_MISC1;
@@ -240,19 +240,19 @@ amd_f10_handler(struct mc_info *mi, uint16_t bank, uint64_t status)
     return mc_ext;
 }
 
-static bool amd_need_clearbank_scan(enum mca_source who, uint64_t status)
+static int amd_need_clearbank_scan(enum mca_source who, uint64_t status)
 {
     if ( who != MCA_MCE_SCAN )
-        return true;
+        return 1;
 
     /*
      * For fatal error, it shouldn't be cleared so that sticky bank
      * have a chance to be handled after reboot by polling.
      */
     if ( (status & MCi_STATUS_UC) && (status & MCi_STATUS_PCC) )
-        return false;
+        return 0;
 
-    return true;
+    return 1;
 }
 
 /* AMD specific MCA MSR */

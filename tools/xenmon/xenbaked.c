@@ -243,12 +243,10 @@ static void dump_stats(void)
     }
 
     printf("processed %d total records in %d seconds (%ld per second)\n",
-           rec_count, (int)run_time,
-           run_time ? (long)(rec_count/run_time) : 0L);
+           rec_count, (int)run_time, (long)(rec_count/run_time));
 
-    printf("woke up %d times in %d seconds (%ld per second)\n",
-           wakeups, (int) run_time,
-           run_time ? (long)(wakeups/run_time) : 0L);
+    printf("woke up %d times in %d seconds (%ld per second)\n", wakeups,
+	   (int) run_time, (long)(wakeups/run_time));
 
     check_gotten_sum();
 }

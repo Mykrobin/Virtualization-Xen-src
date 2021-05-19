@@ -51,12 +51,8 @@
 
 #define vlapic_base_address(vlapic)                             \
     ((vlapic)->hw.apic_base_msr & MSR_IA32_APICBASE_BASE)
-/* Only check EXTD bit as EXTD can't be set if it is disabled by hardware */
 #define vlapic_x2apic_mode(vlapic)                              \
     ((vlapic)->hw.apic_base_msr & MSR_IA32_APICBASE_EXTD)
-#define vlapic_xapic_mode(vlapic)                               \
-    (!vlapic_hw_disabled(vlapic) && \
-     !((vlapic)->hw.apic_base_msr & MSR_IA32_APICBASE_EXTD))
 
 /*
  * Generic APIC bitmap vector update & search routines.
@@ -110,7 +106,6 @@ static inline void vlapic_set_reg(
 
 bool_t is_vlapic_lvtpc_enabled(struct vlapic *vlapic);
 
-bool vlapic_test_irq(const struct vlapic *vlapic, uint8_t vec);
 void vlapic_set_irq(struct vlapic *vlapic, uint8_t vec, uint8_t trig);
 
 int vlapic_has_pending_irq(struct vcpu *v);
@@ -144,11 +139,5 @@ struct vlapic *vlapic_lowest_prio(
 bool_t vlapic_match_dest(
     const struct vlapic *target, const struct vlapic *source,
     int short_hand, uint32_t dest, bool_t dest_mode);
-
-static inline void vlapic_sync_pir_to_irr(struct vcpu *v)
-{
-    if ( hvm_funcs.sync_pir_to_irr )
-        hvm_funcs.sync_pir_to_irr(v);
-}
 
 #endif /* __ASM_X86_HVM_VLAPIC_H__ */

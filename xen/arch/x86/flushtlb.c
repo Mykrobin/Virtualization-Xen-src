@@ -7,13 +7,14 @@
  * Copyright (c) 2003-2006, K A Fraser
  */
 
+#include <xen/config.h>
 #include <xen/sched.h>
 #include <xen/smp.h>
 #include <xen/softirq.h>
 #include <asm/flushtlb.h>
 #include <asm/invpcid.h>
 #include <asm/page.h>
-#include <asm/pv/domain.h>
+#include <asm/domain.h>
 
 /* Debug builds: Wrap frequently to stress-test the wrap logic. */
 #ifdef NDEBUG
@@ -76,18 +77,17 @@ static void post_flush(u32 t)
 
 static void do_tlb_flush(void)
 {
-    unsigned long cr4;
     u32 t = pre_flush();
 
     if ( use_invpcid )
         invpcid_flush_all();
-    else if ( (cr4 = read_cr4()) & X86_CR4_PGE )
+    else
     {
-        write_cr4(cr4 & ~X86_CR4_PGE);
+        unsigned long cr4 = read_cr4();
+
+        write_cr4(cr4 ^ X86_CR4_PGE);
         write_cr4(cr4);
     }
-    else
-        write_cr3(read_cr3());
 
     post_flush(t);
 }
@@ -113,7 +113,6 @@ void switch_cr3_cr4(unsigned long cr3, unsigned long cr4)
         write_cr4(old_cr4);
     }
     else if ( use_invpcid )
-    {
         /*
          * Flushing the TLB via INVPCID is necessary only in case PCIDs are
          * in use, which is true only with INVPCID being available.
@@ -123,19 +122,6 @@ void switch_cr3_cr4(unsigned long cr3, unsigned long cr4)
          * invpcid_flush_all(), so use that.
          */
         invpcid_flush_all_nonglobals();
-
-        /*
-         * CR4.PCIDE needs to be set before the CR3 write below. Otherwise
-         * - the CR3 write will fault when CR3.NOFLUSH is set (which is the
-         *   case normally),
-         * - the subsequent CR4 write will fault if CR3.PCID != 0.
-         */
-        if ( (old_cr4 & X86_CR4_PCIDE) < (cr4 & X86_CR4_PCIDE) )
-        {
-            write_cr4(cr4);
-            old_cr4 = cr4;
-        }
-    }
 
     /*
      * If we don't change PCIDs, the CR3 write below needs to flush this very

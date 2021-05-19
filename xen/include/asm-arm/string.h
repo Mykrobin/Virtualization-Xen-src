@@ -1,6 +1,7 @@
 #ifndef __ARM_STRING_H__
 #define __ARM_STRING_H__
 
+#include <xen/config.h>
 
 /*
  * We don't do inline string functions, since the
@@ -8,47 +9,48 @@
  */
 
 #define __HAVE_ARCH_STRRCHR
-char *strrchr(const char *s, int c);
+extern char * strrchr(const char * s, int c);
 
 #define __HAVE_ARCH_STRCHR
-char *strchr(const char *s, int c);
+extern char * strchr(const char * s, int c);
 
 #if defined(CONFIG_ARM_64)
 #define __HAVE_ARCH_STRCMP
-int strcmp(const char *, const char *);
+extern int strcmp(const char *, const char *);
 
 #define __HAVE_ARCH_STRNCMP
-int strncmp(const char *, const char *, size_t);
+extern int strncmp(const char *, const char *, __kernel_size_t);
 
 #define __HAVE_ARCH_STRLEN
-size_t strlen(const char *);
+extern __kernel_size_t strlen(const char *);
 
 #define __HAVE_ARCH_STRNLEN
-size_t strnlen(const char *, size_t);
+extern __kernel_size_t strnlen(const char *, __kernel_size_t);
 #endif
 
 #define __HAVE_ARCH_MEMCPY
-void *memcpy(void *, const void *, size_t);
+extern void * memcpy(void *, const void *, __kernel_size_t);
 
 #if defined(CONFIG_ARM_64)
 #define __HAVE_ARCH_MEMCMP
-int memcmp(const void *, const void *, size_t);
+extern int memcmp(const void *, const void *, __kernel_size_t);
 #endif
 
+/* Some versions of gcc don't have this builtin. It's non-critical anyway. */
 #define __HAVE_ARCH_MEMMOVE
-void *memmove(void *dest, const void *src, size_t n);
+extern void *memmove(void *dest, const void *src, size_t n);
 
 #define __HAVE_ARCH_MEMSET
-void *memset(void *, int, size_t);
+extern void * memset(void *, int, __kernel_size_t);
 
 #define __HAVE_ARCH_MEMCHR
-void *memchr(const void *, int, size_t);
+extern void * memchr(const void *, int, __kernel_size_t);
 
 #if defined(CONFIG_ARM_32)
 
-void __memzero(void *ptr, size_t n);
+extern void __memzero(void *ptr, __kernel_size_t n);
 
-#define memset(p, v, n)                                                 \
+#define memset(p,v,n)                                                   \
         ({                                                              \
                 void *__p = (p); size_t __n = n;                        \
                 if ((__n) != 0) {                                       \

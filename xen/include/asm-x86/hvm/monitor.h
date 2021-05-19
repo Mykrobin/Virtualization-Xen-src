@@ -31,23 +31,17 @@ enum hvm_monitor_debug_type
 /*
  * Called for current VCPU on crX/MSR changes by guest.
  * The event might not fire if the client has subscribed to it in onchangeonly
- * mode, hence the bool return type for control register write events.
+ * mode, hence the bool_t return type for control register write events.
  */
-bool hvm_monitor_cr(unsigned int index, unsigned long value,
-                    unsigned long old);
+bool_t hvm_monitor_cr(unsigned int index, unsigned long value,
+                      unsigned long old);
 #define hvm_monitor_crX(cr, new, old) \
                         hvm_monitor_cr(VM_EVENT_X86_##cr, new, old)
-void hvm_monitor_msr(unsigned int msr, uint64_t value, uint64_t old_value);
-void hvm_monitor_descriptor_access(uint64_t exit_info,
-                                   uint64_t vmx_exit_qualification,
-                                   uint8_t descriptor, bool is_write);
+void hvm_monitor_msr(unsigned int msr, uint64_t value);
 int hvm_monitor_debug(unsigned long rip, enum hvm_monitor_debug_type type,
                       unsigned long trap_type, unsigned long insn_length);
 int hvm_monitor_cpuid(unsigned long insn_length, unsigned int leaf,
                       unsigned int subleaf);
-void hvm_monitor_interrupt(unsigned int vector, unsigned int type,
-                           unsigned int err, uint64_t cr2);
-bool hvm_monitor_emul_unimplemented(void);
 
 #endif /* __ASM_X86_HVM_MONITOR_H__ */
 

@@ -70,6 +70,11 @@
 /********************************************/
 /*        NESTED VIRT P2M FUNCTIONS         */
 /********************************************/
+/* Override macros from asm/page.h to make them work with mfn_t */
+#undef mfn_valid
+#define mfn_valid(_mfn) __mfn_valid(mfn_x(_mfn))
+#undef page_to_mfn
+#define page_to_mfn(_pg) _mfn(__page_to_mfn(_pg))
 
 void
 nestedp2m_write_p2m_entry(struct p2m_domain *p2m, unsigned long gfn,
@@ -98,22 +103,30 @@ nestedhap_fix_p2m(struct vcpu *v, struct p2m_domain *p2m,
                   unsigned int page_order, p2m_type_t p2mt, p2m_access_t p2ma)
 {
     int rc = 0;
-    unsigned long gfn, mask;
-    mfn_t mfn;
-
     ASSERT(p2m);
     ASSERT(p2m->set_entry);
-    ASSERT(p2m_locked_by_me(p2m));
 
-    /*
-     * If this is a superpage mapping, round down both addresses to
-     * the start of the superpage.
-     */
-    mask = ~((1UL << page_order) - 1);
-    gfn = (L2_gpa >> PAGE_SHIFT) & mask;
-    mfn = _mfn((L0_gpa >> PAGE_SHIFT) & mask);
+    p2m_lock(p2m);
 
-    rc = p2m_set_entry(p2m, _gfn(gfn), mfn, page_order, p2mt, p2ma);
+    /* If this p2m table has been flushed or recycled under our feet, 
+     * leave it alone.  We'll pick up the right one as we try to 
+     * vmenter the guest. */
+    if ( p2m->np2m_base == nhvm_vcpu_p2m_base(v) )
+    {
+        unsigned long gfn, mask;
+        mfn_t mfn;
+
+        /* If this is a superpage mapping, round down both addresses
+         * to the start of the superpage. */
+        mask = ~((1UL << page_order) - 1);
+
+        gfn = (L2_gpa >> PAGE_SHIFT) & mask;
+        mfn = _mfn((L0_gpa >> PAGE_SHIFT) & mask);
+
+        rc = p2m_set_entry(p2m, gfn, mfn, page_order, p2mt, p2ma);
+    }
+
+    p2m_unlock(p2m);
 
     if ( rc )
     {
@@ -201,6 +214,7 @@ nestedhvm_hap_nested_page_fault(struct vcpu *v, paddr_t *L2_gpa,
     uint8_t p2ma_21 = p2m_access_rwx;
 
     p2m = p2m_get_hostp2m(d); /* L0 p2m */
+    nested_p2m = p2m_get_nestedp2m(v, nhvm_vcpu_p2m_base(v));
 
     /* walk the L1 P2M table */
     rv = nestedhap_walk_L1_p2m(v, *L2_gpa, &L1_gpa, &page_order_21, &p2ma_21,
@@ -266,10 +280,8 @@ nestedhvm_hap_nested_page_fault(struct vcpu *v, paddr_t *L2_gpa,
     p2ma_10 &= (p2m_access_t)p2ma_21;
 
     /* fix p2m_get_pagetable(nested_p2m) */
-    nested_p2m = p2m_get_nestedp2m_locked(v);
     nestedhap_fix_p2m(v, nested_p2m, *L2_gpa, L0_gpa, page_order_20,
         p2mt_10, p2ma_10);
-    p2m_unlock(nested_p2m);
 
     return NESTEDHVM_PAGEFAULT_DONE;
 }

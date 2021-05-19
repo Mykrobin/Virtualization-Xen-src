@@ -21,7 +21,7 @@
 #include <xen/keyhandler.h>
 #include <xsm/xsm.h>
 
-static int parse_iommu_param(const char *s);
+static void parse_iommu_param(char *s);
 static void iommu_dump_p2m_table(unsigned char key);
 
 unsigned int __read_mostly iommu_dev_iotlb_timeout = 1000;
@@ -61,7 +61,6 @@ bool_t __read_mostly iommu_passthrough;
 bool_t __read_mostly iommu_snoop = 1;
 bool_t __read_mostly iommu_qinval = 1;
 bool_t __read_mostly iommu_intremap = 1;
-bool_t __read_mostly iommu_crash_disable;
 
 /*
  * In the current implementation of VT-d posted interrupts, in some extreme
@@ -80,10 +79,10 @@ DEFINE_SPINLOCK(iommu_pt_cleanup_lock);
 PAGE_LIST_HEAD(iommu_pt_cleanup_list);
 static struct tasklet iommu_pt_cleanup_tasklet;
 
-static int __init parse_iommu_param(const char *s)
+static void __init parse_iommu_param(char *s)
 {
-    const char *ss;
-    int val, b, rc = 0;
+    char *ss;
+    int val;
 
     do {
         val = !!strncmp(s, "no-", 3);
@@ -91,56 +90,46 @@ static int __init parse_iommu_param(const char *s)
             s += 3;
 
         ss = strchr(s, ',');
-        if ( !ss )
-            ss = strchr(s, '\0');
+        if ( ss )
+            *ss = '\0';
 
-        b = parse_bool(s, ss);
-        if ( b >= 0 )
-            iommu_enable = b;
-        else if ( !cmdline_strcmp(s, "force") ||
-                  !cmdline_strcmp(s, "required") )
+        if ( !parse_bool(s) )
+            iommu_enable = 0;
+        else if ( !strcmp(s, "force") || !strcmp(s, "required") )
             force_iommu = val;
-        else if ( !cmdline_strcmp(s, "quarantine") )
+        else if ( !strcmp(s, "quarantine") )
             iommu_quarantine = val;
-        else if ( !cmdline_strcmp(s, "workaround_bios_bug") )
+        else if ( !strcmp(s, "workaround_bios_bug") )
             iommu_workaround_bios_bug = val;
-        else if ( !cmdline_strcmp(s, "igfx") )
+        else if ( !strcmp(s, "igfx") )
             iommu_igfx = val;
-        else if ( !cmdline_strcmp(s, "verbose") )
+        else if ( !strcmp(s, "verbose") )
             iommu_verbose = val;
-        else if ( !cmdline_strcmp(s, "snoop") )
+        else if ( !strcmp(s, "snoop") )
             iommu_snoop = val;
-        else if ( !cmdline_strcmp(s, "qinval") )
+        else if ( !strcmp(s, "qinval") )
             iommu_qinval = val;
-        else if ( !cmdline_strcmp(s, "intremap") )
+        else if ( !strcmp(s, "intremap") )
             iommu_intremap = val;
-        else if ( !cmdline_strcmp(s, "intpost") )
+        else if ( !strcmp(s, "intpost") )
             iommu_intpost = val;
-#ifdef CONFIG_KEXEC
-        else if ( !cmdline_strcmp(s, "crash-disable") )
-            iommu_crash_disable = val;
-#endif
-        else if ( !cmdline_strcmp(s, "debug") )
+        else if ( !strcmp(s, "debug") )
         {
             iommu_debug = val;
             if ( val )
                 iommu_verbose = 1;
         }
-        else if ( !cmdline_strcmp(s, "amd-iommu-perdev-intremap") )
+        else if ( !strcmp(s, "amd-iommu-perdev-intremap") )
             amd_iommu_perdev_intremap = val;
-        else if ( !cmdline_strcmp(s, "dom0-passthrough") )
+        else if ( !strcmp(s, "dom0-passthrough") )
             iommu_passthrough = val;
-        else if ( !cmdline_strcmp(s, "dom0-strict") )
+        else if ( !strcmp(s, "dom0-strict") )
             iommu_dom0_strict = val;
-        else if ( !cmdline_strcmp(s, "sharept") )
+        else if ( !strcmp(s, "sharept") )
             iommu_hap_pt_share = val;
-        else
-            rc = -EINVAL;
 
         s = ss + 1;
-    } while ( *ss );
-
-    return rc;
+    } while ( ss );
 }
 
 int iommu_domain_init(struct domain *d)
@@ -192,7 +181,7 @@ void __hwdom_init iommu_hwdom_init(struct domain *d)
 
         page_list_for_each ( page, &d->page_list )
         {
-            unsigned long mfn = mfn_x(page_to_mfn(page));
+            unsigned long mfn = page_to_mfn(page);
             unsigned long gfn = mfn_to_gmfn(d, mfn);
             unsigned int mapping = IOMMUF_readable;
             int ret;
@@ -380,21 +369,6 @@ int iommu_iotlb_flush_all(struct domain *d)
     return rc;
 }
 
-static int __init iommu_quarantine_init(void)
-{
-    const struct domain_iommu *hd = dom_iommu(dom_io);
-    int rc;
-
-    rc = iommu_domain_init(dom_io);
-    if ( rc )
-        return rc;
-
-    if ( !hd->platform_ops->quarantine_init )
-        return 0;
-
-    return hd->platform_ops->quarantine_init(dom_io);
-}
-
 int __init iommu_setup(void)
 {
     int rc = -ENODEV;
@@ -428,7 +402,7 @@ int __init iommu_setup(void)
     printk("I/O virtualisation %sabled\n", iommu_enabled ? "en" : "dis");
     if ( iommu_enabled )
     {
-        if ( iommu_quarantine_init() )
+        if ( iommu_domain_init(dom_io) )
             panic("Could not set up quarantine\n");
 
         printk(" - Dom0 mode: %s\n",
@@ -484,9 +458,6 @@ void iommu_share_p2m_table(struct domain* d)
 
 void iommu_crash_shutdown(void)
 {
-    if ( !iommu_crash_disable )
-        return;
-
     if ( iommu_enabled )
         iommu_get_ops()->crash_shutdown();
     iommu_enabled = iommu_intremap = iommu_intpost = 0;

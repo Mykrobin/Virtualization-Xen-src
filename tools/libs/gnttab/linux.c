@@ -35,11 +35,16 @@
 
 #include "private.h"
 
+#define DEVXEN "/dev/xen/"
+
+#define ROUNDUP(_x,_w) (((unsigned long)(_x)+(1UL<<(_w))-1) & ~((1UL<<(_w))-1))
+
+#define GTERROR(_l, _f...) xtl_log(_l, XTL_ERROR, errno, "gnttab", _f)
+#define GSERROR(_l, _f...) xtl_log(_l, XTL_ERROR, errno, "gntshr", _f)
+
 #define PAGE_SHIFT           12
 #define PAGE_SIZE            (1UL << PAGE_SHIFT)
 #define PAGE_MASK            (~(PAGE_SIZE-1))
-
-#define DEVXEN "/dev/xen/"
 
 #ifndef O_CLOEXEC
 #define O_CLOEXEC 0

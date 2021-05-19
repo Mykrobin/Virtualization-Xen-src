@@ -39,20 +39,6 @@
  */
 struct xenevtchn_handle;
 
-/* For save's precopy_policy(). */
-struct precopy_stats
-{
-    unsigned int iteration;
-    unsigned int total_written;
-    long dirty_count; /* -1 if unknown */
-};
-
-/*
- * A precopy_policy callback may not be running in the same address
- * space as libxc an so precopy_stats is passed by value.
- */
-typedef int (*precopy_policy_t)(struct precopy_stats, void *);
-
 /* callbacks provided by xc_domain_save */
 struct save_callbacks {
     /* Called after expiration of checkpoint interval,
@@ -60,22 +46,7 @@ struct save_callbacks {
      */
     int (*suspend)(void* data);
 
-    /*
-     * Called before and after every batch of page data sent during
-     * the precopy phase of a live migration to ask the caller what
-     * to do next based on the current state of the precopy migration.
-     *
-     * Should return one of the values listed below:
-     */
-#define XGS_POLICY_ABORT          (-1) /* Abandon the migration entirely
-                                        * and tidy up. */
-#define XGS_POLICY_CONTINUE_PRECOPY 0  /* Remain in the precopy phase. */
-#define XGS_POLICY_STOP_AND_COPY    1  /* Immediately suspend and transmit the
-                                        * remaining dirty pages. */
-    precopy_policy_t precopy_policy;
-
-    /*
-     * Called after the guest's dirty pages have been
+    /* Called after the guest's dirty pages have been
      *  copied into an output buffer.
      * Callback function resumes the guest & the device model,
      *  returns to xc_domain_save.
@@ -84,8 +55,7 @@ struct save_callbacks {
      */
     int (*postcopy)(void* data);
 
-    /*
-     * Called after the memory checkpoint has been flushed
+    /* Called after the memory checkpoint has been flushed
      * out into the network. Typical actions performed in this
      * callback include:
      *   (a) send the saved device model state (for HVM guests),
@@ -95,8 +65,7 @@ struct save_callbacks {
      *
      * returns:
      * 0: terminate checkpointing gracefully
-     * 1: take another checkpoint
-     */
+     * 1: take another checkpoint */
     int (*checkpoint)(void* data);
 
     /*
@@ -109,7 +78,7 @@ struct save_callbacks {
     int (*wait_checkpoint)(void* data);
 
     /* Enable qemu-dm logging dirty pages to xen */
-    int (*switch_qemu_logdirty)(uint32_t domid, unsigned enable, void *data); /* HVM only */
+    int (*switch_qemu_logdirty)(int domid, unsigned enable, void *data); /* HVM only */
 
     /* to be provided as the last argument to each callback function */
     void* data;
@@ -131,8 +100,8 @@ typedef enum {
  *        doesn't use checkpointing
  * @return 0 on success, -1 on failure
  */
-int xc_domain_save(xc_interface *xch, int io_fd, uint32_t dom,
-                   uint32_t flags /* XCFLAGS_xxx */,
+int xc_domain_save(xc_interface *xch, int io_fd, uint32_t dom, uint32_t max_iters,
+                   uint32_t max_factor, uint32_t flags /* XCFLAGS_xxx */,
                    struct save_callbacks* callbacks, int hvm,
                    xc_migration_stream_t stream_type, int recv_fd);
 
@@ -188,6 +157,7 @@ struct restore_callbacks {
  * @parm store_mfn returned with the mfn of the store page
  * @parm hvm non-zero if this is a HVM restore
  * @parm pae non-zero if this HVM domain has PAE support enabled
+ * @parm superpages non-zero to allocate guest memory with superpages
  * @parm stream_type non-zero if the far end of the stream is using checkpointing
  * @parm callbacks non-NULL to receive a callback to restore toolstack
  *       specific data
@@ -195,9 +165,9 @@ struct restore_callbacks {
  */
 int xc_domain_restore(xc_interface *xch, int io_fd, uint32_t dom,
                       unsigned int store_evtchn, unsigned long *store_mfn,
-                      uint32_t store_domid, unsigned int console_evtchn,
-                      unsigned long *console_mfn, uint32_t console_domid,
-                      unsigned int hvm, unsigned int pae,
+                      domid_t store_domid, unsigned int console_evtchn,
+                      unsigned long *console_mfn, domid_t console_domid,
+                      unsigned int hvm, unsigned int pae, int superpages,
                       xc_migration_stream_t stream_type,
                       struct restore_callbacks *callbacks, int send_back_fd);
 
@@ -243,7 +213,7 @@ struct xc_hvm_firmware_module {
  */
 int xc_suspend_evtchn_release(xc_interface *xch,
                               struct xenevtchn_handle *xce,
-                              uint32_t domid, int suspend_evtchn, int *lockfd);
+                              int domid, int suspend_evtchn, int *lockfd);
 
 /**
  * This function eats the initial notification.
@@ -252,7 +222,7 @@ int xc_suspend_evtchn_release(xc_interface *xch,
  */
 int xc_suspend_evtchn_init_exclusive(xc_interface *xch,
                                      struct xenevtchn_handle *xce,
-                                     uint32_t domid, int port, int *lockfd);
+                                     int domid, int port, int *lockfd);
 
 /* xce must not be used for anything else */
 int xc_await_suspend(xc_interface *xch, struct xenevtchn_handle *xce,
@@ -267,7 +237,7 @@ int xc_await_suspend(xc_interface *xch, struct xenevtchn_handle *xce,
  */
 int xc_suspend_evtchn_init_sane(xc_interface *xch,
                                 struct xenevtchn_handle *xce,
-                                uint32_t domid, int port, int *lockfd);
+                                int domid, int port, int *lockfd);
 
 int xc_mark_page_online(xc_interface *xch, unsigned long start,
                         unsigned long end, uint32_t *status);
@@ -278,7 +248,7 @@ int xc_mark_page_offline(xc_interface *xch, unsigned long start,
 int xc_query_page_offline_status(xc_interface *xch, unsigned long start,
                                  unsigned long end, uint32_t *status);
 
-int xc_exchange_page(xc_interface *xch, uint32_t domid, xen_pfn_t mfn);
+int xc_exchange_page(xc_interface *xch, int domid, xen_pfn_t mfn);
 
 
 /**
@@ -293,7 +263,7 @@ struct xc_domain_meminfo {
     unsigned long p2m_size;
 };
 
-int xc_map_domain_meminfo(xc_interface *xch, uint32_t domid,
+int xc_map_domain_meminfo(xc_interface *xch, int domid,
                           struct xc_domain_meminfo *minfo);
 
 int xc_unmap_domain_meminfo(xc_interface *xch, struct xc_domain_meminfo *mem);

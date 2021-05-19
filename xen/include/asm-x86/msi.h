@@ -4,7 +4,6 @@
 #include <xen/cpumask.h>
 #include <xen/pci.h>
 #include <asm/byteorder.h>
-#include <asm/hvm/vmx/vmcs.h>
 
 /*
  * Constants for Intel APIC based MSI messages.
@@ -48,7 +47,6 @@
 #define MSI_ADDR_REDIRECTION_SHIFT  3
 #define MSI_ADDR_REDIRECTION_CPU    (0 << MSI_ADDR_REDIRECTION_SHIFT)
 #define MSI_ADDR_REDIRECTION_LOWPRI (1 << MSI_ADDR_REDIRECTION_SHIFT)
-#define MSI_ADDR_REDIRECTION_MASK   (1 << MSI_ADDR_REDIRECTION_SHIFT)
 
 #define MSI_ADDR_DEST_ID_SHIFT		12
 #define	 MSI_ADDR_DEST_ID_MASK		0x00ff000
@@ -56,6 +54,8 @@
 
 /* MAX fixed pages reserved for mapping MSIX tables. */
 #define FIX_MSIX_MAX_PAGES              512
+
+#define MAX_MSI_IRQS 32 /* limited by MSI capability struct properties */
 
 struct msi_info {
     u16 seg;
@@ -84,7 +84,7 @@ struct msi_desc;
 /* Helper functions */
 extern int pci_enable_msi(struct msi_info *msi, struct msi_desc **desc);
 extern void pci_disable_msi(struct msi_desc *desc);
-extern int pci_prepare_msix(u16 seg, u8 bus, u8 devfn, bool off);
+extern int pci_prepare_msix(u16 seg, u8 bus, u8 devfn, bool_t off);
 extern void pci_cleanup_msi(struct pci_dev *pdev);
 extern int setup_msi_irq(struct irq_desc *, struct msi_desc *);
 extern int __setup_msi_irq(struct irq_desc *, struct msi_desc *,
@@ -92,7 +92,6 @@ extern int __setup_msi_irq(struct irq_desc *, struct msi_desc *,
 extern void teardown_msi_irq(int irq);
 extern int msi_free_vector(struct msi_desc *entry);
 extern int pci_restore_msi_state(struct pci_dev *pdev);
-extern int pci_reset_msix_state(struct pci_dev *pdev);
 
 struct msi_desc {
 	struct msi_attrib {
@@ -104,10 +103,6 @@ struct msi_desc {
 		__u8	guest_masked : 1;
 		__u16	entry_nr;	/* specific enabled entry 	  */
 	} msi_attrib;
-
-	bool irte_initialized;
-	uint8_t gvec;			/* guest vector. valid when pi_desc isn't NULL */
-	const struct pi_desc *pi_desc;	/* pointer to posted descriptor */
 
 	struct list_head list;
 
@@ -121,9 +116,10 @@ struct msi_desc {
 	};
 	struct pci_dev *dev;
 	int irq;
-	int remap_index;		/* index in interrupt remapping table */
 
 	struct msi_msg msg;		/* Last set MSI message */
+
+	int remap_index;		/* index in interrupt remapping table */
 };
 
 /*
@@ -154,8 +150,6 @@ int msi_free_irq(struct msi_desc *entry);
 	( (is64bit == 1) ? base+PCI_MSI_DATA_64 : base+PCI_MSI_DATA_32 )
 #define msi_mask_bits_reg(base, is64bit) \
 	( (is64bit == 1) ? base+PCI_MSI_MASK_BIT : base+PCI_MSI_MASK_BIT-4)
-#define msi_pending_bits_reg(base, is64bit) \
-	((base) + PCI_MSI_MASK_BIT + ((is64bit) ? 4 : 0))
 #define msi_disable(control)		control &= ~PCI_MSI_FLAGS_ENABLE
 #define multi_msi_capable(control) \
 	(1 << ((control & PCI_MSI_FLAGS_QMASK) >> 1))
@@ -239,7 +233,7 @@ struct arch_msix {
     int table_refcnt[MAX_MSIX_TABLE_PAGES];
     int table_idx[MAX_MSIX_TABLE_PAGES];
     spinlock_t table_lock;
-    bool host_maskall, guest_maskall;
+    bool_t host_maskall, guest_maskall;
     domid_t warned;
 };
 
@@ -249,7 +243,7 @@ void msi_compose_msg(unsigned vector, const cpumask_t *mask,
 void __msi_set_enable(u16 seg, u8 bus, u8 slot, u8 func, int pos, int enable);
 void mask_msi_irq(struct irq_desc *);
 void unmask_msi_irq(struct irq_desc *);
-void guest_mask_msi_irq(struct irq_desc *, bool mask);
+void guest_mask_msi_irq(struct irq_desc *, bool_t mask);
 void ack_nonmaskable_msi_irq(struct irq_desc *);
 void end_nonmaskable_msi_irq(struct irq_desc *, u8 vector);
 void set_msi_affinity(struct irq_desc *, const cpumask_t *);

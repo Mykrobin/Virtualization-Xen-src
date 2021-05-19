@@ -12,6 +12,7 @@
  * Author: Allen Kay <allen.m.kay@intel.com> -  adapted to xen from Linux
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/acpi.h>
@@ -28,36 +29,22 @@
 
 unsigned int pci_probe = PCI_PROBE_CONF1 | PCI_PROBE_MMCONF;
 
-static int __init parse_mmcfg(const char *s)
+static void __init parse_mmcfg(char *s)
 {
-    const char *ss;
-    int rc = 0;
+    char *ss;
 
     do {
         ss = strchr(s, ',');
-        if ( !ss )
-            ss = strchr(s, '\0');
+        if ( ss )
+            *ss = '\0';
 
-        switch ( parse_bool(s, ss) )
-        {
-        case 0:
+        if ( !parse_bool(s) )
             pci_probe &= ~PCI_PROBE_MMCONF;
-            break;
-        case 1:
-            break;
-        default:
-            if ( !cmdline_strcmp(s, "amd_fam10") ||
-                 !cmdline_strcmp(s, "amd-fam10") )
-                pci_probe |= PCI_CHECK_ENABLE_AMD_MMCONF;
-            else
-                rc = -EINVAL;
-            break;
-        }
+        else if ( !strcmp(s, "amd_fam10") || !strcmp(s, "amd-fam10") )
+            pci_probe |= PCI_CHECK_ENABLE_AMD_MMCONF;
 
         s = ss + 1;
-    } while ( *ss );
-
-    return rc;
+    } while ( ss );
 }
 custom_param("mmcfg", parse_mmcfg);
 

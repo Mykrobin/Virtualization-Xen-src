@@ -6,7 +6,6 @@
 
 void vcpu_kick(struct vcpu *v);
 void vcpu_mark_events_pending(struct vcpu *v);
-void vcpu_update_evtchn_irq(struct vcpu *v);
 void vcpu_block_unless_event_pending(struct vcpu *v);
 
 static inline int vcpu_event_delivery_is_enabled(struct vcpu *v)
@@ -17,6 +16,9 @@ static inline int vcpu_event_delivery_is_enabled(struct vcpu *v)
 
 static inline int local_events_need_delivery_nomask(void)
 {
+    struct pending_irq *p = irq_to_pending(current,
+                                           current->domain->arch.evtchn_irq);
+
     /* XXX: if the first interrupt has already been delivered, we should
      * check whether any other interrupts with priority higher than the
      * one in GICV_IAR are in the lr_pending queue or in the LR
@@ -25,13 +27,14 @@ static inline int local_events_need_delivery_nomask(void)
      * interrupts disabled so this shouldn't be a problem in the general
      * case.
      */
-    if ( vgic_vcpu_pending_irq(current) )
+    if ( gic_events_need_delivery() )
         return 1;
 
-    if ( !vcpu_info(current, evtchn_upcall_pending) )
-        return 0;
+    if ( vcpu_info(current, evtchn_upcall_pending) &&
+        list_empty(&p->inflight) )
+        return 1;
 
-    return vgic_evtchn_irq_pending(current);
+    return 0;
 }
 
 static inline int local_events_need_delivery(void)
@@ -48,9 +51,9 @@ static inline void local_event_delivery_enable(void)
 }
 
 /* No arch specific virq definition now. Default to global. */
-static inline bool arch_virq_is_global(unsigned int virq)
+static inline int arch_virq_is_global(int virq)
 {
-    return true;
+    return 1;
 }
 
 #endif

@@ -21,7 +21,7 @@ extern void set_pdx_range(unsigned long smfn, unsigned long emfn);
 #define page_to_pdx(pg)  ((pg) - frame_table)
 #define pdx_to_page(pdx) (frame_table + (pdx))
 
-bool __mfn_valid(unsigned long mfn);
+extern int __mfn_valid(unsigned long mfn);
 
 static inline unsigned long pfn_to_pdx(unsigned long pfn)
 {
@@ -34,9 +34,6 @@ static inline unsigned long pdx_to_pfn(unsigned long pdx)
     return (pdx & pfn_pdx_bottom_mask) |
            ((pdx << pfn_pdx_hole_shift) & pfn_top_mask);
 }
-
-#define mfn_to_pdx(mfn) pfn_to_pdx(mfn_x(mfn))
-#define pdx_to_mfn(pdx) _mfn(pdx_to_pfn(pdx))
 
 extern void pfn_pdx_hole_setup(unsigned long);
 

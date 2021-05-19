@@ -16,19 +16,16 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/spinlock.h>
 #include <xen/sched.h>
 #include <xen/sort.h>
-#include <asm/cpuerrata.h>
 #include <asm/current.h>
 #include <asm/mmio.h>
 
-#include "decode.h"
-
-static enum io_state handle_read(const struct mmio_handler *handler,
-                                 struct vcpu *v,
-                                 mmio_info_t *info)
+static int handle_read(const struct mmio_handler *handler, struct vcpu *v,
+                       mmio_info_t *info)
 {
     const struct hsr_dabt dabt = info->dabt;
     struct cpu_user_regs *regs = guest_cpu_user_regs();
@@ -41,7 +38,7 @@ static enum io_state handle_read(const struct mmio_handler *handler,
     uint8_t size = (1 << dabt.size) * 8;
 
     if ( !handler->ops->read(v, info, &r, handler->priv) )
-        return IO_ABORT;
+        return 0;
 
     /*
      * Sign extend if required.
@@ -61,20 +58,17 @@ static enum io_state handle_read(const struct mmio_handler *handler,
 
     set_user_reg(regs, dabt.reg, r);
 
-    return IO_HANDLED;
+    return 1;
 }
 
-static enum io_state handle_write(const struct mmio_handler *handler,
-                                  struct vcpu *v,
-                                  mmio_info_t *info)
+static int handle_write(const struct mmio_handler *handler, struct vcpu *v,
+                        mmio_info_t *info)
 {
     const struct hsr_dabt dabt = info->dabt;
     struct cpu_user_regs *regs = guest_cpu_user_regs();
-    int ret;
 
-    ret = handler->ops->write(v, info, get_user_reg(regs, dabt.reg),
-                              handler->priv);
-    return ret ? IO_HANDLED : IO_ABORT;
+    return handler->ops->write(v, info, get_user_reg(regs, dabt.reg),
+                               handler->priv);
 }
 
 /* This function assumes that mmio regions are not overlapped */
@@ -107,49 +101,19 @@ static const struct mmio_handler *find_mmio_handler(struct domain *d,
     return handler;
 }
 
-enum io_state try_handle_mmio(struct cpu_user_regs *regs,
-                              const union hsr hsr,
-                              paddr_t gpa)
+int handle_mmio(mmio_info_t *info)
 {
     struct vcpu *v = current;
     const struct mmio_handler *handler = NULL;
-    const struct hsr_dabt dabt = hsr.dabt;
-    mmio_info_t info = {
-        .gpa = gpa,
-        .dabt = dabt
-    };
 
-    ASSERT(hsr.ec == HSR_EC_DATA_ABORT_LOWER_EL);
-
-    handler = find_mmio_handler(v->domain, info.gpa);
+    handler = find_mmio_handler(v->domain, info->gpa);
     if ( !handler )
-        return IO_UNHANDLED;
+        return 0;
 
-    /* All the instructions used on emulated MMIO region should be valid */
-    if ( !dabt.valid )
-        return IO_ABORT;
-
-    /*
-     * Erratum 766422: Thumb store translation fault to Hypervisor may
-     * not have correct HSR Rt value.
-     */
-    if ( check_workaround_766422() && (regs->cpsr & PSR_THUMB) &&
-         dabt.write )
-    {
-        int rc;
-
-        rc = decode_instruction(regs, &info.dabt);
-        if ( rc )
-        {
-            gprintk(XENLOG_DEBUG, "Unable to decode instruction\n");
-            return IO_ABORT;
-        }
-    }
-
-    if ( info.dabt.write )
-        return handle_write(handler, v, &info);
+    if ( info->dabt.write )
+        return handle_write(handler, v, info);
     else
-        return handle_read(handler, v, &info);
+        return handle_read(handler, v, info);
 }
 
 void register_mmio_handler(struct domain *d,

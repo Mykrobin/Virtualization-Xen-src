@@ -17,8 +17,7 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-        .file "svm/entry.S"
-
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/softirq.h>
 #include <asm/types.h>
@@ -61,11 +60,25 @@ UNLIKELY_START(ne, nsvm_hap)
         jmp  .Lsvm_do_resume
 __UNLIKELY_END(nsvm_hap)
 
-        mov  %rsp, %rdi
-        call svm_vmenter_helper
+        call svm_asid_handle_vmrun
 
-        mov VCPU_arch_msr(%rbx), %rax
-        mov VCPUMSR_spec_ctrl_raw(%rax), %eax
+        cmpb $0,tb_init_done(%rip)
+UNLIKELY_START(nz, svm_trace)
+        call svm_trace_vmentry
+UNLIKELY_END(svm_trace)
+
+        mov  VCPU_svm_vmcb(%rbx),%rcx
+        mov  UREGS_rax(%rsp),%rax
+        mov  %rax,VMCB_rax(%rcx)
+        mov  UREGS_rip(%rsp),%rax
+        mov  %rax,VMCB_rip(%rcx)
+        mov  UREGS_rsp(%rsp),%rax
+        mov  %rax,VMCB_rsp(%rcx)
+        mov  UREGS_eflags(%rsp),%rax
+        or   $X86_EFLAGS_MBS,%rax
+        mov  %rax,VMCB_rflags(%rcx)
+
+        mov VCPU_arch_spec_ctrl(%rbx), %eax
 
         /* WARNING! `ret`, `call *`, `jmp *` not safe beyond this point. */
         SPEC_CTRL_EXIT_TO_HVM   /* Req: a=spec_ctrl %rsp=regs/cpuinfo, Clob: cd */
@@ -95,6 +108,17 @@ __UNLIKELY_END(nsvm_hap)
 
         SPEC_CTRL_ENTRY_FROM_HVM    /* Req: b=curr %rsp=regs/cpuinfo, Clob: acd */
         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
+
+        mov  VCPU_svm_vmcb(%rbx),%rcx
+        movb $0,VCPU_svm_vmcb_in_sync(%rbx)
+        mov  VMCB_rax(%rcx),%rax
+        mov  %rax,UREGS_rax(%rsp)
+        mov  VMCB_rip(%rcx),%rax
+        mov  %rax,UREGS_rip(%rsp)
+        mov  VMCB_rsp(%rcx),%rax
+        mov  %rax,UREGS_rsp(%rsp)
+        mov  VMCB_rflags(%rcx),%rax
+        mov  %rax,UREGS_eflags(%rsp)
 
         STGI
 GLOBAL(svm_stgi_label)
