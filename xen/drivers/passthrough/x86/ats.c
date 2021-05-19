@@ -9,7 +9,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #include <xen/sched.h>
@@ -17,14 +18,15 @@
 #include <xen/pci_regs.h>
 #include "../ats.h"
 
+LIST_HEAD(ats_devices);
+
 bool_t __read_mostly ats_enabled = 0;
 boolean_param("ats", ats_enabled);
 
-int enable_ats_device(struct pci_dev *pdev, struct list_head *ats_list)
+int enable_ats_device(int seg, int bus, int devfn, const void *iommu)
 {
+    struct pci_ats_dev *pdev = NULL;
     u32 value;
-    u16 seg = pdev->seg;
-    u8 bus = pdev->bus, devfn = pdev->devfn;
     int pos;
 
     pos = pci_find_ext_capability(seg, bus, devfn, PCI_EXT_CAP_ID_ATS);
@@ -38,15 +40,19 @@ int enable_ats_device(struct pci_dev *pdev, struct list_head *ats_list)
                             PCI_FUNC(devfn), pos + ATS_REG_CTL);
     if ( value & ATS_ENABLE )
     {
-        struct pci_dev *other;
-
-        list_for_each_entry ( other, ats_list, ats.list )
-            if ( other == pdev )
+        list_for_each_entry ( pdev, &ats_devices, list )
+        {
+            if ( pdev->seg == seg && pdev->bus == bus && pdev->devfn == devfn )
             {
                 pos = 0;
                 break;
             }
+        }
     }
+    if ( pos )
+        pdev = xmalloc(struct pci_ats_dev);
+    if ( !pdev )
+        return -ENOMEM;
 
     if ( !(value & ATS_ENABLE) )
     {
@@ -57,12 +63,15 @@ int enable_ats_device(struct pci_dev *pdev, struct list_head *ats_list)
 
     if ( pos )
     {
-        pdev->ats.cap_pos = pos;
+        pdev->seg = seg;
+        pdev->bus = bus;
+        pdev->devfn = devfn;
+        pdev->iommu = iommu;
         value = pci_conf_read16(seg, bus, PCI_SLOT(devfn),
                                 PCI_FUNC(devfn), pos + ATS_REG_CAP);
-        pdev->ats.queue_depth = value & ATS_QUEUE_DEPTH_MASK ?:
+        pdev->ats_queue_depth = value & ATS_QUEUE_DEPTH_MASK ?:
                                 ATS_QUEUE_DEPTH_MASK + 1;
-        list_add(&pdev->ats.list, ats_list);
+        list_add(&pdev->list, &ats_devices);
     }
 
     if ( iommu_verbose )
@@ -73,23 +82,48 @@ int enable_ats_device(struct pci_dev *pdev, struct list_head *ats_list)
     return pos;
 }
 
-void disable_ats_device(struct pci_dev *pdev)
+void disable_ats_device(int seg, int bus, int devfn)
 {
+    struct pci_ats_dev *pdev;
     u32 value;
-    u16 seg = pdev->seg;
-    u8 bus = pdev->bus, devfn = pdev->devfn;
+    int pos;
 
-    BUG_ON(!pdev->ats.cap_pos);
+    pos = pci_find_ext_capability(seg, bus, devfn, PCI_EXT_CAP_ID_ATS);
+    BUG_ON(!pos);
 
-    value = pci_conf_read16(seg, bus, PCI_SLOT(devfn), PCI_FUNC(devfn),
-                            pdev->ats.cap_pos + ATS_REG_CTL);
+    value = pci_conf_read16(seg, bus, PCI_SLOT(devfn),
+                            PCI_FUNC(devfn), pos + ATS_REG_CTL);
     value &= ~ATS_ENABLE;
     pci_conf_write16(seg, bus, PCI_SLOT(devfn), PCI_FUNC(devfn),
-                     pdev->ats.cap_pos + ATS_REG_CTL, value);
+                     pos + ATS_REG_CTL, value);
 
-    list_del(&pdev->ats.list);
+    list_for_each_entry ( pdev, &ats_devices, list )
+    {
+        if ( pdev->seg == seg && pdev->bus == bus && pdev->devfn == devfn )
+        {
+            list_del(&pdev->list);
+            xfree(pdev);
+            break;
+        }
+    }
 
     if ( iommu_verbose )
         dprintk(XENLOG_INFO, "%04x:%02x:%02x.%u: ATS is disabled\n",
                 seg, bus, PCI_SLOT(devfn), PCI_FUNC(devfn));
+}
+
+struct pci_ats_dev *get_ats_device(int seg, int bus, int devfn)
+{
+    struct pci_ats_dev *pdev;
+
+    if ( !pci_ats_device(seg, bus, devfn) )
+        return NULL;
+
+    list_for_each_entry ( pdev, &ats_devices, list )
+    {
+        if ( pdev->seg == seg && pdev->bus == bus && pdev->devfn == devfn )
+            return pdev;
+    }
+
+    return NULL;
 }

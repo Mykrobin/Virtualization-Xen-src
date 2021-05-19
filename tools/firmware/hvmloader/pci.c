@@ -16,7 +16,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #include "util.h"
@@ -27,54 +28,13 @@
 #include <xen/memory.h>
 #include <xen/hvm/ioreq.h>
 #include <xen/hvm/hvm_xs_strings.h>
-#include <xen/hvm/e820.h>
 #include <stdbool.h>
 
-unsigned long pci_mem_start = HVM_BELOW_4G_MMIO_START;
+unsigned long pci_mem_start = PCI_MEM_START;
 unsigned long pci_mem_end = PCI_MEM_END;
-uint64_t pci_hi_mem_start = 0, pci_hi_mem_end = 0;
 
 enum virtual_vga virtual_vga = VGA_none;
 unsigned long igd_opregion_pgbase = 0;
-
-/* Check if the specified range conflicts with any reserved device memory. */
-static bool check_overlap_all(uint64_t start, uint64_t size)
-{
-    unsigned int i;
-
-    for ( i = 0; i < memory_map.nr_map; i++ )
-    {
-        if ( memory_map.map[i].type == E820_RESERVED &&
-             check_overlap(start, size,
-                           memory_map.map[i].addr,
-                           memory_map.map[i].size) )
-            return true;
-    }
-
-    return false;
-}
-
-/* Find the lowest RMRR ending above base but below 4G. */
-static int find_next_rmrr(uint32_t base)
-{
-    unsigned int i;
-    int next_rmrr = -1;
-    uint64_t end, min_end = GB(4);
-
-    for ( i = 0; i < memory_map.nr_map ; i++ )
-    {
-        end = memory_map.map[i].addr + memory_map.map[i].size;
-
-        if ( memory_map.map[i].type == E820_RESERVED &&
-             end > base && end <= min_end )
-        {
-            next_rmrr = i;
-            min_end = end;
-        }
-    }
-
-    return next_rmrr;
-}
 
 void pci_setup(void)
 {
@@ -98,7 +58,6 @@ void pci_setup(void)
         uint64_t bar_sz;
     } *bars = (struct bars *)scratch_start;
     unsigned int i, nr_bars = 0;
-    uint64_t mmio_hole_size = 0;
 
     const char *s;
     /*
@@ -125,10 +84,6 @@ void pci_setup(void)
         allow_memory_relocate = strtoll(s, NULL, 0);
     printf("Relocating guest memory for lowmem MMIO space %s\n",
            allow_memory_relocate?"enabled":"disabled");
-
-    s = xenstore_read("platform/mmio_hole_size", NULL);
-    if ( s )
-        mmio_hole_size = strtoll(s, NULL, 0);
 
     /* Program PCI-ISA bridge with appropriate link routes. */
     isa_irq = 0;
@@ -295,58 +250,26 @@ void pci_setup(void)
         pci_writew(devfn, PCI_COMMAND, cmd);
     }
 
-    if ( mmio_hole_size )
-    {
-        uint64_t max_ram_below_4g = GB(4) - mmio_hole_size;
-
-        if ( max_ram_below_4g > HVM_BELOW_4G_MMIO_START )
-        {
-            printf("max_ram_below_4g=0x"PRIllx
-                   " too big for mmio_hole_size=0x"PRIllx
-                   " has been ignored.\n",
-                   PRIllx_arg(max_ram_below_4g),
-                   PRIllx_arg(mmio_hole_size));
-        }
-        else
-        {
-            pci_mem_start = max_ram_below_4g;
-            printf("pci_mem_start=0x%lx (was 0x%x) for mmio_hole_size=%lu\n",
-                   pci_mem_start, HVM_BELOW_4G_MMIO_START,
-                   (long)mmio_hole_size);
-        }
-    }
-    else
-    {
-        /*
-         * At the moment qemu-xen can't deal with relocated memory regions.
-         * It's too close to the release to make a proper fix; for now,
-         * only allow the MMIO hole to grow large enough to move guest memory
-         * if we're running qemu-traditional.  Items that don't fit will be
-         * relocated into the 64-bit address space.
-         *
-         * This loop now does the following:
-         * - If allow_memory_relocate, increase the MMIO hole until it's
-         *   big enough, or until it's 2GiB
-         * - If !allow_memory_relocate, increase the MMIO hole until it's
-         *   big enough, or until it's 2GiB, or until it overlaps guest
-         *   memory
-         */
-        while ( (mmio_total > (pci_mem_end - pci_mem_start))
-                && ((pci_mem_start << 1) != 0)
-                && (allow_memory_relocate
-                    || (((pci_mem_start << 1) >> PAGE_SHIFT)
-                        >= hvm_info->low_mem_pgend)) )
-            pci_mem_start <<= 1;
-
-        /*
-         * Try to accommodate RMRRs in our MMIO region on a best-effort basis.
-         * If we have RMRRs in the range, then make pci_mem_start just after
-         * hvm_info->low_mem_pgend.
-         */
-        if ( pci_mem_start > (hvm_info->low_mem_pgend << PAGE_SHIFT) &&
-             check_overlap_all(pci_mem_start, pci_mem_end-pci_mem_start) )
-            pci_mem_start = hvm_info->low_mem_pgend << PAGE_SHIFT;
-    }
+    /*
+     * At the moment qemu-xen can't deal with relocated memory regions.
+     * It's too close to the release to make a proper fix; for now,
+     * only allow the MMIO hole to grow large enough to move guest memory
+     * if we're running qemu-traditional.  Items that don't fit will be
+     * relocated into the 64-bit address space.
+     *
+     * This loop now does the following:
+     * - If allow_memory_relocate, increase the MMIO hole until it's
+     *   big enough, or until it's 2GiB
+     * - If !allow_memory_relocate, increase the MMIO hole until it's
+     *   big enough, or until it's 2GiB, or until it overlaps guest
+     *   memory
+     */
+    while ( (mmio_total > (pci_mem_end - pci_mem_start)) 
+            && ((pci_mem_start << 1) != 0)
+            && (allow_memory_relocate
+                || (((pci_mem_start << 1) >> PAGE_SHIFT)
+                    >= hvm_info->low_mem_pgend)) )
+        pci_mem_start <<= 1;
 
     if ( mmio_total > (pci_mem_end - pci_mem_start) )
     {
@@ -381,17 +304,14 @@ void pci_setup(void)
         hvm_info->high_mem_pgend += nr_pages;
     }
 
-    /* Sync memory map[] if necessary. */
-    adjust_memory_map();
-
     high_mem_resource.base = ((uint64_t)hvm_info->high_mem_pgend) << PAGE_SHIFT;
-    if ( high_mem_resource.base < GB(4) )
+    if ( high_mem_resource.base < 1ull << 32 )
     {
         if ( hvm_info->high_mem_pgend != 0 )
             printf("WARNING: hvm_info->high_mem_pgend %x"
                    " does not point into high memory!",
                    hvm_info->high_mem_pgend);
-        high_mem_resource.base = GB(4);
+        high_mem_resource.base = 1ull << 32;
     }
     printf("%sRAM in high memory; setting high_mem resource base to "PRIllx"\n",
            hvm_info->high_mem_pgend?"":"No ",
@@ -439,8 +359,9 @@ void pci_setup(void)
                 if ( high_mem_resource.base & (bar_sz - 1) )
                     high_mem_resource.base = high_mem_resource.base - 
                         (high_mem_resource.base & (bar_sz - 1)) + bar_sz;
-                if ( !pci_hi_mem_start )
-                    pci_hi_mem_start = high_mem_resource.base;
+                else
+                    high_mem_resource.base = high_mem_resource.base - 
+                        (high_mem_resource.base & (bar_sz - 1));
                 resource = &high_mem_resource;
                 bar_data &= ~PCI_BASE_ADDRESS_MEM_MASK;
             } 
@@ -457,24 +378,6 @@ void pci_setup(void)
         }
 
         base = (resource->base  + bar_sz - 1) & ~(uint64_t)(bar_sz - 1);
-
-        /* If we're using mem_resource, check for RMRR conflicts. */
-        if ( resource == &mem_resource)
-        {
-            int next_rmrr = find_next_rmrr(base);
-
-            while ( next_rmrr >= 0 &&
-                    check_overlap(base, bar_sz,
-                              memory_map.map[next_rmrr].addr,
-                              memory_map.map[next_rmrr].size) )
-            {
-                base = memory_map.map[next_rmrr].addr +
-                       memory_map.map[next_rmrr].size;
-                base = (base + bar_sz - 1) & ~(bar_sz - 1);
-                next_rmrr = find_next_rmrr(base);
-            }
-        }
-
         bar_data |= (uint32_t)base;
         bar_data_upper = (uint32_t)(base >> 32);
         base += bar_sz;
@@ -507,16 +410,6 @@ void pci_setup(void)
         else
             cmd |= PCI_COMMAND_IO;
         pci_writew(devfn, PCI_COMMAND, cmd);
-    }
-
-    if ( pci_hi_mem_start )
-    {
-        /*
-         * Make end address alignment match the start address one's so that
-         * fewer variable range MTRRs are needed to cover the range.
-         */
-        pci_hi_mem_end = ((high_mem_resource.base - 1) |
-                          ((pci_hi_mem_start & -pci_hi_mem_start) - 1)) + 1;
     }
 
     if ( vga_devfn != 256 )

@@ -56,7 +56,7 @@ const struct selinux_class_perm selinux_class_perm = {
 #define AVC_DEF_CACHE_THRESHOLD        512
 #define AVC_CACHE_RECLAIM        16
 
-#ifdef CONFIG_FLASK_AVC_STATS
+#ifdef FLASK_AVC_STATS
 #define avc_cache_stats_incr(field)                 \
 do {                                \
     __get_cpu_var(avc_cache_stats).field++;        \
@@ -86,14 +86,27 @@ struct avc_cache {
     u32            latest_notif;    /* latest revocation notification */
 };
 
+struct avc_callback_node {
+    int (*callback) (u32 event, u32 ssid, u32 tsid,
+                     u16 tclass, u32 perms,
+                     u32 *out_retained);
+    u32 events;
+    u32 ssid;
+    u32 tsid;
+    u16 tclass;
+    u32 perms;
+    struct avc_callback_node *next;
+};
+
 /* Exported via Flask hypercall */
 unsigned int avc_cache_threshold = AVC_DEF_CACHE_THRESHOLD;
 
-#ifdef CONFIG_FLASK_AVC_STATS
+#ifdef FLASK_AVC_STATS
 DEFINE_PER_CPU(struct avc_cache_stats, avc_cache_stats);
 #endif
 
 static struct avc_cache avc_cache;
+static struct avc_callback_node *avc_callbacks;
 
 static DEFINE_RCU_READ_LOCK(avc_rcu_lock);
 
@@ -184,7 +197,7 @@ static void avc_dump_av(struct avc_dump_buf *buf, u16 tclass, u32 av)
     }
 
     if ( av )
-        avc_printk(buf, " %#x", av);
+        avc_printk(buf, " 0x%x", av);
 
     avc_printk(buf, " }");
 }
@@ -238,6 +251,8 @@ void __init avc_init(void)
     }
     atomic_set(&avc_cache.active_nodes, 0);
     atomic_set(&avc_cache.lru_hint, 0);
+
+    printk("AVC INITIALIZED\n");
 }
 
 int avc_get_hash_stats(struct xen_flask_hash_stats *arg)
@@ -345,10 +360,11 @@ static struct avc_node *avc_alloc_node(void)
 {
     struct avc_node *node;
 
-    node = xzalloc(struct avc_node);
+    node = xmalloc(struct avc_node);
     if (!node)
         goto out;
 
+    memset(node, 0, sizeof(*node));
     INIT_RCU_HEAD(&node->rhead);
     INIT_HLIST_NODE(&node->list);
     avc_cache_stats_incr(allocations);
@@ -576,19 +592,16 @@ void avc_audit(u32 ssid, u32 tsid, u16 tclass, u32 requested,
         avc_printk(&buf, "domid=%d ", cdom->domain_id);
     switch ( a ? a->type : 0 ) {
     case AVC_AUDIT_DATA_DEV:
-        avc_printk(&buf, "device=%#lx ", a->device);
+        avc_printk(&buf, "device=0x%lx ", a->device);
         break;
     case AVC_AUDIT_DATA_IRQ:
         avc_printk(&buf, "irq=%d ", a->irq);
         break;
     case AVC_AUDIT_DATA_RANGE:
-        avc_printk(&buf, "range=%#lx-%#lx ", a->range.start, a->range.end);
+        avc_printk(&buf, "range=0x%lx-0x%lx ", a->range.start, a->range.end);
         break;
     case AVC_AUDIT_DATA_MEMORY:
-        avc_printk(&buf, "pte=%#lx mfn=%#lx ", a->memory.pte, a->memory.mfn);
-        break;
-    case AVC_AUDIT_DATA_DTDEV:
-        avc_printk(&buf, "dtdevice=%s ", a->dtdev);
+        avc_printk(&buf, "pte=0x%lx mfn=0x%lx ", a->memory.pte, a->memory.mfn);
         break;
     }
 
@@ -603,6 +616,51 @@ void avc_audit(u32 ssid, u32 tsid, u16 tclass, u32 requested,
 }
 
 /**
+ * avc_add_callback - Register a callback for security events.
+ * @callback: callback function
+ * @events: security events
+ * @ssid: source security identifier or %SECSID_WILD
+ * @tsid: target security identifier or %SECSID_WILD
+ * @tclass: target security class
+ * @perms: permissions
+ *
+ * Register a callback function for events in the set @events
+ * related to the SID pair (@ssid, @tsid) and
+ * and the permissions @perms, interpreting
+ * @perms based on @tclass.  Returns %0 on success or
+ * -%ENOMEM if insufficient memory exists to add the callback.
+ */
+int avc_add_callback(int (*callback)(u32 event, u32 ssid, u32 tsid, u16 tclass,
+                                     u32 perms, u32 *out_retained), u32 events, u32 ssid, u32 tsid,
+                     u16 tclass, u32 perms)
+{
+    struct avc_callback_node *c;
+    int rc = 0;
+
+    c = xmalloc(struct avc_callback_node);
+    if ( !c )
+    {
+        rc = -ENOMEM;
+        goto out;
+    }
+
+    c->callback = callback;
+    c->events = events;
+    c->ssid = ssid;
+    c->tsid = tsid;
+    c->perms = perms;
+    c->next = avc_callbacks;
+    avc_callbacks = c;
+ out:
+    return rc;
+}
+
+static inline int avc_sidcmp(u32 x, u32 y)
+{
+    return (x == y || x == SECSID_WILD || y == SECSID_WILD);
+}
+
+/**
  * avc_update_node Update an AVC entry
  * @event : Updating event
  * @perms : Permission mask bits
@@ -613,7 +671,7 @@ void avc_audit(u32 ssid, u32 tsid, u16 tclass, u32 requested,
  * otherwise, this function update the AVC entry. The original AVC-entry object
  * will release later by RCU.
  */
-static int avc_update_node(u32 perms, u32 ssid, u32 tsid, u16 tclass,
+static int avc_update_node(u32 event, u32 perms, u32 ssid, u32 tsid, u16 tclass,
                            u32 seqno)
 {
     int hvalue, rc = 0;
@@ -662,7 +720,28 @@ static int avc_update_node(u32 perms, u32 ssid, u32 tsid, u16 tclass,
 
     avc_node_populate(node, ssid, tsid, tclass, &orig->ae.avd);
 
-    node->ae.avd.allowed |= perms;
+    switch ( event )
+    {
+    case AVC_CALLBACK_GRANT:
+        node->ae.avd.allowed |= perms;
+        break;
+    case AVC_CALLBACK_TRY_REVOKE:
+    case AVC_CALLBACK_REVOKE:
+        node->ae.avd.allowed &= ~perms;
+        break;
+    case AVC_CALLBACK_AUDITALLOW_ENABLE:
+        node->ae.avd.auditallow |= perms;
+        break;
+    case AVC_CALLBACK_AUDITALLOW_DISABLE:
+        node->ae.avd.auditallow &= ~perms;
+        break;
+    case AVC_CALLBACK_AUDITDENY_ENABLE:
+        node->ae.avd.auditdeny |= perms;
+        break;
+    case AVC_CALLBACK_AUDITDENY_DISABLE:
+        node->ae.avd.auditdeny &= ~perms;
+        break;
+    }
     avc_node_replace(node, orig);
  out_unlock:
     spin_unlock_irqrestore(lock, flag);
@@ -676,7 +755,8 @@ static int avc_update_node(u32 perms, u32 ssid, u32 tsid, u16 tclass,
  */
 int avc_ss_reset(u32 seqno)
 {
-    int i, rc = 0;
+    struct avc_callback_node *c;
+    int i, rc = 0, tmprc;
     unsigned long flag;
     struct avc_node *node;
     struct hlist_head *head;
@@ -696,6 +776,19 @@ int avc_ss_reset(u32 seqno)
         spin_unlock_irqrestore(lock, flag);
     }
     
+    for ( c = avc_callbacks; c; c = c->next )
+    {
+        if ( c->events & AVC_CALLBACK_RESET )
+        {
+            tmprc = c->callback(AVC_CALLBACK_RESET,
+                                0, 0, 0, 0, NULL);
+            /* save the first error encountered for the return
+               value and continue processing the callbacks */
+            if ( !rc )
+                rc = tmprc;
+        }
+    }
+
     avc_latest_notif_update(seqno, 0);
     return rc;
 }
@@ -757,7 +850,8 @@ int avc_has_perm_noaudit(u32 ssid, u32 tsid, u16 tclass, u32 requested,
     if ( denied )
     {
         if ( !flask_enforcing || (avd->flags & AVD_FLAGS_PERMISSIVE) )
-            avc_update_node(requested, ssid,tsid,tclass,avd->seqno);
+            avc_update_node(AVC_CALLBACK_GRANT,requested,
+                            ssid,tsid,tclass,avd->seqno);
         else
             rc = -EACCES;
     }

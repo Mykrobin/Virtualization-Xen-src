@@ -13,9 +13,11 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/cpu.h>
 #include <xen/cpumask.h>
@@ -90,11 +92,6 @@ static unsigned int cpu_mask_to_apicid_x2apic_cluster(const cpumask_t *cpumask)
     return dest;
 }
 
-static void send_IPI_self_x2apic(uint8_t vector)
-{
-    apic_wrmsr(APIC_SELF_IPI, vector);
-}
-
 static void send_IPI_mask_x2apic_phys(const cpumask_t *cpumask, int vector)
 {
     unsigned int cpu;
@@ -106,12 +103,12 @@ static void send_IPI_mask_x2apic_phys(const cpumask_t *cpumask, int vector)
      * CPU is seen by notified remote CPUs. The WRMSR contained within
      * apic_icr_write() can otherwise be executed early.
      * 
-     * The reason smp_mb() is sufficient here is subtle: the register arguments
+     * The reason mb() is sufficient here is subtle: the register arguments
      * to WRMSR must depend on a memory read executed after the barrier. This
      * is guaranteed by cpu_physical_id(), which reads from a global array (and
      * so cannot be hoisted above the barrier even by a clever compiler).
      */
-    smp_mb();
+    mb();
 
     local_irq_save(flags);
 
@@ -135,7 +132,7 @@ static void send_IPI_mask_x2apic_cluster(const cpumask_t *cpumask, int vector)
     const cpumask_t *cluster_cpus;
     unsigned long flags;
 
-    smp_mb(); /* See above for an explanation. */
+    mb(); /* See above for an explanation. */
 
     local_irq_save(flags);
 
@@ -201,21 +198,18 @@ static int update_clusterinfo(
         if ( !cluster_cpus_spare )
             cluster_cpus_spare = xzalloc(cpumask_t);
         if ( !cluster_cpus_spare ||
-             !cond_alloc_cpumask_var(&per_cpu(scratch_mask, cpu)) )
+             !alloc_cpumask_var(&per_cpu(scratch_mask, cpu)) )
             err = -ENOMEM;
         break;
     case CPU_UP_CANCELED:
     case CPU_DEAD:
-    case CPU_REMOVE:
-        if ( park_offline_cpus == (action != CPU_REMOVE) )
-            break;
         if ( per_cpu(cluster_cpus, cpu) )
         {
             cpumask_clear_cpu(cpu, per_cpu(cluster_cpus, cpu));
             if ( cpumask_empty(per_cpu(cluster_cpus, cpu)) )
-                XFREE(per_cpu(cluster_cpus, cpu));
+                xfree(per_cpu(cluster_cpus, cpu));
         }
-        FREE_CPUMASK_VAR(per_cpu(scratch_mask, cpu));
+        free_cpumask_var(per_cpu(scratch_mask, cpu));
         break;
     }
 

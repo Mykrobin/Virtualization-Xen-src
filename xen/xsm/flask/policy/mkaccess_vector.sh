@@ -42,7 +42,7 @@ $1 == "class"	{
 			} 
 			av_defined[tclass] = 1;
 
-			permission = 0;
+			permission = 1;
 
 			nextstate = "INHERITS_OR_CLASS-OPENBRACKET";
 			next;
@@ -108,8 +108,8 @@ $1 == "{"	{
 
 			for (i = 0; i < spaces; i++) 
 				printf(" ") > outfile; 
-			printf("(1UL << %u)\n", permission) > outfile;
-			permission = permission + 1;
+			printf("0x%08xUL\n", permission) > outfile; 
+			permission = permission * 2;
 		}
 $1 == "}"	{
 			if (nextstate != "CLASS-CLOSEBRACKET" && 

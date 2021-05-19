@@ -1,11 +1,9 @@
-#include <xenevtchn.h>
 #include <xenctrl.h>
 #include <xc_private.h>
 #include <xc_core.h>
-#include <xenstore.h>
+#include <errno.h>
 #include <unistd.h>
 
-#undef ARRAY_SIZE /* We shouldn't be including xc_private.h */
 #define ARRAY_SIZE(a) (sizeof (a) / sizeof ((a)[0]))
 
 static xc_interface *xch;
@@ -50,7 +48,7 @@ static int hp_mem_online_func(int argc, char *argv[])
     ret = xc_mark_page_online(xch, mfn, mfn, &status);
 
     if (ret < 0)
-        fprintf(stderr, "Onlining page mfn %lx failed, error %x", mfn, errno);
+        fprintf(stderr, "Onlining page mfn %lx failed, error %x", mfn, ret);
     else if (status & (PG_ONLINE_FAILED |PG_ONLINE_BROKEN)) {
         fprintf(stderr, "Onlining page mfn %lx is broken, "
                         "Memory online failed\n", mfn);
@@ -81,7 +79,7 @@ static int hp_mem_query_func(int argc, char *argv[])
     ret = xc_query_page_offline_status(xch, mfn, mfn, &status);
 
     if (ret < 0)
-        fprintf(stderr, "Querying page mfn %lx failed, error %x", mfn, errno);
+        fprintf(stderr, "Querying page mfn %lx failed, error %x", mfn, ret);
     else
     {
 		printf("Memory Status %x: [", status);
@@ -99,12 +97,11 @@ static int hp_mem_query_func(int argc, char *argv[])
     return ret;
 }
 
-static int suspend_guest(xc_interface *xch, xenevtchn_handle *xce, int domid,
-                         int *evtchn, int *lockfd)
+extern int xs_suspend_evtchn_port(int domid);
+
+static int suspend_guest(xc_interface *xch, xc_evtchn *xce, int domid, int *evtchn)
 {
     int port, rc, suspend_evtchn = -1;
-
-    *lockfd = -1;
 
     if (!evtchn)
         return -1;
@@ -115,8 +112,7 @@ static int suspend_guest(xc_interface *xch, xenevtchn_handle *xce, int domid,
         fprintf(stderr, "DOM%d: No suspend port, try live migration\n", domid);
         goto failed;
     }
-    suspend_evtchn = xc_suspend_evtchn_init_exclusive(xch, xce, domid,
-                                                      port, lockfd);
+    suspend_evtchn = xc_suspend_evtchn_init(xch, xce, domid, port);
     if (suspend_evtchn < 0)
     {
         fprintf(stderr, "Suspend evtchn initialization failed\n");
@@ -124,7 +120,7 @@ static int suspend_guest(xc_interface *xch, xenevtchn_handle *xce, int domid,
     }
     *evtchn = suspend_evtchn;
 
-    rc = xenevtchn_notify(xce, suspend_evtchn);
+    rc = xc_evtchn_notify(xce, suspend_evtchn);
     if (rc < 0)
     {
         fprintf(stderr, "Failed to notify suspend channel: errno %d\n", rc);
@@ -139,8 +135,7 @@ static int suspend_guest(xc_interface *xch, xenevtchn_handle *xce, int domid,
 
 failed:
     if (suspend_evtchn != -1)
-        xc_suspend_evtchn_release(xch, xce, domid,
-                                  suspend_evtchn, lockfd);
+        xc_suspend_evtchn_release(xch, xce, domid, suspend_evtchn);
 
     return -1;
 }
@@ -161,7 +156,7 @@ static int hp_mem_offline_func(int argc, char *argv[])
     printf("Prepare to offline MEMORY mfn %lx\n", mfn);
     ret = xc_mark_page_offline(xch, mfn, mfn, &status);
     if (ret < 0) {
-        fprintf(stderr, "Offlining page mfn %lx failed, error %x\n", mfn, errno);
+        fprintf(stderr, "Offlining page mfn %lx failed, error %x\n", mfn, ret);
         if (status & (PG_OFFLINE_XENPAGE | PG_OFFLINE_FAILED))
             fprintf(stderr, "XEN_PAGE is not permitted be offlined\n");
         else if (status & (PG_OFFLINE_FAILED | PG_OFFLINE_NOT_CONV_RAM))
@@ -198,9 +193,9 @@ static int hp_mem_offline_func(int argc, char *argv[])
                 }
                 else if (status & PG_OFFLINE_OWNED)
                 {
-                    int result, suspend_evtchn = -1, suspend_lockfd = -1;
-                    xenevtchn_handle *xce;
-                    xce = xenevtchn_open(NULL, 0);
+                    int result, suspend_evtchn = -1;
+                    xc_evtchn *xce;
+                    xce = xc_evtchn_open(NULL, 0);
 
                     if (xce == NULL)
                     {
@@ -210,12 +205,11 @@ static int hp_mem_offline_func(int argc, char *argv[])
                     }
 
                     domid = status >> PG_OFFLINE_OWNER_SHIFT;
-                    if (suspend_guest(xch, xce, domid,
-                                      &suspend_evtchn, &suspend_lockfd))
+                    if (suspend_guest(xch, xce, domid, &suspend_evtchn))
                     {
                         fprintf(stderr, "Failed to suspend guest %d for"
                                 " mfn %lx\n", domid, mfn);
-                        xenevtchn_close(xce);
+                        xc_evtchn_close(xce);
                         return -1;
                     }
 
@@ -237,9 +231,8 @@ static int hp_mem_offline_func(int argc, char *argv[])
                                 mfn, domid);
                     }
                     xc_domain_resume(xch, domid, 1);
-                    xc_suspend_evtchn_release(xch, xce, domid,
-                                              suspend_evtchn, &suspend_lockfd);
-                    xenevtchn_close(xce);
+                    xc_suspend_evtchn_release(xch, xce, domid, suspend_evtchn);
+                    xc_evtchn_close(xce);
                 }
                 break;
             }

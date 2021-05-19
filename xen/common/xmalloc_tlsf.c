@@ -23,6 +23,7 @@
  * Adapted for Xen by Dan Magenheimer (dan.magenheimer@oracle.com)
  */
 
+#include <xen/config.h>
 #include <xen/irq.h>
 #include <xen/mm.h>
 #include <xen/pfn.h>
@@ -137,9 +138,9 @@ static inline void MAPPING_SEARCH(unsigned long *r, int *fl, int *sl)
     }
     else
     {
-        t = (1 << (flsl(*r) - 1 - MAX_LOG2_SLI)) - 1;
+        t = (1 << (fls(*r) - 1 - MAX_LOG2_SLI)) - 1;
         *r = *r + t;
-        *fl = flsl(*r) - 1;
+        *fl = fls(*r) - 1;
         *sl = (*r >> (*fl - MAX_LOG2_SLI)) - MAX_SLI;
         *fl -= FLI_OFFSET;
         /*if ((*fl -= FLI_OFFSET) < 0) // FL will be always >0!
@@ -163,7 +164,7 @@ static inline void MAPPING_INSERT(unsigned long r, int *fl, int *sl)
     }
     else
     {
-        *fl = flsl(r) - 1;
+        *fl = fls(r) - 1;
         *sl = (r >> (*fl - MAX_LOG2_SLI)) - MAX_SLI;
         *fl -= FLI_OFFSET;
     }
@@ -176,7 +177,7 @@ static inline void MAPPING_INSERT(unsigned long r, int *fl, int *sl)
 static inline struct bhdr *FIND_SUITABLE_BLOCK(struct xmem_pool *p, int *fl,
                                                int *sl)
 {
-    u32 tmp = p->sl_bitmap[*fl] & (~0u << *sl);
+    u32 tmp = p->sl_bitmap[*fl] & (~0 << *sl);
     struct bhdr *b = NULL;
 
     if ( tmp )
@@ -186,7 +187,7 @@ static inline struct bhdr *FIND_SUITABLE_BLOCK(struct xmem_pool *p, int *fl,
     }
     else
     {
-        *fl = ffs(p->fl_bitmap & (~0u << (*fl + 1))) - 1;
+        *fl = ffs(p->fl_bitmap & (~0 << (*fl + 1))) - 1;
         if ( likely(*fl > 0) )
         {
             *sl = ffs(p->sl_bitmap[*fl]) - 1;

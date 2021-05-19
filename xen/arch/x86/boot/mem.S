@@ -1,7 +1,7 @@
         .code16
 
 #define SMAP    0x534d4150
-#define E820_BIOS_MAX 128
+#define E820MAX 128
 
 get_memory_map:
 
@@ -22,15 +22,16 @@ get_memory_map:
         cmpl    $SMAP,%eax                      # check the return is `SMAP'
         jne     .Lmem88
 
-        incw    bootsym(e820nr)
-        cmpw    $E820_BIOS_MAX,bootsym(e820nr)  # up to this many entries
+        movb    bootsym(e820nr),%al             # up to 128 entries
+        cmpb    $E820MAX,%al
         jae     .Lmem88
 
+        incb    bootsym(e820nr)
         movw    %di,%ax
         addw    $20,%ax
         movw    %ax,%di
-        testl   %ebx,%ebx                       # check to see if
-        jnz     1b                              # %ebx is set to EOF
+        cmpl    $0,%ebx                         # check to see if
+        jne     1b                              # %ebx is set to EOF
 
 .Lmem88:
         movb    $0x88, %ah
@@ -48,17 +49,17 @@ get_memory_map:
         int     $0x15
         jc      .Lint12
 
-        testw   %cx, %cx                        # Kludge to handle BIOSes
-        jnz     1f                              # which report their extended
-        testw   %dx, %dx                        # memory in AX/BX rather than
-        jnz     1f                              # CX/DX.  The spec I have read
+        cmpw    $0x0, %cx                       # Kludge to handle BIOSes
+        jne     1f                              # which report their extended
+        cmpw    $0x0, %dx                       # memory in AX/BX rather than
+        jne     1f                              # CX/DX.  The spec I have read
         movw    %ax, %cx                        # seems to indicate AX/BX 
         movw    %bx, %dx                        # are more reasonable anyway...
-1:      movzwl  %dx, %edx
+1:      andl    $0xffff,%edx                    # clear sign extend
         shll    $6,%edx                         # and go from 64k to 1k chunks
-        movzwl  %cx, %ecx
-        addl    %ecx, %edx                      # add in lower memory
         movl    %edx,bootsym(highmem_kb)        # store extended memory size
+        andl    $0xffff,%ecx                    # clear sign extend
+        addl    %ecx,bootsym(highmem_kb)        # and add lower memory into
 
 .Lint12:
         int     $0x12
@@ -66,27 +67,9 @@ get_memory_map:
 
         ret
 
-/*
- * Copy E820 map obtained from BIOS to a buffer allocated by Xen.
- * Input: %rdi: target address of e820 entry array
- *        %esi: maximum number of entries to copy
- * Output: %eax: number of entries copied
- */
-        .code64
-ENTRY(e820map_copy)
-        mov     %esi, %eax
-        lea     e820map(%rip), %rsi
-        mov     e820nr(%rip), %ecx
-        cmp     %ecx, %eax
-        cmova   %ecx, %eax                      # number of entries to move
-        imul    $5, %eax, %ecx
-        rep movsl                               # do the move
-        ret
-
-        .align  4
-e820map:
-        .fill   E820_BIOS_MAX*20,1,0
-e820nr:
+GLOBAL(e820map)
+        .fill   E820MAX*20,1,0
+GLOBAL(e820nr)
         .long   0
 GLOBAL(lowmem_kb)
         .long   0

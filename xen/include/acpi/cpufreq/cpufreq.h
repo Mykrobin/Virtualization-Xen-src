@@ -41,18 +41,6 @@ struct cpufreq_cpuinfo {
     unsigned int        transition_latency; /* in 10^(-9) s = nanoseconds */
 };
 
-struct perf_limits {
-    bool_t no_turbo;
-    bool_t turbo_disabled;
-    uint32_t turbo_pct;
-    uint32_t max_perf_pct; /* max performance in percentage */
-    uint32_t min_perf_pct; /* min performance in percentage */
-    uint32_t max_perf;
-    uint32_t min_perf;
-    uint32_t max_policy_pct;
-    uint32_t min_policy_pct;
-};
-
 struct cpufreq_policy {
     cpumask_var_t       cpus;          /* affected CPUs */
     unsigned int        shared_type;   /* ANY or ALL affected CPUs
@@ -64,7 +52,6 @@ struct cpufreq_policy {
     unsigned int        max;    /* in kHz */
     unsigned int        cur;    /* in kHz, only needed if cpufreq
                                  * governors are used */
-    struct perf_limits  limits;
     struct cpufreq_governor     *governor;
 
     bool_t              resume; /* flag for cpufreq 1st run
@@ -78,6 +65,8 @@ DECLARE_PER_CPU(struct cpufreq_policy *, cpufreq_cpu_policy);
 
 extern int __cpufreq_set_policy(struct cpufreq_policy *data,
                                 struct cpufreq_policy *policy);
+
+void cpufreq_cmdline_parse(char *);
 
 #define CPUFREQ_SHARED_TYPE_NONE (0) /* None */
 #define CPUFREQ_SHARED_TYPE_HW   (1) /* HW does needed coordination */
@@ -156,7 +145,6 @@ struct cpufreq_driver {
     char   name[CPUFREQ_NAME_LEN];
     int    (*init)(struct cpufreq_policy *policy);
     int    (*verify)(struct cpufreq_policy *policy);
-    int    (*setpolicy)(struct cpufreq_policy *policy);
     int    (*update)(int cpuid, struct cpufreq_policy *policy);
     int    (*target)(struct cpufreq_policy *policy,
                      unsigned int target_freq,
@@ -168,7 +156,32 @@ struct cpufreq_driver {
 
 extern struct cpufreq_driver *cpufreq_driver;
 
-int cpufreq_register_driver(struct cpufreq_driver *);
+static __inline__ 
+int cpufreq_register_driver(struct cpufreq_driver *driver_data)
+{
+    if (!driver_data         || 
+        !driver_data->init   || 
+        !driver_data->exit   || 
+        !driver_data->verify || 
+        !driver_data->target)
+        return -EINVAL;
+
+    if (cpufreq_driver)
+        return -EBUSY;
+
+    cpufreq_driver = driver_data;
+    return 0;
+}
+
+static __inline__ 
+int cpufreq_unregister_driver(struct cpufreq_driver *driver)
+{
+    if (!cpufreq_driver || (driver != cpufreq_driver))
+        return -EINVAL;
+
+    cpufreq_driver = NULL;
+    return 0;
+}
 
 static __inline__
 void cpufreq_verify_within_limits(struct cpufreq_policy *policy,
@@ -225,8 +238,8 @@ struct cpu_dbs_info_s {
     struct cpufreq_frequency_table *freq_table;
     int cpu;
     unsigned int enable:1;
+    unsigned int stoppable:1;
     unsigned int turbo_enabled:1;
-    int8_t stoppable;
 };
 
 int cpufreq_governor_dbs(struct cpufreq_policy *policy, unsigned int event);

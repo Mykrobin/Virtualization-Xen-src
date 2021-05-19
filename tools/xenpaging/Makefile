@@ -1,9 +1,8 @@
 XEN_ROOT=$(CURDIR)/../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-# xenpaging.c and file_ops.c incorrectly use libxc internals
-CFLAGS += $(CFLAGS_libxentoollog) $(CFLAGS_libxenevtchn) $(CFLAGS_libxenctrl) $(CFLAGS_libxenstore) $(PTHREAD_CFLAGS) -I$(XEN_ROOT)/tools/libxc $(CFLAGS_libxencall)
-LDLIBS += $(LDLIBS_libxentoollog) $(LDLIBS_libxenevtchn) $(LDLIBS_libxenctrl) $(LDLIBS_libxenstore) $(PTHREAD_LIBS)
+CFLAGS += $(CFLAGS_libxenctrl) $(CFLAGS_libxenstore) $(PTHREAD_CFLAGS)
+LDLIBS += $(LDLIBS_libxenctrl) $(LDLIBS_libxenstore) $(PTHREAD_LIBS)
 LDFLAGS += $(PTHREAD_LDFLAGS)
 
 POLICY    = default
@@ -14,6 +13,7 @@ SRCS     += pagein.c
 
 CFLAGS   += -Werror
 CFLAGS   += -Wno-unused
+CFLAGS   += -g
 
 OBJS     = $(SRCS:.c=.o)
 IBINS    = xenpaging
@@ -24,22 +24,17 @@ xenpaging: $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS) $(APPEND_LDFLAGS)
 
 install: all
-	$(INSTALL_DIR) -m 0700 $(DESTDIR)$(XEN_PAGING_DIR)
-	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC_BIN)
-	$(INSTALL_PROG) $(IBINS) $(DESTDIR)$(LIBEXEC_BIN)
-
-uninstall:
-	rm -f $(addprefix $(DESTDIR)$(LIBEXEC_BIN)/, $(IBINS))
+	$(INSTALL_DIR) $(DESTDIR)$(XEN_PAGING_DIR)
+	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC)
+	$(INSTALL_PROG) $(IBINS) $(DESTDIR)$(LIBEXEC)
 
 clean:
-	rm -f *.o *~ $(DEPS_RM) xen TAGS $(IBINS) $(LIB)
+	rm -f *.o *~ $(DEPS) xen TAGS $(IBINS) $(LIB)
 
-distclean: clean
-
-.PHONY: clean install distclean uninstall
+.PHONY: clean install
 
 .PHONY: TAGS
 TAGS:
 	etags -t $(SRCS) *.h
 
--include $(DEPS_INCLUDE)
+-include $(DEPS)

@@ -42,7 +42,7 @@
 #define UART_IER_ELSI     0x04    /* rx line status       */
 #define UART_IER_EMSI     0x08    /* MODEM status         */
 
-/* Interrupt Identification Register */
+/* Interrupt Identificatiegister */
 #define UART_IIR_NOINT    0x01    /* no interrupt pending */
 #define UART_IIR_IMA      0x06    /* interrupt identity:  */
 #define UART_IIR_LSI      0x06    /*  - rx line status    */
@@ -124,6 +124,26 @@
 /* Resume retry settings */
 #define RESUME_DELAY      MILLISECS(10)
 #define RESUME_RETRIES    100
+
+/* Enhanced feature register */
+#define UART_OMAP_EFR     0x02
+
+#define UART_OMAP_EFR_ECB 0x10 /* Enhanced control bit */
+
+/* Mode definition register 1 */
+#define UART_OMAP_MDR1    0x08
+
+/*
+ * These are the definitions for the MDR1 register
+ */
+#define UART_OMAP_MDR1_16X_MODE 0x00 /* UART 16x mode           */
+#define UART_OMAP_MDR1_DISABLE  0x07 /* Disable (default state) */
+
+/* Supplementary control register */
+#define UART_OMAP_SCR     0x10
+
+/* SCR register bitmasks */
+#define OMAP_UART_SCR_RX_TRIG_GRANU1_MASK (1 << 7)
 
 #endif /* __XEN_8250_UART_H__ */
 

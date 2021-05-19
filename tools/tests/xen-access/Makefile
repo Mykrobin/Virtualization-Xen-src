@@ -2,14 +2,13 @@ XEN_ROOT=$(CURDIR)/../../..
 include $(XEN_ROOT)/tools/Rules.mk
 
 CFLAGS += -Werror
-CFLAGS += -DXC_WANT_COMPAT_DEVICEMODEL_API
 
 CFLAGS += $(CFLAGS_libxenctrl)
 CFLAGS += $(CFLAGS_libxenguest)
-CFLAGS += $(CFLAGS_libxenevtchn)
 CFLAGS += $(CFLAGS_xeninclude)
 
-TARGETS-y := xen-access
+TARGETS-y := 
+TARGETS-$(CONFIG_X86) += xen-access
 TARGETS := $(TARGETS-y)
 
 .PHONY: all
@@ -20,12 +19,9 @@ build: $(TARGETS)
 
 .PHONY: clean
 clean:
-	$(RM) *.o $(TARGETS) *~ $(DEPS_RM)
-
-.PHONY: distclean
-distclean: clean
+	$(RM) *.o $(TARGETS) *~ $(DEPS)
 
 xen-access: xen-access.o Makefile
-	$(CC) -o $@ $< $(LDFLAGS) $(LDLIBS_libxenctrl) $(LDLIBS_libxenguest) $(LDLIBS_libxenevtchn)
+	$(CC) -o $@ $< $(LDFLAGS) $(LDLIBS_libxenctrl) $(LDLIBS_libxenguest)
 
--include $(DEPS_INCLUDE)
+-include $(DEPS)

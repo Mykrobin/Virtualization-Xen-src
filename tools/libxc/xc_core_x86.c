@@ -10,7 +10,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  *
  * Copyright (c) 2007 Isaku Yamahata <yamahata at valinux co jp>
  *                    VA Linux Systems Japan K.K.
@@ -23,6 +24,10 @@
 
 #define GET_FIELD(_p, _f) ((dinfo->guest_width==8) ? ((_p)->x64._f) : ((_p)->x32._f))
 
+#ifndef MAX
+#define MAX(_a, _b) ((_a) >= (_b) ? (_a) : (_b))
+#endif
+
 int
 xc_core_arch_gpfn_may_present(struct xc_core_arch_context *arch_ctxt,
                               unsigned long pfn)
@@ -32,6 +37,12 @@ xc_core_arch_gpfn_may_present(struct xc_core_arch_context *arch_ctxt,
             && pfn < (1ULL<<32) >> PAGE_SHIFT)) /* MMIO */
         return 0;
     return 1;
+}
+
+
+static int nr_gpfns(xc_interface *xch, domid_t domid)
+{
+    return xc_domain_maximum_gpfn(xch, domid) + 1;
 }
 
 int
@@ -46,11 +57,8 @@ xc_core_arch_memory_map_get(xc_interface *xch, struct xc_core_arch_context *unus
                             xc_core_memory_map_t **mapp,
                             unsigned int *nr_entries)
 {
-    xen_pfn_t p2m_size = 0;
+    unsigned long p2m_size = nr_gpfns(xch, info->domid);
     xc_core_memory_map_t *map;
-
-    if ( xc_domain_nr_gpfns(xch, info->domid, &p2m_size) < 0 )
-        return -1;
 
     map = malloc(sizeof(*map));
     if ( map == NULL )
@@ -84,12 +92,7 @@ xc_core_arch_map_p2m_rw(xc_interface *xch, struct domain_info_context *dinfo, xc
     int err;
     int i;
 
-    if ( xc_domain_nr_gpfns(xch, info->domid, &dinfo->p2m_size) < 0 )
-    {
-        ERROR("Could not get maximum GPFN!");
-        goto out;
-    }
-
+    dinfo->p2m_size = nr_gpfns(xch, info->domid);
     if ( dinfo->p2m_size < info->nr_pages  )
     {
         ERROR("p2m_size < nr_pages -1 (%lx < %lx", dinfo->p2m_size, info->nr_pages - 1);
@@ -206,14 +209,6 @@ xc_core_arch_map_p2m_writable(xc_interface *xch, unsigned int guest_width, xc_do
     return xc_core_arch_map_p2m_rw(xch, dinfo, info,
                                    live_shinfo, live_p2m, pfnp, 1);
 }
-
-int
-xc_core_arch_get_scratch_gpfn(xc_interface *xch, uint32_t domid,
-                              xen_pfn_t *gpfn)
-{
-    return xc_domain_nr_gpfns(xch, domid, gpfn);
-}
-
 /*
  * Local variables:
  * mode: C

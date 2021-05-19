@@ -17,7 +17,7 @@ extern void smp_send_state_dump(unsigned int cpu);
 /*
  * Prepare machine for booting other CPUs.
  */
-extern void smp_prepare_cpus(void);
+extern void smp_prepare_cpus(unsigned int max_cpus);
 
 /*
  * Final polishing of CPUs
@@ -70,7 +70,5 @@ void smp_send_call_function_mask(const cpumask_t *mask);
 int alloc_cpu_id(void);
 
 extern void *stack_base[NR_CPUS];
-
-void initialize_cpu_data(unsigned int cpu);
 
 #endif /* __XEN_SMP_H__ */

@@ -13,6 +13,7 @@
  *    Keir Fraser <keir@xen.org>
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/sched.h>
 #include <xen/softirq.h>
@@ -111,15 +112,11 @@ void do_tasklet(void)
     struct list_head *list = &per_cpu(tasklet_list, cpu);
 
     /*
-     * We want to be sure any caller has checked that a tasklet is both
-     * enqueued and scheduled, before calling this. And, if the caller has
-     * actually checked, it's not an issue that we are outside of the
-     * critical region, in fact:
-     * - TASKLET_enqueued is cleared only here,
-     * - TASKLET_scheduled is only cleared when schedule() find it set,
-     *   without TASKLET_enqueued being set as well.
+     * Work must be enqueued *and* scheduled. Otherwise there is no work to
+     * do, and/or scheduler needs to run to update idle vcpu priority.
      */
-    ASSERT(tasklet_work_to_do(cpu));
+    if ( likely(*work_to_do != (TASKLET_enqueued|TASKLET_scheduled)) )
+        return;
 
     spin_lock_irq(&tasklet_lock);
 
@@ -156,10 +153,6 @@ void tasklet_kill(struct tasklet *t)
 
     spin_lock_irqsave(&tasklet_lock, flags);
 
-    /* Cope with uninitialised tasklets. */
-    if ( list_head_is_null(&t->list) )
-        goto unlock;
-
     if ( !list_empty(&t->list) )
     {
         BUG_ON(t->is_dead || t->is_running || (t->scheduled_on < 0));
@@ -176,7 +169,6 @@ void tasklet_kill(struct tasklet *t)
         spin_lock_irqsave(&tasklet_lock, flags);
     }
 
- unlock:
     spin_unlock_irqrestore(&tasklet_lock, flags);
 }
 

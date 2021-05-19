@@ -14,7 +14,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #include "xc_private.h"
@@ -26,18 +27,129 @@
 #include <pthread.h>
 #include <assert.h>
 
-struct xc_interface_core *xc_interface_open(xentoollog_logger *logger,
-                                            xentoollog_logger *dombuild_logger,
-                                            unsigned open_flags)
-{
-    struct xc_interface_core xch_buf = { 0 }, *xch = &xch_buf;
+#ifndef __MINIOS__
+#include <dlfcn.h>
+#endif
 
+#define XENCTRL_OSDEP "XENCTRL_OSDEP"
+
+/*
+ * Returns a (shallow) copy of the xc_osdep_info_t for the
+ * active OS interface.
+ *
+ * On success a handle to the relevant library is opened.  The user
+ * must subsequently call xc_osdep_put_info() when it is
+ * finished with the library.
+ *
+ * Logs IFF xch != NULL.
+ *
+ * Returns:
+ *  0 - on success
+ * -1 - on error
+ */
+static int xc_osdep_get_info(xc_interface *xch, xc_osdep_info_t *info)
+{
+    int rc = -1;
+#ifndef __MINIOS__
+    const char *lib = getenv(XENCTRL_OSDEP);
+    xc_osdep_info_t *pinfo;
+    void *dl_handle = NULL;
+
+    if ( lib != NULL )
+    {
+        if ( getuid() != geteuid() )
+        {
+            if ( xch ) ERROR("cannot use %s=%s with setuid application", XENCTRL_OSDEP, lib);
+            abort();
+        }
+        if ( getgid() != getegid() )
+        {
+            if ( xch ) ERROR("cannot use %s=%s with setgid application", XENCTRL_OSDEP, lib);
+            abort();
+        }
+
+        dl_handle = dlopen(lib, RTLD_LAZY|RTLD_LOCAL);
+        if ( !dl_handle )
+        {
+            if ( xch ) ERROR("unable to open osdep library %s: %s", lib, dlerror());
+            goto out;
+        }
+
+        pinfo = dlsym(dl_handle, "xc_osdep_info");
+        if ( !pinfo )
+        {
+            if ( xch ) ERROR("unable to find xc_osinteface_info in %s: %s", lib, dlerror());
+            goto out;
+        }
+
+        *info = *pinfo;
+        info->dl_handle = dl_handle;
+    }
+    else
+#endif
+    {
+        *info = xc_osdep_info;
+        info->dl_handle = NULL;
+    }
+
+    rc = 0;
+
+#ifndef __MINIOS__
+out:
+    if ( dl_handle && rc == -1 )
+        dlclose(dl_handle);
+#endif
+
+    return rc;
+}
+
+static void xc_osdep_put(xc_osdep_info_t *info)
+{
+#ifndef __MINIOS__
+    if ( info->dl_handle )
+        dlclose(info->dl_handle);
+#endif
+}
+
+static const char *xc_osdep_type_name(enum xc_osdep_type type)
+{
+    switch ( type )
+    {
+    case XC_OSDEP_PRIVCMD: return "privcmd";
+    case XC_OSDEP_EVTCHN:  return "evtchn";
+    case XC_OSDEP_GNTTAB:  return "gnttab";
+    case XC_OSDEP_GNTSHR:  return "gntshr";
+    }
+    return "unknown";
+}
+
+static struct xc_interface_core *xc_interface_open_common(xentoollog_logger *logger,
+                                                          xentoollog_logger *dombuild_logger,
+                                                          unsigned open_flags,
+                                                          enum xc_osdep_type type)
+{
+    struct xc_interface_core xch_buf, *xch = &xch_buf;
+
+    xch->type = type;
     xch->flags = open_flags;
     xch->dombuild_logger_file = 0;
     xc_clear_last_error(xch);
 
     xch->error_handler   = logger;           xch->error_handler_tofree   = 0;
     xch->dombuild_logger = dombuild_logger;  xch->dombuild_logger_tofree = 0;
+
+    xch->hypercall_buffer_cache_nr = 0;
+
+    xch->hypercall_buffer_total_allocations = 0;
+    xch->hypercall_buffer_total_releases = 0;
+    xch->hypercall_buffer_current_allocations = 0;
+    xch->hypercall_buffer_maximum_allocations = 0;
+    xch->hypercall_buffer_cache_hits = 0;
+    xch->hypercall_buffer_cache_misses = 0;
+    xch->hypercall_buffer_cache_toobig = 0;
+
+    xch->ops_handle = XC_OSDEP_OPEN_ERROR;
+    xch->ops = NULL;
 
     if (!xch->error_handler) {
         xch->error_handler = xch->error_handler_tofree =
@@ -55,47 +167,44 @@ struct xc_interface_core *xc_interface_open(xentoollog_logger *logger,
     }
     *xch = xch_buf;
 
-    if (open_flags & XC_OPENFLAG_DUMMY)
-        return xch; /* We are done */
+    if (!(open_flags & XC_OPENFLAG_DUMMY)) {
+        if ( xc_osdep_get_info(xch, &xch->osdep) < 0 )
+            goto err;
 
-    xch->xcall = xencall_open(xch->error_handler,
-        open_flags & XC_OPENFLAG_NON_REENTRANT ? XENCALL_OPENFLAG_NON_REENTRANT : 0U);
-    if ( xch->xcall == NULL )
-        goto err;
+        xch->ops = xch->osdep.init(xch, type);
+        if ( xch->ops == NULL )
+        {
+            DPRINTF("OSDEP: interface %d (%s) not supported on this platform",
+                  type, xc_osdep_type_name(type));
+            goto err_put_iface;
+        }
 
-    xch->fmem = xenforeignmemory_open(xch->error_handler, 0);
-    if ( xch->fmem == NULL )
-        goto err;
-
-    xch->dmod = xendevicemodel_open(xch->error_handler, 0);
-    if ( xch->dmod == NULL )
-        goto err;
+        xch->ops_handle = xch->ops->open(xch);
+        if (xch->ops_handle == XC_OSDEP_OPEN_ERROR)
+            goto err_put_iface;
+    }
 
     return xch;
 
+err_put_iface:
+    xc_osdep_put(&xch->osdep);
  err:
-    xenforeignmemory_close(xch->fmem);
-    xencall_close(xch->xcall);
     xtl_logger_destroy(xch->error_handler_tofree);
     if (xch != &xch_buf) free(xch);
     return NULL;
 }
 
-int xc_interface_close(xc_interface *xch)
+static int xc_interface_close_common(xc_interface *xch)
 {
     int rc = 0;
 
     if (!xch)
-        return 0;
+	return 0;
 
-    rc = xencall_close(xch->xcall);
-    if (rc) PERROR("Could not close xencall interface");
+    rc = xch->ops->close(xch, xch->ops_handle);
+    if (rc) PERROR("Could not close hypervisor interface");
 
-    rc = xenforeignmemory_close(xch->fmem);
-    if (rc) PERROR("Could not close foreign memory interface");
-
-    rc = xendevicemodel_close(xch->dmod);
-    if (rc) PERROR("Could not close device model interface");
+    xc__hypercall_buffer_cache_release(xch);
 
     xtl_logger_destroy(xch->dombuild_logger_tofree);
     xtl_logger_destroy(xch->error_handler_tofree);
@@ -103,6 +212,83 @@ int xc_interface_close(xc_interface *xch)
     free(xch);
     return rc;
 }
+
+int xc_interface_is_fake(void)
+{
+    xc_osdep_info_t info;
+
+    if ( xc_osdep_get_info(NULL, &info) < 0 )
+        return -1;
+
+    /* Have a copy of info so can release the interface now. */
+    xc_osdep_put(&info);
+
+    return info.fake;
+}
+
+xc_interface *xc_interface_open(xentoollog_logger *logger,
+                                xentoollog_logger *dombuild_logger,
+                                unsigned open_flags)
+{
+    xc_interface *xch;
+
+    xch = xc_interface_open_common(logger, dombuild_logger, open_flags,
+                                   XC_OSDEP_PRIVCMD);
+
+    return xch;
+}
+
+int xc_interface_close(xc_interface *xch)
+{
+    return xc_interface_close_common(xch);
+}
+
+
+int do_xen_hypercall(xc_interface *xch, privcmd_hypercall_t *hypercall)
+{
+    return xch->ops->u.privcmd.hypercall(xch, xch->ops_handle, hypercall);
+}
+
+xc_evtchn *xc_evtchn_open(xentoollog_logger *logger,
+                             unsigned open_flags)
+{
+    xc_evtchn *xce;
+
+    xce = xc_interface_open_common(logger, NULL, open_flags,
+                                   XC_OSDEP_EVTCHN);
+
+    return xce;
+}
+
+int xc_evtchn_close(xc_evtchn *xce)
+{
+    return xc_interface_close_common(xce);
+}
+
+xc_gnttab *xc_gnttab_open(xentoollog_logger *logger,
+                             unsigned open_flags)
+{
+    return xc_interface_open_common(logger, NULL, open_flags,
+                                    XC_OSDEP_GNTTAB);
+}
+
+int xc_gnttab_close(xc_gnttab *xcg)
+{
+    return xc_interface_close_common(xcg);
+}
+
+xc_gntshr *xc_gntshr_open(xentoollog_logger *logger,
+                             unsigned open_flags)
+{
+    return xc_interface_open_common(logger, NULL, open_flags,
+                                    XC_OSDEP_GNTSHR);
+}
+
+int xc_gntshr_close(xc_gntshr *xcg)
+{
+    return xc_interface_close_common(xcg);
+}
+
 
 static pthread_key_t errbuf_pkey;
 static pthread_once_t errbuf_pkey_once = PTHREAD_ONCE_INIT;
@@ -190,26 +376,26 @@ void xc_report_error(xc_interface *xch, int code, const char *fmt, ...)
     va_end(args);
 }
 
-const char *xc_set_progress_prefix(xc_interface *xch, const char *doing)
+void xc_osdep_log(xc_interface *xch, xentoollog_level level, int code, const char *fmt, ...)
 {
-    const char *old = xch->currently_progress_reporting;
-
-    xch->currently_progress_reporting = doing;
-    return old;
+    va_list args;
+    va_start(args, fmt);
+    xc_reportv(xch, xch->error_handler, level, code, fmt, args);
+    va_end(args);
 }
 
-void xc_report_progress_single(xc_interface *xch, const char *doing)
-{
-    assert(doing);
-    xtl_progress(xch->error_handler, "xc", doing, 0, 0);
+void xc_report_progress_start(xc_interface *xch, const char *doing,
+                              unsigned long total) {
+    xch->currently_progress_reporting = doing;
+    xtl_progress(xch->error_handler, "xc", xch->currently_progress_reporting,
+                 0, total);
 }
 
 void xc_report_progress_step(xc_interface *xch,
-                             unsigned long done, unsigned long total)
-{
+                             unsigned long done, unsigned long total) {
     assert(xch->currently_progress_reporting);
-    xtl_progress(xch->error_handler, "xc",
-                 xch->currently_progress_reporting, done, total);
+    xtl_progress(xch->error_handler, "xc", xch->currently_progress_reporting,
+                 done, total);
 }
 
 int xc_get_pfn_type_batch(xc_interface *xch, uint32_t dom,
@@ -221,10 +407,10 @@ int xc_get_pfn_type_batch(xc_interface *xch, uint32_t dom,
     if ( xc_hypercall_bounce_pre(xch, arr) )
         return -1;
     domctl.cmd = XEN_DOMCTL_getpageframeinfo3;
-    domctl.domain = dom;
+    domctl.domain = (domid_t)dom;
     domctl.u.getpageframeinfo3.num = num;
     set_xen_guest_handle(domctl.u.getpageframeinfo3.array, arr);
-    rc = do_domctl_retry_efault(xch, &domctl);
+    rc = do_domctl(xch, &domctl);
     xc_hypercall_bounce_post(xch, arr);
     return rc;
 }
@@ -233,10 +419,11 @@ int xc_mmuext_op(
     xc_interface *xch,
     struct mmuext_op *op,
     unsigned int nr_ops,
-    uint32_t dom)
+    domid_t dom)
 {
+    DECLARE_HYPERCALL;
     DECLARE_HYPERCALL_BOUNCE(op, nr_ops*sizeof(*op), XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
-    long ret = -1;
+    long ret = -EINVAL;
 
     if ( xc_hypercall_bounce_pre(xch, op) )
     {
@@ -244,9 +431,13 @@ int xc_mmuext_op(
         goto out1;
     }
 
-    ret = xencall4(xch->xcall, __HYPERVISOR_mmuext_op,
-                   HYPERCALL_BUFFER_AS_ARG(op),
-                   nr_ops, 0, dom);
+    hypercall.op     = __HYPERVISOR_mmuext_op;
+    hypercall.arg[0] = HYPERCALL_BUFFER_AS_ARG(op);
+    hypercall.arg[1] = (unsigned long)nr_ops;
+    hypercall.arg[2] = (unsigned long)0;
+    hypercall.arg[3] = (unsigned long)dom;
+
+    ret = do_xen_hypercall(xch, &hypercall);
 
     xc_hypercall_bounce_post(xch, op);
 
@@ -256,7 +447,8 @@ int xc_mmuext_op(
 
 static int flush_mmu_updates(xc_interface *xch, struct xc_mmu *mmu)
 {
-    int rc, err = 0;
+    int err = 0;
+    DECLARE_HYPERCALL;
     DECLARE_NAMED_HYPERCALL_BOUNCE(updates, mmu->updates, mmu->idx*sizeof(*mmu->updates), XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
 
     if ( mmu->idx == 0 )
@@ -269,10 +461,13 @@ static int flush_mmu_updates(xc_interface *xch, struct xc_mmu *mmu)
         goto out;
     }
 
-    rc = xencall4(xch->xcall, __HYPERVISOR_mmu_update,
-                  HYPERCALL_BUFFER_AS_ARG(updates),
-                  mmu->idx, 0, mmu->subject);
-    if ( rc < 0 )
+    hypercall.op     = __HYPERVISOR_mmu_update;
+    hypercall.arg[0] = HYPERCALL_BUFFER_AS_ARG(updates);
+    hypercall.arg[1] = (unsigned long)mmu->idx;
+    hypercall.arg[2] = 0;
+    hypercall.arg[3] = mmu->subject;
+
+    if ( do_xen_hypercall(xch, &hypercall) < 0 )
     {
         ERROR("Failure when submitting mmu updates");
         err = 1;
@@ -313,10 +508,11 @@ int xc_flush_mmu_updates(xc_interface *xch, struct xc_mmu *mmu)
     return flush_mmu_updates(xch, mmu);
 }
 
-long do_memory_op(xc_interface *xch, int cmd, void *arg, size_t len)
+int do_memory_op(xc_interface *xch, int cmd, void *arg, size_t len)
 {
+    DECLARE_HYPERCALL;
     DECLARE_HYPERCALL_BOUNCE(arg, len, XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
-    long ret = -1;
+    long ret = -EINVAL;
 
     if ( xc_hypercall_bounce_pre(xch, arg) )
     {
@@ -324,32 +520,28 @@ long do_memory_op(xc_interface *xch, int cmd, void *arg, size_t len)
         goto out1;
     }
 
-    ret = xencall2(xch->xcall, __HYPERVISOR_memory_op,
-                   cmd, HYPERCALL_BUFFER_AS_ARG(arg));
+    hypercall.op     = __HYPERVISOR_memory_op;
+    hypercall.arg[0] = (unsigned long) cmd;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(arg);
+
+    ret = do_xen_hypercall(xch, &hypercall);
 
     xc_hypercall_bounce_post(xch, arg);
  out1:
     return ret;
 }
 
-int xc_maximum_ram_page(xc_interface *xch, unsigned long *max_mfn)
+long xc_maximum_ram_page(xc_interface *xch)
 {
-    long rc = do_memory_op(xch, XENMEM_maximum_ram_page, NULL, 0);
-
-    if ( rc >= 0 )
-    {
-        *max_mfn = rc;
-        rc = 0;
-    }
-    return rc;
+    return do_memory_op(xch, XENMEM_maximum_ram_page, NULL, 0);
 }
 
-long long xc_domain_get_cpu_usage(xc_interface *xch, uint32_t domid, int vcpu)
+long long xc_domain_get_cpu_usage( xc_interface *xch, domid_t domid, int vcpu )
 {
     DECLARE_DOMCTL;
 
     domctl.cmd = XEN_DOMCTL_getvcpuinfo;
-    domctl.domain = domid;
+    domctl.domain = (domid_t)domid;
     domctl.u.getvcpuinfo.vcpu   = (uint16_t)vcpu;
     if ( (do_domctl(xch, &domctl) < 0) )
     {
@@ -387,13 +579,42 @@ int xc_machphys_mfn_list(xc_interface *xch,
     return rc;
 }
 
+int xc_get_pfn_list(xc_interface *xch,
+                    uint32_t domid,
+                    uint64_t *pfn_buf,
+                    unsigned long max_pfns)
+{
+    DECLARE_DOMCTL;
+    DECLARE_HYPERCALL_BOUNCE(pfn_buf, max_pfns * sizeof(*pfn_buf), XC_HYPERCALL_BUFFER_BOUNCE_OUT);
+    int ret;
+
+#ifdef VALGRIND
+    memset(pfn_buf, 0, max_pfns * sizeof(*pfn_buf));
+#endif
+
+    if ( xc_hypercall_bounce_pre(xch, pfn_buf) )
+    {
+        PERROR("xc_get_pfn_list: pfn_buf bounce failed");
+        return -1;
+    }
+
+    domctl.cmd = XEN_DOMCTL_getmemlist;
+    domctl.domain   = (domid_t)domid;
+    domctl.u.getmemlist.max_pfns = max_pfns;
+    set_xen_guest_handle(domctl.u.getmemlist.buffer, pfn_buf);
+
+    ret = do_domctl(xch, &domctl);
+
+    xc_hypercall_bounce_post(xch, pfn_buf);
+
+    return (ret < 0) ? -1 : domctl.u.getmemlist.num_pfns;
+}
+
 long xc_get_tot_pages(xc_interface *xch, uint32_t domid)
 {
     xc_dominfo_t info;
-    if ( (xc_domain_getinfo(xch, domid, 1, &info) != 1) ||
-         (info.domid != domid) )
-        return -1;
-    return info.nr_pages;
+    return (xc_domain_getinfo(xch, domid, 1, &info) != 1) ?
+        -1 : info.nr_pages;
 }
 
 int xc_copy_to_domain_page(xc_interface *xch,
@@ -411,19 +632,17 @@ int xc_copy_to_domain_page(xc_interface *xch,
     return 0;
 }
 
-int xc_clear_domain_pages(xc_interface *xch,
-                          uint32_t domid,
-                          unsigned long dst_pfn,
-                          int num)
+int xc_clear_domain_page(xc_interface *xch,
+                         uint32_t domid,
+                         unsigned long dst_pfn)
 {
-    size_t size = num * PAGE_SIZE;
     void *vaddr = xc_map_foreign_range(
-        xch, domid, size, PROT_WRITE, dst_pfn);
+        xch, domid, PAGE_SIZE, PROT_WRITE, dst_pfn);
     if ( vaddr == NULL )
         return -1;
-    memset(vaddr, 0, size);
-    munmap(vaddr, size);
-    xc_domain_cacheflush(xch, domid, dst_pfn, num);
+    memset(vaddr, 0, PAGE_SIZE);
+    munmap(vaddr, PAGE_SIZE);
+    xc_domain_cacheflush(xch, domid, dst_pfn, 1);
     return 0;
 }
 
@@ -475,13 +694,6 @@ int xc_version(xc_interface *xch, int cmd, void *arg)
     case XENVER_commandline:
         sz = sizeof(xen_commandline_t);
         break;
-    case XENVER_build_id:
-        {
-            xen_build_id_t *build_id = (xen_build_id_t *)arg;
-            sz = sizeof(*build_id) + build_id->len;
-            HYPERCALL_BOUNCE_SET_DIR(arg, XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
-            break;
-        }
     default:
         ERROR("xc_version: unknown command %d\n", cmd);
         return -EINVAL;
@@ -494,6 +706,11 @@ int xc_version(xc_interface *xch, int cmd, void *arg)
         PERROR("Could not bounce buffer for version hypercall");
         return -ENOMEM;
     }
+
+#ifdef VALGRIND
+    if (sz != 0)
+        memset(hypercall_bounce_get(bounce), 0, sz);
+#endif
 
     rc = do_xen_version(xch, cmd, HYPERCALL_BUFFER(arg));
 
@@ -643,91 +860,6 @@ int write_exact(int fd, const void *data, size_t size)
 
     return 0;
 }
-
-#if defined(__MINIOS__)
-/*
- * MiniOS's libc doesn't know about writev(). Implement it as multiple write()s.
- */
-int writev_exact(int fd, const struct iovec *iov, int iovcnt)
-{
-    int rc, i;
-
-    for ( i = 0; i < iovcnt; ++i )
-    {
-        rc = write_exact(fd, iov[i].iov_base, iov[i].iov_len);
-        if ( rc )
-            return rc;
-    }
-
-    return 0;
-}
-#else
-int writev_exact(int fd, const struct iovec *iov, int iovcnt)
-{
-    struct iovec *local_iov = NULL;
-    int rc = 0, iov_idx = 0, saved_errno = 0;
-    ssize_t len;
-
-    while ( iov_idx < iovcnt )
-    {
-        /*
-         * Skip over iov[] entries with 0 length.
-         *
-         * This is needed to cover the case where we took a partial write and
-         * all remaining vectors are of 0 length.  In such a case, the results
-         * from writev() are indistinguishable from EOF.
-         */
-        while ( iov[iov_idx].iov_len == 0 )
-            if ( ++iov_idx == iovcnt )
-                goto out;
-
-        len = writev(fd, &iov[iov_idx], min(iovcnt - iov_idx, IOV_MAX));
-        saved_errno = errno;
-
-        if ( (len == -1) && (errno == EINTR) )
-            continue;
-        if ( len <= 0 )
-        {
-            rc = -1;
-            goto out;
-        }
-
-        /* Check iov[] to see whether we had a partial or complete write. */
-        while ( (len > 0) && (iov_idx < iovcnt) )
-        {
-            if ( len >= iov[iov_idx].iov_len )
-                len -= iov[iov_idx++].iov_len;
-            else
-            {
-                /* Partial write of iov[iov_idx]. Copy iov so we can adjust
-                 * element iov_idx and resubmit the rest. */
-                if ( !local_iov )
-                {
-                    local_iov = malloc(iovcnt * sizeof(*iov));
-                    if ( !local_iov )
-                    {
-                        saved_errno = ENOMEM;
-                        goto out;
-                    }
-
-                    iov = memcpy(local_iov, iov, iovcnt * sizeof(*iov));
-                }
-
-                local_iov[iov_idx].iov_base += len;
-                local_iov[iov_idx].iov_len  -= len;
-                break;
-            }
-        }
-    }
-
-    saved_errno = 0;
-
- out:
-    free(local_iov);
-    errno = saved_errno;
-    return rc;
-}
-#endif
 
 int xc_ffs8(uint8_t x)
 {

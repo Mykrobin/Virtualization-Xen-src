@@ -35,19 +35,18 @@ char *libxl__blktap_devpath(libxl__gc *gc,
     type = libxl__device_disk_string_of_format(format);
     err = tap_ctl_find(type, disk, &tap);
     if (err == 0) {
-        devname = GCSPRINTF("/dev/xen/blktap-2/tapdev%d", tap.minor);
+        devname = libxl__sprintf(gc, "/dev/xen/blktap-2/tapdev%d", tap.minor);
         if (devname)
             return devname;
     }
 
-    params = GCSPRINTF("%s:%s", type, disk);
+    params = libxl__sprintf(gc, "%s:%s", type, disk);
     err = tap_ctl_create(params, &devname);
     if (!err) {
         libxl__ptr_add(gc, devname);
         return devname;
     }
 
-    free(devname);
     return NULL;
 }
 

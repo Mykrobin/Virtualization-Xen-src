@@ -15,17 +15,17 @@
 #include <xen/xenoprof.h>
 #include <xen/guest_access.h>
 
-struct __packed frame_head {
+struct frame_head {
     struct frame_head * ebp;
     unsigned long ret;
-};
+} __attribute__((packed));
 typedef struct frame_head frame_head_t;
 DEFINE_XEN_GUEST_HANDLE(frame_head_t);
 
-struct __packed frame_head_32bit {
+struct frame_head_32bit {
     uint32_t ebp;
     uint32_t ret;
-};
+} __attribute__((packed));
 typedef struct frame_head_32bit frame_head32_t;
 DEFINE_COMPAT_HANDLE(frame_head32_t);
 
@@ -47,7 +47,7 @@ dump_hypervisor_backtrace(struct vcpu *vcpu, const struct frame_head *head,
 static inline int is_32bit_vcpu(struct vcpu *vcpu)
 {
     if (is_hvm_vcpu(vcpu))
-        return !hvm_long_mode_active(vcpu);
+        return !hvm_long_mode_enabled(vcpu);
     else
         return is_pv_32bit_vcpu(vcpu);
 }
@@ -150,7 +150,7 @@ static int valid_hypervisor_stack(const struct frame_head *head,
 void xenoprof_backtrace(struct vcpu *vcpu, const struct cpu_user_regs *regs,
 			unsigned long depth, int mode)
 {
-    const struct frame_head *head = (void *)regs->rbp;
+    const struct frame_head *head = (void *)regs->ebp;
 
     if (mode > 1) {
         while (depth-- && valid_hypervisor_stack(head, regs))

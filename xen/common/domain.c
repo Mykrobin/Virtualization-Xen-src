@@ -4,6 +4,7 @@
  * Generic domain-handling functions.
  */
 
+#include <xen/config.h>
 #include <xen/compat.h>
 #include <xen/init.h>
 #include <xen/lib.h>
@@ -14,7 +15,6 @@
 #include <xen/domain.h>
 #include <xen/mm.h>
 #include <xen/event.h>
-#include <xen/vm_event.h>
 #include <xen/time.h>
 #include <xen/console.h>
 #include <xen/softirq.h>
@@ -41,11 +41,6 @@
 #include <xsm/xsm.h>
 #include <xen/trace.h>
 #include <xen/tmem.h>
-#include <asm/setup.h>
-
-#ifdef CONFIG_X86
-#include <asm/guest.h>
-#endif
 
 /* Linux config option: propageted to domain0 */
 /* xen_processor_pmbits: xen control Cx, Px, ... */
@@ -64,16 +59,16 @@ DEFINE_RCU_READ_LOCK(domlist_read_lock);
 static struct domain *domain_hash[DOMAIN_HASH_SIZE];
 struct domain *domain_list;
 
-struct domain *hardware_domain __read_mostly;
-
-#ifdef CONFIG_LATE_HWDOM
-domid_t hardware_domid __read_mostly;
-integer_param("hardware_dom", hardware_domid);
-#endif
+struct domain *dom0;
 
 struct vcpu *idle_vcpu[NR_CPUS] __read_mostly;
 
 vcpu_info_t dummy_vcpu_info;
+
+int current_domain_id(void)
+{
+    return current->domain->domain_id;
+}
 
 static void __domain_finalise_shutdown(struct domain *d)
 {
@@ -113,16 +108,6 @@ static void vcpu_check_shutdown(struct vcpu *v)
     spin_unlock(&d->shutdown_lock);
 }
 
-static void vcpu_info_reset(struct vcpu *v)
-{
-    struct domain *d = v->domain;
-
-    v->vcpu_info = ((v->vcpu_id < XEN_LEGACY_MAX_VCPUS)
-                    ? (vcpu_info_t *)&shared_info(d, vcpu_info[v->vcpu_id])
-                    : &dummy_vcpu_info);
-    v->vcpu_info_mfn = INVALID_MFN;
-}
-
 struct vcpu *alloc_vcpu(
     struct domain *d, unsigned int vcpu_id, unsigned int cpu_id)
 {
@@ -135,18 +120,15 @@ struct vcpu *alloc_vcpu(
 
     v->domain = d;
     v->vcpu_id = vcpu_id;
-    v->dirty_cpu = VCPU_CPU_CLEAN;
 
     spin_lock_init(&v->virq_lock);
 
     tasklet_init(&v->continue_hypercall_tasklet, NULL, 0);
 
-    grant_table_init_vcpu(v);
-
-    if ( !zalloc_cpumask_var(&v->cpu_hard_affinity) ||
-         !zalloc_cpumask_var(&v->cpu_hard_affinity_tmp) ||
-         !zalloc_cpumask_var(&v->cpu_hard_affinity_saved) ||
-         !zalloc_cpumask_var(&v->cpu_soft_affinity) )
+    if ( !zalloc_cpumask_var(&v->cpu_affinity) ||
+         !zalloc_cpumask_var(&v->cpu_affinity_tmp) ||
+         !zalloc_cpumask_var(&v->cpu_affinity_saved) ||
+         !zalloc_cpumask_var(&v->vcpu_dirty_cpumask) )
         goto fail_free;
 
     if ( is_idle_domain(d) )
@@ -158,7 +140,10 @@ struct vcpu *alloc_vcpu(
         v->runstate.state = RUNSTATE_offline;        
         v->runstate.state_entry_time = NOW();
         set_bit(_VPF_down, &v->pause_flags);
-        vcpu_info_reset(v);
+        v->vcpu_info = ((vcpu_id < XEN_LEGACY_MAX_VCPUS)
+                        ? (vcpu_info_t *)&shared_info(d, vcpu_info[vcpu_id])
+                        : &dummy_vcpu_info);
+        v->vcpu_info_mfn = INVALID_MFN;
         init_waitqueue_vcpu(v);
     }
 
@@ -171,10 +156,10 @@ struct vcpu *alloc_vcpu(
  fail_wq:
         destroy_waitqueue_vcpu(v);
  fail_free:
-        free_cpumask_var(v->cpu_hard_affinity);
-        free_cpumask_var(v->cpu_hard_affinity_tmp);
-        free_cpumask_var(v->cpu_hard_affinity_saved);
-        free_cpumask_var(v->cpu_soft_affinity);
+        free_cpumask_var(v->cpu_affinity);
+        free_cpumask_var(v->cpu_affinity_tmp);
+        free_cpumask_var(v->cpu_affinity_saved);
+        free_cpumask_var(v->vcpu_dirty_cpumask);
         free_vcpu_struct(v);
         return NULL;
     }
@@ -193,96 +178,44 @@ struct vcpu *alloc_vcpu(
     /* Must be called after making new vcpu visible to for_each_vcpu(). */
     vcpu_check_shutdown(v);
 
-    if ( !is_idle_domain(d) )
-        domain_update_node_affinity(d);
+    domain_update_node_affinity(d);
 
     return v;
 }
 
-static int late_hwdom_init(struct domain *d)
-{
-#ifdef CONFIG_LATE_HWDOM
-    struct domain *dom0;
-    int rv;
-
-    if ( d != hardware_domain || d->domain_id == 0 )
-        return 0;
-
-    rv = xsm_init_hardware_domain(XSM_HOOK, d);
-    if ( rv )
-        return rv;
-
-    printk("Initialising hardware domain %d\n", hardware_domid);
-
-    dom0 = rcu_lock_domain_by_id(0);
-    ASSERT(dom0 != NULL);
-    /*
-     * Hardware resource ranges for domain 0 have been set up from
-     * various sources intended to restrict the hardware domain's
-     * access.  Apply these ranges to the actual hardware domain.
-     *
-     * Because the lists are being swapped, a side effect of this
-     * operation is that Domain 0's rangesets are cleared.  Since
-     * domain 0 should not be accessing the hardware when it constructs
-     * a hardware domain, this should not be a problem.  Both lists
-     * may be modified after this hypercall returns if a more complex
-     * device model is desired.
-     */
-    rangeset_swap(d->irq_caps, dom0->irq_caps);
-    rangeset_swap(d->iomem_caps, dom0->iomem_caps);
-#ifdef CONFIG_X86
-    rangeset_swap(d->arch.ioport_caps, dom0->arch.ioport_caps);
-    setup_io_bitmap(d);
-    setup_io_bitmap(dom0);
-#endif
-
-    rcu_unlock_domain(dom0);
-
-    iommu_hwdom_init(d);
-
-    return rv;
-#else
-    return 0;
-#endif
-}
-
-static unsigned int __read_mostly extra_hwdom_irqs;
+static unsigned int __read_mostly extra_dom0_irqs = 256;
 static unsigned int __read_mostly extra_domU_irqs = 32;
-
-static int __init parse_extra_guest_irqs(const char *s)
+static void __init parse_extra_guest_irqs(const char *s)
 {
     if ( isdigit(*s) )
         extra_domU_irqs = simple_strtoul(s, &s, 0);
     if ( *s == ',' && isdigit(*++s) )
-        extra_hwdom_irqs = simple_strtoul(s, &s, 0);
-
-    return *s ? -EINVAL : 0;
+        extra_dom0_irqs = simple_strtoul(s, &s, 0);
 }
 custom_param("extra_guest_irqs", parse_extra_guest_irqs);
 
-struct domain *domain_create(domid_t domid,
-                             struct xen_domctl_createdomain *config)
+struct domain *domain_create(
+    domid_t domid, unsigned int domcr_flags, uint32_t ssidref)
 {
-    struct domain *d, **pd, *old_hwdom = NULL;
+    struct domain *d, **pd;
     enum { INIT_xsm = 1u<<0, INIT_watchdog = 1u<<1, INIT_rangeset = 1u<<2,
            INIT_evtchn = 1u<<3, INIT_gnttab = 1u<<4, INIT_arch = 1u<<5 };
     int err, init_status = 0;
+    int poolid = CPUPOOLID_NONE;
 
     if ( (d = alloc_domain_struct()) == NULL )
         return ERR_PTR(-ENOMEM);
 
     d->domain_id = domid;
 
-    /* Debug sanity. */
-    ASSERT(is_system_domain(d) ? config == NULL : config != NULL);
-
-    TRACE_1D(TRC_DOM0_DOM_ADD, d->domain_id);
-
     lock_profile_register_struct(LOCKPROF_TYPE_PERDOM, d, domid, "Domain");
 
     if ( (err = xsm_alloc_security_domain(d)) != 0 )
         goto fail;
     init_status |= INIT_xsm;
+
+    watchdog_domain_init(d);
+    init_status |= INIT_watchdog;
 
     atomic_set(&d->refcnt, 1);
     spin_lock_init_prof(d, domain_lock);
@@ -296,65 +229,48 @@ struct domain *domain_create(domid_t domid,
     d->auto_node_affinity = 1;
 
     spin_lock_init(&d->shutdown_lock);
-    d->shutdown_code = SHUTDOWN_CODE_INVALID;
+    d->shutdown_code = -1;
 
     spin_lock_init(&d->pbuf_lock);
 
-    rwlock_init(&d->vnuma_rwlock);
-
     err = -ENOMEM;
-    if ( !zalloc_cpumask_var(&d->dirty_cpumask) )
+    if ( !zalloc_cpumask_var(&d->domain_dirty_cpumask) )
         goto fail;
+
+    if ( domcr_flags & DOMCRF_hvm )
+        d->guest_type = guest_type_hvm;
+    else if ( domcr_flags & DOMCRF_pvh )
+        d->guest_type = guest_type_pvh;
+
+    if ( domid == 0 )
+    {
+        d->is_pinned = opt_dom0_vcpus_pin;
+        d->disable_migrate = 1;
+    }
 
     rangeset_domain_initialise(d);
     init_status |= INIT_rangeset;
 
-    /* DOMID_{XEN,IO,etc} (other than IDLE) are sufficiently constructed. */
-    if ( is_system_domain(d) && !is_idle_domain(d) )
+    d->iomem_caps = rangeset_new(d, "I/O Memory", RANGESETF_prettyprint_hex);
+    d->irq_caps   = rangeset_new(d, "Interrupts", 0);
+    if ( (d->iomem_caps == NULL) || (d->irq_caps == NULL) )
+        goto fail;
+
+    if ( domcr_flags & DOMCRF_dummy )
         return d;
 
     if ( !is_idle_domain(d) )
     {
-        if ( config->flags & XEN_DOMCTL_CDF_hvm_guest )
-            d->guest_type = guest_type_hvm;
-        else
-            d->guest_type = guest_type_pv;
-
-        watchdog_domain_init(d);
-        init_status |= INIT_watchdog;
-
-        if ( domid == 0 || domid == hardware_domid )
-        {
-            if ( hardware_domid < 0 || hardware_domid >= DOMID_FIRST_RESERVED )
-                panic("The value of hardware_dom must be a valid domain ID");
-            d->is_pinned = opt_dom0_vcpus_pin;
-            d->disable_migrate = 1;
-            old_hwdom = hardware_domain;
-            hardware_domain = d;
-        }
-
-        if ( config->flags & XEN_DOMCTL_CDF_xs_domain )
-        {
-            d->is_xenstore = 1;
-            d->disable_migrate = 1;
-        }
-
-        d->iomem_caps = rangeset_new(d, "I/O Memory", RANGESETF_prettyprint_hex);
-        d->irq_caps   = rangeset_new(d, "Interrupts", 0);
-        if ( !d->iomem_caps || !d->irq_caps )
-            goto fail;
-
-        if ( (err = xsm_domain_create(XSM_HOOK, d, config->ssidref)) != 0 )
+        if ( (err = xsm_domain_create(XSM_HOOK, d, ssidref)) != 0 )
             goto fail;
 
         d->controller_pause_count = 1;
         atomic_inc(&d->pause_count);
 
-        if ( !is_hardware_domain(d) )
+        if ( domid )
             d->nr_pirqs = nr_static_irqs + extra_domU_irqs;
         else
-            d->nr_pirqs = extra_hwdom_irqs ? nr_static_irqs + extra_hwdom_irqs
-                                           : arch_hwdom_irqs(domid);
+            d->nr_pirqs = nr_static_irqs + extra_dom0_irqs;
         if ( d->nr_pirqs > nr_irqs )
             d->nr_pirqs = nr_irqs;
 
@@ -368,30 +284,30 @@ struct domain *domain_create(domid_t domid,
             goto fail;
         init_status |= INIT_gnttab;
 
+        poolid = 0;
+
         err = -ENOMEM;
+        d->mem_event = xzalloc(struct mem_event_per_domain);
+        if ( !d->mem_event )
+            goto fail;
 
         d->pbuf = xzalloc_array(char, DOMAIN_PBUF_SIZE);
         if ( !d->pbuf )
             goto fail;
     }
 
-    if ( (err = arch_domain_create(d, config)) != 0 )
+    if ( (err = arch_domain_create(d, domcr_flags)) != 0 )
         goto fail;
     init_status |= INIT_arch;
 
+    if ( (err = cpupool_add_domain(d, poolid)) != 0 )
+        goto fail;
+
+    if ( (err = sched_init_domain(d)) != 0 )
+        goto fail;
+
     if ( !is_idle_domain(d) )
     {
-        if ( (err = sched_init_domain(d, 0)) != 0 )
-            goto fail;
-
-        if ( (err = late_hwdom_init(d)) != 0 )
-            goto fail;
-
-        /*
-         * Must not fail beyond this point, as our caller doesn't know whether
-         * the domain has been entered into domain_list or not.
-         */
-
         spin_lock(&domlist_update_lock);
         pd = &domain_list; /* NB. domain_list maintained in order of domid. */
         for ( pd = &domain_list; *pd != NULL; pd = &(*pd)->next_in_list )
@@ -402,24 +318,15 @@ struct domain *domain_create(domid_t domid,
         rcu_assign_pointer(*pd, d);
         rcu_assign_pointer(domain_hash[DOMAIN_HASH(domid)], d);
         spin_unlock(&domlist_update_lock);
-
-        memcpy(d->handle, config->handle, sizeof(d->handle));
     }
 
     return d;
 
  fail:
-    ASSERT(err < 0);      /* Sanity check paths leading here. */
-    err = err ?: -EILSEQ; /* Release build safety. */
-
     d->is_dying = DOMDYING_dead;
-    if ( hardware_domain == d )
-        hardware_domain = old_hwdom;
     atomic_set(&d->refcnt, DOMAIN_DESTROYED);
+    xfree(d->mem_event);
     xfree(d->pbuf);
-
-    sched_destroy_domain(d);
-
     if ( init_status & INIT_arch )
         arch_domain_destroy(d);
     if ( init_status & INIT_gnttab )
@@ -436,7 +343,7 @@ struct domain *domain_create(domid_t domid,
         watchdog_domain_destroy(d);
     if ( init_status & INIT_xsm )
         xsm_free_security_domain(d);
-    free_cpumask_var(d->dirty_cpumask);
+    free_cpumask_var(d->domain_dirty_cpumask);
     free_domain_struct(d);
     return ERR_PTR(err);
 }
@@ -444,70 +351,51 @@ struct domain *domain_create(domid_t domid,
 
 void domain_update_node_affinity(struct domain *d)
 {
-    cpumask_var_t dom_cpumask, dom_cpumask_soft;
-    cpumask_t *dom_affinity;
+    cpumask_var_t cpumask;
+    cpumask_var_t online_affinity;
     const cpumask_t *online;
     struct vcpu *v;
-    unsigned int cpu;
+    unsigned int node;
 
-    /* Do we have vcpus already? If not, no need to update node-affinity. */
-    if ( !d->vcpu || !d->vcpu[0] )
+    if ( !zalloc_cpumask_var(&cpumask) )
         return;
-
-    if ( !zalloc_cpumask_var(&dom_cpumask) )
-        return;
-    if ( !zalloc_cpumask_var(&dom_cpumask_soft) )
+    if ( !alloc_cpumask_var(&online_affinity) )
     {
-        free_cpumask_var(dom_cpumask);
+        free_cpumask_var(cpumask);
         return;
     }
 
-    online = cpupool_domain_cpumask(d);
+    online = cpupool_online_cpumask(d->cpupool);
 
     spin_lock(&d->node_affinity_lock);
 
+    for_each_vcpu ( d, v )
+    {
+        cpumask_and(online_affinity, v->cpu_affinity, online);
+        cpumask_or(cpumask, cpumask, online_affinity);
+    }
+
     /*
-     * If d->auto_node_affinity is true, let's compute the domain's
-     * node-affinity and update d->node_affinity accordingly. if false,
-     * just leave d->auto_node_affinity alone.
+     * If d->auto_node_affinity is true, the domain's node-affinity mask
+     * (d->node_affinity) is automaically computed from all the domain's
+     * vcpus' vcpu-affinity masks (the union of which we have just built
+     * above in cpumask). OTOH, if d->auto_node_affinity is false, we
+     * must leave the node-affinity of the domain alone.
      */
     if ( d->auto_node_affinity )
     {
-        /*
-         * We want the narrowest possible set of pcpus (to get the narowest
-         * possible set of nodes). What we need is the cpumask of where the
-         * domain can run (the union of the hard affinity of all its vcpus),
-         * and the full mask of where it would prefer to run (the union of
-         * the soft affinity of all its various vcpus). Let's build them.
-         */
-        for_each_vcpu ( d, v )
-        {
-            cpumask_or(dom_cpumask, dom_cpumask, v->cpu_hard_affinity);
-            cpumask_or(dom_cpumask_soft, dom_cpumask_soft,
-                       v->cpu_soft_affinity);
-        }
-        /* Filter out non-online cpus */
-        cpumask_and(dom_cpumask, dom_cpumask, online);
-        ASSERT(!cpumask_empty(dom_cpumask));
-        /* And compute the intersection between hard, online and soft */
-        cpumask_and(dom_cpumask_soft, dom_cpumask_soft, dom_cpumask);
-
-        /*
-         * If not empty, the intersection of hard, soft and online is the
-         * narrowest set we want. If empty, we fall back to hard&online.
-         */
-        dom_affinity = cpumask_empty(dom_cpumask_soft) ?
-                           dom_cpumask : dom_cpumask_soft;
-
         nodes_clear(d->node_affinity);
-        for_each_cpu ( cpu, dom_affinity )
-            node_set(cpu_to_node(cpu), d->node_affinity);
+        for_each_online_node ( node )
+            if ( cpumask_intersects(&node_to_cpumask(node), cpumask) )
+                node_set(node, d->node_affinity);
     }
+
+    sched_set_node_affinity(d, &d->node_affinity);
 
     spin_unlock(&d->node_affinity_lock);
 
-    free_cpumask_var(dom_cpumask_soft);
-    free_cpumask_var(dom_cpumask);
+    free_cpumask_var(online_affinity);
+    free_cpumask_var(cpumask);
 }
 
 
@@ -631,40 +519,33 @@ int domain_kill(struct domain *d)
     if ( d == current->domain )
         return -EINVAL;
 
-    /* Protected by d->domain_lock. */
+    /* Protected by domctl_lock. */
     switch ( d->is_dying )
     {
     case DOMDYING_alive:
-        domain_unlock(d);
         domain_pause(d);
-        domain_lock(d);
-        /*
-         * With the domain lock dropped, d->is_dying may have changed. Call
-         * ourselves recursively if so, which is safe as then we won't come
-         * back here.
-         */
-        if ( d->is_dying != DOMDYING_alive )
-            return domain_kill(d);
         d->is_dying = DOMDYING_dying;
+        spin_barrier(&d->domain_lock);
         evtchn_destroy(d);
         gnttab_release_mappings(d);
         tmem_destroy(d->tmem_client);
-        vnuma_destroy(d->vnuma);
         domain_set_outstanding_pages(d, 0);
         d->tmem_client = NULL;
         /* fallthrough */
     case DOMDYING_dying:
         rc = domain_relinquish_resources(d);
         if ( rc != 0 )
+        {
             break;
+        }
         if ( cpupool_move_domain(d, cpupool0) )
-            return -ERESTART;
+            return -EAGAIN;
         for_each_vcpu ( d, v )
             unmap_vcpu_info(v);
         d->is_dying = DOMDYING_dead;
         /* Mem event cleanup has to go here because the rings 
          * have to be put before we call put_domain. */
-        vm_event_cleanup(d);
+        mem_event_cleanup(d);
         put_domain(d);
         send_global_virq(VIRQ_DOM_EXC);
         /* fallthrough */
@@ -709,28 +590,23 @@ void __domain_crash_synchronous(void)
 }
 
 
-int domain_shutdown(struct domain *d, u8 reason)
+void domain_shutdown(struct domain *d, u8 reason)
 {
     struct vcpu *v;
 
-#ifdef CONFIG_X86
-    if ( pv_shim )
-        return pv_shim_shutdown(reason);
-#endif
-
     spin_lock(&d->shutdown_lock);
 
-    if ( d->shutdown_code == SHUTDOWN_CODE_INVALID )
+    if ( d->shutdown_code == -1 )
         d->shutdown_code = reason;
     reason = d->shutdown_code;
 
-    if ( is_hardware_domain(d) )
-        hwdom_shutdown(reason);
+    if ( d->domain_id == 0 )
+        dom0_shutdown(reason);
 
     if ( d->is_shutting_down )
     {
         spin_unlock(&d->shutdown_lock);
-        return 0;
+        return;
     }
 
     d->is_shutting_down = 1;
@@ -747,13 +623,9 @@ int domain_shutdown(struct domain *d, u8 reason)
         v->paused_for_shutdown = 1;
     }
 
-    arch_domain_shutdown(d);
-
     __domain_finalise_shutdown(d);
 
     spin_unlock(&d->shutdown_lock);
-
-    return 0;
 }
 
 void domain_resume(struct domain *d)
@@ -769,7 +641,7 @@ void domain_resume(struct domain *d)
     spin_lock(&d->shutdown_lock);
 
     d->is_shutting_down = d->is_shut_down = 0;
-    d->shutdown_code = SHUTDOWN_CODE_INVALID;
+    d->shutdown_code = -1;
 
     for_each_vcpu ( d, v )
     {
@@ -804,7 +676,7 @@ void vcpu_end_shutdown_deferral(struct vcpu *v)
         vcpu_check_shutdown(v);
 }
 
-#ifdef CONFIG_HAS_GDBSX
+#ifdef HAS_GDBSX
 void domain_pause_for_debugger(void)
 {
     struct vcpu *curr = current;
@@ -824,14 +696,6 @@ static void complete_domain_destroy(struct rcu_head *head)
     struct domain *d = container_of(head, struct domain, rcu);
     struct vcpu *v;
     int i;
-
-    /*
-     * Flush all state for the vCPU previously having run on the current CPU.
-     * This is in particular relevant for x86 HVM ones on VMX, so that this
-     * flushing of state won't happen from the TLB flush IPI handler behind
-     * the back of a vmx_vmcs_enter() / vmx_vmcs_exit() section.
-     */
-    sync_local_execstate();
 
     for ( i = d->max_vcpus - 1; i >= 0; i-- )
     {
@@ -858,23 +722,16 @@ static void complete_domain_destroy(struct rcu_head *head)
     free_xenoprof_pages(d);
 #endif
 
-#ifdef CONFIG_HAS_MEM_PAGING
-    xfree(d->vm_event_paging);
-#endif
-    xfree(d->vm_event_monitor);
-#ifdef CONFIG_HAS_MEM_SHARING
-    xfree(d->vm_event_share);
-#endif
-
+    xfree(d->mem_event);
     xfree(d->pbuf);
 
     for ( i = d->max_vcpus - 1; i >= 0; i-- )
         if ( (v = d->vcpu[i]) != NULL )
         {
-            free_cpumask_var(v->cpu_hard_affinity);
-            free_cpumask_var(v->cpu_hard_affinity_tmp);
-            free_cpumask_var(v->cpu_hard_affinity_saved);
-            free_cpumask_var(v->cpu_soft_affinity);
+            free_cpumask_var(v->cpu_affinity);
+            free_cpumask_var(v->cpu_affinity_tmp);
+            free_cpumask_var(v->cpu_affinity_saved);
+            free_cpumask_var(v->vcpu_dirty_cpumask);
             free_vcpu_struct(v);
         }
 
@@ -886,7 +743,7 @@ static void complete_domain_destroy(struct rcu_head *head)
     radix_tree_destroy(&d->pirq_tree, free_pirq_struct);
 
     xsm_free_security_domain(d);
-    free_cpumask_var(d->dirty_cpumask);
+    free_cpumask_var(d->domain_dirty_cpumask);
     xfree(d->vcpu);
     free_domain_struct(d);
 
@@ -897,16 +754,21 @@ static void complete_domain_destroy(struct rcu_head *head)
 void domain_destroy(struct domain *d)
 {
     struct domain **pd;
+    atomic_t      old, new;
 
     BUG_ON(!d->is_dying);
 
     /* May be already destroyed, or get_domain() can race us. */
-    if ( atomic_cmpxchg(&d->refcnt, 0, DOMAIN_DESTROYED) != 0 )
+    _atomic_set(old, 0);
+    _atomic_set(new, DOMAIN_DESTROYED);
+    old = atomic_compareandswap(old, new, &d->refcnt);
+    if ( _atomic_read(old) != 0 )
         return;
 
-    TRACE_1D(TRC_DOM0_DOM_REM, d->domain_id);
+    cpupool_rm_domain(d);
 
     /* Delete from task list and task hashtable. */
+    TRACE_1D(TRC_SCHED_DOM_REM, d->domain_id);
     spin_lock(&domlist_update_lock);
     pd = &domain_list;
     while ( *pd != d ) 
@@ -941,75 +803,31 @@ void vcpu_unpause(struct vcpu *v)
         vcpu_wake(v);
 }
 
-int vcpu_pause_by_systemcontroller(struct vcpu *v)
+void domain_pause(struct domain *d)
 {
-    int old, new, prev = v->controller_pause_count;
+    struct vcpu *v;
 
-    do
-    {
-        old = prev;
-        new = old + 1;
+    ASSERT(d != current->domain);
 
-        if ( new > 255 )
-            return -EOVERFLOW;
+    atomic_inc(&d->pause_count);
 
-        prev = cmpxchg(&v->controller_pause_count, old, new);
-    } while ( prev != old );
-
-    vcpu_pause(v);
-
-    return 0;
+    for_each_vcpu( d, v )
+        vcpu_sleep_sync(v);
 }
 
-int vcpu_unpause_by_systemcontroller(struct vcpu *v)
-{
-    int old, new, prev = v->controller_pause_count;
-
-    do
-    {
-        old = prev;
-        new = old - 1;
-
-        if ( new < 0 )
-            return -EINVAL;
-
-        prev = cmpxchg(&v->controller_pause_count, old, new);
-    } while ( prev != old );
-
-    vcpu_unpause(v);
-
-    return 0;
-}
-
-static void do_domain_pause(struct domain *d,
-                            void (*sleep_fn)(struct vcpu *v))
+void domain_pause_nosync(struct domain *d)
 {
     struct vcpu *v;
 
     atomic_inc(&d->pause_count);
 
     for_each_vcpu( d, v )
-        sleep_fn(v);
-
-    arch_domain_pause(d);
-}
-
-void domain_pause(struct domain *d)
-{
-    ASSERT(d != current->domain);
-    do_domain_pause(d, vcpu_sleep_sync);
-}
-
-void domain_pause_nosync(struct domain *d)
-{
-    do_domain_pause(d, vcpu_sleep_nosync);
+        vcpu_sleep_nosync(v);
 }
 
 void domain_unpause(struct domain *d)
 {
     struct vcpu *v;
-
-    arch_domain_unpause(d);
 
     if ( atomic_dec_and_test(&d->pause_count) )
         for_each_vcpu( d, v )
@@ -1031,7 +849,7 @@ int __domain_pause_by_systemcontroller(struct domain *d,
          * toolstack overflowing d->pause_count with many repeated hypercalls.
          */
         if ( new > 255 )
-            return -EOVERFLOW;
+            return -EUSERS;
 
         prev = cmpxchg(&d->controller_pause_count, old, new);
     } while ( prev != old );
@@ -1056,86 +874,9 @@ int domain_unpause_by_systemcontroller(struct domain *d)
         prev = cmpxchg(&d->controller_pause_count, old, new);
     } while ( prev != old );
 
-    /*
-     * d->controller_pause_count is initialised to 1, and the toolstack is
-     * responsible for making one unpause hypercall when it wishes the guest
-     * to start running.
-     *
-     * All other toolstack operations should make a pair of pause/unpause
-     * calls and rely on the reference counting here.
-     *
-     * Creation is considered finished when the controller reference count
-     * first drops to 0.
-     */
-    if ( new == 0 )
-        d->creation_finished = true;
-
     domain_unpause(d);
 
     return 0;
-}
-
-void domain_pause_except_self(struct domain *d)
-{
-    struct vcpu *v, *curr = current;
-
-    if ( curr->domain == d )
-    {
-        for_each_vcpu( d, v )
-            if ( likely(v != curr) )
-                vcpu_pause(v);
-    }
-    else
-        domain_pause(d);
-}
-
-void domain_unpause_except_self(struct domain *d)
-{
-    struct vcpu *v, *curr = current;
-
-    if ( curr->domain == d )
-    {
-        for_each_vcpu( d, v )
-            if ( likely(v != curr) )
-                vcpu_unpause(v);
-    }
-    else
-        domain_unpause(d);
-}
-
-int domain_soft_reset(struct domain *d)
-{
-    struct vcpu *v;
-    int rc;
-
-    spin_lock(&d->shutdown_lock);
-    for_each_vcpu ( d, v )
-        if ( !v->paused_for_shutdown )
-        {
-            spin_unlock(&d->shutdown_lock);
-            return -EINVAL;
-        }
-    spin_unlock(&d->shutdown_lock);
-
-    rc = evtchn_reset(d);
-    if ( rc )
-        return rc;
-
-    grant_table_warn_active_grants(d);
-
-    for_each_vcpu ( d, v )
-    {
-        set_xen_guest_handle(runstate_guest(v), NULL);
-        unmap_vcpu_info(v);
-    }
-
-    rc = arch_domain_soft_reset(d);
-    if ( !rc )
-        domain_resume(d);
-    else
-        domain_crash(d);
-
-    return rc;
 }
 
 int vcpu_reset(struct vcpu *v)
@@ -1163,7 +904,7 @@ int vcpu_reset(struct vcpu *v)
     v->async_exception_mask = 0;
     memset(v->async_exception_state, 0, sizeof(v->async_exception_state));
 #endif
-    cpumask_clear(v->cpu_hard_affinity_tmp);
+    cpumask_clear(v->cpu_affinity_tmp);
     clear_bit(_VPF_blocked, &v->pause_flags);
     clear_bit(_VPF_in_reset, &v->pause_flags);
 
@@ -1186,15 +927,16 @@ int map_vcpu_info(struct vcpu *v, unsigned long gfn, unsigned offset)
     void *mapping;
     vcpu_info_t *new_info;
     struct page_info *page;
+    int i;
 
     if ( offset > (PAGE_SIZE - sizeof(vcpu_info_t)) )
         return -EINVAL;
 
-    if ( !mfn_eq(v->vcpu_info_mfn, INVALID_MFN) )
+    if ( v->vcpu_info_mfn != INVALID_MFN )
         return -EINVAL;
 
     /* Run this command on yourself or on other offline VCPUS. */
-    if ( (v != current) && !(v->pause_flags & VPF_down) )
+    if ( (v != current) && !test_bit(_VPF_down, &v->pause_flags) )
         return -EINVAL;
 
     page = get_page_from_gfn(d, gfn, NULL, P2M_ALLOC);
@@ -1238,65 +980,44 @@ int map_vcpu_info(struct vcpu *v, unsigned long gfn, unsigned offset)
      * Mark everything as being pending just to make sure nothing gets
      * lost.  The domain will get a spurious event, but it can cope.
      */
-#ifdef CONFIG_COMPAT
-    if ( !has_32bit_shinfo(d) )
-        write_atomic(&new_info->native.evtchn_pending_sel, ~0);
-    else
-#endif
-        write_atomic(&vcpu_info(v, evtchn_pending_sel), ~0);
-    vcpu_mark_events_pending(v);
+    vcpu_info(v, evtchn_upcall_pending) = 1;
+    for ( i = 0; i < BITS_PER_EVTCHN_WORD(d); i++ )
+        set_bit(i, &vcpu_info(v, evtchn_pending_sel));
 
     return 0;
 }
 
 /*
  * Unmap the vcpu info page if the guest decided to place it somewhere
- * else. This is used from domain_kill() and domain_soft_reset().
+ * else.  This is only used from arch_domain_destroy, so there's no
+ * need to do anything clever.
  */
 void unmap_vcpu_info(struct vcpu *v)
 {
-    mfn_t mfn = v->vcpu_info_mfn;
+    unsigned long mfn;
 
-    if ( mfn_eq(mfn, INVALID_MFN) )
+    if ( v->vcpu_info_mfn == INVALID_MFN )
         return;
 
+    mfn = v->vcpu_info_mfn;
     unmap_domain_page_global((void *)
                              ((unsigned long)v->vcpu_info & PAGE_MASK));
 
-    vcpu_info_reset(v); /* NB: Clobbers v->vcpu_info_mfn */
+    v->vcpu_info = &dummy_vcpu_info;
+    v->vcpu_info_mfn = INVALID_MFN;
 
     put_page_and_type(mfn_to_page(mfn));
 }
 
-int default_initialise_vcpu(struct vcpu *v, XEN_GUEST_HANDLE_PARAM(void) arg)
-{
-    struct vcpu_guest_context *ctxt;
-    struct domain *d = v->domain;
-    int rc;
-
-    if ( (ctxt = alloc_vcpu_guest_context()) == NULL )
-        return -ENOMEM;
-
-    if ( copy_from_guest(ctxt, arg, 1) )
-    {
-        free_vcpu_guest_context(ctxt);
-        return -EFAULT;
-    }
-
-    domain_lock(d);
-    rc = v->is_initialised ? -EEXIST : arch_set_info_guest(v, ctxt);
-    domain_unlock(d);
-
-    free_vcpu_guest_context(ctxt);
-
-    return rc;
-}
-
-long do_vcpu_op(int cmd, unsigned int vcpuid, XEN_GUEST_HANDLE_PARAM(void) arg)
+long do_vcpu_op(int cmd, int vcpuid, XEN_GUEST_HANDLE_PARAM(void) arg)
 {
     struct domain *d = current->domain;
     struct vcpu *v;
+    struct vcpu_guest_context *ctxt;
     long rc = 0;
+
+    if ( (vcpuid < 0) || (vcpuid >= MAX_VIRT_CPUS) )
+        return -EINVAL;
 
     if ( vcpuid >= d->max_vcpus || (v = d->vcpu[vcpuid]) == NULL )
         return -ENOENT;
@@ -1307,63 +1028,47 @@ long do_vcpu_op(int cmd, unsigned int vcpuid, XEN_GUEST_HANDLE_PARAM(void) arg)
         if ( v->vcpu_info == &dummy_vcpu_info )
             return -EINVAL;
 
-        rc = arch_initialise_vcpu(v, arg);
-        if ( rc == -ERESTART )
+        if ( (ctxt = alloc_vcpu_guest_context()) == NULL )
+            return -ENOMEM;
+
+        if ( copy_from_guest(ctxt, arg, 1) )
+        {
+            free_vcpu_guest_context(ctxt);
+            return -EFAULT;
+        }
+
+        domain_lock(d);
+        rc = v->is_initialised ? -EEXIST : arch_set_info_guest(v, ctxt);
+        domain_unlock(d);
+
+        free_vcpu_guest_context(ctxt);
+
+        if ( rc == -EAGAIN )
             rc = hypercall_create_continuation(__HYPERVISOR_vcpu_op, "iih",
                                                cmd, vcpuid, arg);
 
         break;
 
-    case VCPUOP_up:
-#ifdef CONFIG_X86
-        if ( pv_shim )
-            rc = continue_hypercall_on_cpu(0, pv_shim_cpu_up, v);
+    case VCPUOP_up: {
+        bool_t wake = 0;
+        domain_lock(d);
+        if ( !v->is_initialised )
+            rc = -EINVAL;
         else
-#endif
-        {
-            bool wake = false;
-
-            domain_lock(d);
-            if ( !v->is_initialised )
-                rc = -EINVAL;
-            else
-                wake = test_and_clear_bit(_VPF_down, &v->pause_flags);
-            domain_unlock(d);
-            if ( wake )
-                vcpu_wake(v);
-        }
-
+            wake = test_and_clear_bit(_VPF_down, &v->pause_flags);
+        domain_unlock(d);
+        if ( wake )
+            vcpu_wake(v);
         break;
+    }
 
     case VCPUOP_down:
-        for_each_vcpu ( d, v )
-            if ( v->vcpu_id != vcpuid && !test_bit(_VPF_down, &v->pause_flags) )
-            {
-               rc = 1;
-               break;
-            }
-
-        if ( !rc ) /* Last vcpu going down? */
-        {
-            domain_shutdown(d, SHUTDOWN_poweroff);
-            break;
-        }
-
-        rc = 0;
-        v = d->vcpu[vcpuid];
-
-#ifdef CONFIG_X86
-        if ( pv_shim )
-            rc = continue_hypercall_on_cpu(0, pv_shim_cpu_down, v);
-        else
-#endif
-            if ( !test_and_set_bit(_VPF_down, &v->pause_flags) )
-                vcpu_sleep_nosync(v);
-
+        if ( !test_and_set_bit(_VPF_down, &v->pause_flags) )
+            vcpu_sleep_nosync(v);
         break;
 
     case VCPUOP_is_up:
-        rc = !(v->pause_flags & VPF_down);
+        rc = !test_bit(_VPF_down, &v->pause_flags);
         break;
 
     case VCPUOP_get_runstate_info:
@@ -1429,6 +1134,7 @@ long do_vcpu_op(int cmd, unsigned int vcpuid, XEN_GUEST_HANDLE_PARAM(void) arg)
 
     case VCPUOP_register_vcpu_info:
     {
+        struct domain *d = v->domain;
         struct vcpu_register_vcpu_info info;
 
         rc = -EFAULT;
@@ -1489,11 +1195,9 @@ long do_vcpu_op(int cmd, unsigned int vcpuid, XEN_GUEST_HANDLE_PARAM(void) arg)
     return rc;
 }
 
-#ifdef VM_ASSIST_VALID
-long vm_assist(struct domain *p, unsigned int cmd, unsigned int type,
-               unsigned long valid)
+long vm_assist(struct domain *p, unsigned int cmd, unsigned int type)
 {
-    if ( type >= BITS_PER_LONG || !test_bit(type, &valid) )
+    if ( type > MAX_VMASST_TYPE )
         return -EINVAL;
 
     switch ( cmd )
@@ -1508,7 +1212,6 @@ long vm_assist(struct domain *p, unsigned int cmd, unsigned int type,
 
     return -ENOSYS;
 }
-#endif
 
 struct pirq *pirq_get_info(struct domain *d, int pirq)
 {

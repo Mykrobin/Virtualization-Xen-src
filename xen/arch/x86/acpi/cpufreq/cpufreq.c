@@ -22,7 +22,8 @@
  *  General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License along
- *  with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
@@ -50,20 +51,21 @@ enum {
 };
 
 #define INTEL_MSR_RANGE         (0xffffull)
+#define CPUID_6_ECX_APERFMPERF_CAPABILITY       (0x1)
 
 struct acpi_cpufreq_data *cpufreq_drv_data[NR_CPUS];
 
 static struct cpufreq_driver acpi_cpufreq_driver;
 
-static bool __read_mostly acpi_pstate_strict;
-boolean_param("acpi_pstate_strict", acpi_pstate_strict);
+static unsigned int __read_mostly acpi_pstate_strict;
+integer_param("acpi_pstate_strict", acpi_pstate_strict);
 
 static int check_est_cpu(unsigned int cpuid)
 {
     struct cpuinfo_x86 *cpu = &cpu_data[cpuid];
 
     if (cpu->x86_vendor != X86_VENDOR_INTEL ||
-        !cpu_has(cpu, X86_FEATURE_EIST))
+        !cpu_has(cpu, X86_FEATURE_EST))
         return 0;
 
     return 1;
@@ -350,10 +352,10 @@ static unsigned int get_cur_freq_on_cpu(unsigned int cpu)
 static void feature_detect(void *info)
 {
     struct cpufreq_policy *policy = info;
-    unsigned int eax;
+    unsigned int eax, ecx;
 
-    if ( cpu_has_aperfmperf )
-    {
+    ecx = cpuid_ecx(6);
+    if (ecx & CPUID_6_ECX_APERFMPERF_CAPABILITY) {
         policy->aperf_mperf = 1;
         acpi_cpufreq_driver.getavg = get_measured_perf;
     }

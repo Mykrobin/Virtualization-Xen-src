@@ -1,3 +1,4 @@
+#include <xen/config.h>
 #include <xen/cpumask.h>
 #include <asm/current.h>
 #include <asm/mpspec.h>
@@ -14,7 +15,7 @@
 static __init int force_bigsmp(struct dmi_system_id *d)
 {
 	printk(KERN_NOTICE "%s detected: force use of apic=bigsmp\n", d->ident);
-	def_to_bigsmp = true;
+	def_to_bigsmp = 1;
 	return 0;
 }
 
@@ -36,7 +37,7 @@ static __init int probe_bigsmp(void)
 	 */
 	if (acpi_gbl_FADT.flags &
 	    (ACPI_FADT_APIC_CLUSTER | ACPI_FADT_APIC_PHYSICAL))
-		def_to_bigsmp = true;
+		def_to_bigsmp = 1;
 	else if (!def_to_bigsmp)
 		dmi_check_system(bigsmp_dmi_table);
 	return def_to_bigsmp;

@@ -9,6 +9,7 @@
  * Copyright (c) 1992, Linus Torvalds
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/preempt.h>
@@ -21,9 +22,6 @@ irq_cpustat_t irq_stat[NR_CPUS];
 #endif
 
 static softirq_handler softirq_handlers[NR_SOFTIRQS];
-
-static DEFINE_PER_CPU(cpumask_t, batch_mask);
-static DEFINE_PER_CPU(unsigned int, batching);
 
 static void __do_softirq(unsigned long ignore_mask)
 {
@@ -58,7 +56,7 @@ void process_pending_softirqs(void)
     __do_softirq(1ul<<SCHEDULE_SOFTIRQ);
 }
 
-void do_softirq(void)
+asmlinkage void do_softirq(void)
 {
     ASSERT_NOT_IN_ATOMIC();
     __do_softirq(0);
@@ -72,59 +70,22 @@ void open_softirq(int nr, softirq_handler handler)
 
 void cpumask_raise_softirq(const cpumask_t *mask, unsigned int nr)
 {
-    unsigned int cpu, this_cpu = smp_processor_id();
-    cpumask_t send_mask, *raise_mask;
+    int cpu;
+    cpumask_t send_mask;
 
-    if ( !per_cpu(batching, this_cpu) || in_irq() )
-    {
-        cpumask_clear(&send_mask);
-        raise_mask = &send_mask;
-    }
-    else
-        raise_mask = &per_cpu(batch_mask, this_cpu);
-
+    cpumask_clear(&send_mask);
     for_each_cpu(cpu, mask)
-        if ( !test_and_set_bit(nr, &softirq_pending(cpu)) &&
-             cpu != this_cpu &&
-             !arch_skip_send_event_check(cpu) )
-            __cpumask_set_cpu(cpu, raise_mask);
+        if ( !test_and_set_bit(nr, &softirq_pending(cpu)) )
+            cpumask_set_cpu(cpu, &send_mask);
 
-    if ( raise_mask == &send_mask )
-        smp_send_event_check_mask(raise_mask);
+    smp_send_event_check_mask(&send_mask);
 }
 
 void cpu_raise_softirq(unsigned int cpu, unsigned int nr)
 {
-    unsigned int this_cpu = smp_processor_id();
-
-    if ( test_and_set_bit(nr, &softirq_pending(cpu))
-         || (cpu == this_cpu)
-         || arch_skip_send_event_check(cpu) )
-        return;
-
-    if ( !per_cpu(batching, this_cpu) || in_irq() )
+    if ( !test_and_set_bit(nr, &softirq_pending(cpu))
+         && (cpu != smp_processor_id()) )
         smp_send_event_check_cpu(cpu);
-    else
-        __cpumask_set_cpu(cpu, &per_cpu(batch_mask, this_cpu));
-}
-
-void cpu_raise_softirq_batch_begin(void)
-{
-    ++this_cpu(batching);
-}
-
-void cpu_raise_softirq_batch_finish(void)
-{
-    unsigned int cpu, this_cpu = smp_processor_id();
-    cpumask_t *mask = &per_cpu(batch_mask, this_cpu);
-
-    ASSERT(per_cpu(batching, this_cpu));
-    for_each_cpu ( cpu, mask )
-        if ( !softirq_pending(cpu) )
-            __cpumask_clear_cpu(cpu, mask);
-    smp_send_event_check_mask(mask);
-    cpumask_clear(mask);
-    --per_cpu(batching, this_cpu);
 }
 
 void raise_softirq(unsigned int nr)

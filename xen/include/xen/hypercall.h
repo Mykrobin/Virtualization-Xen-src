@@ -14,10 +14,17 @@
 #include <public/event_channel.h>
 #include <public/tmem.h>
 #include <public/version.h>
-#include <public/pmu.h>
-#include <public/hvm/dm_op.h>
 #include <asm/hypercall.h>
 #include <xsm/xsm.h>
+
+extern long
+do_ni_hypercall(
+    void);
+
+extern long
+do_sched_op_compat(
+    int cmd,
+    unsigned long arg);
 
 extern long
 do_sched_op(
@@ -50,11 +57,6 @@ do_platform_op(
  * To allow safe resume of do_memory_op() after preemption, we need to know
  * at what point in the page list to resume. For this purpose I steal the
  * high-order bits of the @cmd parameter, which are otherwise unused and zero.
- *
- * Note that both of these values are effectively part of the ABI, even if
- * we don't need to make them a formal part of it: A guest suspended for
- * migration in the middle of a continuation would fail to work if resumed on
- * a hypervisor using different values.
  */
 #define MEMOP_EXTENT_SHIFT 6 /* cmd[:6] == start_extent */
 #define MEMOP_CMD_MASK     ((1 << MEMOP_EXTENT_SHIFT) - 1)
@@ -102,7 +104,7 @@ do_vm_assist(
 extern long
 do_vcpu_op(
     int cmd,
-    unsigned int vcpuid,
+    int vcpuid,
     XEN_GUEST_HANDLE_PARAM(void) arg);
 
 struct vcpu;
@@ -130,23 +132,12 @@ extern long
 do_xsm_op(
     XEN_GUEST_HANDLE_PARAM(xsm_op_t) u_xsm_op);
 
-#ifdef CONFIG_TMEM
 extern long
 do_tmem_op(
     XEN_GUEST_HANDLE_PARAM(tmem_op_t) uops);
-#endif
 
 extern long
 do_xenoprof_op(int op, XEN_GUEST_HANDLE_PARAM(void) arg);
-
-extern long
-do_xenpmu_op(unsigned int op, XEN_GUEST_HANDLE_PARAM(xen_pmu_params_t) arg);
-
-extern long
-do_dm_op(
-    domid_t domid,
-    unsigned int nr_bufs,
-    XEN_GUEST_HANDLE_PARAM(xen_dm_op_buf_t) bufs);
 
 #ifdef CONFIG_COMPAT
 
@@ -164,7 +155,7 @@ compat_grant_table_op(
 extern int
 compat_vcpu_op(
     int cmd,
-    unsigned int vcpuid,
+    int vcpuid,
     XEN_GUEST_HANDLE_PARAM(void) arg);
 
 extern int
@@ -184,26 +175,6 @@ extern int
 compat_set_timer_op(
     u32 lo,
     s32 hi);
-
-extern int compat_xsm_op(
-    XEN_GUEST_HANDLE_PARAM(xsm_op_t) op);
-
-extern int compat_kexec_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) uarg);
-
-extern int compat_vm_assist(unsigned int cmd, unsigned int type);
-
-DEFINE_XEN_GUEST_HANDLE(multicall_entry_compat_t);
-extern int compat_multicall(
-    XEN_GUEST_HANDLE_PARAM(multicall_entry_compat_t) call_list,
-    uint32_t nr_calls);
-
-#include <compat/hvm/dm_op.h>
-
-extern int
-compat_dm_op(
-    domid_t domid,
-    unsigned int nr_bufs,
-    XEN_GUEST_HANDLE_PARAM(void) bufs);
 
 #endif
 

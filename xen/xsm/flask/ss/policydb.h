@@ -154,12 +154,12 @@ struct ocontext {
                 u32 high_ioport;
         } ioport;
         struct {
-                u64 low_iomem;
-                u64 high_iomem;
+                u32 low_iomem;
+                u32 high_iomem;
         } iomem;
     } u;
-    struct context context;
-    u32 sid;
+    struct context context[2];    /* security context(s) */
+    u32 sid[2];    /* SID(s) */
     struct ocontext *next;
 };
 
@@ -180,8 +180,7 @@ struct ocontext {
 #define OCON_IOPORT  2    /* io ports */
 #define OCON_IOMEM   3    /* io memory */
 #define OCON_DEVICE  4    /* pci devices */
-#define OCON_DTREE   5    /* device tree nodes */
-#define OCON_NUM     6
+#define OCON_NUM     5
 #define OCON_NUM_OLD 7
 
 /* The policy database */
@@ -246,8 +245,6 @@ struct policydb {
 
     unsigned int policyvers;
 
-    unsigned int allow_unknown : 1;
-
     u16 target_type;
 };
 
@@ -263,10 +260,6 @@ extern int policydb_read(struct policydb *p, void *fp);
 
 #define POLICYDB_CONFIG_MLS    1
 
-/* the config flags related to unknown classes/perms are bits 2 and 3 */
-#define REJECT_UNKNOWN 0x00000002
-#define ALLOW_UNKNOWN  0x00000004
-
 #define OBJECT_R "object_r"
 #define OBJECT_R_VAL 1
 
@@ -277,7 +270,7 @@ extern int policydb_read(struct policydb *p, void *fp);
 #define TARGET_XEN_OLD 0
 
 struct policy_file {
-    const char *data;
+    char *data;
     size_t len;
 };
 

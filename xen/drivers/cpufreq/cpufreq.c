@@ -21,7 +21,8 @@
  *  General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License along
- *  with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
@@ -62,41 +63,31 @@ LIST_HEAD_READ_MOSTLY(cpufreq_governor_list);
 /* set xen as default cpufreq */
 enum cpufreq_controller cpufreq_controller = FREQCTL_xen;
 
-static int __init cpufreq_cmdline_parse(const char *s);
-
-static int __init setup_cpufreq_option(const char *str)
+static void __init setup_cpufreq_option(char *str)
 {
-    const char *arg = strpbrk(str, ",:");
-    int choice;
+    char *arg;
 
-    if ( !arg )
-        arg = strchr(str, '\0');
-    choice = parse_bool(str, arg);
-
-    if ( choice < 0 && !cmdline_strcmp(str, "dom0-kernel") )
+    if ( !strcmp(str, "dom0-kernel") )
     {
         xen_processor_pmbits &= ~XEN_PROCESSOR_PM_PX;
         cpufreq_controller = FREQCTL_dom0_kernel;
         opt_dom0_vcpus_pin = 1;
-        return 0;
+        return;
     }
 
-    if ( choice == 0 || !cmdline_strcmp(str, "none") )
+    if ( !strcmp(str, "none") )
     {
         xen_processor_pmbits &= ~XEN_PROCESSOR_PM_PX;
         cpufreq_controller = FREQCTL_none;
-        return 0;
+        return;
     }
 
-    if ( choice > 0 || !cmdline_strcmp(str, "xen") )
-    {
-        xen_processor_pmbits |= XEN_PROCESSOR_PM_PX;
-        cpufreq_controller = FREQCTL_xen;
-        if ( *arg && *(arg + 1) )
-            return cpufreq_cmdline_parse(arg + 1);
-    }
+    if ( (arg = strpbrk(str, ",:")) != NULL )
+        *arg++ = '\0';
 
-    return (choice < 0) ? -EINVAL : 0;
+    if ( !strcmp(str, "xen") )
+        if ( arg && *arg )
+            cpufreq_cmdline_parse(arg);
 }
 custom_param("cpufreq", setup_cpufreq_option);
 
@@ -130,15 +121,13 @@ int __init cpufreq_register_governor(struct cpufreq_governor *governor)
 
 int cpufreq_limit_change(unsigned int cpu)
 {
-    struct processor_performance *perf;
+    struct processor_performance *perf = &processor_pminfo[cpu]->perf;
     struct cpufreq_policy *data;
     struct cpufreq_policy policy;
 
     if (!cpu_online(cpu) || !(data = per_cpu(cpufreq_cpu_policy, cpu)) ||
         !processor_pminfo[cpu])
         return -ENODEV;
-
-    perf = &processor_pminfo[cpu]->perf;
 
     if (perf->platform_limit >= perf->state_count)
         return -EINVAL;
@@ -161,15 +150,12 @@ int cpufreq_add_cpu(unsigned int cpu)
     struct cpufreq_dom *cpufreq_dom = NULL;
     struct cpufreq_policy new_policy;
     struct cpufreq_policy *policy;
-    struct processor_performance *perf;
+    struct processor_performance *perf = &processor_pminfo[cpu]->perf;
 
     /* to protect the case when Px was not controlled by xen */
-    if ( !processor_pminfo[cpu] || !cpu_online(cpu) )
-        return -EINVAL;
-
-    perf = &processor_pminfo[cpu]->perf;
-
-    if ( !(perf->init & XEN_PX_INIT) )
+    if (!processor_pminfo[cpu]      ||
+        !(perf->init & XEN_PX_INIT) ||
+        !cpu_online(cpu))
         return -EINVAL;
 
     if (!cpufreq_driver)
@@ -319,15 +305,12 @@ int cpufreq_del_cpu(unsigned int cpu)
     struct list_head *pos;
     struct cpufreq_dom *cpufreq_dom = NULL;
     struct cpufreq_policy *policy;
-    struct processor_performance *perf;
+    struct processor_performance *perf = &processor_pminfo[cpu]->perf;
 
     /* to protect the case when Px was not controlled by xen */
-    if ( !processor_pminfo[cpu] || !cpu_online(cpu) )
-        return -EINVAL;
-
-    perf = &processor_pminfo[cpu]->perf;
-
-    if ( !(perf->init & XEN_PX_INIT) )
+    if (!processor_pminfo[cpu]      ||
+        !(perf->init & XEN_PX_INIT) ||
+        !cpu_online(cpu))
         return -EINVAL;
 
     if (!per_cpu(cpufreq_cpu_policy, cpu))
@@ -575,7 +558,7 @@ static int __init cpufreq_handle_common_option(const char *name, const char *val
     return 0;
 }
 
-static int __init cpufreq_cmdline_parse(const char *s)
+void __init cpufreq_cmdline_parse(char *str)
 {
     static struct cpufreq_governor *__initdata cpufreq_governors[] =
     {
@@ -585,12 +568,8 @@ static int __init cpufreq_cmdline_parse(const char *s)
         &cpufreq_gov_performance,
         &cpufreq_gov_powersave
     };
-    static char __initdata buf[128];
-    char *str = buf;
     unsigned int gov_index = 0;
-    int rc = 0;
 
-    strlcpy(buf, s, sizeof(buf));
     do {
         char *val, *end = strchr(str, ',');
         unsigned int i;
@@ -619,16 +598,11 @@ static int __init cpufreq_cmdline_parse(const char *s)
         if (str && !cpufreq_handle_common_option(str, val) &&
             (!cpufreq_governors[gov_index]->handle_option ||
              !cpufreq_governors[gov_index]->handle_option(str, val)))
-        {
             printk(XENLOG_WARNING "cpufreq/%s: option '%s' not recognized\n",
                    cpufreq_governors[gov_index]->name, str);
-            rc = -EINVAL;
-        }
 
         str = end;
     } while (str);
-
-    return rc;
 }
 
 static int cpu_callback(
@@ -658,22 +632,10 @@ static struct notifier_block cpu_nfb = {
 
 static int __init cpufreq_presmp_init(void)
 {
+    void *cpu = (void *)(long)smp_processor_id();
+    cpu_callback(&cpu_nfb, CPU_ONLINE, cpu);
     register_cpu_notifier(&cpu_nfb);
     return 0;
 }
 presmp_initcall(cpufreq_presmp_init);
 
-int __init cpufreq_register_driver(struct cpufreq_driver *driver_data)
-{
-   if ( !driver_data || !driver_data->init ||
-        !driver_data->verify || !driver_data->exit ||
-        (!driver_data->target == !driver_data->setpolicy) )
-        return -EINVAL;
-
-    if ( cpufreq_driver )
-        return -EBUSY;
-
-    cpufreq_driver = driver_data;
-
-    return 0;
-}

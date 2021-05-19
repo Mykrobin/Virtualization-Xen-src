@@ -37,7 +37,6 @@
 #include <iconv.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <langinfo.h>
 
 #include "libvhd.h"
 #include "relative-path.h"
@@ -1297,7 +1296,6 @@ vhd_macx_encode_location(char *name, char **out, int *outlen)
 	size_t ibl, obl;
 	char *uri, *uri_utf8, *uri_utf8p, *ret;
 	const char *urip;
-	char *codeset;
 
 	err     = 0;
 	ret     = NULL;
@@ -1306,7 +1304,7 @@ vhd_macx_encode_location(char *name, char **out, int *outlen)
 	len     = strlen(name) + strlen("file://");
 
 	ibl     = len;
-	obl     = len * 2;
+	obl     = len;
 
 	urip = uri = malloc(ibl + 1);
 	uri_utf8 = uri_utf8p = malloc(obl);
@@ -1314,8 +1312,7 @@ vhd_macx_encode_location(char *name, char **out, int *outlen)
 	if (!uri || !uri_utf8)
 		return -ENOMEM;
 
-	codeset = nl_langinfo(CODESET);
-	cd = iconv_open("UTF-8", codeset);
+	cd = iconv_open("UTF-8", "ASCII");
 	if (cd == (iconv_t)-1) {
 		err = -errno;
 		goto out;
@@ -1328,7 +1325,7 @@ vhd_macx_encode_location(char *name, char **out, int *outlen)
 	    (char **)
 #endif
 	    &urip, &ibl, &uri_utf8p, &obl) == (size_t)-1 ||
-	    ibl) {
+	    ibl || obl) {
 		err = (errno ? -errno : -EIO);
 		goto out;
 	}
@@ -1360,7 +1357,6 @@ vhd_w2u_encode_location(char *name, char **out, int *outlen)
 	size_t ibl, obl;
 	char *uri, *uri_utf16, *uri_utf16p, *tmp, *ret;
 	const char *urip;
-	char *codeset;
 
 	err     = 0;
 	ret     = NULL;
@@ -1408,8 +1404,7 @@ vhd_w2u_encode_location(char *name, char **out, int *outlen)
 	 * MICROSOFT_COMPAT
 	 * little endian unicode here 
 	 */
-	codeset = nl_langinfo(CODESET);
-	cd = iconv_open("UTF-16LE", codeset);
+	cd = iconv_open("UTF-16LE", "ASCII");
 	if (cd == (iconv_t)-1) {
 		err = -errno;
 		goto out;
@@ -1420,7 +1415,7 @@ vhd_w2u_encode_location(char *name, char **out, int *outlen)
 	    (char **)
 #endif
 	    &urip, &ibl, &uri_utf16p, &obl) == (size_t)-1 ||
-	    ibl) {
+	    ibl || obl) {
 		err = (errno ? -errno : -EIO);
 		goto out;
 	}
@@ -1452,13 +1447,11 @@ vhd_macx_decode_location(const char *in, char *out, int len)
 	iconv_t cd;
 	char *name;
 	size_t ibl, obl;
-	char *codeset;
 
 	name = out;
 	ibl  = obl = len;
 
-	codeset = nl_langinfo(CODESET);
-	cd = iconv_open(codeset, "UTF-8");
+	cd = iconv_open("ASCII", "UTF-8");
 	if (cd == (iconv_t)-1) 
 		return NULL;
 
@@ -1486,13 +1479,11 @@ vhd_w2u_decode_location(const char *in, char *out, int len, char *utf_type)
 	iconv_t cd;
 	char *name, *tmp;
 	size_t ibl, obl;
-	char *codeset;
 
 	tmp = name = out;
 	ibl = obl  = len;
 
-	codeset = nl_langinfo(CODESET);
-	cd = iconv_open(codeset, utf_type);
+	cd = iconv_open("ASCII", utf_type);
 	if (cd == (iconv_t)-1) 
 		return NULL;
 
@@ -2188,7 +2179,7 @@ vhd_write_block(vhd_context_t *ctx, uint32_t block, char *data)
 	if (block >= ctx->bat.entries)
 		return -ERANGE;
 
-	if ((unsigned long)data & (VHD_SECTOR_SIZE -1))
+	if ((unsigned long)data & ~(VHD_SECTOR_SIZE -1))
 		return -EINVAL;
 
 	blk  = ctx->bat.bat[block];
@@ -2459,7 +2450,6 @@ vhd_initialize_header_parent_name(vhd_context_t *ctx, const char *parent_path)
 	size_t ibl, obl;
 	char *ppath, *dst;
 	const char *pname;
-	char *codeset;
 
 	err   = 0;
 	pname = NULL;
@@ -2469,8 +2459,7 @@ vhd_initialize_header_parent_name(vhd_context_t *ctx, const char *parent_path)
 	 * MICROSOFT_COMPAT
 	 * big endian unicode here 
 	 */
-	codeset = nl_langinfo(CODESET);
-	cd = iconv_open(UTF_16BE, codeset);
+	cd = iconv_open(UTF_16BE, "ASCII");
 	if (cd == (iconv_t)-1) {
 		err = -errno;
 		goto out;

@@ -11,7 +11,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * Copyright (C) 2005 Mike Wray Hewlett-Packard
  * Copyright (C) 2005 Christian Limpach <Christian.Limpach@cl.cam.ac.uk>
@@ -43,14 +44,6 @@
 #define PKG "xen.lowlevel.xs"
 #define CLS "xs"
 
-#if PY_MAJOR_VERSION < 3
-/* Python 2 compatibility */
-#define PyLong_FromLong PyInt_FromLong
-#undef PyLong_Check
-#define PyLong_Check PyInt_Check
-#define PyLong_AsLong PyInt_AsLong
-#endif
-
 static PyObject *xs_error;
 
 /** Python wrapper round an xs handle.
@@ -76,8 +69,6 @@ static inline struct xs_handle *xshandle(XsHandle *self)
 }
 
 static void remove_watch(XsHandle *xsh, PyObject *token);
-
-static PyObject *match_watch_by_token(XsHandle *self, char **xsval);
 
 static PyObject *none(bool result);
 
@@ -113,7 +104,7 @@ static PyObject *xspy_read(XsHandle *self, PyObject *args)
     xsval = xs_read(xh, th, path, &xsval_n);
     Py_END_ALLOW_THREADS
     if (xsval) {
-        PyObject *val = PyBytes_FromStringAndSize(xsval, xsval_n);
+        PyObject *val = PyString_FromStringAndSize(xsval, xsval_n);
         free(xsval);
         return val;
     }
@@ -189,11 +180,7 @@ static PyObject *xspy_ls(XsHandle *self, PyObject *args)
         int i;
         PyObject *val = PyList_New(xsval_n);
         for (i = 0; i < xsval_n; i++)
-#if PY_MAJOR_VERSION >= 3
-            PyList_SetItem(val, i, PyUnicode_FromString(xsval[i]));
-#else
-            PyList_SetItem(val, i, PyBytes_FromString(xsval[i]));
-#endif
+            PyList_SetItem(val, i, PyString_FromString(xsval[i]));
         free(xsval);
         return val;
     }
@@ -205,8 +192,7 @@ static PyObject *xspy_ls(XsHandle *self, PyObject *args)
 
 #define xspy_mkdir_doc "\n"					\
 	"Make a directory.\n"					\
-	" transaction [string]: transaction handle.\n"		\
-	" path [string]       : path to directory to create.\n"	\
+	" path [string]: path to directory to create.\n"	\
 	"\n"							\
 	"Returns None on success.\n"				\
 	"Raises xen.lowlevel.xs.Error on error.\n"			\
@@ -455,52 +441,6 @@ static PyObject *xspy_watch(XsHandle *self, PyObject *args)
 }
 
 
-#define xspy_fileno_doc "\n"                              \
-	"Return the FD to poll for notifications when watches fire.\n"   \
-	"Returns: [int] file descriptor.\n"                \
-	"\n"
-
-static PyObject *xspy_fileno(XsHandle *self)
-{
-    struct xs_handle *xh = xshandle(self);
-    int fd;
-
-    if (!xh)
-        return NULL;
-
-    fd = xs_fileno(xh);
-
-    return PyLong_FromLong(fd);
-}
-
-
-#define xspy_check_watch_doc "\n"				\
-	"Check for watch notifications without blocking.\n"	\
-	"\n"							\
-	"Returns: [tuple] (path, token).\n"			\
-	"         None if no watches have fired.\n"             \
-	"Raises xen.lowlevel.xs.Error on error.\n"	        \
-	"\n"
-
-static PyObject *xspy_check_watch(XsHandle *self, PyObject *args)
-{
-    struct xs_handle *xh = xshandle(self);
-    PyObject *val = NULL;
-    char **xsval;
-
-    if (!xh)
-        return NULL;
-
-    xsval = xs_check_watch(xh);
-    if (!xsval) {
-        return none(errno == EAGAIN);
-    }
-
-    val = match_watch_by_token(self, xsval);
-    free(xsval);
-    return val;
-}
-
 #define xspy_read_watch_doc "\n"				\
 	"Read a watch notification.\n"				\
 	"\n"							\
@@ -513,6 +453,8 @@ static PyObject *xspy_read_watch(XsHandle *self, PyObject *args)
     struct xs_handle *xh = xshandle(self);
     PyObject *val = NULL;
     char **xsval;
+    PyObject *token;
+    int i;
     unsigned int num;
 
     if (!xh)
@@ -524,16 +466,29 @@ again:
     Py_END_ALLOW_THREADS
     if (!xsval) {
         PyErr_SetFromErrno(xs_error);
-        return val;
+        goto exit;
     }
-
-    val = match_watch_by_token(self, xsval);
+    if (sscanf(xsval[XS_WATCH_TOKEN], "%li", (unsigned long *)&token) != 1) {
+	xs_set_error(EINVAL);
+        goto exit;
+    }
+    for (i = 0; i < PyList_Size(self->watches); i++) {
+        if (token == PyList_GetItem(self->watches, i))
+            break;
+    }
+    if (i == PyList_Size(self->watches)) {
+      /* We do not have a registered watch for the one that has just fired.
+         Ignore this -- a watch that has been recently deregistered can still
+         have watches in transit.  This is a blocking method, so go back to
+         read again.
+      */
+      free(xsval);
+      goto again;
+    }
+    /* Create tuple (path, token). */
+    val = Py_BuildValue("(sO)", xsval[XS_WATCH_PATH], token);
+ exit:
     free(xsval);
-
-    if (!val && errno == EAGAIN) {
-        goto again;
-    }
-
     return val;
 }
 
@@ -595,18 +550,13 @@ static PyObject *xspy_transaction_start(XsHandle *self)
     }
 
     snprintf(thstr, sizeof(thstr), "%lX", (unsigned long)th);
-#if PY_MAJOR_VERSION >= 3
-    return PyUnicode_FromString(thstr);
-#else
-    return PyBytes_FromString(thstr);
-#endif
+    return PyString_FromString(thstr);
 }
 
 #define xspy_transaction_end_doc "\n"					\
 	"End the current transaction.\n"				\
 	"Attempts to commit the transaction unless abort is true.\n"	\
-	" transaction [string] : transaction handle.\n"			\
-	" abort [int]          : abort flag (default 0).\n"		\
+	" abort [int]: abort flag (default 0).\n"			\
 	"\n"								\
 	"Returns True on success, False if you need to try again.\n"	\
 	"Raises xen.lowlevel.xs.Error on error.\n"				\
@@ -822,11 +772,7 @@ static PyObject *xspy_get_domain_path(XsHandle *self, PyObject *args)
     Py_END_ALLOW_THREADS
 
     if (xsval) {
-#if PY_MAJOR_VERSION >= 3
-        PyObject *val = PyUnicode_FromString(xsval);
-#else
-        PyObject *val = PyBytes_FromString(xsval);
-#endif
+        PyObject *val = PyString_FromString(xsval);
         free(xsval);
         return val;
     }
@@ -870,7 +816,7 @@ static int parse_transaction_path(XsHandle *self, PyObject *args,
 
     *xh = xshandle(self);
 
-    if (!*xh)
+    if (!xh)
         return 0;
 
     if (!PyArg_ParseTuple(args, "ss", &thstr, path))
@@ -879,33 +825,6 @@ static int parse_transaction_path(XsHandle *self, PyObject *args,
     *th = strtoul(thstr, NULL, 16);
 
     return 1;
-}
-
-
-static PyObject *match_watch_by_token(XsHandle *self, char **xsval)
-{
-    PyObject *token;
-    int i;
-
-    if (sscanf(xsval[XS_WATCH_TOKEN], "%li", (unsigned long *)&token) != 1) {
-        xs_set_error(EINVAL);
-        return NULL;
-    }
-    for (i = 0; i < PyList_Size(self->watches); i++) {
-        if (token == PyList_GetItem(self->watches, i))
-            break;
-    }
-    if (i == PyList_Size(self->watches)) {
-        /* We do not have a registered watch for the one that has just fired.
-           Ignore this -- a watch that has been recently deregistered can still
-           have watches in transit.
-        */
-        xs_set_error(EAGAIN);
-        return NULL;
-    }
-
-    /* Create tuple (path, token). */
-    return Py_BuildValue("(sO)", xsval[XS_WATCH_PATH], token);
 }
 
 
@@ -938,7 +857,6 @@ static PyMethodDef xshandle_methods[] = {
     XSPY_METH(set_permissions,   METH_VARARGS),
     XSPY_METH(watch,             METH_VARARGS),
     XSPY_METH(read_watch,        METH_NOARGS),
-    XSPY_METH(check_watch,       METH_NOARGS),
     XSPY_METH(unwatch,           METH_VARARGS),
     XSPY_METH(transaction_start, METH_NOARGS),
     XSPY_METH(transaction_end,   METH_VARARGS | METH_KEYWORDS),
@@ -948,9 +866,13 @@ static PyMethodDef xshandle_methods[] = {
     XSPY_METH(release_domain,    METH_VARARGS),
     XSPY_METH(close,             METH_NOARGS),
     XSPY_METH(get_domain_path,   METH_VARARGS),
-    XSPY_METH(fileno,            METH_NOARGS),
     { NULL /* Sentinel. */ },
 };
+
+static PyObject *xshandle_getattr(PyObject *self, char *name)
+{
+    return Py_FindMethod(xshandle_methods, self, name);
+}
 
 static PyObject *
 xshandle_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
@@ -1004,75 +926,72 @@ static void xshandle_dealloc(XsHandle *self)
 
     Py_XDECREF(self->watches);
 
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    self->ob_type->tp_free((PyObject *)self);
 }
 
 static PyTypeObject xshandle_type = {
-#if PY_MAJOR_VERSION >= 3
-    .ob_base = { PyObject_HEAD_INIT(NULL) },
-#else
     PyObject_HEAD_INIT(NULL)
-#endif
-    .tp_name = PKG "." CLS,
-    .tp_basicsize = sizeof(XsHandle),
-    .tp_itemsize = 0,
-    .tp_dealloc = (destructor)xshandle_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_doc = "Xenstore connections",
-    .tp_methods = xshandle_methods,
-    .tp_init = (initproc)xshandle_init,
-    .tp_new = xshandle_new,
+    0,
+    PKG "." CLS,
+    sizeof(XsHandle),
+    0,
+    (destructor)xshandle_dealloc, /* tp_dealloc        */
+    NULL,                         /* tp_print          */
+    xshandle_getattr,             /* tp_getattr        */
+    NULL,                         /* tp_setattr        */
+    NULL,                         /* tp_compare        */
+    NULL,                         /* tp_repr           */
+    NULL,                         /* tp_as_number      */
+    NULL,                         /* tp_as_sequence    */
+    NULL,                         /* tp_as_mapping     */
+    NULL,                         /* tp_hash           */
+    NULL,                         /* tp_call           */
+    NULL,                         /* tp_str            */
+    NULL,                         /* tp_getattro       */
+    NULL,                         /* tp_setattro       */
+    NULL,                         /* tp_as_buffer      */
+    Py_TPFLAGS_DEFAULT,           /* tp_flags          */
+    "Xenstore connections",       /* tp_doc            */
+    NULL,                         /* tp_traverse       */
+    NULL,                         /* tp_clear          */
+    NULL,                         /* tp_richcompare    */
+    0,                            /* tp_weaklistoffset */
+    NULL,                         /* tp_iter           */
+    NULL,                         /* tp_iternext       */
+    xshandle_methods,             /* tp_methods        */
+    NULL,                         /* tp_members        */
+    NULL,                         /* tp_getset         */
+    NULL,                         /* tp_base           */
+    NULL,                         /* tp_dict           */
+    NULL,                         /* tp_descr_get      */
+    NULL,                         /* tp_descr_set      */
+    0,                            /* tp_dictoffset     */
+    (initproc)xshandle_init,      /* tp_init           */
+    NULL,                         /* tp_alloc          */
+    xshandle_new,                 /* tp_new            */
 };
 
 static PyMethodDef xs_methods[] = { { NULL } };
 
-#if PY_MAJOR_VERSION >= 3
-static PyModuleDef xs_module = {
-    PyModuleDef_HEAD_INIT,
-    PKG,     /* name */
-    NULL,   /* docstring */
-    -1,     /* size of per-interpreter state, -1 means the module use global
-               variables */
-    xs_methods
-};
-#endif
-
-#if PY_MAJOR_VERSION >= 3
-#define INITERROR return NULL
-PyMODINIT_FUNC PyInit_xs(void)
-#else
-#define INITERROR return
 PyMODINIT_FUNC initxs(void)
-#endif
 {
     PyObject* m;
 
     if (PyType_Ready(&xshandle_type) < 0)
-        INITERROR;
+        return;
 
-#if PY_MAJOR_VERSION >= 3
-    m = PyModule_Create(&xs_module);
-#else
     m = Py_InitModule(PKG, xs_methods);
-#endif
 
     if (m == NULL)
-        INITERROR;
+      return;
 
     xs_error = PyErr_NewException(PKG ".Error", PyExc_RuntimeError, NULL);
-    if (xs_error == NULL) {
-        Py_DECREF(m);
-        INITERROR;
-    }
 
     Py_INCREF(&xshandle_type);
     PyModule_AddObject(m, CLS, (PyObject *)&xshandle_type);
 
     Py_INCREF(xs_error);
     PyModule_AddObject(m, "Error", xs_error);
-#if PY_MAJOR_VERSION >= 3
-    return m;
-#endif
 }
 
 

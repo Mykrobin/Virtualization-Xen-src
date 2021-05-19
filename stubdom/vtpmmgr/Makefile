@@ -12,9 +12,7 @@
 XEN_ROOT=../..
 
 TARGET=vtpmmgr.a
-OBJS=vtpmmgr.o vtpm_cmd_handler.o init.o tpmrsa.o tpm.o tpm2.o log.o
-OBJS += vtpm_disk.o disk_tpm.o disk_io.o disk_crypto.o disk_read.o disk_write.o
-OBJS += mgmt_authority.o
+OBJS=vtpmmgr.o vtpm_cmd_handler.o vtpm_storage.o init.o tpmrsa.o tpm.o log.o
 
 CFLAGS+=-Werror -Iutil -Icrypto -Itcs
 CFLAGS+=-Wno-declaration-after-statement -Wno-unused-label
@@ -22,11 +20,6 @@ CFLAGS+=-Wno-declaration-after-statement -Wno-unused-label
 build: $(TARGET)
 $(TARGET): $(OBJS)
 	ar -rcs $@ $^
-
-install:
-	$(INSTALL_DIR) "$(DESTDIR)$(LIBEXEC_BIN)"
-	$(INSTALL_PROG) calc.pl "$(DESTDIR)$(LIBEXEC_BIN)"
-	$(INSTALL_PROG) manage-vtpmmgr.pl "$(DESTDIR)$(LIBEXEC_BIN)"
 
 clean:
 	rm -f $(TARGET) $(OBJS)

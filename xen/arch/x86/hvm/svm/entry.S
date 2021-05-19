@@ -14,11 +14,11 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
-        .file "svm/entry.S"
-
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/softirq.h>
 #include <asm/types.h>
@@ -32,7 +32,7 @@
 #define CLGI   .byte 0x0F,0x01,0xDD
 
 ENTRY(svm_asm_do_resume)
-        GET_CURRENT(bx)
+        GET_CURRENT(%rbx)
 .Lsvm_do_resume:
         call svm_intr_assist
         mov  %rsp,%rdi
@@ -61,14 +61,23 @@ UNLIKELY_START(ne, nsvm_hap)
         jmp  .Lsvm_do_resume
 __UNLIKELY_END(nsvm_hap)
 
-        mov  %rsp, %rdi
-        call svm_vmenter_helper
+        call svm_asid_handle_vmrun
 
-        mov VCPU_arch_msr(%rbx), %rax
-        mov VCPUMSR_spec_ctrl_raw(%rax), %eax
+        cmpb $0,tb_init_done(%rip)
+UNLIKELY_START(nz, svm_trace)
+        call svm_trace_vmentry
+UNLIKELY_END(svm_trace)
 
-        /* WARNING! `ret`, `call *`, `jmp *` not safe beyond this point. */
-        SPEC_CTRL_EXIT_TO_HVM   /* Req: a=spec_ctrl %rsp=regs/cpuinfo, Clob: cd */
+        mov  VCPU_svm_vmcb(%rbx),%rcx
+        mov  UREGS_rax(%rsp),%rax
+        mov  %rax,VMCB_rax(%rcx)
+        mov  UREGS_rip(%rsp),%rax
+        mov  %rax,VMCB_rip(%rcx)
+        mov  UREGS_rsp(%rsp),%rax
+        mov  %rax,VMCB_rsp(%rcx)
+        mov  UREGS_eflags(%rsp),%rax
+        or   $X86_EFLAGS_MBS,%rax
+        mov  %rax,VMCB_rflags(%rcx)
 
         pop  %r15
         pop  %r14
@@ -89,12 +98,34 @@ __UNLIKELY_END(nsvm_hap)
 
         VMRUN
 
-        SAVE_ALL
+        GET_CURRENT(%rax)
+        push %rdi
+        push %rsi
+        push %rdx
+        push %rcx
+        mov  VCPU_svm_vmcb(%rax),%rcx
+        push %rax
+        push %r8
+        push %r9
+        push %r10
+        push %r11
+        push %rbx
+        mov  %rax,%rbx
+        push %rbp
+        push %r12
+        push %r13
+        push %r14
+        push %r15
 
-        GET_CURRENT(bx)
-
-        SPEC_CTRL_ENTRY_FROM_HVM    /* Req: b=curr %rsp=regs/cpuinfo, Clob: acd */
-        /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
+        movb $0,VCPU_svm_vmcb_in_sync(%rbx)
+        mov  VMCB_rax(%rcx),%rax
+        mov  %rax,UREGS_rax(%rsp)
+        mov  VMCB_rip(%rcx),%rax
+        mov  %rax,UREGS_rip(%rsp)
+        mov  VMCB_rsp(%rcx),%rax
+        mov  %rax,UREGS_rsp(%rsp)
+        mov  VMCB_rflags(%rcx),%rax
+        mov  %rax,UREGS_eflags(%rsp)
 
         STGI
 GLOBAL(svm_stgi_label)

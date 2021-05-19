@@ -1,7 +1,7 @@
 XEN_ROOT=$(CURDIR)/../../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-CFLAGS += -Werror
+CFLAGS += -Wall -g -Werror
 CFLAGS += $(CFLAGS_libxenctrl)
 
 TESTDIR  = testsuite/tmp
@@ -37,10 +37,7 @@ flask-set-bool: set-bool.o
 clean: 
 	rm -f *.o *.opic *.so
 	rm -f $(CLIENTS)
-	$(RM) $(DEPS_RM)
-
-.PHONY: distclean
-distclean: clean
+	$(RM) $(DEPS)
 
 .PHONY: print-dir
 print-dir:
@@ -52,11 +49,7 @@ print-end:
 
 .PHONY: install
 install: all
-	$(INSTALL_DIR) $(DESTDIR)$(sbindir)
-	$(INSTALL_PROG) $(CLIENTS) $(DESTDIR)$(sbindir)
+	$(INSTALL_DIR) $(DESTDIR)$(SBINDIR)
+	$(INSTALL_PROG) $(CLIENTS) $(DESTDIR)$(SBINDIR)
 
-.PHONY: uninstall
-uninstall:
-	rm -f $(addprefix $(DESTDIR)$(sbindir)/, $(CLIENTS))
-
--include $(DEPS_INCLUDE)
+-include $(DEPS)

@@ -16,12 +16,18 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 
 #include <asm/system.h>
 #include <asm/processor.h>
 
 #include <public/xen.h>
+
+asmlinkage void do_trap_serror(struct cpu_user_regs *regs)
+{
+    panic("Unhandled serror trap");
+}
 
 static const char *handler[]= {
         "Synchronous Abort",
@@ -30,16 +36,13 @@ static const char *handler[]= {
         "Error"
 };
 
-void do_bad_mode(struct cpu_user_regs *regs, int reason)
+asmlinkage void do_bad_mode(struct cpu_user_regs *regs, int reason)
 {
-    union hsr hsr = { .bits = regs->hsr };
-
-    printk("Bad mode in %s handler detected\n", handler[reason]);
-    printk("ESR=0x%08"PRIx32":  EC=%"PRIx32", IL=%"PRIx32", ISS=%"PRIx32"\n",
-           hsr.bits, hsr.ec, hsr.len, hsr.iss);
+    uint64_t esr = READ_SYSREG64(ESR_EL2);
+    printk("Bad mode in %s handler detected, code 0x%08"PRIx64"\n",
+           handler[reason], esr);
 
     local_irq_disable();
-    show_execution_state(regs);
     panic("bad mode");
 }
 

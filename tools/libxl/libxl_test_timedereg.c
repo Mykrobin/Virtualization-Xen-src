@@ -28,15 +28,14 @@ static libxl__ao *tao;
 static int seq;
 
 static void occurs(libxl__egc *egc, libxl__ev_time *ev,
-                   const struct timeval *requested_abs, int rc);
+                   const struct timeval *requested_abs);
 
-static void regs(libxl__ao *ao, int j)
+static void regs(libxl__gc *gc, int j)
 {
-    AO_GC;
     int rc, i;
     LOG(DEBUG,"regs(%d)", j);
     for (i=0; i<NTIMES; i++) {
-        rc = libxl__ev_time_register_rel(ao, &et[j][i], occurs, ms[j][i]);
+        rc = libxl__ev_time_register_rel(gc, &et[j][i], occurs, ms[j][i]);
         assert(!rc);
     }    
 }
@@ -53,28 +52,26 @@ int libxl_test_timedereg(libxl_ctx *ctx, libxl_asyncop_how *ao_how)
         libxl__ev_time_init(&et[1][i]);
     }
 
-    regs(ao, 0);
+    regs(gc, 0);
 
     return AO_INPROGRESS;
 }
 
 static void occurs(libxl__egc *egc, libxl__ev_time *ev,
-                   const struct timeval *requested_abs, int rc)
+                   const struct timeval *requested_abs)
 {
     EGC_GC;
     int i;
 
     int off = ev - &et[0][0];
-    LOG(DEBUG,"occurs[%d][%d] seq=%d rc=%d", off/NTIMES, off%NTIMES, seq, rc);
-
-    assert(rc == ERROR_TIMEDOUT);
+    LOG(DEBUG,"occurs[%d][%d] seq=%d", off/NTIMES, off%NTIMES, seq);
 
     switch (seq) {
     case 0:
         assert(ev == &et[0][1]);
         libxl__ev_time_deregister(gc, &et[0][0]);
         libxl__ev_time_deregister(gc, &et[0][2]);
-        regs(tao, 1);
+        regs(gc, 1);
         libxl__ev_time_deregister(gc, &et[0][1]);
         break;
 

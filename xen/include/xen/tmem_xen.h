@@ -16,7 +16,6 @@
 #include <xen/guest_access.h> /* copy_from_guest */
 #include <xen/hash.h> /* hash_long */
 #include <xen/domain_page.h> /* __map_domain_page */
-#include <xen/rbtree.h> /* struct rb_root */
 #include <xsm/xsm.h> /* xsm_tmem_control */
 #include <public/tmem.h>
 #ifdef CONFIG_COMPAT
@@ -24,8 +23,9 @@
 #endif
 typedef uint32_t pagesize_t;  /* like size_t, must handle largest PAGE_SIZE */
 
-#define IS_PAGE_ALIGNED(addr) IS_ALIGNED((unsigned long)(addr), PAGE_SIZE)
-#define IS_VALID_PAGE(_pi)    mfn_valid(page_to_mfn(_pi))
+#define IS_PAGE_ALIGNED(addr) \
+  ((void *)((((unsigned long)addr + (PAGE_SIZE - 1)) & PAGE_MASK)) == addr)
+#define IS_VALID_PAGE(_pi)  ( mfn_valid(page_to_mfn(_pi)) )
 
 extern struct page_list_head tmem_page_list;
 extern spinlock_t tmem_page_list_lock;
@@ -35,33 +35,40 @@ extern atomic_t freeable_page_count;
 extern int tmem_init(void);
 #define tmem_hash hash_long
 
-extern bool opt_tmem_compress;
-static inline bool tmem_compression_enabled(void)
+extern bool_t opt_tmem_compress;
+static inline bool_t tmem_compression_enabled(void)
 {
     return opt_tmem_compress;
 }
 
-#ifdef CONFIG_TMEM
-extern bool opt_tmem;
-static inline bool tmem_enabled(void)
+extern bool_t opt_tmem_dedup;
+static inline bool_t tmem_dedup_enabled(void)
+{
+    return opt_tmem_dedup;
+}
+
+extern bool_t opt_tmem_tze;
+static inline bool_t tmem_tze_enabled(void)
+{
+    return opt_tmem_tze;
+}
+
+static inline void tmem_tze_disable(void)
+{
+    opt_tmem_tze = 0;
+}
+
+extern bool_t opt_tmem_shared_auth;
+static inline bool_t tmem_shared_auth(void)
+{
+    return opt_tmem_shared_auth;
+}
+
+extern bool_t opt_tmem;
+static inline bool_t tmem_enabled(void)
 {
     return opt_tmem;
 }
-
-static inline void tmem_disable(void)
-{
-    opt_tmem = false;
-}
-#else
-static inline bool tmem_enabled(void)
-{
-    return false;
-}
-
-static inline void tmem_disable(void)
-{
-}
-#endif /* CONFIG_TMEM */
 
 /*
  * Memory free page list management
@@ -169,6 +176,103 @@ static inline struct client *tmem_client_from_cli_id(domid_t cli_id)
     return c;
 }
 
+static inline uint8_t tmem_get_first_byte(struct page_info *pfp)
+{
+    const uint8_t *p = __map_domain_page(pfp);
+    uint8_t byte = p[0];
+
+    unmap_domain_page(p);
+
+    return byte;
+}
+
+static inline int tmem_page_cmp(struct page_info *pfp1, struct page_info *pfp2)
+{
+    const uint64_t *p1 = __map_domain_page(pfp1);
+    const uint64_t *p2 = __map_domain_page(pfp2);
+    int rc = memcmp(p1, p2, PAGE_SIZE);
+
+    unmap_domain_page(p2);
+    unmap_domain_page(p1);
+
+    return rc;
+}
+
+static inline int tmem_pcd_cmp(void *va1, pagesize_t len1, void *va2, pagesize_t len2)
+{
+    const char *p1 = (char *)va1;
+    const char *p2 = (char *)va2;
+    pagesize_t i;
+
+    ASSERT(len1 <= PAGE_SIZE);
+    ASSERT(len2 <= PAGE_SIZE);
+    if ( len1 < len2 )
+        return -1;
+    if ( len1 > len2 )
+        return 1;
+    ASSERT(len1 == len2);
+    for ( i = len2; i && *p1 == *p2; i--, p1++, p2++ );
+    if ( !i )
+        return 0;
+    if ( *p1 < *p2 )
+        return -1;
+    return 1;
+}
+
+static inline int tmem_tze_pfp_cmp(struct page_info *pfp1, pagesize_t pfp_len,
+                                   void *tva, const pagesize_t tze_len)
+{
+    const uint64_t *p1 = __map_domain_page(pfp1);
+    const uint64_t *p2 = tze_len == PAGE_SIZE ?
+        __map_domain_page((struct page_info *)tva) : tva;
+    int rc;
+
+    ASSERT(pfp_len <= PAGE_SIZE);
+    ASSERT(!(pfp_len & (sizeof(uint64_t)-1)));
+    ASSERT(tze_len <= PAGE_SIZE);
+    ASSERT(!(tze_len & (sizeof(uint64_t)-1)));
+    if ( pfp_len < tze_len )
+        rc = -1;
+    else if ( pfp_len > tze_len )
+        rc = 1;
+    else
+        rc = memcmp(p1, p2, tze_len);
+
+    if ( tze_len == PAGE_SIZE )
+        unmap_domain_page(p2);
+    unmap_domain_page(p1);
+
+    return rc;
+}
+
+/* return the size of the data in the pfp, ignoring trailing zeroes and
+ * rounded up to the nearest multiple of 8 */
+static inline pagesize_t tmem_tze_pfp_scan(struct page_info *pfp)
+{
+    const uint64_t *const page = __map_domain_page(pfp);
+    const uint64_t *p = page;
+    pagesize_t bytecount = PAGE_SIZE;
+    pagesize_t len = PAGE_SIZE/sizeof(uint64_t);
+
+    p += len;
+    while ( len-- && !*--p )
+        bytecount -= sizeof(uint64_t);
+
+    unmap_domain_page(page);
+
+    return bytecount;
+}
+
+static inline void tmem_tze_copy_from_pfp(void *tva, struct page_info *pfp, pagesize_t len)
+{
+    const uint64_t *p = __map_domain_page(pfp);
+
+    ASSERT(!(len & (sizeof(uint64_t)-1)));
+    memcpy(tva, p, len);
+
+    unmap_domain_page(p);
+}
+
 /* these typedefs are in the public/tmem.h interface
 typedef XEN_GUEST_HANDLE(void) cli_mfn_t;
 typedef XEN_GUEST_HANDLE(char) cli_va_t;
@@ -179,8 +283,9 @@ typedef XEN_GUEST_HANDLE_PARAM(char) tmem_cli_va_param_t;
 static inline int tmem_get_tmemop_from_client(tmem_op_t *op, tmem_cli_op_t uops)
 {
 #ifdef CONFIG_COMPAT
-    if ( is_hvm_vcpu(current) ? hvm_guest_x86_mode(current) != 8
-                              : is_pv_32bit_vcpu(current) )
+    if ( has_hvm_container_vcpu(current) ?
+         hvm_guest_x86_mode(current) != 8 :
+         is_pv_32on64_vcpu(current) )
     {
         int rc;
         enum XLAT_tmem_op_u u;
@@ -192,9 +297,15 @@ static inline int tmem_get_tmemop_from_client(tmem_op_t *op, tmem_cli_op_t uops)
         switch ( cop.cmd )
         {
         case TMEM_NEW_POOL:   u = XLAT_tmem_op_u_creat; break;
+        case TMEM_CONTROL:    u = XLAT_tmem_op_u_ctrl;  break;
+        case TMEM_AUTH:       u = XLAT_tmem_op_u_creat; break;
+        case TMEM_RESTORE_NEW:u = XLAT_tmem_op_u_creat; break;
         default:              u = XLAT_tmem_op_u_gen ;  break;
         }
+#define XLAT_tmem_op_HNDL_u_ctrl_buf(_d_, _s_) \
+        guest_from_compat_handle((_d_)->u.ctrl.buf, (_s_)->u.ctrl.buf)
         XLAT_tmem_op(op, &cop);
+#undef XLAT_tmem_op_HNDL_u_ctrl_buf
         return 0;
     }
 #endif
@@ -213,131 +324,10 @@ int tmem_compress_from_client(xen_pfn_t, void **, size_t *,
 
 int tmem_copy_from_client(struct page_info *, xen_pfn_t, tmem_cli_va_param_t);
 int tmem_copy_to_client(xen_pfn_t, struct page_info *, tmem_cli_va_param_t);
+extern int tmem_copy_tze_to_client(xen_pfn_t cmfn, void *tmem_va, pagesize_t len);
 
 #define tmem_client_err(fmt, args...)  printk(XENLOG_G_ERR fmt, ##args)
 #define tmem_client_warn(fmt, args...) printk(XENLOG_G_WARNING fmt, ##args)
 #define tmem_client_info(fmt, args...) printk(XENLOG_G_INFO fmt, ##args)
-
-/* Global statistics (none need to be locked). */
-struct tmem_statistics {
-    unsigned long total_tmem_ops;
-    unsigned long errored_tmem_ops;
-    unsigned long total_flush_pool;
-    unsigned long alloc_failed;
-    unsigned long alloc_page_failed;
-    unsigned long evicted_pgs;
-    unsigned long evict_attempts;
-    unsigned long relinq_pgs;
-    unsigned long relinq_attempts;
-    unsigned long max_evicts_per_relinq;
-    unsigned long low_on_memory;
-    unsigned long deduped_puts;
-    unsigned long tot_good_eph_puts;
-    int global_obj_count_max;
-    int global_pgp_count_max;
-    int global_pcd_count_max;
-    int global_page_count_max;
-    int global_rtree_node_count_max;
-    long global_eph_count_max;
-    unsigned long failed_copies;
-    unsigned long pcd_tot_tze_size;
-    unsigned long pcd_tot_csize;
-    /* Global counters (should use long_atomic_t access). */
-    atomic_t global_obj_count;
-    atomic_t global_pgp_count;
-    atomic_t global_pcd_count;
-    atomic_t global_page_count;
-    atomic_t global_rtree_node_count;
-};
-
-#define atomic_inc_and_max(_c) do { \
-    atomic_inc(&tmem_stats._c); \
-    if ( _atomic_read(tmem_stats._c) > tmem_stats._c##_max ) \
-        tmem_stats._c##_max = _atomic_read(tmem_stats._c); \
-} while (0)
-
-#define atomic_dec_and_assert(_c) do { \
-    atomic_dec(&tmem_stats._c); \
-    ASSERT(_atomic_read(tmem_stats._c) >= 0); \
-} while (0)
-
-#define MAX_GLOBAL_SHARED_POOLS  16
-struct tmem_global {
-    struct list_head ephemeral_page_list;  /* All pages in ephemeral pools. */
-    struct list_head client_list;
-    struct tmem_pool *shared_pools[MAX_GLOBAL_SHARED_POOLS];
-    bool shared_auth;
-    long eph_count;  /* Atomicity depends on eph_lists_spinlock. */
-    atomic_t client_weight_total;
-};
-
-#define MAX_POOLS_PER_DOMAIN 16
-
-struct tmem_pool;
-struct tmem_page_descriptor;
-struct tmem_page_content_descriptor;
-struct client {
-    struct list_head client_list;
-    struct tmem_pool *pools[MAX_POOLS_PER_DOMAIN];
-    struct domain *domain;
-    struct xmem_pool *persistent_pool;
-    struct list_head ephemeral_page_list;
-    long eph_count, eph_count_max;
-    domid_t cli_id;
-    xen_tmem_client_t info;
-    /* For save/restore/migration. */
-    bool was_frozen;
-    struct list_head persistent_invalidated_list;
-    struct tmem_page_descriptor *cur_pgp;
-    /* Statistics collection. */
-    unsigned long compress_poor, compress_nomem;
-    unsigned long compressed_pages;
-    uint64_t compressed_sum_size;
-    uint64_t total_cycles;
-    unsigned long succ_pers_puts, succ_eph_gets, succ_pers_gets;
-    /* Shared pool authentication. */
-    uint64_t shared_auth_uuid[MAX_GLOBAL_SHARED_POOLS][2];
-};
-
-#define POOL_PAGESHIFT (PAGE_SHIFT - 12)
-#define OBJ_HASH_BUCKETS 256 /* Must be power of two. */
-#define OBJ_HASH_BUCKETS_MASK (OBJ_HASH_BUCKETS-1)
-
-#define is_persistent(_p)  (_p->persistent)
-#define is_shared(_p)      (_p->shared)
-
-struct tmem_pool {
-    bool shared;
-    bool persistent;
-    bool is_dying;
-    struct client *client;
-    uint64_t uuid[2]; /* 0 for private, non-zero for shared. */
-    uint32_t pool_id;
-    rwlock_t pool_rwlock;
-    struct rb_root obj_rb_root[OBJ_HASH_BUCKETS]; /* Protected by pool_rwlock. */
-    struct list_head share_list; /* Valid if shared. */
-    int shared_count; /* Valid if shared. */
-    /* For save/restore/migration. */
-    struct list_head persistent_page_list;
-    struct tmem_page_descriptor *cur_pgp;
-    /* Statistics collection. */
-    atomic_t pgp_count;
-    int pgp_count_max;
-    long obj_count;  /* Atomicity depends on pool_rwlock held for write. */
-    long obj_count_max;
-    unsigned long objnode_count, objnode_count_max;
-    uint64_t sum_life_cycles;
-    uint64_t sum_evicted_cycles;
-    unsigned long puts, good_puts, no_mem_puts;
-    unsigned long dup_puts_flushed, dup_puts_replaced;
-    unsigned long gets, found_gets;
-    unsigned long flushs, flushs_found;
-    unsigned long flush_objs, flush_objs_found;
-};
-
-struct share_list {
-    struct list_head share_list;
-    struct client *client;
-};
 
 #endif /* __XEN_TMEM_XEN_H__ */

@@ -13,16 +13,20 @@
 #define BYTES_PER_LONG (1 << LONG_BYTEORDER)
 #define BITS_PER_LONG (BYTES_PER_LONG << 3)
 #define BITS_PER_BYTE 8
-#define POINTER_ALIGN BYTES_PER_LONG
-
-#define BITS_PER_LLONG 64
 
 #define BITS_PER_XEN_ULONG BITS_PER_LONG
 
+#define CONFIG_X86 1
+#define CONFIG_X86_HT 1
+#define CONFIG_PAGING_ASSISTANCE 1
+#define CONFIG_X86_LOCAL_APIC 1
+#define CONFIG_X86_GOOD_APIC 1
+#define CONFIG_X86_IO_APIC 1
 #define CONFIG_X86_PM_TIMER 1
 #define CONFIG_HPET_TIMER 1
 #define CONFIG_X86_MCE_THERMAL 1
 #define CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS 1
+#define CONFIG_NUMA 1
 #define CONFIG_DISCONTIGMEM 1
 #define CONFIG_NUMA_EMU 1
 #define CONFIG_DOMAIN_PAGE 1
@@ -34,22 +38,48 @@
 /* Intel P4 currently has largest cache line (L2 line size is 128 bytes). */
 #define CONFIG_X86_L1_CACHE_SHIFT 7
 
+#define CONFIG_ACPI 1
+#define CONFIG_ACPI_BOOT 1
 #define CONFIG_ACPI_SLEEP 1
 #define CONFIG_ACPI_NUMA 1
 #define CONFIG_ACPI_SRAT 1
 #define CONFIG_ACPI_CSTATE 1
 
-#define CONFIG_WATCHDOG 1
+#define CONFIG_VGA 1
+#define CONFIG_VIDEO 1
 
-#define CONFIG_MULTIBOOT 1
+#define CONFIG_HOTPLUG 1
+#define CONFIG_HOTPLUG_CPU 1
+
+#define CONFIG_XENOPROF 1
+#define CONFIG_KEXEC 1
+#define CONFIG_WATCHDOG 1
 
 #define HZ 100
 
 #define OPT_CONSOLE_STR "vga"
 
+#ifdef MAX_PHYS_CPUS
+#define NR_CPUS MAX_PHYS_CPUS
+#else
+#define NR_CPUS 256
+#endif
+
+/* Maximum we can support with current vLAPIC ID mapping. */
+#define MAX_HVM_VCPUS 128
+
+#ifdef CONFIG_X86_SUPERVISOR_MODE_KERNEL
+# define supervisor_mode_kernel (1)
+#else
+# define supervisor_mode_kernel (0)
+#endif
+
 /* Linkage for x86 */
+#define __ALIGN .align 16,0x90
+#define __ALIGN_STR ".align 16,0x90"
 #ifdef __ASSEMBLY__
-#define ALIGN .align 16,0x90
+#define ALIGN __ALIGN
+#define ALIGN_STR __ALIGN_STR
 #define ENTRY(name)                             \
   .globl name;                                  \
   ALIGN;                                        \
@@ -68,18 +98,8 @@
 #define STACK_ORDER 3
 #define STACK_SIZE  (PAGE_SIZE << STACK_ORDER)
 
-#define TRAMPOLINE_STACK_SPACE  PAGE_SIZE
-#define TRAMPOLINE_SPACE        (KB(64) - TRAMPOLINE_STACK_SPACE)
-#define WAKEUP_STACK_MIN        3072
-
-#define MBI_SPACE_MIN           (2 * PAGE_SIZE)
-
 /* Primary stack is restricted to 8kB by guard pages. */
 #define PRIMARY_STACK_SIZE 8192
-
-/* Total size of syscall and emulation stubs. */
-#define STUB_BUF_SHIFT (L1_CACHE_SHIFT > 7 ? L1_CACHE_SHIFT : 7)
-#define STUB_BUF_SIZE  (1 << STUB_BUF_SHIFT)
 
 /* Return value for zero-size _xmalloc(), distinguished from NULL. */
 #define ZERO_BLOCK_PTR ((void *)0xBAD0BAD0BAD0BAD0UL)
@@ -104,6 +124,10 @@ extern unsigned int video_mode, video_flags;
 extern unsigned short boot_edid_caps;
 extern unsigned char boot_edid_info[128];
 #endif
+
+#define asmlinkage
+
+#define CONFIG_COMPAT 1
 
 #include <xen/const.h>
 
@@ -141,21 +165,14 @@ extern unsigned char boot_edid_info[128];
  *    High read-only compatibility machine-to-phys translation table.
  *  0xffff82d080000000 - 0xffff82d0bfffffff [1GB,   2^30 bytes, PML4:261]
  *    Xen text, static data, bss.
-#ifndef CONFIG_BIGMEM
- *  0xffff82d0c0000000 - 0xffff82dfffffffff [61GB,              PML4:261]
+ *  0xffff82d0c0000000 - 0xffff82dffbffffff [61GB - 64MB,       PML4:261]
  *    Reserved for future use.
+ *  0xffff82dffc000000 - 0xffff82dfffffffff [64MB,  2^26 bytes, PML4:261]
+ *    Super-page information array.
  *  0xffff82e000000000 - 0xffff82ffffffffff [128GB, 2^37 bytes, PML4:261]
  *    Page-frame information array.
  *  0xffff830000000000 - 0xffff87ffffffffff [5TB, 5*2^40 bytes, PML4:262-271]
  *    1:1 direct mapping of all physical memory.
-#else
- *  0xffff82d0c0000000 - 0xffff82ffffffffff [189GB,             PML4:261]
- *    Reserved for future use.
- *  0xffff830000000000 - 0xffff847fffffffff [1.5TB, 3*2^39 bytes, PML4:262-264]
- *    Page-frame information array.
- *  0xffff848000000000 - 0xffff87ffffffffff [3.5TB, 7*2^39 bytes, PML4:265-271]
- *    1:1 direct mapping of all physical memory.
-#endif
  *  0xffff880000000000 - 0xffffffffffffffff [120TB,             PML4:272-511]
  *    PV: Guest-defined use.
  *  0xffff880000000000 - 0xffffff7fffffffff [119.5TB,           PML4:272-510]
@@ -168,8 +185,12 @@ extern unsigned char boot_edid_info[128];
  *    Guest-defined use.
  *  0x00000000f5800000 - 0x00000000ffffffff [168MB,             PML4:0]
  *    Read-only machine-to-phys translation table (GUEST ACCESSIBLE).
- *  0x0000000100000000 - 0x00007fffffffffff [128TB-4GB,         PML4:0-255]
- *    Unused / Reserved for future use.
+ *  0x0000000100000000 - 0x0000007fffffffff [508GB,             PML4:0]
+ *    Unused.
+ *  0x0000008000000000 - 0x000000ffffffffff [512GB, 2^39 bytes, PML4:1]
+ *    Hypercall argument translation area.
+ *  0x0000010000000000 - 0x00007fffffffffff [127TB, 2^46 bytes, PML4:2-255]
+ *    Reserved for future use.
  */
 
 
@@ -220,27 +241,21 @@ extern unsigned char boot_edid_info[128];
 /* Slot 261: xen text, static data and bss (1GB). */
 #define XEN_VIRT_START          (HIRO_COMPAT_MPT_VIRT_END)
 #define XEN_VIRT_END            (XEN_VIRT_START + GB(1))
-
-#ifndef CONFIG_BIGMEM
+/* Slot 261: superpage information array (64MB). */
+#define SPAGETABLE_VIRT_END     FRAMETABLE_VIRT_START
+#define SPAGETABLE_NR           (((FRAMETABLE_NR - 1) >> (SUPERPAGE_SHIFT - \
+                                                          PAGE_SHIFT)) + 1)
+#define SPAGETABLE_SIZE         (SPAGETABLE_NR * sizeof(struct spage_info))
+#define SPAGETABLE_VIRT_START   ((SPAGETABLE_VIRT_END - SPAGETABLE_SIZE) & \
+                                 (_AC(-1,UL) << SUPERPAGE_SHIFT))
 /* Slot 261: page-frame information array (128GB). */
-#define FRAMETABLE_SIZE         GB(128)
-#else
-/* Slot 262-264: page-frame information array (1.5TB). */
-#define FRAMETABLE_SIZE         GB(1536)
-#endif
 #define FRAMETABLE_VIRT_END     DIRECTMAP_VIRT_START
+#define FRAMETABLE_SIZE         GB(128)
 #define FRAMETABLE_NR           (FRAMETABLE_SIZE / sizeof(*frame_table))
 #define FRAMETABLE_VIRT_START   (FRAMETABLE_VIRT_END - FRAMETABLE_SIZE)
-
-#ifndef CONFIG_BIGMEM
 /* Slot 262-271/510: A direct 1:1 mapping of all of physical memory. */
 #define DIRECTMAP_VIRT_START    (PML4_ADDR(262))
 #define DIRECTMAP_SIZE          (PML4_ENTRY_BYTES * (511 - 262))
-#else
-/* Slot 265-271/510: A direct 1:1 mapping of all of physical memory. */
-#define DIRECTMAP_VIRT_START    (PML4_ADDR(265))
-#define DIRECTMAP_SIZE          (PML4_ENTRY_BYTES * (511 - 265))
-#endif
 #define DIRECTMAP_VIRT_END      (DIRECTMAP_VIRT_START + DIRECTMAP_SIZE)
 
 #ifndef __ASSEMBLY__
@@ -309,17 +324,6 @@ extern unsigned long xen_phys_start;
 #define ARG_XLAT_VA_SHIFT        (2 + PAGE_SHIFT)
 #define ARG_XLAT_START(v)        \
     (ARG_XLAT_VIRT_START + ((v)->vcpu_id << ARG_XLAT_VA_SHIFT))
-
-#define NATIVE_VM_ASSIST_VALID   ((1UL << VMASST_TYPE_4gb_segments)        | \
-                                  (1UL << VMASST_TYPE_4gb_segments_notify) | \
-                                  (1UL << VMASST_TYPE_writable_pagetables) | \
-                                  (1UL << VMASST_TYPE_pae_extended_cr3)    | \
-                                  (1UL << VMASST_TYPE_architectural_iopl)  | \
-                                  (1UL << VMASST_TYPE_runstate_update_flag)| \
-                                  (1UL << VMASST_TYPE_m2p_strict))
-#define VM_ASSIST_VALID          NATIVE_VM_ASSIST_VALID
-#define COMPAT_VM_ASSIST_VALID   (NATIVE_VM_ASSIST_VALID & \
-                                  ((1UL << COMPAT_BITS_PER_LONG) - 1))
 
 #define ELFSIZE 64
 

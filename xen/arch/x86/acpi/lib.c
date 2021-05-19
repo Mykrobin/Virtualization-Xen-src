@@ -14,11 +14,13 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/init.h>
 #include <xen/acpi.h>
@@ -49,7 +51,7 @@ char *__acpi_map_table(paddr_t phys, unsigned long size)
 	offset = phys & (PAGE_SIZE - 1);
 	mapped_size = PAGE_SIZE - offset;
 	set_fixmap(FIX_ACPI_END, phys);
-	base = __fix_to_virt(FIX_ACPI_END);
+	base = fix_to_virt(FIX_ACPI_END);
 
 	/*
 	 * Most cases can be covered by the below.
@@ -100,7 +102,7 @@ int arch_acpi_set_pdc_bits(u32 acpi_id, u32 *pdc, u32 mask)
 
 	pdc[2] |= ACPI_PDC_C_CAPABILITY_SMP & mask;
 
-	if (cpu_has(c, X86_FEATURE_EIST))
+	if (cpu_has(c, X86_FEATURE_EST))
 		pdc[2] |= ACPI_PDC_EST_CAPABILITY_SWSMP & mask;
 
 	if (cpu_has(c, X86_FEATURE_ACPI))
@@ -110,7 +112,7 @@ int arch_acpi_set_pdc_bits(u32 acpi_id, u32 *pdc, u32 mask)
 	 * If mwait/monitor or its break-on-interrupt extension are
 	 * unsupported, Cx_FFH will be disabled.
 	 */
-	if (!cpu_has(c, X86_FEATURE_MONITOR) ||
+	if (!cpu_has(c, X86_FEATURE_MWAIT) ||
 	    c->cpuid_level < CPUID_MWAIT_LEAF)
 		ecx = 0;
 	else if (c == &boot_cpu_data || cpu == smp_processor_id())

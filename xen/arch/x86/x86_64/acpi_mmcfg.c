@@ -17,13 +17,15 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  *
  * copied from Linux
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/init.h>
 #include <xen/acpi.h>
@@ -54,7 +56,8 @@ static int __init acpi_mcfg_check_entry(struct acpi_table_mcfg *mcfg,
     if (cfg->address < 0xFFFFFFFF)
         return 0;
 
-    if (!strncmp(mcfg->header.oem_id, "SGI", 3))
+    if (!strcmp(mcfg->header.oem_id, "SGI") ||
+        !strcmp(mcfg->header.oem_id, "SGI2"))
         return 0;
 
     if (mcfg->header.revision >= 1 &&
@@ -96,7 +99,6 @@ int __init acpi_parse_mcfg(struct acpi_table_header *header)
     if (!pci_mmcfg_config) {
         printk(KERN_WARNING PREFIX
                "No memory for MCFG config tables\n");
-        pci_mmcfg_config_num = 0;
         return -ENOMEM;
     }
 

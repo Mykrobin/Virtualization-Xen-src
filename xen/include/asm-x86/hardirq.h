@@ -1,6 +1,7 @@
 #ifndef __ASM_HARDIRQ_H
 #define __ASM_HARDIRQ_H
 
+#include <xen/config.h>
 #include <xen/cache.h>
 #include <xen/types.h>
 

@@ -1,19 +1,19 @@
 #ifndef __ARM_TIME_H__
 #define __ARM_TIME_H__
 
-#include <asm/system.h>
-
 #define DT_MATCH_TIMER                      \
     DT_MATCH_COMPATIBLE("arm,armv7-timer"), \
     DT_MATCH_COMPATIBLE("arm,armv8-timer")
 
-typedef uint64_t cycles_t;
+typedef unsigned long cycles_t;
 
 static inline cycles_t get_cycles (void)
 {
-        isb();
-        return READ_SYSREG64(CNTPCT_EL0);
+        return 0;
 }
+
+struct tm;
+struct tm wallclock_time(void);
 
 /* List of timer's IRQ */
 enum timer_ppi
@@ -25,25 +25,17 @@ enum timer_ppi
     MAX_TIMER_PPI = 4,
 };
 
-/*
- * Value of "clock-frequency" in the DT timer node if present.
- * 0 means the property doesn't exist.
- */
-extern uint32_t timer_dt_clock_frequency;
+/* Get one of the timer IRQ description */
+const struct dt_irq* timer_dt_irq(enum timer_ppi ppi);
 
-/* Get one of the timer IRQ number */
-unsigned int timer_get_irq(enum timer_ppi ppi);
+/* Route timer's IRQ on this CPU */
+extern void __cpuinit route_timer_interrupt(void);
 
 /* Set up the timer interrupt on this CPU */
-extern void init_timer_interrupt(void);
+extern void __cpuinit init_timer_interrupt(void);
 
 /* Counter value at boot time */
 extern uint64_t boot_count;
-
-extern s_time_t ticks_to_ns(uint64_t ticks);
-extern uint64_t ns_to_ticks(s_time_t ns);
-
-void preinit_xen_time(void);
 
 #endif /* __ARM_TIME_H__ */
 /*

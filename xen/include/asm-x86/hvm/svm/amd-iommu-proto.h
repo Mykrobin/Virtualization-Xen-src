@@ -14,7 +14,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #ifndef _ASM_X86_64_AMD_IOMMU_PROTO_H
@@ -42,7 +43,6 @@ struct acpi_ivrs_hardware;
 
 /* amd-iommu-detect functions */
 int amd_iommu_get_ivrs_dev_entries(void);
-int amd_iommu_get_supported_ivhd_type(void);
 int amd_iommu_detect_one_acpi(const struct acpi_ivrs_hardware *);
 int amd_iommu_detect_acpi(void);
 void get_iommu_features(struct amd_iommu *iommu);
@@ -51,15 +51,11 @@ void get_iommu_features(struct amd_iommu *iommu);
 int amd_iommu_init(void);
 int amd_iommu_update_ivrs_mapping_acpi(void);
 
-int amd_iommu_get_paging_mode(unsigned long entries);
-int amd_iommu_quarantine_init(struct domain *d);
-
 /* mapping functions */
-int __must_check amd_iommu_map_page(struct domain *d, unsigned long gfn,
-                                    unsigned long mfn, unsigned int flags);
-int __must_check amd_iommu_unmap_page(struct domain *d, unsigned long gfn);
+int amd_iommu_map_page(struct domain *d, unsigned long gfn, unsigned long mfn,
+                       unsigned int flags);
+int amd_iommu_unmap_page(struct domain *d, unsigned long gfn);
 u64 amd_iommu_get_next_table_from_pte(u32 *entry);
-int __must_check amd_iommu_alloc_root(struct domain_iommu *hd);
 int amd_iommu_reserve_domain_unity_map(struct domain *domain,
                                        u64 phys_addr, unsigned long size,
                                        int iw, int ir);
@@ -107,14 +103,8 @@ int amd_setup_hpet_msi(struct msi_desc *msi_desc);
 
 extern struct ioapic_sbdf {
     u16 bdf, seg;
-    u8 id;
-    bool cmdline;
     u16 *pin_2_idx;
 } ioapic_sbdf[MAX_IO_APICS];
-
-extern unsigned int nr_ioapic_sbdf;
-unsigned int ioapic_id_to_index(unsigned int apic_id);
-unsigned int get_next_ioapic_sbdf_index(void);
 
 extern struct hpet_sbdf {
     u16 bdf, seg, id;
@@ -130,7 +120,7 @@ extern unsigned long *shared_intremap_inuse;
 
 /* power management support */
 void amd_iommu_resume(void);
-int __must_check amd_iommu_suspend(void);
+void amd_iommu_suspend(void);
 void amd_iommu_crash_shutdown(void);
 
 /* guest iommu support */
@@ -220,7 +210,7 @@ static inline int iommu_has_cap(struct amd_iommu *iommu, uint32_t bit)
     return !!(iommu->cap.header & (1u << bit));
 }
 
-static inline int amd_iommu_has_feature(struct amd_iommu *iommu, uint32_t bit)
+static inline int iommu_has_feature(struct amd_iommu *iommu, uint32_t bit)
 {
     if ( !iommu_has_cap(iommu, PCI_CAP_EFRSUP_SHIFT) )
         return 0;

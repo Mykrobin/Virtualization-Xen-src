@@ -18,12 +18,8 @@
 #include <ctype.h>
 
 #include "libxl_internal.h"
-#include "_paths.h"
 
-#ifndef LIBXL_HAVE_NONCONST_LIBXL_BASENAME_RETURN_VALUE
-const
-#endif
-char *libxl_basename(const char *name)
+const char *libxl_basename(const char *name)
 {
     const char *filename;
     if (name == NULL)
@@ -90,7 +86,7 @@ int libxl_name_to_domid(libxl_ctx *ctx, const char *name,
         }
         free(domname);
     }
-    libxl_dominfo_list_free(dominfo, nb_domains);
+    free(dominfo);
     return ret;
 }
 
@@ -112,37 +108,6 @@ int libxl_domain_qualifier_to_domid(libxl_ctx *ctx, const char *name,
     return rv;
 }
 
-static int qualifier_to_id(const char *p, uint32_t *id_r)
-{
-    int i, alldigit;
-
-    alldigit = 1;
-    for (i = 0; p[i]; i++) {
-        if (!isdigit((uint8_t)p[i])) {
-            alldigit = 0;
-            break;
-        }
-    }
-
-    if (i > 0 && alldigit) {
-        *id_r = strtoul(p, NULL, 10);
-        return 0;
-    } else {
-        /* check here if it's a uuid and do proper conversion */
-    }
-    return 1;
-}
-
-int libxl_cpupool_qualifier_to_cpupoolid(libxl_ctx *ctx, const char *p,
-                                         uint32_t *poolid_r,
-                                         int *was_name_r)
-{
-    int was_name;
-
-    was_name = qualifier_to_id(p, poolid_r);
-    if (was_name_r) *was_name_r = was_name;
-    return was_name ? libxl_name_to_cpupoolid(ctx, p, poolid_r) : 0;
-}
 
 char *libxl_cpupoolid_to_name(libxl_ctx *ctx, uint32_t poolid)
 {
@@ -262,20 +227,20 @@ int libxl_create_logfile(libxl_ctx *ctx, const char *name, char **full_name)
     char *logfile, *logfile_new;
     int i, rc;
 
-    logfile = GCSPRINTF(XEN_LOG_DIR "/%s.log", name);
+    logfile = GCSPRINTF("/var/log/xen/%s.log", name);
     if (stat(logfile, &stat_buf) == 0) {
         /* file exists, rotate */
-        logfile = GCSPRINTF(XEN_LOG_DIR "/%s.log.10", name);
+        logfile = GCSPRINTF("/var/log/xen/%s.log.10", name);
         unlink(logfile);
         for (i = 9; i > 0; i--) {
-            logfile = GCSPRINTF(XEN_LOG_DIR "/%s.log.%d", name, i);
-            logfile_new = GCSPRINTF(XEN_LOG_DIR "/%s.log.%d", name, i + 1);
+            logfile = GCSPRINTF("/var/log/xen/%s.log.%d", name, i);
+            logfile_new = GCSPRINTF("/var/log/xen/%s.log.%d", name, i + 1);
             rc = logrename(gc, logfile, logfile_new);
             if (rc)
                 goto out;
         }
-        logfile = GCSPRINTF(XEN_LOG_DIR "/%s.log", name);
-        logfile_new = GCSPRINTF(XEN_LOG_DIR "/%s.log.1", name);
+        logfile = GCSPRINTF("/var/log/xen/%s.log", name);
+        logfile_new = GCSPRINTF("/var/log/xen/%s.log.1", name);
 
         rc = logrename(gc, logfile, logfile_new);
         if (rc)
@@ -316,8 +281,6 @@ int libxl_string_to_backend(libxl_ctx *ctx, char *s, libxl_disk_backend *backend
         } else if (!strcmp(p, "qcow")) {
             *backend = LIBXL_DISK_BACKEND_QDISK;
         } else if (!strcmp(p, "qcow2")) {
-            *backend = LIBXL_DISK_BACKEND_QDISK;
-        } else if (!strcmp(p, "qed")) {
             *backend = LIBXL_DISK_BACKEND_QDISK;
         }
     }
@@ -399,111 +362,34 @@ int libxl_read_file_contents(libxl_ctx *ctx, const char *filename,
     return e;
 }
 
-int libxl__read_sysfs_file_contents(libxl__gc *gc, const char *filename,
-                                    void **data_r, int *datalen_r)
-{
-    FILE *f = 0;
-    uint8_t *data = 0;
-    int datalen = 0;
-    int e;
-    struct stat stab;
-    ssize_t rs;
-
-    f = fopen(filename, "r");
-    if (!f) {
-        if (errno == ENOENT) return ENOENT;
-        LOGE(ERROR, "failed to open %s", filename);
-        goto xe;
-    }
-
-    if (fstat(fileno(f), &stab)) {
-        LOGE(ERROR, "failed to fstat %s", filename);
-        goto xe;
-    }
-
-    if (!S_ISREG(stab.st_mode)) {
-        LOGE(ERROR, "%s is not a plain file", filename);
-        errno = ENOTTY;
-        goto xe;
-    }
-
-    if (stab.st_size > INT_MAX) {
-        LOG(ERROR, "file %s is far too large", filename);
-        errno = EFBIG;
-        goto xe;
-    }
-
-    datalen = stab.st_size;
-
-    if (stab.st_size && data_r) {
-        data = libxl__malloc(gc, datalen);
-
-        /* For sysfs file, datalen is always PAGE_SIZE. 'read'
-         * will return the number of bytes of the actual content,
-         * rs <= datalen is expected.
-         */
-        rs = fread(data, 1, datalen, f);
-        if (rs < datalen) {
-            if (ferror(f)) {
-                LOGE(ERROR, "failed to read %s", filename);
-                goto xe;
-            }
-
-            datalen = rs;
-            data = libxl__realloc(gc, data, datalen);
-        }
-    }
-
-    if (fclose(f)) {
-        f = 0;
-        LOGE(ERROR, "failed to close %s", filename);
-        goto xe;
-    }
-
-    if (data_r) *data_r = data;
-    if (datalen_r) *datalen_r = datalen;
-
-    return 0;
-
- xe:
-    e = errno;
-    assert(e != ENOENT);
-    if (f) fclose(f);
-    return e;
-}
-
-
 #define READ_WRITE_EXACTLY(rw, zero_is_eof, constdata)                    \
                                                                           \
   int libxl_##rw##_exactly(libxl_ctx *ctx, int fd,                 \
                            constdata void *data, ssize_t sz,              \
                            const char *source, const char *what) {        \
       ssize_t got;                                                        \
-      GC_INIT(ctx);                                                       \
                                                                           \
       while (sz > 0) {                                                    \
           got = rw(fd, data, sz);                                         \
           if (got == -1) {                                                \
               if (errno == EINTR) continue;                               \
-              if (!ctx) { GC_FREE; return errno; }                        \
-              LOGE(ERROR, "failed to "#rw" %s%s%s",                       \
-                   what ? what : "", what ? " from " : "", source);       \
-              GC_FREE;                                                    \
+              if (!ctx) return errno;                                     \
+              LIBXL__LOG_ERRNO(ctx, LIBXL__LOG_ERROR, "failed to " #rw " %s%s%s", \
+                           what?what:"", what?" from ":"", source);       \
               return errno;                                               \
           }                                                               \
           if (got == 0) {                                                 \
-              if (!ctx) { GC_FREE; return  EPROTO; }                      \
-              LOG(ERROR, zero_is_eof                                      \
-                  ? "file/stream truncated reading %s%s%s"                \
-                  : "file/stream write returned 0! writing %s%s%s",       \
-                  what ? what : "", what ? " from " : "", source);        \
-              GC_FREE;                                                    \
+              if (!ctx) return EPROTO;                                    \
+              LIBXL__LOG(ctx, LIBXL__LOG_ERROR,                                   \
+                     zero_is_eof                                          \
+                     ? "file/stream truncated reading %s%s%s"             \
+                     : "file/stream write returned 0! writing %s%s%s",    \
+                     what?what:"", what?" from ":"", source);             \
               return EPROTO;                                              \
           }                                                               \
           sz -= got;                                                      \
           data = (char*)data + got;                                       \
       }                                                                   \
-      GC_FREE;                                                            \
       return 0;                                                           \
   }
 
@@ -551,12 +437,14 @@ int libxl__remove_directory(libxl__gc *gc, const char *dirpath)
         goto out;
     }
 
+    size_t need = offsetof(struct dirent, d_name) +
+        pathconf(dirpath, _PC_NAME_MAX) + 1;
+    struct dirent *de_buf = libxl__zalloc(gc, need);
     struct dirent *de;
 
     for (;;) {
-        errno = 0;
-        de = readdir(d);
-        if (!de && errno) {
+        int r = readdir_r(d, de_buf, &de);
+        if (r) {
             LOGE(ERROR, "failed to readdir %s for removal", dirpath);
             rc = ERROR_FAIL;
             break;
@@ -600,6 +488,68 @@ int libxl_pipe(libxl_ctx *ctx, int pipes[2])
     return ret;
 }
 
+int libxl_uuid_to_device_vtpm(libxl_ctx *ctx, uint32_t domid,
+                            libxl_uuid* uuid, libxl_device_vtpm *vtpm)
+{
+    libxl_device_vtpm *vtpms;
+    int nb, i;
+    int rc;
+
+    vtpms = libxl_device_vtpm_list(ctx, domid, &nb);
+    if (!vtpms)
+        return ERROR_FAIL;
+
+    memset(vtpm, 0, sizeof (libxl_device_vtpm));
+    rc = 1;
+    for (i = 0; i < nb; ++i) {
+        if(!libxl_uuid_compare(uuid, &vtpms[i].uuid)) {
+            vtpm->backend_domid = vtpms[i].backend_domid;
+            vtpm->devid = vtpms[i].devid;
+            libxl_uuid_copy(&vtpm->uuid, &vtpms[i].uuid);
+            rc = 0;
+            break;
+        }
+    }
+
+    libxl_device_vtpm_list_free(vtpms, nb);
+    return rc;
+}
+
+int libxl_mac_to_device_nic(libxl_ctx *ctx, uint32_t domid,
+                            const char *mac, libxl_device_nic *nic)
+{
+    libxl_device_nic *nics;
+    int nb, rc, i;
+    libxl_mac mac_n;
+
+    rc = libxl__parse_mac(mac, mac_n);
+    if (rc)
+        return rc;
+
+    nics = libxl_device_nic_list(ctx, domid, &nb);
+    if (!nics)
+        return ERROR_FAIL;
+
+    memset(nic, 0, sizeof (libxl_device_nic));
+
+    rc = ERROR_INVAL;
+    for (i = 0; i < nb; ++i) {
+        if (!libxl__compare_macs(&mac_n, &nics[i].mac)) {
+            *nic = nics[i];
+            rc = 0;
+            i++; /* Do not dispose this NIC on exit path */
+            break;
+        }
+        libxl_device_nic_dispose(&nics[i]);
+    }
+
+    for (; i<nb; i++)
+        libxl_device_nic_dispose(&nics[i]);
+
+    free(nics);
+    return rc;
+}
+
 int libxl_bitmap_alloc(libxl_ctx *ctx, libxl_bitmap *bitmap, int n_bits)
 {
     GC_INIT(ctx);
@@ -620,12 +570,7 @@ void libxl_bitmap_init(libxl_bitmap *map)
 
 void libxl_bitmap_dispose(libxl_bitmap *map)
 {
-    if (!map)
-        return;
-
     free(map->map);
-    map->map = NULL;
-    map->size = 0;
 }
 
 void libxl_bitmap_copy(libxl_ctx *ctx, libxl_bitmap *dptr,
@@ -636,34 +581,6 @@ void libxl_bitmap_copy(libxl_ctx *ctx, libxl_bitmap *dptr,
     assert(dptr->size == sptr->size);
     sz = dptr->size = sptr->size;
     memcpy(dptr->map, sptr->map, sz * sizeof(*dptr->map));
-}
-
-/* This function copies X bytes from source to destination bitmap,
- * where X is the smaller of the two sizes.
- *
- * If destination's size is larger than source, the extra bytes are
- * untouched.
- */
-void libxl__bitmap_copy_best_effort(libxl__gc *gc, libxl_bitmap *dptr,
-                                    const libxl_bitmap *sptr)
-{
-    int sz;
-
-    sz = dptr->size < sptr->size ? dptr->size : sptr->size;
-    memcpy(dptr->map, sptr->map, sz * sizeof(*dptr->map));
-}
-
-void libxl_bitmap_copy_alloc(libxl_ctx *ctx,
-                             libxl_bitmap *dptr,
-                             const libxl_bitmap *sptr)
-{
-    GC_INIT(ctx);
-
-    dptr->map = libxl__calloc(NOGC, sptr->size, sizeof(*sptr->map));
-    dptr->size = sptr->size;
-    memcpy(dptr->map, sptr->map, sptr->size * sizeof(*sptr->map));
-
-    GC_FREE;
 }
 
 int libxl_bitmap_is_full(const libxl_bitmap *bitmap)
@@ -707,76 +624,6 @@ void libxl_bitmap_reset(libxl_bitmap *bitmap, int bit)
     bitmap->map[bit / 8] &= ~(1 << (bit & 7));
 }
 
-int libxl_bitmap_or(libxl_ctx *ctx, libxl_bitmap *or_map,
-                    const libxl_bitmap *map1, const libxl_bitmap *map2)
-{
-    GC_INIT(ctx);
-    int rc;
-    uint32_t i;
-    const libxl_bitmap *large_map;
-    const libxl_bitmap *small_map;
-
-    if (map1->size > map2->size) {
-        large_map = map1;
-        small_map = map2;
-    } else {
-        large_map = map2;
-        small_map = map1;
-    }
-
-    rc = libxl_bitmap_alloc(ctx, or_map, large_map->size * 8);
-    if (rc)
-        goto out;
-
-    /*
-     *  If bitmaps aren't the same size, their union (logical or) will
-     *  be size of larger bit map.  Any bit past the end of the
-     *  smaller bit map, will match the larger one.
-     */
-    for (i = 0; i < small_map->size; i++)
-        or_map->map[i] = (small_map->map[i] | large_map->map[i]);
-
-    for (i = small_map->size; i < large_map->size; i++)
-        or_map->map[i] = large_map->map[i];
-
-out:
-    GC_FREE;
-    return rc;
-}
-
-int libxl_bitmap_and(libxl_ctx *ctx, libxl_bitmap *and_map,
-                     const libxl_bitmap *map1, const libxl_bitmap *map2)
-{
-    GC_INIT(ctx);
-    int rc;
-    uint32_t i;
-    const libxl_bitmap *large_map;
-    const libxl_bitmap *small_map;
-
-    if (map1->size > map2->size) {
-        large_map = map1;
-        small_map = map2;
-    } else {
-        large_map = map2;
-        small_map = map1;
-    }
-
-    rc = libxl_bitmap_alloc(ctx, and_map, small_map->size * 8);
-    if (rc)
-        goto out;
-
-    /*
-     *  If bitmaps aren't same size, their 'and' will be size of
-     *  smaller bit map
-     */
-    for (i = 0; i < and_map->size; i++)
-        and_map->map[i] = (large_map->map[i] & small_map->map[i]);
-
-out:
-    GC_FREE;
-    return rc;
-}
-
 int libxl_bitmap_count_set(const libxl_bitmap *bitmap)
 {
     int i, nr_set_bits = 0;
@@ -793,7 +640,7 @@ char *libxl_bitmap_to_hex_string(libxl_ctx *ctx, const libxl_bitmap *bitmap)
     int i = bitmap->size;
     char *p = libxl__zalloc(NOGC, bitmap->size * 2 + 3);
     char *q = p;
-    strncpy(p, "0x", 3);
+    strncpy(p, "0x", 2);
     p += 2;
     while(--i >= 0) {
         sprintf(p, "%02x", bitmap->map[i]);
@@ -853,74 +700,6 @@ int libxl_node_bitmap_alloc(libxl_ctx *ctx, libxl_bitmap *nodemap,
 
  out:
     GC_FREE;
-    return rc;
-}
-
-int libxl__count_physical_sockets(libxl__gc *gc, int *sockets)
-{
-    int rc;
-    libxl_physinfo info;
-
-    libxl_physinfo_init(&info);
-
-    rc = libxl_get_physinfo(CTX, &info);
-    if (rc)
-        return rc;
-
-    *sockets = info.nr_cpus / info.threads_per_core
-                            / info.cores_per_socket;
-
-    libxl_physinfo_dispose(&info);
-    return 0;
-}
-
-int libxl_socket_bitmap_alloc(libxl_ctx *ctx, libxl_bitmap *socketmap,
-                              int max_sockets)
-{
-    GC_INIT(ctx);
-    int rc = 0;
-
-    if (max_sockets < 0) {
-        rc = ERROR_INVAL;
-        LOG(ERROR, "invalid number of sockets provided");
-        goto out;
-    }
-
-    if (max_sockets == 0) {
-        rc = libxl__count_physical_sockets(gc, &max_sockets);
-        if (rc) {
-            LOGE(ERROR, "failed to get system socket count");
-            goto out;
-        }
-    }
-    /* This can't fail: no need to check and log */
-    libxl_bitmap_alloc(ctx, socketmap, max_sockets);
-
- out:
-    GC_FREE;
-    return rc;
-
-}
-
-int libxl_get_online_socketmap(libxl_ctx *ctx, libxl_bitmap *socketmap)
-{
-    libxl_cputopology *tinfo = NULL;
-    int nr_cpus = 0, i, rc = 0;
-
-    tinfo = libxl_get_cpu_topology(ctx, &nr_cpus);
-    if (tinfo == NULL) {
-        rc = ERROR_FAIL;
-        goto out;
-    }
-
-    libxl_bitmap_set_none(socketmap);
-    for (i = 0; i < nr_cpus; i++)
-        if (tinfo[i].socket != XEN_INVALID_SOCKET_ID
-            && !libxl_bitmap_test(socketmap, tinfo[i].socket))
-            libxl_bitmap_set(socketmap, tinfo[i].socket);
-
- out:
-    libxl_cputopology_list_free(tinfo, nr_cpus);
     return rc;
 }
 
@@ -1033,14 +812,6 @@ void libxl_cputopology_list_free(libxl_cputopology *list, int nr)
     int i;
     for (i = 0; i < nr; i++)
         libxl_cputopology_dispose(&list[i]);
-    free(list);
-}
-
-void libxl_pcitopology_list_free(libxl_pcitopology *list, int nr)
-{
-    int i;
-    for (i = 0; i < nr; i++)
-        libxl_pcitopology_dispose(&list[i]);
     free(list);
 }
 
@@ -1188,50 +959,27 @@ void libxl_cpupoolinfo_list_free(libxl_cpupoolinfo *list, int nr)
     free(list);
 }
 
+void libxl_vtpminfo_list_free(libxl_vtpminfo* list, int nr)
+{
+   int i;
+   for (i = 0; i < nr; i++)
+      libxl_vtpminfo_dispose(&list[i]);
+   free(list);
+}
+
+void libxl_device_vtpm_list_free(libxl_device_vtpm* list, int nr)
+{
+   int i;
+   for (i = 0; i < nr; i++)
+      libxl_device_vtpm_dispose(&list[i]);
+   free(list);
+}
+
 int libxl_domid_valid_guest(uint32_t domid)
 {
     /* returns 1 if the value _could_ be a valid guest domid, 0 otherwise
      * does not check whether the domain actually exists */
     return domid > 0 && domid < DOMID_FIRST_RESERVED;
-}
-
-void libxl_string_copy(libxl_ctx *ctx, char **dst, char * const*src)
-{
-    GC_INIT(ctx);
-
-    if (*src)
-        *dst = libxl__strdup(NOGC, *src);
-    else
-        *dst = NULL;
-
-    GC_FREE;
-}
-
-/*
- * Fill @buf with @len random bytes.
- */
-int libxl__random_bytes(libxl__gc *gc, uint8_t *buf, size_t len)
-{
-    static const char *dev = "/dev/urandom";
-    int fd;
-    int ret;
-
-    fd = open(dev, O_RDONLY);
-    if (fd < 0) {
-        LOGE(ERROR, "failed to open \"%s\"", dev);
-        return ERROR_FAIL;
-    }
-    ret = libxl_fd_set_cloexec(CTX, fd, 1);
-    if (ret) {
-        close(fd);
-        return ERROR_FAIL;
-    }
-
-    ret = libxl_read_exactly(CTX, fd, buf, len, dev, NULL);
-
-    close(fd);
-
-    return ret;
 }
 
 /*

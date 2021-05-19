@@ -14,9 +14,11 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/acpi.h>
 #include <xen/iommu.h>
@@ -93,7 +95,7 @@ void __init get_iommu_features(struct amd_iommu *iommu)
 
     while ( feature_str[i] )
     {
-        if ( amd_iommu_has_feature(iommu, i) )
+        if ( iommu_has_feature(iommu, i) )
             printk( " %s\n", feature_str[i]);
         i++;
     }
@@ -127,7 +129,6 @@ int __init amd_iommu_detect_one_acpi(
     }
 
     spin_lock_init(&iommu->lock);
-    INIT_LIST_HEAD(&iommu->ats_devices);
 
     iommu->seg = ivhd_block->pci_segment_group;
     iommu->bdf = ivhd_block->header.device_id;

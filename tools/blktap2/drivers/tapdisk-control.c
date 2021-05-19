@@ -462,8 +462,7 @@ tapdisk_control_open_image(struct tapdisk_control_connection *connection,
 
 	params.capacity = image.size;
 	params.sector_size = image.secsize;
-	strncpy(params.name, vbd->name, BLKTAP2_MAX_MESSAGE_LEN - 1);
-	params.name[BLKTAP2_MAX_MESSAGE_LEN - 1] = '\0';
+	strncpy(params.name, vbd->name, BLKTAP2_MAX_MESSAGE_LEN);
 
 	err = ioctl(vbd->ring.fd, BLKTAP2_IOCTL_CREATE_DEVICE, &params);
 	if (err && errno != EEXIST) {
@@ -791,7 +790,7 @@ tapdisk_control_create_socket(char **socket_path)
 	}
 
 	memset(&saddr, 0, sizeof(saddr));
-	strncpy(saddr.sun_path, td_control.path, sizeof(saddr.sun_path) - 1);
+	strncpy(saddr.sun_path, td_control.path, sizeof(saddr.sun_path));
 	saddr.sun_family = AF_UNIX;
 
 	err = bind(td_control.socket,

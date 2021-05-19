@@ -11,7 +11,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  * Copyright (C) Allen Kay <allen.m.kay@intel.com>
  * Copyright (C) Weidong Han <weidong.han@intel.com>
@@ -25,12 +26,11 @@
 
 #define VTDPREFIX "[VT-D]"
 
-struct pci_ats_dev;
 extern bool_t rwbf_quirk;
 
 void print_iommu_regs(struct acpi_drhd_unit *drhd);
 void print_vtd_entries(struct iommu *iommu, int bus, int devfn, u64 gmfn);
-keyhandler_fn_t vtd_dump_iommu_info;
+extern struct keyhandler dump_iommu_info_keyhandler;
 
 int enable_qinval(struct iommu *iommu);
 void disable_qinval(struct iommu *iommu);
@@ -42,6 +42,13 @@ void iommu_flush_cache_page(void *addr, unsigned long npages);
 int iommu_alloc(struct acpi_drhd_unit *drhd);
 void iommu_free(struct acpi_drhd_unit *drhd);
 
+int queue_invalidate_context(struct iommu *iommu,
+    u16 did, u16 source_id, u8 function_mask, u8 granu);
+int queue_invalidate_iotlb(struct iommu *iommu,
+    u8 granu, u8 dr, u8 dw, u16 did, u8 am, u8 ih, u64 addr);
+int queue_invalidate_iec(struct iommu *iommu,
+    u8 granu, u8 im, u16 iidx);
+int invalidate_sync(struct iommu *iommu);
 int iommu_flush_iec_global(struct iommu *iommu);
 int iommu_flush_iec_index(struct iommu *iommu, u8 im, u16 iidx);
 void clear_fault_bits(struct iommu *iommu);
@@ -60,9 +67,8 @@ int ats_device(const struct pci_dev *, const struct acpi_drhd_unit *);
 int dev_invalidate_iotlb(struct iommu *iommu, u16 did,
                          u64 addr, unsigned int size_order, u64 type);
 
-int __must_check qinval_device_iotlb_sync(struct iommu *iommu,
-                                          struct pci_dev *pdev,
-                                          u16 did, u16 size, u64 addr);
+int qinval_device_iotlb(struct iommu *iommu,
+                        u32 max_invs_pend, u16 sid, u16 size, u64 addr);
 
 unsigned int get_cache_line_size(void);
 void cacheline_flush(char *);
@@ -76,7 +82,6 @@ int domain_context_mapping_one(struct domain *domain, struct iommu *iommu,
                                u8 bus, u8 devfn, const struct pci_dev *);
 int domain_context_unmap_one(struct domain *domain, struct iommu *iommu,
                              u8 bus, u8 devfn);
-int intel_iommu_get_reserved_device_memory(iommu_grdm_t *func, void *ctxt);
 
 unsigned int io_apic_read_remap_rte(unsigned int apic, unsigned int reg);
 void io_apic_write_remap_rte(unsigned int apic,
@@ -93,14 +98,9 @@ int is_igd_vt_enabled_quirk(void);
 void platform_quirks_init(void);
 void vtd_ops_preamble_quirk(struct iommu* iommu);
 void vtd_ops_postamble_quirk(struct iommu* iommu);
-int __must_check me_wifi_quirk(struct domain *domain,
-                               u8 bus, u8 devfn, int map);
+void me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map);
 void pci_vtd_quirk(const struct pci_dev *);
-void quirk_iommu_caps(struct iommu *iommu);
-
-bool_t platform_supports_intremap(void);
-bool_t platform_supports_x2apic(void);
-
-void vtd_set_hwdom_mapping(struct domain *d);
+int platform_supports_intremap(void);
+int platform_supports_x2apic(void);
 
 #endif // _VTD_EXTERN_H_

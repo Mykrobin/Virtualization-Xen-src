@@ -10,7 +10,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #ifndef XC_PRIVATE_H
@@ -28,43 +29,27 @@
 #include <stdlib.h>
 #include <sys/ioctl.h>
 
-#include "_paths.h"
-
-#define XC_WANT_COMPAT_MAP_FOREIGN_API
-#define XC_INTERNAL_COMPAT_MAP_FOREIGN_API
 #include "xenctrl.h"
-
-#include <xencall.h>
-#include <xenforeignmemory.h>
-#include <xendevicemodel.h>
+#include "xenctrlosdep.h"
 
 #include <xen/sys/privcmd.h>
 
-#if defined(HAVE_VALGRIND_MEMCHECK_H) && !defined(NDEBUG) && !defined(__MINIOS__)
-/* Compile in Valgrind client requests? */
-#include <valgrind/memcheck.h>
+/* valgrind cannot see when a hypercall has filled in some values.  For this
+   reason, we must zero the privcmd_hypercall_t or domctl/sysctl instance
+   before a call, if using valgrind.  */
+#ifdef VALGRIND
+#define DECLARE_HYPERCALL privcmd_hypercall_t hypercall = { 0 }
+#define DECLARE_DOMCTL struct xen_domctl domctl = { 0 }
+#define DECLARE_SYSCTL struct xen_sysctl sysctl = { 0 }
+#define DECLARE_PHYSDEV_OP struct physdev_op physdev_op = { 0 }
+#define DECLARE_FLASK_OP struct xen_flask_op op = { 0 }
 #else
-#define VALGRIND_MAKE_MEM_UNDEFINED(addr, len) /* addr, len */
-#endif
-
-#if defined(__MINIOS__)
-/*
- * MiniOS's libc doesn't know about sys/uio.h or writev().
- * Declare enough of sys/uio.h to compile.
- */
-struct iovec {
-    void *iov_base;
-    size_t iov_len;
-};
-#else
-#include <sys/uio.h>
-#endif
-
+#define DECLARE_HYPERCALL privcmd_hypercall_t hypercall
 #define DECLARE_DOMCTL struct xen_domctl domctl
 #define DECLARE_SYSCTL struct xen_sysctl sysctl
 #define DECLARE_PHYSDEV_OP struct physdev_op physdev_op
 #define DECLARE_FLASK_OP struct xen_flask_op op
-#define DECLARE_PLATFORM_OP struct xen_platform_op platform_op
+#endif
 
 #undef PAGE_SHIFT
 #undef PAGE_SIZE
@@ -73,10 +58,8 @@ struct iovec {
 #define PAGE_SIZE               XC_PAGE_SIZE
 #define PAGE_MASK               XC_PAGE_MASK
 
-#ifndef ARRAY_SIZE /* MiniOS leaks ARRAY_SIZE into our namespace as part of a
-                    * stubdom build.  It shouldn't... */
-#define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
-#endif
+/* Force a compilation error if condition is true */
+#define XC_BUILD_BUG_ON(p) ((void)sizeof(struct { int:-!!(p); }))
 
 /*
 ** Define max dirty page cache to permit during save/restore -- need to balance 
@@ -86,6 +69,7 @@ struct iovec {
 #define MAX_PAGECACHE_USAGE (4*1024)
 
 struct xc_interface_core {
+    enum xc_osdep_type type;
     int flags;
     xentoollog_logger *error_handler,   *error_handler_tofree;
     xentoollog_logger *dombuild_logger, *dombuild_logger_tofree;
@@ -93,24 +77,34 @@ struct xc_interface_core {
     FILE *dombuild_logger_file;
     const char *currently_progress_reporting;
 
-    /* Hypercall interface */
-    xencall_handle *xcall;
+    /*
+     * A simple cache of unused, single page, hypercall buffers
+     *
+     * Protected by a global lock.
+     */
+#define HYPERCALL_BUFFER_CACHE_SIZE 4
+    int hypercall_buffer_cache_nr;
+    void *hypercall_buffer_cache[HYPERCALL_BUFFER_CACHE_SIZE];
 
-    /* Foreign mappings */
-    xenforeignmemory_handle *fmem;
+    /*
+     * Hypercall buffer statistics. All protected by the global
+     * hypercall_buffer_cache lock.
+     */
+    int hypercall_buffer_total_allocations;
+    int hypercall_buffer_total_releases;
+    int hypercall_buffer_current_allocations;
+    int hypercall_buffer_maximum_allocations;
+    int hypercall_buffer_cache_hits;
+    int hypercall_buffer_cache_misses;
+    int hypercall_buffer_cache_toobig;
 
-    /* Device model */
-    xendevicemodel_handle *dmod;
+    /* Low lovel OS interface */
+    xc_osdep_info_t  osdep;
+    xc_osdep_ops    *ops; /* backend operations */
+    xc_osdep_handle  ops_handle; /* opaque data for xc_osdep_ops */
 };
 
-int osdep_privcmd_open(xc_interface *xch);
-int osdep_privcmd_close(xc_interface *xch);
-
-void *osdep_alloc_hypercall_buffer(xc_interface *xch, int npages);
-void osdep_free_hypercall_buffer(xc_interface *xch, void *ptr, int npages);
-
-void xc_report_error(xc_interface *xch, int code, const char *fmt, ...)
-    __attribute__((format(printf,3,4)));
+void xc_report_error(xc_interface *xch, int code, const char *fmt, ...);
 void xc_reportv(xc_interface *xch, xentoollog_logger *lg, xentoollog_level,
                 int code, const char *fmt, va_list args)
      __attribute__((format(printf,5,0)));
@@ -118,35 +112,20 @@ void xc_report(xc_interface *xch, xentoollog_logger *lg, xentoollog_level,
                int code, const char *fmt, ...)
      __attribute__((format(printf,5,6)));
 
-const char *xc_set_progress_prefix(xc_interface *xch, const char *doing);
-void xc_report_progress_single(xc_interface *xch, const char *doing);
+void xc_report_progress_start(xc_interface *xch, const char *doing,
+                              unsigned long total);
 void xc_report_progress_step(xc_interface *xch,
                              unsigned long done, unsigned long total);
 
 /* anamorphic macros:  struct xc_interface *xch  must be in scope */
 
-#define IPRINTF(_f, _a...)  do { int IPRINTF_errno = errno; \
-        xc_report(xch, xch->error_handler, XTL_INFO,0, _f , ## _a); \
-        errno = IPRINTF_errno; \
-        } while (0)
-#define DPRINTF(_f, _a...) do { int DPRINTF_errno = errno; \
-        xc_report(xch, xch->error_handler, XTL_DETAIL,0, _f , ## _a); \
-        errno = DPRINTF_errno; \
-        } while (0)
-#define DBGPRINTF(_f, _a...)  do { int DBGPRINTF_errno = errno; \
-        xc_report(xch, xch->error_handler, XTL_DEBUG,0, _f , ## _a); \
-        errno = DBGPRINTF_errno; \
-        } while (0)
+#define IPRINTF(_f, _a...) xc_report(xch, xch->error_handler, XTL_INFO,0, _f , ## _a)
+#define DPRINTF(_f, _a...) xc_report(xch, xch->error_handler, XTL_DETAIL,0, _f , ## _a)
+#define DBGPRINTF(_f, _a...) xc_report(xch, xch->error_handler, XTL_DEBUG,0, _f , ## _a)
 
-#define ERROR(_m, _a...)  do { int ERROR_errno = errno; \
-        xc_report_error(xch,XC_INTERNAL_ERROR,_m , ## _a ); \
-        errno = ERROR_errno; \
-        } while (0)
-#define PERROR(_m, _a...) do { int PERROR_errno = errno; \
-        xc_report_error(xch,XC_INTERNAL_ERROR,_m " (%d = %s)", \
-        ## _a , errno, xc_strerror(xch, errno)); \
-        errno = PERROR_errno; \
-        } while (0)
+#define ERROR(_m, _a...)  xc_report_error(xch,XC_INTERNAL_ERROR,_m , ## _a )
+#define PERROR(_m, _a...) xc_report_error(xch,XC_INTERNAL_ERROR,_m \
+                  " (%d = %s)", ## _a , errno, xc_strerror(xch, errno))
 
 /*
  * HYPERCALL ARGUMENT BUFFERS
@@ -194,17 +173,6 @@ enum {
 #define HYPERCALL_BOUNCE_SET_SIZE(_buf, _sz) do { (HYPERCALL_BUFFER(_buf))->sz = _sz; } while (0)
 
 /*
- * Change the direction.
- *
- * Can only be used if the bounce_pre/bounce_post commands have
- * not been used.
- */
-#define HYPERCALL_BOUNCE_SET_DIR(_buf, _dir) do { if ((HYPERCALL_BUFFER(_buf))->hbuf)         \
-                                                        assert(1);                            \
-                                                   (HYPERCALL_BUFFER(_buf))->dir = _dir;      \
-                                                } while (0)
-
-/*
  * Initialise and free hypercall safe memory. Takes care of any required
  * copying.
  */
@@ -222,16 +190,24 @@ void xc__hypercall_buffer_cache_release(xc_interface *xch);
  * Hypercall interfaces.
  */
 
+int do_xen_hypercall(xc_interface *xch, privcmd_hypercall_t *hypercall);
+
 static inline int do_xen_version(xc_interface *xch, int cmd, xc_hypercall_buffer_t *dest)
 {
+    DECLARE_HYPERCALL;
     DECLARE_HYPERCALL_BUFFER_ARGUMENT(dest);
-    return xencall2(xch->xcall, __HYPERVISOR_xen_version,
-                    cmd, HYPERCALL_BUFFER_AS_ARG(dest));
+
+    hypercall.op     = __HYPERVISOR_xen_version;
+    hypercall.arg[0] = (unsigned long) cmd;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(dest);
+
+    return do_xen_hypercall(xch, &hypercall);
 }
 
 static inline int do_physdev_op(xc_interface *xch, int cmd, void *op, size_t len)
 {
     int ret = -1;
+    DECLARE_HYPERCALL;
     DECLARE_HYPERCALL_BOUNCE(op, len, XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
 
     if ( xc_hypercall_bounce_pre(xch, op) )
@@ -240,9 +216,11 @@ static inline int do_physdev_op(xc_interface *xch, int cmd, void *op, size_t len
         goto out1;
     }
 
-    ret = xencall2(xch->xcall, __HYPERVISOR_physdev_op,
-                   cmd, HYPERCALL_BUFFER_AS_ARG(op));
-    if ( ret < 0 )
+    hypercall.op = __HYPERVISOR_physdev_op;
+    hypercall.arg[0] = (unsigned long) cmd;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(op);
+
+    if ( (ret = do_xen_hypercall(xch, &hypercall)) < 0 )
     {
         if ( errno == EACCES )
             DPRINTF("physdev operation failed -- need to"
@@ -254,13 +232,10 @@ out1:
     return ret;
 }
 
-static inline int do_domctl_maybe_retry_efault(xc_interface *xch,
-                                               struct xen_domctl *domctl,
-                                               unsigned int retries)
+static inline int do_domctl(xc_interface *xch, struct xen_domctl *domctl)
 {
     int ret = -1;
-    unsigned int retry_cnt = 0;
-
+    DECLARE_HYPERCALL;
     DECLARE_HYPERCALL_BOUNCE(domctl, sizeof(*domctl), XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
 
     domctl->interface_version = XEN_DOMCTL_INTERFACE_VERSION;
@@ -271,12 +246,10 @@ static inline int do_domctl_maybe_retry_efault(xc_interface *xch,
         goto out1;
     }
 
-    do {
-        ret = xencall1(xch->xcall, __HYPERVISOR_domctl,
-                       HYPERCALL_BUFFER_AS_ARG(domctl));
-    } while ( ret < 0 && errno == EFAULT && retry_cnt++ < retries );
+    hypercall.op     = __HYPERVISOR_domctl;
+    hypercall.arg[0] = HYPERCALL_BUFFER_AS_ARG(domctl);
 
-    if ( ret < 0 )
+    if ( (ret = do_xen_hypercall(xch, &hypercall)) < 0 )
     {
         if ( errno == EACCES )
             DPRINTF("domctl operation failed -- need to"
@@ -288,21 +261,10 @@ static inline int do_domctl_maybe_retry_efault(xc_interface *xch,
     return ret;
 }
 
-static inline int do_domctl(xc_interface *xch, struct xen_domctl *domctl)
-{
-    return do_domctl_maybe_retry_efault(xch, domctl, 0);
-}
-
-static inline int do_domctl_retry_efault(xc_interface *xch, struct xen_domctl *domctl)
-{
-    unsigned int retries = xencall_buffers_never_fault(xch->xcall) ? 0 : 2;
-
-    return do_domctl_maybe_retry_efault(xch, domctl, retries);
-}
-
 static inline int do_sysctl(xc_interface *xch, struct xen_sysctl *sysctl)
 {
     int ret = -1;
+    DECLARE_HYPERCALL;
     DECLARE_HYPERCALL_BOUNCE(sysctl, sizeof(*sysctl), XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
 
     sysctl->interface_version = XEN_SYSCTL_INTERFACE_VERSION;
@@ -313,9 +275,9 @@ static inline int do_sysctl(xc_interface *xch, struct xen_sysctl *sysctl)
         goto out1;
     }
 
-    ret = xencall1(xch->xcall, __HYPERVISOR_sysctl,
-                   HYPERCALL_BUFFER_AS_ARG(sysctl));
-    if ( ret < 0 )
+    hypercall.op     = __HYPERVISOR_sysctl;
+    hypercall.arg[0] = HYPERCALL_BUFFER_AS_ARG(sysctl);
+    if ( (ret = do_xen_hypercall(xch, &hypercall)) < 0 )
     {
         if ( errno == EACCES )
             DPRINTF("sysctl operation failed -- need to"
@@ -327,54 +289,7 @@ static inline int do_sysctl(xc_interface *xch, struct xen_sysctl *sysctl)
     return ret;
 }
 
-static inline int do_platform_op(xc_interface *xch,
-                                 struct xen_platform_op *platform_op)
-{
-    int ret = -1;
-    DECLARE_HYPERCALL_BOUNCE(platform_op, sizeof(*platform_op),
-                             XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
-
-    platform_op->interface_version = XENPF_INTERFACE_VERSION;
-
-    if ( xc_hypercall_bounce_pre(xch, platform_op) )
-    {
-        PERROR("Could not bounce buffer for platform_op hypercall");
-        return -1;
-    }
-
-    ret = xencall1(xch->xcall, __HYPERVISOR_platform_op,
-                   HYPERCALL_BUFFER_AS_ARG(platform_op));
-    if ( ret < 0 )
-    {
-        if ( errno == EACCES )
-            DPRINTF("platform operation failed -- need to"
-                    " rebuild the user-space tool set?\n");
-    }
-
-    xc_hypercall_bounce_post(xch, platform_op);
-    return ret;
-}
-
-static inline int do_multicall_op(xc_interface *xch,
-                                  xc_hypercall_buffer_t *call_list,
-                                  uint32_t nr_calls)
-{
-    int ret = -1;
-    DECLARE_HYPERCALL_BUFFER_ARGUMENT(call_list);
-
-    ret = xencall2(xch->xcall, __HYPERVISOR_multicall,
-                   HYPERCALL_BUFFER_AS_ARG(call_list), nr_calls);
-    if ( ret < 0 )
-    {
-        if ( errno == EACCES )
-            DPRINTF("multicall operation failed -- need to"
-                    " rebuild the user-space tool set?\n");
-    }
-
-    return ret;
-}
-
-long do_memory_op(xc_interface *xch, int cmd, void *arg, size_t len);
+int do_memory_op(xc_interface *xch, int cmd, void *arg, size_t len);
 
 void *xc_map_foreign_ranges(xc_interface *xch, uint32_t dom,
                             size_t size, int prot, size_t chunksize,
@@ -388,6 +303,9 @@ void bitmap_byte_to_64(uint64_t *lp, const uint8_t *bp, int nbits);
 
 /* Optionally flush file to disk and discard page cache */
 void discard_file_cache(xc_interface *xch, int fd, int flush);
+
+int xc_domain_cacheflush(xc_interface *xch, uint32_t domid,
+			 xen_pfn_t start_pfn, xen_pfn_t nr_pfns);
 
 #define MAX_MMU_UPDATES 1024
 struct xc_mmu {
@@ -404,54 +322,13 @@ int xc_flush_mmu_updates(xc_interface *xch, struct xc_mmu *mmu);
 /* Return 0 on success; -1 on error setting errno. */
 int read_exact(int fd, void *data, size_t size); /* EOF => -1, errno=0 */
 int write_exact(int fd, const void *data, size_t size);
-int writev_exact(int fd, const struct iovec *iov, int iovcnt);
 
 int xc_ffs8(uint8_t x);
 int xc_ffs16(uint16_t x);
 int xc_ffs32(uint32_t x);
 int xc_ffs64(uint64_t x);
 
-#define min(X, Y) ({                             \
-            const typeof (X) _x = (X);           \
-            const typeof (Y) _y = (Y);           \
-            (void) (&_x == &_y);                 \
-            (_x < _y) ? _x : _y; })
-#define max(X, Y) ({                             \
-            const typeof (X) _x = (X);           \
-            const typeof (Y) _y = (Y);           \
-            (void) (&_x == &_y);                 \
-            (_x > _y) ? _x : _y; })
-
-#define min_t(type,x,y) \
-        ({ type __x = (x); type __y = (y); __x < __y ? __x: __y; })
-#define max_t(type,x,y) \
-        ({ type __x = (x); type __y = (y); __x > __y ? __x: __y; })
-
 #define DOMPRINTF(fmt, args...) xc_dom_printf(dom->xch, fmt, ## args)
 #define DOMPRINTF_CALLED(xch) xc_dom_printf((xch), "%s: called", __FUNCTION__)
 
-/**
- * vm_event operations. Internal use only.
- */
-int xc_vm_event_control(xc_interface *xch, uint32_t domain_id, unsigned int op,
-                        unsigned int mode, uint32_t *port);
-/*
- * Enables vm_event and returns the mapped ring page indicated by param.
- * param can be HVM_PARAM_PAGING/ACCESS/SHARING_RING_PFN
- */
-void *xc_vm_event_enable(xc_interface *xch, uint32_t domain_id, int param,
-                         uint32_t *port);
-
-int do_dm_op(xc_interface *xch, uint32_t domid, unsigned int nr_bufs, ...);
-
 #endif /* __XC_PRIVATE_H__ */
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * tab-width: 4
- * indent-tabs-mode: nil
- * End:
- */

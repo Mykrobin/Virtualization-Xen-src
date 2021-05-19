@@ -21,7 +21,8 @@
  *  Lesser General Public License for more details.
  *
  *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ *  License along with this library; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA
  *
  * @section DESCRIPTION
  *
@@ -43,13 +44,8 @@
  */
 
 #include <xen/io/libxenvchan.h>
-#include <xen/xen.h>
 #include <xen/sys/evtchn.h>
-#include <xenevtchn.h>
-#include <xengnttab.h>
-
-/* Callers who don't care don't need to #include <xentoollog.h> */
-struct xentoollog_logger;
+#include <xenctrl.h>
 
 struct libxenvchan_ring {
 	/* Pointer into the shared page. Offsets into buffer. */
@@ -70,13 +66,13 @@ struct libxenvchan_ring {
 struct libxenvchan {
 	/* Mapping handle for shared ring page */
 	union {
-		xengntshr_handle *gntshr; /* for server */
-		xengnttab_handle *gnttab; /* for client */
+		xc_gntshr *gntshr; /* for server */
+		xc_gnttab *gnttab; /* for client */
 	};
 	/* Pointer to shared ring page */
 	struct vchan_interface *ring;
 	/* event channel interface */
-	xenevtchn_handle *event;
+	xc_evtchn *event;
 	uint32_t event_port;
 	/* informative flags: are we acting as server? */
 	int is_server:1;
@@ -97,9 +93,7 @@ struct libxenvchan {
  * @param recv_min The minimum size (in bytes) of the receive ring (right)
  * @return The structure, or NULL in case of an error
  */
-struct libxenvchan *libxenvchan_server_init(struct xentoollog_logger *logger,
-                                            int domain, const char* xs_path,
-                                            size_t read_min, size_t write_min);
+struct libxenvchan *libxenvchan_server_init(xentoollog_logger *logger, int domain, const char* xs_path, size_t read_min, size_t write_min);
 /**
  * Connect to an existing vchan. Note: you can reconnect to an existing vchan
  * safely, however no locking is performed, so you must prevent multiple clients
@@ -110,8 +104,7 @@ struct libxenvchan *libxenvchan_server_init(struct xentoollog_logger *logger,
  * @param xs_path Base xenstore path for storing ring/event data
  * @return The structure, or NULL in case of an error
  */
-struct libxenvchan *libxenvchan_client_init(struct xentoollog_logger *logger,
-                                            int domain, const char* xs_path);
+struct libxenvchan *libxenvchan_client_init(xentoollog_logger *logger, int domain, const char* xs_path);
 /**
  * Close a vchan. This deallocates the vchan and attempts to free its
  * resources. The other side is notified of the close, but can still read any

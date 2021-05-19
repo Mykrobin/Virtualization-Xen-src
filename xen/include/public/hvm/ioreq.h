@@ -34,20 +34,13 @@
 
 #define IOREQ_TYPE_PIO          0 /* pio */
 #define IOREQ_TYPE_COPY         1 /* mmio ops */
-#define IOREQ_TYPE_PCI_CONFIG   2
 #define IOREQ_TYPE_TIMEOFFSET   7
 #define IOREQ_TYPE_INVALIDATE   8 /* mapcache */
 
 /*
  * VMExit dispatcher should cooperate with instruction decoder to
  * prepare this structure and notify service OS and DM by sending
- * virq.
- *
- * For I/O type IOREQ_TYPE_PCI_CONFIG, the physical address is formatted
- * as follows:
- * 
- * 63....48|47..40|39..35|34..32|31........0
- * SEGMENT |BUS   |DEV   |FN    |OFFSET
+ * virq
  */
 struct ioreq {
     uint64_t addr;          /* physical address */
@@ -83,17 +76,8 @@ typedef struct buf_ioreq buf_ioreq_t;
 
 #define IOREQ_BUFFER_SLOT_NUM     511 /* 8 bytes each, plus 2 4-byte indexes */
 struct buffered_iopage {
-#ifdef __XEN__
-    union bufioreq_pointers {
-        struct {
-#endif
-            uint32_t read_pointer;
-            uint32_t write_pointer;
-#ifdef __XEN__
-        };
-        uint64_t full;
-    } ptrs;
-#endif
+    unsigned int read_pointer;
+    unsigned int write_pointer;
     buf_ioreq_t buf_ioreq[IOREQ_BUFFER_SLOT_NUM];
 }; /* NB. Size of this structure must be no greater than one page. */
 typedef struct buffered_iopage buffered_iopage_t;
@@ -103,19 +87,14 @@ typedef struct buffered_iopage buffered_iopage_t;
  * version number in HVM_PARAM_ACPI_IOPORTS_LOCATION.
  */
 
-/*
- * Version 0 (default): Traditional (obsolete) Xen locations.
- *
- * These are now only used for compatibility with VMs migrated
- * from older Xen versions.
- */
+/* Version 0 (default): Traditional Xen locations. */
 #define ACPI_PM1A_EVT_BLK_ADDRESS_V0 0x1f40
 #define ACPI_PM1A_CNT_BLK_ADDRESS_V0 (ACPI_PM1A_EVT_BLK_ADDRESS_V0 + 0x04)
 #define ACPI_PM_TMR_BLK_ADDRESS_V0   (ACPI_PM1A_EVT_BLK_ADDRESS_V0 + 0x08)
 #define ACPI_GPE0_BLK_ADDRESS_V0     (ACPI_PM_TMR_BLK_ADDRESS_V0 + 0x20)
 #define ACPI_GPE0_BLK_LEN_V0         0x08
 
-/* Version 1: Locations preferred by modern Qemu (including Qemu-trad). */
+/* Version 1: Locations preferred by modern Qemu. */
 #define ACPI_PM1A_EVT_BLK_ADDRESS_V1 0xb000
 #define ACPI_PM1A_CNT_BLK_ADDRESS_V1 (ACPI_PM1A_EVT_BLK_ADDRESS_V1 + 0x04)
 #define ACPI_PM_TMR_BLK_ADDRESS_V1   (ACPI_PM1A_EVT_BLK_ADDRESS_V1 + 0x08)

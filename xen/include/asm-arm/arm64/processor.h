@@ -1,10 +1,6 @@
 #ifndef __ASM_ARM_ARM64_PROCESSOR_H
 #define __ASM_ARM_ARM64_PROCESSOR_H
 
-#include <xen/stringify.h>
-
-#include <asm/arm64/sysregs.h>
-
 #ifndef __ASSEMBLY__
 
 /* Anonymous union includes both 32- and 64-bit names (e.g., r0/x0). */
@@ -17,12 +13,7 @@
 /* On stack VCPU state */
 struct cpu_user_regs
 {
-    /*
-     * The mapping AArch64 <-> AArch32 is based on D1.20.1 in ARM DDI
-     * 0487A.d.
-     *
-     *         AArch64       AArch32
-     */
+    /*         Aarch64       Aarch32 */
     __DECL_REG(x0,           r0/*_usr*/);
     __DECL_REG(x1,           r1/*_usr*/);
     __DECL_REG(x2,           r2/*_usr*/);
@@ -68,7 +59,8 @@ struct cpu_user_regs
     /* Return address and mode */
     __DECL_REG(pc,           pc32);             /* ELR_EL2 */
     uint32_t cpsr;                              /* SPSR_EL2 */
-    uint32_t hsr;                               /* ESR_EL2 */
+
+    uint32_t pad0; /* Align end of kernel frame. */
 
     /* Outer guest frame only from here on... */
 
@@ -93,24 +85,26 @@ struct cpu_user_regs
 
 #define READ_SYSREG32(name) ({                          \
     uint32_t _r;                                        \
-    asm volatile("mrs  %0, "__stringify(name) : "=r" (_r));         \
+    asm volatile("mrs  %0, "#name : "=r" (_r));         \
     _r; })
 #define WRITE_SYSREG32(v, name) do {                    \
     uint32_t _r = v;                                    \
-    asm volatile("msr "__stringify(name)", %0" : : "r" (_r));       \
+    asm volatile("msr "#name", %0" : : "r" (_r));       \
 } while (0)
 
 #define WRITE_SYSREG64(v, name) do {                    \
     uint64_t _r = v;                                    \
-    asm volatile("msr "__stringify(name)", %0" : : "r" (_r));       \
+    asm volatile("msr "#name", %0" : : "r" (_r));       \
 } while (0)
 #define READ_SYSREG64(name) ({                          \
     uint64_t _r;                                        \
-    asm volatile("mrs  %0, "__stringify(name) : "=r" (_r));         \
+    asm volatile("mrs  %0, "#name : "=r" (_r));         \
     _r; })
 
 #define READ_SYSREG(name)     READ_SYSREG64(name)
 #define WRITE_SYSREG(v, name) WRITE_SYSREG64(v, name)
+
+#define cpu_has_erratum_766422() 0
 
 #endif /* __ASSEMBLY__ */
 

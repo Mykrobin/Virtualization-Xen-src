@@ -14,7 +14,8 @@
  *  GNU General Public License for more details.
  * 
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 \*/
 
 #include <sys/types.h>
@@ -33,6 +34,7 @@
 #include <string.h>
 #include <signal.h>
 
+#include "xenctrl.h"
 #include "utils.h"
 
 struct xs_handle *xs;
@@ -50,6 +52,10 @@ void daemonize(const char *pidfile)
 	int len;
 	int i;
 	char buf[100];
+
+	if (getppid() == 1) {
+		return;
+	}
 
 	if ((pid = fork()) > 0) {
 		exit(0);

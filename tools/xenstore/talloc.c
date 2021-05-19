@@ -22,7 +22,8 @@
    Lesser General Public License for more details.
 
    You should have received a copy of the GNU Lesser General Public
-   License along with this library; If not, see <http://www.gnu.org/licenses/>.
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 /*
@@ -1101,16 +1102,13 @@ char *talloc_vasprintf(const void *t, const char *fmt, va_list ap)
 
 	/* this call looks strange, but it makes it work on older solaris boxes */
 	if ((len = vsnprintf(&c, 1, fmt, ap2)) < 0) {
-		va_end(ap2);
 		return NULL;
 	}
-	va_end(ap2);
 
 	ret = _talloc(t, len+1);
 	if (ret) {
 		VA_COPY(ap2, ap);
 		vsnprintf(ret, len+1, fmt, ap2);
-		va_end(ap2);
 		talloc_set_name_const(ret, ret);
 	}
 
@@ -1164,10 +1162,8 @@ static char *talloc_vasprintf_append(char *s, const char *fmt, va_list ap)
 		 * the original string. Most current callers of this 
 		 * function expect it to never return NULL.
 		 */
-		va_end(ap2);
 		return s;
 	}
-	va_end(ap2);
 
 	s = talloc_realloc(NULL, s, char, s_len + len+1);
 	if (!s) return NULL;
@@ -1175,7 +1171,6 @@ static char *talloc_vasprintf_append(char *s, const char *fmt, va_list ap)
 	VA_COPY(ap2, ap);
 
 	vsnprintf(s+s_len, len+1, fmt, ap2);
-	va_end(ap2);
 	talloc_set_name_const(s, s);
 
 	return s;

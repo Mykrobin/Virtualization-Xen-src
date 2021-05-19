@@ -13,18 +13,22 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
-#include <xen/domain_page.h>
+#include <public/hvm/e820.h>
+#include <xen/types.h>
 #include <asm/e820.h>
-#include <asm/iocap.h>
+#include <asm/mm.h>
 #include <asm/paging.h>
 #include <asm/p2m.h>
+#include <xen/domain_page.h>
 #include <asm/mtrr.h>
 #include <asm/hvm/support.h>
 #include <asm/hvm/cacheattr.h>
-#include <public/hvm/e820.h>
+
+static uint32_t size_or_mask;
 
 /* Get page attribute fields (PAn) from PAT MSR. */
 #define pat_cr_2_paf(pat_cr,n)  ((((uint64_t)pat_cr) >> ((n)<<3)) & 0xff)
@@ -38,65 +42,88 @@ static const uint8_t pat_entry_2_pte_flags[8] = {
 
 /* Effective mm type lookup table, according to MTRR and PAT. */
 static const uint8_t mm_type_tbl[MTRR_NUM_TYPES][PAT_TYPE_NUMS] = {
-#define RS MEMORY_NUM_TYPES
-#define UC MTRR_TYPE_UNCACHABLE
-#define WB MTRR_TYPE_WRBACK
-#define WC MTRR_TYPE_WRCOMB
-#define WP MTRR_TYPE_WRPROT
-#define WT MTRR_TYPE_WRTHROUGH
-
-/*          PAT(UC, WC, RS, RS, WT, WP, WB, UC-) */
-/* MTRR(UC) */ {UC, WC, RS, RS, UC, UC, UC, UC},
-/* MTRR(WC) */ {UC, WC, RS, RS, UC, UC, WC, WC},
-/* MTRR(RS) */ {RS, RS, RS, RS, RS, RS, RS, RS},
-/* MTRR(RS) */ {RS, RS, RS, RS, RS, RS, RS, RS},
-/* MTRR(WT) */ {UC, WC, RS, RS, WT, WP, WT, UC},
-/* MTRR(WP) */ {UC, WC, RS, RS, WT, WP, WP, WC},
-/* MTRR(WB) */ {UC, WC, RS, RS, WT, WP, WB, UC}
-
-#undef UC
-#undef WC
-#undef WT
-#undef WP
-#undef WB
-#undef RS
+/********PAT(UC,WC,RS,RS,WT,WP,WB,UC-)*/
+/* RS means reserved type(2,3), and type is hardcoded here */
+ /*MTRR(UC):(UC,WC,RS,RS,UC,UC,UC,UC)*/
+            {0, 1, 2, 2, 0, 0, 0, 0},
+ /*MTRR(WC):(UC,WC,RS,RS,UC,UC,WC,WC)*/
+            {0, 1, 2, 2, 0, 0, 1, 1},
+ /*MTRR(RS):(RS,RS,RS,RS,RS,RS,RS,RS)*/
+            {2, 2, 2, 2, 2, 2, 2, 2},
+ /*MTRR(RS):(RS,RS,RS,RS,RS,RS,RS,RS)*/
+            {2, 2, 2, 2, 2, 2, 2, 2},
+ /*MTRR(WT):(UC,WC,RS,RS,WT,WP,WT,UC)*/
+            {0, 1, 2, 2, 4, 5, 4, 0},
+ /*MTRR(WP):(UC,WC,RS,RS,WT,WP,WP,WC)*/
+            {0, 1, 2, 2, 4, 5, 5, 1},
+ /*MTRR(WB):(UC,WC,RS,RS,WT,WP,WB,UC)*/
+            {0, 1, 2, 2, 4, 5, 6, 0}
 };
 
 /*
  * Reverse lookup table, to find a pat type according to MTRR and effective
  * memory type. This table is dynamically generated.
  */
-static uint8_t __read_mostly mtrr_epat_tbl[MTRR_NUM_TYPES][MEMORY_NUM_TYPES] =
-    { [0 ... MTRR_NUM_TYPES-1] =
-        { [0 ... MEMORY_NUM_TYPES-1] = INVALID_MEM_TYPE }
-    };
+static uint8_t mtrr_epat_tbl[MTRR_NUM_TYPES][MEMORY_NUM_TYPES];
 
 /* Lookup table for PAT entry of a given PAT value in host PAT. */
-static uint8_t __read_mostly pat_entry_tbl[PAT_TYPE_NUMS] =
-    { [0 ... PAT_TYPE_NUMS-1] = INVALID_MEM_TYPE };
+static uint8_t pat_entry_tbl[PAT_TYPE_NUMS];
 
-bool_t is_var_mtrr_overlapped(const struct mtrr_state *m)
+static void get_mtrr_range(uint64_t base_msr, uint64_t mask_msr,
+                           uint64_t *base, uint64_t *end)
 {
-    unsigned int seg, i;
-    unsigned int num_var_ranges = (uint8_t)m->mtrr_cap;
+    uint32_t mask_lo = (uint32_t)mask_msr;
+    uint32_t mask_hi = (uint32_t)(mask_msr >> 32);
+    uint32_t base_lo = (uint32_t)base_msr;
+    uint32_t base_hi = (uint32_t)(base_msr >> 32);
+    uint32_t size;
+
+    if ( (mask_lo & 0x800) == 0 )
+    {
+        /* Invalid (i.e. free) range */
+        *base = 0;
+        *end = 0;
+        return;
+    }
+
+    /* Work out the shifted address mask. */
+    mask_lo = (size_or_mask | (mask_hi << (32 - PAGE_SHIFT)) |
+               (mask_lo >> PAGE_SHIFT));
+
+    /* This works correctly if size is a power of two (a contiguous range). */
+    size = -mask_lo;
+    *base = base_hi << (32 - PAGE_SHIFT) | base_lo >> PAGE_SHIFT;
+    *end = *base + size - 1;
+}
+
+bool_t is_var_mtrr_overlapped(struct mtrr_state *m)
+{
+    int32_t seg, i;
+    uint64_t phys_base, phys_mask, phys_base_pre, phys_mask_pre;
+    uint64_t base_pre, end_pre, base, end;
+    uint8_t num_var_ranges = (uint8_t)m->mtrr_cap;
 
     for ( i = 0; i < num_var_ranges; i++ )
     {
-        uint64_t base1 = m->var_ranges[i].base >> PAGE_SHIFT;
-        uint64_t mask1 = m->var_ranges[i].mask >> PAGE_SHIFT;
+        phys_base_pre = ((uint64_t*)m->var_ranges)[i*2];
+        phys_mask_pre = ((uint64_t*)m->var_ranges)[i*2 + 1];
 
-        if ( !(m->var_ranges[i].mask & MTRR_PHYSMASK_VALID) )
-            continue;
+        get_mtrr_range(phys_base_pre, phys_mask_pre,
+                        &base_pre, &end_pre);
 
         for ( seg = i + 1; seg < num_var_ranges; seg ++ )
         {
-            uint64_t base2 = m->var_ranges[seg].base >> PAGE_SHIFT;
-            uint64_t mask2 = m->var_ranges[seg].mask >> PAGE_SHIFT;
+            phys_base = ((uint64_t*)m->var_ranges)[seg*2];
+            phys_mask = ((uint64_t*)m->var_ranges)[seg*2 + 1];
 
-            if ( !(m->var_ranges[seg].mask & MTRR_PHYSMASK_VALID) )
-                continue;
+            get_mtrr_range(phys_base, phys_mask,
+                            &base, &end);
 
-            if ( (base1 & mask1 & mask2) == (base2 & mask2 & mask1) )
+            if ( ((base_pre != end_pre) && (base != end))
+                 || ((base >= base_pre) && (base <= end_pre))
+                 || ((end >= base_pre) && (end <= end_pre))
+                 || ((base_pre >= base) && (base_pre <= end))
+                 || ((end_pre >= base) && (end_pre <= end)) )
             {
                 /* MTRR is overlapped. */
                 return 1;
@@ -106,21 +133,33 @@ bool_t is_var_mtrr_overlapped(const struct mtrr_state *m)
     return 0;
 }
 
-static int __init hvm_mtrr_pat_init(void)
+#define MTRR_PHYSMASK_VALID_BIT  11
+#define MTRR_PHYSMASK_SHIFT      12
+
+#define MTRR_PHYSBASE_TYPE_MASK  0xff   /* lowest 8 bits */
+#define MTRR_PHYSBASE_SHIFT      12
+#define MTRR_VCNT                8
+
+#define MTRRphysBase_MSR(reg) (0x200 + 2 * (reg))
+#define MTRRphysMask_MSR(reg) (0x200 + 2 * (reg) + 1)
+
+static int hvm_mtrr_pat_init(void)
 {
     unsigned int i, j;
 
+    memset(&mtrr_epat_tbl, INVALID_MEM_TYPE, sizeof(mtrr_epat_tbl));
     for ( i = 0; i < MTRR_NUM_TYPES; i++ )
     {
         for ( j = 0; j < PAT_TYPE_NUMS; j++ )
         {
-            unsigned int tmp = mm_type_tbl[i][j];
-
-            if ( tmp < MEMORY_NUM_TYPES )
+            int32_t tmp = mm_type_tbl[i][j];
+            if ( (tmp >= 0) && (tmp < MEMORY_NUM_TYPES) )
                 mtrr_epat_tbl[i][tmp] = j;
         }
     }
 
+    memset(&pat_entry_tbl, INVALID_MEM_TYPE,
+           PAT_TYPE_NUMS * sizeof(pat_entry_tbl[0]));
     for ( i = 0; i < PAT_TYPE_NUMS; i++ )
     {
         for ( j = 0; j < PAT_TYPE_NUMS; j++ )
@@ -133,22 +172,24 @@ static int __init hvm_mtrr_pat_init(void)
         }
     }
 
+    size_or_mask = ~((1 << (paddr_bits - PAGE_SHIFT)) - 1);
+
     return 0;
 }
 __initcall(hvm_mtrr_pat_init);
 
 uint8_t pat_type_2_pte_flags(uint8_t pat_type)
 {
-    unsigned int pat_entry = pat_entry_tbl[pat_type];
+    int32_t pat_entry = pat_entry_tbl[pat_type];
 
-    /*
-     * INVALID_MEM_TYPE, means doesn't find the pat_entry in host PAT for a
-     * given pat_type. If host PAT covers all the PAT types, it can't happen.
+    /* INVALID_MEM_TYPE, means doesn't find the pat_entry in host pat for
+     * a given pat_type. If host pat covers all the pat types,
+     * it can't happen.
      */
-    if ( unlikely(pat_entry == INVALID_MEM_TYPE) )
-        pat_entry = pat_entry_tbl[PAT_TYPE_UNCACHABLE];
+    if ( likely(pat_entry != INVALID_MEM_TYPE) )
+        return pat_entry_2_pte_flags[pat_entry];
 
-    return pat_entry_2_pte_flags[pat_entry];
+    return pat_entry_2_pte_flags[pat_entry_tbl[PAT_TYPE_UNCACHABLE]];
 }
 
 int hvm_vcpu_cacheattr_init(struct vcpu *v)
@@ -183,40 +224,30 @@ void hvm_vcpu_cacheattr_destroy(struct vcpu *v)
 
 /*
  * Get MTRR memory type for physical address pa.
- *
- * May return a negative value when order > 0, indicating to the caller
- * that the respective mapping needs splitting.
  */
-static int get_mtrr_type(const struct mtrr_state *m,
-                         paddr_t pa, unsigned int order)
+static uint8_t get_mtrr_type(struct mtrr_state *m, paddr_t pa)
 {
+   int32_t     addr, seg, index;
    uint8_t     overlap_mtrr = 0;
    uint8_t     overlap_mtrr_pos = 0;
-   uint64_t    mask = -(uint64_t)PAGE_SIZE << order;
-   unsigned int seg, num_var_ranges = m->mtrr_cap & 0xff;
+   uint64_t    phys_base;
+   uint64_t    phys_mask;
+   uint8_t     num_var_ranges = m->mtrr_cap & 0xff;
 
    if ( unlikely(!(m->enabled & 0x2)) )
        return MTRR_TYPE_UNCACHABLE;
 
-   pa &= mask;
    if ( (pa < 0x100000) && (m->enabled & 1) )
    {
-       /* Fixed range MTRR takes effect. */
-       uint32_t addr = (uint32_t)pa, index;
-
+       /* Fixed range MTRR takes effective */
+       addr = (uint32_t) pa;
        if ( addr < 0x80000 )
        {
-           /* 0x00000 ... 0x7FFFF in 64k steps */
-           if ( order > 4 )
-               return -1;
            seg = (addr >> 16);
            return m->fixed_ranges[seg];
        }
        else if ( addr < 0xc0000 )
        {
-           /* 0x80000 ... 0xBFFFF in 16k steps */
-           if ( order > 2 )
-               return -1;
            seg = (addr - 0x80000) >> 14;
            index = (seg >> 3) + 1;
            seg &= 7;            /* select 0-7 segments */
@@ -224,9 +255,7 @@ static int get_mtrr_type(const struct mtrr_state *m,
        }
        else
        {
-           /* 0xC0000 ... 0xFFFFF in 4k steps */
-           if ( order )
-               return -1;
+           /* 0xC0000 --- 0x100000 */
            seg = (addr - 0xc0000) >> 12;
            index = (seg >> 3) + 3;
            seg &= 7;            /* select 0-7 segments */
@@ -237,15 +266,14 @@ static int get_mtrr_type(const struct mtrr_state *m,
    /* Match with variable MTRRs. */
    for ( seg = 0; seg < num_var_ranges; seg++ )
    {
-       uint64_t phys_base = m->var_ranges[seg].base;
-       uint64_t phys_mask = m->var_ranges[seg].mask;
-
-       if ( phys_mask & MTRR_PHYSMASK_VALID )
+       phys_base = ((uint64_t*)m->var_ranges)[seg*2];
+       phys_mask = ((uint64_t*)m->var_ranges)[seg*2 + 1];
+       if ( phys_mask & (1 << MTRR_PHYSMASK_VALID_BIT) )
        {
-           phys_mask &= mask;
-           if ( (pa & phys_mask) == (phys_base & phys_mask) )
+           if ( ((uint64_t) pa & phys_mask) >> MTRR_PHYSMASK_SHIFT ==
+                (phys_base & phys_mask) >> MTRR_PHYSMASK_SHIFT )
            {
-               if ( unlikely(m->overlapped) || order )
+               if ( unlikely(m->overlapped) )
                {
                     overlap_mtrr |= 1 << (phys_base & MTRR_PHYSBASE_TYPE_MASK);
                     overlap_mtrr_pos = phys_base & MTRR_PHYSBASE_TYPE_MASK;
@@ -259,24 +287,22 @@ static int get_mtrr_type(const struct mtrr_state *m,
        }
    }
 
-   /* Not found? */
+   /* Overlapped or not found. */
    if ( unlikely(overlap_mtrr == 0) )
        return m->def_type;
 
-   /* One match, or multiple identical ones? */
-   if ( likely(overlap_mtrr == (1 << overlap_mtrr_pos)) )
+   if ( likely(!(overlap_mtrr & ~( ((uint8_t)1) << overlap_mtrr_pos ))) )
+       /* Covers both one variable memory range matches and
+        * two or more identical match.
+        */
        return overlap_mtrr_pos;
 
-   if ( order )
-       return -1;
-
-   /* Two or more matches, one being UC? */
-   if ( overlap_mtrr & (1 << MTRR_TYPE_UNCACHABLE) )
+   if ( overlap_mtrr & 0x1 )
+       /* Two or more match, one is UC. */
        return MTRR_TYPE_UNCACHABLE;
 
-   /* Two or more matches, all of them WT and WB? */
-   if ( overlap_mtrr ==
-        ((1 << MTRR_TYPE_WRTHROUGH) | (1 << MTRR_TYPE_WRBACK)) )
+   if ( !(overlap_mtrr & 0xaf) )
+       /* Two or more match, WT and WB. */
        return MTRR_TYPE_WRTHROUGH;
 
    /* Behaviour is undefined, but return the last overlapped type. */
@@ -316,7 +342,7 @@ static uint8_t effective_mm_type(struct mtrr_state *m,
      * just use it
      */ 
     if ( gmtrr_mtype == NO_HARDCODE_MEM_TYPE )
-        mtrr_mtype = get_mtrr_type(m, gpa, 0);
+        mtrr_mtype = get_mtrr_type(m, gpa);
     else
         mtrr_mtype = gmtrr_mtype;
 
@@ -345,7 +371,7 @@ uint32_t get_pat_flags(struct vcpu *v,
     guest_eff_mm_type = effective_mm_type(g, pat, gpaddr, 
                                           gl1e_flags, gmtrr_mtype);
     /* 2. Get the memory type of host physical address, with MTRR */
-    shadow_mtrr_type = get_mtrr_type(&mtrr_state, spaddr, 0);
+    shadow_mtrr_type = get_mtrr_type(&mtrr_state, spaddr);
 
     /* 3. Find the memory type in PAT, with host MTRR memory type
      * and guest effective memory type.
@@ -373,27 +399,13 @@ uint32_t get_pat_flags(struct vcpu *v,
     return pat_type_2_pte_flags(pat_entry_value);
 }
 
-static inline bool_t valid_mtrr_type(uint8_t type)
-{
-    switch ( type )
-    {
-    case MTRR_TYPE_UNCACHABLE:
-    case MTRR_TYPE_WRBACK:
-    case MTRR_TYPE_WRCOMB:
-    case MTRR_TYPE_WRPROT:
-    case MTRR_TYPE_WRTHROUGH:
-        return 1;
-    }
-    return 0;
-}
-
-bool_t mtrr_def_type_msr_set(struct domain *d, struct mtrr_state *m,
-                             uint64_t msr_content)
+bool_t mtrr_def_type_msr_set(struct mtrr_state *m, uint64_t msr_content)
 {
     uint8_t def_type = msr_content & 0xff;
     uint8_t enabled = (msr_content >> 10) & 0x3;
 
-    if ( unlikely(!valid_mtrr_type(def_type)) )
+    if ( unlikely(!(def_type == 0 || def_type == 1 || def_type == 4 ||
+                    def_type == 5 || def_type == 6)) )
     {
          HVM_DBG_LOG(DBG_LEVEL_MSR, "invalid MTRR def type:%x\n", def_type);
          return 0;
@@ -406,32 +418,31 @@ bool_t mtrr_def_type_msr_set(struct domain *d, struct mtrr_state *m,
          return 0;
     }
 
-    if ( m->enabled != enabled || m->def_type != def_type )
-    {
-        m->enabled = enabled;
-        m->def_type = def_type;
-        memory_type_changed(d);
-    }
+    m->enabled = enabled;
+    m->def_type = def_type;
 
     return 1;
 }
 
-bool_t mtrr_fix_range_msr_set(struct domain *d, struct mtrr_state *m,
-                              uint32_t row, uint64_t msr_content)
+bool_t mtrr_fix_range_msr_set(struct mtrr_state *m, uint32_t row,
+                              uint64_t msr_content)
 {
     uint64_t *fixed_range_base = (uint64_t *)m->fixed_ranges;
 
     if ( fixed_range_base[row] != msr_content )
     {
         uint8_t *range = (uint8_t*)&msr_content;
-        unsigned int i;
+        int32_t i, type;
 
         for ( i = 0; i < 8; i++ )
-            if ( unlikely(!valid_mtrr_type(range[i])) )
+        {
+            type = range[i];
+            if ( unlikely(!(type == 0 || type == 1 ||
+                            type == 4 || type == 5 || type == 6)) )
                 return 0;
+        }
 
         fixed_range_base[row] = msr_content;
-        memory_type_changed(d);
     }
 
     return 1;
@@ -440,19 +451,29 @@ bool_t mtrr_fix_range_msr_set(struct domain *d, struct mtrr_state *m,
 bool_t mtrr_var_range_msr_set(
     struct domain *d, struct mtrr_state *m, uint32_t msr, uint64_t msr_content)
 {
-    uint32_t index, phys_addr;
+    uint32_t index, type, phys_addr, eax;
     uint64_t msr_mask;
     uint64_t *var_range_base = (uint64_t*)m->var_ranges;
 
-    index = msr - MSR_IA32_MTRR_PHYSBASE(0);
+    index = msr - MSR_IA32_MTRR_PHYSBASE0;
     if ( var_range_base[index] == msr_content )
         return 1;
 
-    if ( unlikely(!valid_mtrr_type((uint8_t)msr_content)) )
+    type = (uint8_t)msr_content;
+    if ( unlikely(!(type == 0 || type == 1 ||
+                    type == 4 || type == 5 || type == 6)) )
         return 0;
 
     if ( d == current->domain )
-        phys_addr = d->arch.cpuid->extd.maxphysaddr;
+    {
+        phys_addr = 36;
+        hvm_cpuid(0x80000000, &eax, NULL, NULL, NULL);
+        if ( eax >= 0x80000008 )
+        {
+            hvm_cpuid(0x80000008, &eax, NULL, NULL, NULL);
+            phys_addr = (uint8_t)eax;
+        }
+    }
     else
         phys_addr = paddr_bits;
     msr_mask = ~((((uint64_t)1) << phys_addr) - 1);
@@ -468,62 +489,48 @@ bool_t mtrr_var_range_msr_set(
 
     m->overlapped = is_var_mtrr_overlapped(m);
 
-    memory_type_changed(d);
-
     return 1;
 }
 
-bool mtrr_pat_not_equal(const struct vcpu *vd, const struct vcpu *vs)
+bool_t mtrr_pat_not_equal(struct vcpu *vd, struct vcpu *vs)
 {
-    const struct mtrr_state *md = &vd->arch.hvm_vcpu.mtrr;
-    const struct mtrr_state *ms = &vs->arch.hvm_vcpu.mtrr;
+    struct mtrr_state *md = &vd->arch.hvm_vcpu.mtrr;
+    struct mtrr_state *ms = &vs->arch.hvm_vcpu.mtrr;
+    int32_t res;
+    uint8_t num_var_ranges = (uint8_t)md->mtrr_cap;
 
-    if ( (md->enabled ^ ms->enabled) & 2 )
-        return true;
+    /* Test fixed ranges. */
+    res = memcmp(md->fixed_ranges, ms->fixed_ranges,
+            NUM_FIXED_RANGES*sizeof(mtrr_type));
+    if ( res )
+        return 1;
 
-    if ( md->enabled & 2 )
-    {
-        unsigned int num_var_ranges = (uint8_t)md->mtrr_cap;
+    /* Test var ranges. */
+    res = memcmp(md->var_ranges, ms->var_ranges,
+            num_var_ranges*sizeof(struct mtrr_var_range));
+    if ( res )
+        return 1;
 
-        /* Test default type MSR. */
-        if ( md->def_type != ms->def_type )
-            return true;
-
-        /* Test fixed ranges. */
-        if ( (md->enabled ^ ms->enabled) & 1 )
-            return true;
-
-        if ( (md->enabled & 1) &&
-             memcmp(md->fixed_ranges, ms->fixed_ranges,
-                    sizeof(md->fixed_ranges)) )
-            return true;
-
-        /* Test variable ranges. */
-        if ( num_var_ranges != (uint8_t)ms->mtrr_cap ||
-             memcmp(md->var_ranges, ms->var_ranges,
-                    num_var_ranges * sizeof(*md->var_ranges)) )
-            return true;
-    }
+    /* Test default type MSR. */
+    if ( (md->def_type != ms->def_type)
+            && (md->enabled != ms->enabled) )
+        return 1;
 
     /* Test PAT. */
-    return vd->arch.hvm_vcpu.pat_cr != vs->arch.hvm_vcpu.pat_cr;
+    if ( vd->arch.hvm_vcpu.pat_cr != vs->arch.hvm_vcpu.pat_cr )
+        return 1;
+
+    return 0;
 }
 
-struct hvm_mem_pinned_cacheattr_range {
-    struct list_head list;
-    uint64_t start, end;
-    uint32_t type;
-    struct rcu_head rcu;
-};
-
-static DEFINE_RCU_READ_LOCK(pinned_cacheattr_rcu_lock);
-
-void hvm_init_cacheattr_region_list(struct domain *d)
+void hvm_init_cacheattr_region_list(
+    struct domain *d)
 {
     INIT_LIST_HEAD(&d->arch.hvm_domain.pinned_cacheattr_ranges);
 }
 
-void hvm_destroy_cacheattr_region_list(struct domain *d)
+void hvm_destroy_cacheattr_region_list(
+    struct domain *d)
 {
     struct list_head *head = &d->arch.hvm_domain.pinned_cacheattr_ranges;
     struct hvm_mem_pinned_cacheattr_range *range;
@@ -538,122 +545,48 @@ void hvm_destroy_cacheattr_region_list(struct domain *d)
     }
 }
 
-int hvm_get_mem_pinned_cacheattr(struct domain *d, gfn_t gfn,
-                                 unsigned int order)
+int32_t hvm_get_mem_pinned_cacheattr(
+    struct domain *d,
+    uint64_t guest_fn,
+    uint32_t *type)
 {
     struct hvm_mem_pinned_cacheattr_range *range;
-    uint64_t mask = ~(uint64_t)0 << order;
-    int rc = -ENXIO;
 
-    ASSERT(is_hvm_domain(d));
-
-    rcu_read_lock(&pinned_cacheattr_rcu_lock);
-    list_for_each_entry_rcu ( range,
-                              &d->arch.hvm_domain.pinned_cacheattr_ranges,
-                              list )
-    {
-        if ( ((gfn_x(gfn) & mask) >= range->start) &&
-             ((gfn_x(gfn) | ~mask) <= range->end) )
-        {
-            rc = range->type;
-            break;
-        }
-        if ( ((gfn_x(gfn) & mask) <= range->end) &&
-             ((gfn_x(gfn) | ~mask) >= range->start) )
-        {
-            rc = -EADDRNOTAVAIL;
-            break;
-        }
-    }
-    rcu_read_unlock(&pinned_cacheattr_rcu_lock);
-
-    return rc;
-}
-
-static void free_pinned_cacheattr_entry(struct rcu_head *rcu)
-{
-    xfree(container_of(rcu, struct hvm_mem_pinned_cacheattr_range, rcu));
-}
-
-int hvm_set_mem_pinned_cacheattr(struct domain *d, uint64_t gfn_start,
-                                 uint64_t gfn_end, uint32_t type)
-{
-    struct hvm_mem_pinned_cacheattr_range *range;
-    int rc = 1;
+    *type = 0;
 
     if ( !is_hvm_domain(d) )
-        return -EOPNOTSUPP;
+        return 0;
 
-    if ( gfn_end < gfn_start || (gfn_start | gfn_end) >> paddr_bits )
-        return -EINVAL;
-
-    switch ( type )
-    {
-    case XEN_DOMCTL_DELETE_MEM_CACHEATTR:
-        /* Remove the requested range. */
-        rcu_read_lock(&pinned_cacheattr_rcu_lock);
-        list_for_each_entry_rcu ( range,
-                                  &d->arch.hvm_domain.pinned_cacheattr_ranges,
-                                  list )
-            if ( range->start == gfn_start && range->end == gfn_end )
-            {
-                rcu_read_unlock(&pinned_cacheattr_rcu_lock);
-                list_del_rcu(&range->list);
-                type = range->type;
-                call_rcu(&range->rcu, free_pinned_cacheattr_entry);
-                p2m_memory_type_changed(d);
-                switch ( type )
-                {
-                case PAT_TYPE_UC_MINUS:
-                    /*
-                     * For EPT we can also avoid the flush in this case;
-                     * see epte_get_entry_emt().
-                     */
-                    if ( hap_enabled(d) && cpu_has_vmx )
-                case PAT_TYPE_UNCACHABLE:
-                        break;
-                    /* fall through */
-                default:
-                    flush_all(FLUSH_CACHE);
-                    break;
-                }
-                return 0;
-            }
-        rcu_read_unlock(&pinned_cacheattr_rcu_lock);
-        return -ENOENT;
-
-    case PAT_TYPE_UC_MINUS:
-    case PAT_TYPE_UNCACHABLE:
-    case PAT_TYPE_WRBACK:
-    case PAT_TYPE_WRCOMB:
-    case PAT_TYPE_WRPROT:
-    case PAT_TYPE_WRTHROUGH:
-        break;
-
-    default:
-        return -EINVAL;
-    }
-
-    rcu_read_lock(&pinned_cacheattr_rcu_lock);
     list_for_each_entry_rcu ( range,
                               &d->arch.hvm_domain.pinned_cacheattr_ranges,
                               list )
     {
-        if ( range->start == gfn_start && range->end == gfn_end )
+        if ( (guest_fn >= range->start) && (guest_fn <= range->end) )
         {
-            range->type = type;
-            rc = 0;
-            break;
-        }
-        if ( range->start <= gfn_end && gfn_start <= range->end )
-        {
-            rc = -EBUSY;
-            break;
+            *type = range->type;
+            return 1;
         }
     }
-    rcu_read_unlock(&pinned_cacheattr_rcu_lock);
-    if ( rc <= 0 )
-        return rc;
+
+    return 0;
+}
+
+int32_t hvm_set_mem_pinned_cacheattr(
+    struct domain *d,
+    uint64_t gfn_start,
+    uint64_t gfn_end,
+    uint32_t  type)
+{
+    struct hvm_mem_pinned_cacheattr_range *range;
+
+    if ( !((type == PAT_TYPE_UNCACHABLE) ||
+           (type == PAT_TYPE_WRCOMB) ||
+           (type == PAT_TYPE_WRTHROUGH) ||
+           (type == PAT_TYPE_WRPROT) ||
+           (type == PAT_TYPE_WRBACK) ||
+           (type == PAT_TYPE_UC_MINUS)) ||
+         !is_hvm_domain(d) )
+        return -EINVAL;
 
     range = xzalloc(struct hvm_mem_pinned_cacheattr_range);
     if ( range == NULL )
@@ -664,9 +597,6 @@ int hvm_set_mem_pinned_cacheattr(struct domain *d, uint64_t gfn_start,
     range->type = type;
 
     list_add_rcu(&range->list, &d->arch.hvm_domain.pinned_cacheattr_ranges);
-    p2m_memory_type_changed(d);
-    if ( type != PAT_TYPE_WRBACK )
-        flush_all(FLUSH_CACHE);
 
     return 0;
 }
@@ -733,19 +663,17 @@ static int hvm_load_mtrr_msr(struct domain *d, hvm_domain_context_t *h)
     mtrr_state->mtrr_cap = hw_mtrr.msr_mtrr_cap;
 
     for ( i = 0; i < NUM_FIXED_MSR; i++ )
-        mtrr_fix_range_msr_set(d, mtrr_state, i, hw_mtrr.msr_mtrr_fixed[i]);
+        mtrr_fix_range_msr_set(mtrr_state, i, hw_mtrr.msr_mtrr_fixed[i]);
 
     for ( i = 0; i < MTRR_VCNT; i++ )
     {
         mtrr_var_range_msr_set(d, mtrr_state,
-                               MSR_IA32_MTRR_PHYSBASE(i),
-                               hw_mtrr.msr_mtrr_var[i * 2]);
+                MTRRphysBase_MSR(i), hw_mtrr.msr_mtrr_var[i*2]);
         mtrr_var_range_msr_set(d, mtrr_state,
-                               MSR_IA32_MTRR_PHYSMASK(i),
-                               hw_mtrr.msr_mtrr_var[i * 2 + 1]);
+                MTRRphysMask_MSR(i), hw_mtrr.msr_mtrr_var[i*2+1]);
     }
 
-    mtrr_def_type_msr_set(d, mtrr_state, hw_mtrr.msr_mtrr_def_type);
+    mtrr_def_type_msr_set(mtrr_state, hw_mtrr.msr_mtrr_def_type);
 
     return 0;
 }
@@ -753,19 +681,11 @@ static int hvm_load_mtrr_msr(struct domain *d, hvm_domain_context_t *h)
 HVM_REGISTER_SAVE_RESTORE(MTRR, hvm_save_mtrr_msr, hvm_load_mtrr_msr,
                           1, HVMSR_PER_VCPU);
 
-void memory_type_changed(struct domain *d)
+uint8_t epte_get_entry_emt(struct domain *d, unsigned long gfn, mfn_t mfn,
+                           uint8_t *ipat, bool_t direct_mmio)
 {
-    if ( (need_iommu(d) || cache_flush_permitted(d)) && d->vcpu && d->vcpu[0] )
-    {
-        p2m_memory_type_changed(d);
-        flush_all(FLUSH_CACHE);
-    }
-}
-
-int epte_get_entry_emt(struct domain *d, unsigned long gfn, mfn_t mfn,
-                       unsigned int order, uint8_t *ipat, bool_t direct_mmio)
-{
-    int gmtrr_mtype, hmtrr_mtype;
+    uint8_t gmtrr_mtype, hmtrr_mtype;
+    uint32_t type;
     struct vcpu *v = current;
 
     *ipat = 0;
@@ -773,59 +693,47 @@ int epte_get_entry_emt(struct domain *d, unsigned long gfn, mfn_t mfn,
     if ( v->domain != d )
         v = d->vcpu ? d->vcpu[0] : NULL;
 
-    /* Mask, not add, for order so it works with INVALID_MFN on unmapping */
-    if ( rangeset_overlaps_range(mmio_ro_ranges, mfn_x(mfn),
-                                 mfn_x(mfn) | ((1UL << order) - 1)) )
-    {
-        if ( !order || rangeset_contains_range(mmio_ro_ranges, mfn_x(mfn),
-                                               mfn_x(mfn) | ((1UL << order) - 1)) )
-        {
-            *ipat = 1;
-            return MTRR_TYPE_UNCACHABLE;
-        }
-        /* Force invalid memory type so resolve_misconfig() will split it */
-        return -1;
-    }
-
-    if ( direct_mmio )
-    {
-        if ( (mfn_x(mfn) ^ d->arch.hvm_domain.vmx.apic_access_mfn) >> order )
-            return MTRR_TYPE_UNCACHABLE;
-        if ( order )
-            return -1;
-        *ipat = 1;
-        return MTRR_TYPE_WRBACK;
-    }
-
-    if ( !mfn_valid(mfn) )
+    if ( !mfn_valid(mfn_x(mfn)) ||
+         rangeset_contains_singleton(mmio_ro_ranges, mfn_x(mfn)) )
     {
         *ipat = 1;
         return MTRR_TYPE_UNCACHABLE;
     }
 
-    if ( !need_iommu(d) && !cache_flush_permitted(d) )
+    if ( hvm_get_mem_pinned_cacheattr(d, gfn, &type) )
+        return type;
+
+    if ( !iommu_enabled ||
+         (rangeset_is_empty(d->iomem_caps) &&
+          rangeset_is_empty(d->arch.ioport_caps) &&
+          !has_arch_pdevs(d)) )
+    {
+        ASSERT(!direct_mmio ||
+               mfn_x(mfn) == d->arch.hvm_domain.vmx.apic_access_mfn);
+        *ipat = 1;
+        return MTRR_TYPE_WRBACK;
+    }
+
+    if ( direct_mmio )
+    {
+        if ( mfn_x(mfn) != d->arch.hvm_domain.vmx.apic_access_mfn )
+            return MTRR_TYPE_UNCACHABLE;
+        *ipat = 1;
+        return MTRR_TYPE_WRBACK;
+    }
+
+    if ( iommu_snoop )
     {
         *ipat = 1;
         return MTRR_TYPE_WRBACK;
     }
 
-    gmtrr_mtype = hvm_get_mem_pinned_cacheattr(d, _gfn(gfn), order);
-    if ( gmtrr_mtype >= 0 )
-    {
-        *ipat = 1;
-        return gmtrr_mtype != PAT_TYPE_UC_MINUS ? gmtrr_mtype
-                                                : MTRR_TYPE_UNCACHABLE;
-    }
-    if ( gmtrr_mtype == -EADDRNOTAVAIL )
-        return -1;
-
-    gmtrr_mtype = is_hvm_domain(d) && v ?
-                  get_mtrr_type(&v->arch.hvm_vcpu.mtrr,
-                                gfn << PAGE_SHIFT, order) :
+    gmtrr_mtype = is_hvm_domain(d) && v &&
+                  d->arch.hvm_domain.params[HVM_PARAM_IDENT_PT] ?
+                  get_mtrr_type(&v->arch.hvm_vcpu.mtrr, (gfn << PAGE_SHIFT)) :
                   MTRR_TYPE_WRBACK;
-    hmtrr_mtype = get_mtrr_type(&mtrr_state, mfn_x(mfn) << PAGE_SHIFT, order);
-    if ( gmtrr_mtype < 0 || hmtrr_mtype < 0 )
-        return -1;
+
+    hmtrr_mtype = get_mtrr_type(&mtrr_state, (mfn_x(mfn) << PAGE_SHIFT));
 
     /* If both types match we're fine. */
     if ( likely(gmtrr_mtype == hmtrr_mtype) )

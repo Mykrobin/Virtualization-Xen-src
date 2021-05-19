@@ -28,9 +28,12 @@ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
 General Public License for more details.
 
 You should have received a copy of the GNU General Public License
-along with this program; see the file COPYING.  If not, see <http://www.gnu.org/licenses/>.  */
+along with this program; see the file COPYING.  If not, write to
+the Free Software Foundation, 59 Temple Place - Suite 330,
+Boston, MA 02111-1307, USA.  */
 
 
+#include <xen/config.h>
 #include "assembler.h"
 
 .macro ARM_DIV_BODY dividend, divisor, result, curbit

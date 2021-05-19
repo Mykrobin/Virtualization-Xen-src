@@ -7,13 +7,12 @@
  * Version 2 or later.  See the file COPYING for more details.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/sched.h>
 #include <xen/event.h>
-
-#include <asm/guest_atomics.h>
 
 static void evtchn_2l_set_pending(struct vcpu *v, struct evtchn *evtchn)
 {
@@ -27,12 +26,12 @@ static void evtchn_2l_set_pending(struct vcpu *v, struct evtchn *evtchn)
      * others may require explicit memory barriers.
      */
 
-    if ( guest_test_and_set_bit(d, port, &shared_info(d, evtchn_pending)) )
+    if ( test_and_set_bit(port, &shared_info(d, evtchn_pending)) )
         return;
 
-    if ( !guest_test_bit(d, port, &shared_info(d, evtchn_mask)) &&
-         !guest_test_and_set_bit(d, port / BITS_PER_EVTCHN_WORD(d),
-                                 &vcpu_info(v, evtchn_pending_sel)) )
+    if ( !test_bit        (port, &shared_info(d, evtchn_mask)) &&
+         !test_and_set_bit(port / BITS_PER_EVTCHN_WORD(d),
+                           &vcpu_info(v, evtchn_pending_sel)) )
     {
         vcpu_mark_events_pending(v);
     }
@@ -42,7 +41,7 @@ static void evtchn_2l_set_pending(struct vcpu *v, struct evtchn *evtchn)
 
 static void evtchn_2l_clear_pending(struct domain *d, struct evtchn *evtchn)
 {
-    guest_clear_bit(d, evtchn->port, &shared_info(d, evtchn_pending));
+    clear_bit(evtchn->port, &shared_info(d, evtchn_pending));
 }
 
 static void evtchn_2l_unmask(struct domain *d, struct evtchn *evtchn)
@@ -54,31 +53,25 @@ static void evtchn_2l_unmask(struct domain *d, struct evtchn *evtchn)
      * These operations must happen in strict order. Based on
      * evtchn_2l_set_pending() above.
      */
-    if ( guest_test_and_clear_bit(d, port, &shared_info(d, evtchn_mask)) &&
-         guest_test_bit(d, port, &shared_info(d, evtchn_pending)) &&
-         !guest_test_and_set_bit(d, port / BITS_PER_EVTCHN_WORD(d),
-                                 &vcpu_info(v, evtchn_pending_sel)) )
+    if ( test_and_clear_bit(port, &shared_info(d, evtchn_mask)) &&
+         test_bit          (port, &shared_info(d, evtchn_pending)) &&
+         !test_and_set_bit (port / BITS_PER_EVTCHN_WORD(d),
+                            &vcpu_info(v, evtchn_pending_sel)) )
     {
         vcpu_mark_events_pending(v);
     }
 }
 
-static bool evtchn_2l_is_pending(const struct domain *d, evtchn_port_t port)
+static bool_t evtchn_2l_is_pending(struct domain *d,
+                                   const struct evtchn *evtchn)
 {
-    unsigned int max_ports = BITS_PER_EVTCHN_WORD(d) * BITS_PER_EVTCHN_WORD(d);
-
-    ASSERT(port < max_ports);
-    return (port < max_ports &&
-            guest_test_bit(d, port, &shared_info(d, evtchn_pending)));
+    return test_bit(evtchn->port, &shared_info(d, evtchn_pending));
 }
 
-static bool evtchn_2l_is_masked(const struct domain *d, evtchn_port_t port)
+static bool_t evtchn_2l_is_masked(struct domain *d,
+                                  const struct evtchn *evtchn)
 {
-    unsigned int max_ports = BITS_PER_EVTCHN_WORD(d) * BITS_PER_EVTCHN_WORD(d);
-
-    ASSERT(port < max_ports);
-    return (port >= max_ports ||
-            guest_test_bit(d, port, &shared_info(d, evtchn_mask)));
+    return test_bit(evtchn->port, &shared_info(d, evtchn_mask));
 }
 
 static void evtchn_2l_print_state(struct domain *d,

@@ -10,7 +10,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #include "xc_private.h"
@@ -32,26 +33,17 @@ static int modify_returncode(xc_interface *xch, uint32_t domid)
     struct domain_info_context *dinfo = &_dinfo;
     int rc;
 
-    if ( xc_domain_getinfo(xch, domid, 1, &info) != 1 ||
-         info.domid != domid )
+    if ( xc_domain_getinfo(xch, domid, 1, &info) != 1 )
     {
         PERROR("Could not get domain info");
-        return -1;
-    }
-
-    if ( !info.shutdown || (info.shutdown_reason != SHUTDOWN_suspend) )
-    {
-        ERROR("Dom %d not suspended: (shutdown %d, reason %d)", domid,
-              info.shutdown, info.shutdown_reason);
-        errno = EINVAL;
         return -1;
     }
 
     if ( info.hvm )
     {
         /* HVM guests without PV drivers have no return code to modify. */
-        uint64_t irq = 0;
-        xc_hvm_param_get(xch, domid, HVM_PARAM_CALLBACK_IRQ, &irq);
+        unsigned long irq = 0;
+        xc_get_hvm_param(xch, domid, HVM_PARAM_CALLBACK_IRQ, &irq);
         if ( !irq )
             return 0;
 
@@ -73,7 +65,7 @@ static int modify_returncode(xc_interface *xch, uint32_t domid)
     if ( (rc = xc_vcpu_getcontext(xch, domid, 0, &ctxt)) != 0 )
         return rc;
 
-    SET_FIELD(&ctxt, user_regs.eax, 1, dinfo->guest_width);
+    SET_FIELD(&ctxt, user_regs.eax, 1);
 
     if ( (rc = xc_vcpu_setcontext(xch, domid, 0, &ctxt)) != 0 )
         return rc;
@@ -108,28 +100,6 @@ static int xc_domain_resume_cooperative(xc_interface *xch, uint32_t domid)
     return do_domctl(xch, &domctl);
 }
 
-#if defined(__i386__) || defined(__x86_64__)
-static int xc_domain_resume_hvm(xc_interface *xch, uint32_t domid)
-{
-    DECLARE_DOMCTL;
-
-    /*
-     * The domctl XEN_DOMCTL_resumedomain unpause each vcpu. After
-     * the domctl, the guest will run.
-     *
-     * If it is PVHVM, the guest called the hypercall
-     *    SCHEDOP_shutdown:SHUTDOWN_suspend
-     * to suspend itself. We don't modify the return code, so the PV driver
-     * will disconnect and reconnect.
-     *
-     * If it is a HVM, the guest will continue running.
-     */
-    domctl.cmd = XEN_DOMCTL_resumedomain;
-    domctl.domain = domid;
-    return do_domctl(xch, &domctl);
-}
-#endif
-
 static int xc_domain_resume_any(xc_interface *xch, uint32_t domid)
 {
     DECLARE_DOMCTL;
@@ -159,7 +129,10 @@ static int xc_domain_resume_any(xc_interface *xch, uint32_t domid)
      */
 #if defined(__i386__) || defined(__x86_64__)
     if ( info.hvm )
-        return xc_domain_resume_hvm(xch, domid);
+    {
+        ERROR("Cannot resume uncooperative HVM guests");
+        return rc;
+    }
 
     if ( xc_domain_get_guest_width(xch, domid, &dinfo->guest_width) != 0 )
     {
@@ -220,7 +193,7 @@ static int xc_domain_resume_any(xc_interface *xch, uint32_t domid)
         goto out;
     }
 
-    mfn = GET_FIELD(&ctxt, user_regs.edx, dinfo->guest_width);
+    mfn = GET_FIELD(&ctxt, user_regs.edx);
 
     start_info = xc_map_foreign_range(xch, domid, PAGE_SIZE,
                                       PROT_READ | PROT_WRITE, mfn);
@@ -267,20 +240,11 @@ out:
 /*
  * Resume execution of a domain after suspend shutdown.
  * This can happen in one of two ways:
- *  1. (fast=1) Resume the guest without resetting the domain environment.
- *     The guests's call to SCHEDOP_shutdown(SHUTDOWN_suspend) will return 1.
- *
- *  2. (fast=0) Reset guest environment so it believes it is resumed in a new
- *     domain context. The guests's call to SCHEDOP_shutdown(SHUTDOWN_suspend)
- *     will return 0.
- *
- * (1) should only by used for guests which can handle the special return
- * code. Also note that the insertion of the return code is quite interesting
- * and that the guest MUST be paused - otherwise we would be corrupting
- * the guest vCPU state.
- *
+ *  1. Resume with special return code.
+ *  2. Reset guest environment so it believes it is resumed in a new
+ *     domain context.
  * (2) should be used only for guests which cannot handle the special
- * new return code - and it is always safe (but slower).
+ * new return code. (1) is always safe (but slower).
  */
 int xc_domain_resume(xc_interface *xch, uint32_t domid, int fast)
 {

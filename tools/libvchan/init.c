@@ -21,7 +21,8 @@
  *  Lesser General Public License for more details.
  *
  *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ *  License along with this library; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA
  *
  * @section DESCRIPTION
  *
@@ -40,7 +41,6 @@
 #include <fcntl.h>
 
 #include <xenstore.h>
-#include <xen/xen.h>
 #include <xen/sys/evtchn.h>
 #include <xen/sys/gntalloc.h>
 #include <xen/sys/gntdev.h>
@@ -79,7 +79,7 @@ static int init_gnt_srv(struct libxenvchan *ctrl, int domain)
 	uint32_t ring_ref = -1;
 	void *ring;
 
-	ring = xengntshr_share_page_notify(ctrl->gntshr, domain,
+	ring = xc_gntshr_share_page_notify(ctrl->gntshr, domain,
 			&ring_ref, 1, offsetof(struct vchan_interface, srv_live),
 			ctrl->event_port);
 
@@ -105,7 +105,7 @@ static int init_gnt_srv(struct libxenvchan *ctrl, int domain)
 		ctrl->read.buffer = ((void*)ctrl->ring) + LARGE_RING_OFFSET;
 		break;
 	default:
-		ctrl->read.buffer = xengntshr_share_pages(ctrl->gntshr, domain,
+		ctrl->read.buffer = xc_gntshr_share_pages(ctrl->gntshr, domain,
 			pages_left, ctrl->ring->grants, 1);
 		if (!ctrl->read.buffer)
 			goto out_ring;
@@ -119,7 +119,7 @@ static int init_gnt_srv(struct libxenvchan *ctrl, int domain)
 		ctrl->write.buffer = ((void*)ctrl->ring) + LARGE_RING_OFFSET;
 		break;
 	default:
-		ctrl->write.buffer = xengntshr_share_pages(ctrl->gntshr, domain,
+		ctrl->write.buffer = xc_gntshr_share_pages(ctrl->gntshr, domain,
 			pages_right, ctrl->ring->grants + pages_left, 1);
 		if (!ctrl->write.buffer)
 			goto out_unmap_left;
@@ -129,9 +129,9 @@ out:
 	return ring_ref;
 out_unmap_left:
 	if (pages_left)
-		xengntshr_unshare(ctrl->gntshr, ctrl->read.buffer, pages_left);
+		xc_gntshr_munmap(ctrl->gntshr, ctrl->read.buffer, pages_left * PAGE_SIZE);
 out_ring:
-	xengntshr_unshare(ctrl->gntshr, ring, 1);
+	xc_gntshr_munmap(ctrl->gntshr, ring, PAGE_SIZE);
 	ring_ref = -1;
 	ctrl->ring = NULL;
 	ctrl->write.order = ctrl->read.order = 0;
@@ -143,7 +143,7 @@ static int init_gnt_cli(struct libxenvchan *ctrl, int domain, uint32_t ring_ref)
 	int rv = -1;
 	uint32_t *grants;
 
-	ctrl->ring = xengnttab_map_grant_ref_notify(ctrl->gnttab,
+	ctrl->ring = xc_gnttab_map_grant_ref_notify(ctrl->gnttab,
 		domain, ring_ref, PROT_READ|PROT_WRITE,
 		offsetof(struct vchan_interface, cli_live), ctrl->event_port);
 
@@ -173,7 +173,7 @@ static int init_gnt_cli(struct libxenvchan *ctrl, int domain, uint32_t ring_ref)
 	default:
 		{
 			int pages_left = 1 << (ctrl->write.order - PAGE_SHIFT);
-			ctrl->write.buffer = xengnttab_map_domain_grant_refs(ctrl->gnttab,
+			ctrl->write.buffer = xc_gnttab_map_domain_grant_refs(ctrl->gnttab,
 				pages_left, domain, grants, PROT_READ|PROT_WRITE);
 			if (!ctrl->write.buffer)
 				goto out_unmap_ring;
@@ -191,7 +191,7 @@ static int init_gnt_cli(struct libxenvchan *ctrl, int domain, uint32_t ring_ref)
 	default:
 		{
 			int pages_right = 1 << (ctrl->read.order - PAGE_SHIFT);
-			ctrl->read.buffer = xengnttab_map_domain_grant_refs(ctrl->gnttab,
+			ctrl->read.buffer = xc_gnttab_map_domain_grant_refs(ctrl->gnttab,
 				pages_right, domain, grants, PROT_READ);
 			if (!ctrl->read.buffer)
 				goto out_unmap_left;
@@ -203,40 +203,39 @@ static int init_gnt_cli(struct libxenvchan *ctrl, int domain, uint32_t ring_ref)
 	return rv;
  out_unmap_left:
 	if (ctrl->write.order >= PAGE_SHIFT)
-		xengnttab_unmap(ctrl->gnttab, ctrl->write.buffer,
-		                1 << (ctrl->write.order - PAGE_SHIFT));
+		xc_gnttab_munmap(ctrl->gnttab, ctrl->write.buffer,
+		                 1 << ctrl->write.order);
  out_unmap_ring:
-	xengnttab_unmap(ctrl->gnttab, ctrl->ring, 1);
+	xc_gnttab_munmap(ctrl->gnttab, ctrl->ring, PAGE_SIZE);
 	ctrl->ring = 0;
 	ctrl->write.order = ctrl->read.order = 0;
 	rv = -1;
 	goto out;
 }
 
-static int init_evt_srv(struct libxenvchan *ctrl, int domain,
-                        struct xentoollog_logger *logger)
+static int init_evt_srv(struct libxenvchan *ctrl, int domain, xentoollog_logger *logger)
 {
-	xenevtchn_port_or_error_t port;
+	evtchn_port_or_error_t port;
 
-	ctrl->event = xenevtchn_open(logger, 0);
+	ctrl->event = xc_evtchn_open(logger, 0);
 	if (!ctrl->event)
 		return -1;
 
-	port = xenevtchn_bind_unbound_port(ctrl->event, domain);
+	port = xc_evtchn_bind_unbound_port(ctrl->event, domain);
 	if (port < 0)
 		goto fail;
 	ctrl->event_port = port;
 
-	if (xenevtchn_unmask(ctrl->event, ctrl->event_port))
+	if (xc_evtchn_unmask(ctrl->event, ctrl->event_port))
 		goto fail;
 
 	return 0;
 
 fail:
 	if (port >= 0)
-		xenevtchn_unbind(ctrl->event, port);
+		xc_evtchn_unbind(ctrl->event, port);
 
-	xenevtchn_close(ctrl->event);
+	xc_evtchn_close(ctrl->event);
 	ctrl->event = NULL;
 
 	return -1;
@@ -295,9 +294,7 @@ static int min_order(size_t siz)
 	return rv;
 }
 
-struct libxenvchan *libxenvchan_server_init(struct xentoollog_logger *logger,
-                                            int domain, const char* xs_path,
-                                            size_t left_min, size_t right_min)
+struct libxenvchan *libxenvchan_server_init(xentoollog_logger *logger, int domain, const char* xs_path, size_t left_min, size_t right_min)
 {
 	struct libxenvchan *ctrl;
 	int ring_ref;
@@ -329,11 +326,9 @@ struct libxenvchan *libxenvchan_server_init(struct xentoollog_logger *logger,
 		ctrl->write.order = LARGE_RING_SHIFT;
 	}
 
-	ctrl->gntshr = xengntshr_open(logger, 0);
-	if (!ctrl->gntshr) {
-		free(ctrl);
-		return 0;
-	}
+	ctrl->gntshr = xc_gntshr_open(logger, 0);
+	if (!ctrl->gntshr)
+		goto out;
 
 	if (init_evt_srv(ctrl, domain, logger))
 		goto out;
@@ -348,39 +343,37 @@ out:
 	return 0;
 }
 
-static int init_evt_cli(struct libxenvchan *ctrl, int domain,
-                        struct xentoollog_logger *logger)
+static int init_evt_cli(struct libxenvchan *ctrl, int domain, xentoollog_logger *logger)
 {
-	xenevtchn_port_or_error_t port;
+	evtchn_port_or_error_t port;
 
-	ctrl->event = xenevtchn_open(logger, 0);
+	ctrl->event = xc_evtchn_open(logger, 0);
 	if (!ctrl->event)
 		return -1;
 
-	port = xenevtchn_bind_interdomain(ctrl->event,
+	port = xc_evtchn_bind_interdomain(ctrl->event,
 		domain, ctrl->event_port);
 	if (port < 0)
 		goto fail;
 	ctrl->event_port = port;
 
-	if (xenevtchn_unmask(ctrl->event, ctrl->event_port))
+	if (xc_evtchn_unmask(ctrl->event, ctrl->event_port))
 		goto fail;
 
 	return 0;
 
 fail:
 	if (port >= 0)
-		xenevtchn_unbind(ctrl->event, port);
+		xc_evtchn_unbind(ctrl->event, port);
 
-	xenevtchn_close(ctrl->event);
+	xc_evtchn_close(ctrl->event);
 	ctrl->event = NULL;
 
 	return -1;
 }
 
 
-struct libxenvchan *libxenvchan_client_init(struct xentoollog_logger *logger,
-                                            int domain, const char* xs_path)
+struct libxenvchan *libxenvchan_client_init(xentoollog_logger *logger, int domain, const char* xs_path)
 {
 	struct libxenvchan *ctrl = malloc(sizeof(struct libxenvchan));
 	struct xs_handle *xs = NULL;
@@ -421,7 +414,7 @@ struct libxenvchan *libxenvchan_client_init(struct xentoollog_logger *logger,
 	if (!ctrl->event_port)
 		goto fail;
 
-	ctrl->gnttab = xengnttab_open(logger, 0);
+	ctrl->gnttab = xc_gnttab_open(logger, 0);
 	if (!ctrl->gnttab)
 		goto fail;
 

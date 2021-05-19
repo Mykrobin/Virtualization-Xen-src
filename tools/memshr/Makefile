@@ -9,6 +9,7 @@ CFLAGS          += $(CFLAGS_xeninclude)
 CFLAGS          += $(CFLAGS_libxenctrl)
 CFLAGS          += -D_GNU_SOURCE
 CFLAGS          += -fPIC
+CFLAGS          += -g
 
 LIB-SRCS        := interface.c
 LIB-SRCS        += shm.c
@@ -36,14 +37,9 @@ libmemshr.a: $(LIB-OBJS)
 
 install: all
 
-uninstall:
-
 clean:
-	rm -rf *.a *.o *~ $(DEPS_RM)
+	rm -rf *.a *.o *~ $(DEPS)
 
-.PHONY: distclean
-distclean: clean
+.PHONY: all build clean install
 
-.PHONY: all build clean install distclean uninstall
-
--include $(DEPS_INCLUDE)
+-include $(DEPS)

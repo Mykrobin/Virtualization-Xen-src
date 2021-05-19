@@ -41,16 +41,14 @@ static enum core_parking_controller {
     PERFORMANCE_FIRST
 } core_parking_controller = POWER_FIRST;
 
-static int __init setup_core_parking_option(const char *str)
+static void __init setup_core_parking_option(char *str)
 {
     if ( !strcmp(str, "power") )
         core_parking_controller = POWER_FIRST;
     else if ( !strcmp(str, "performance") )
         core_parking_controller = PERFORMANCE_FIRST;
     else
-        return -EINVAL;
-
-    return 0;
+        return;
 }
 custom_param("core_parking", setup_core_parking_option);
 
@@ -77,10 +75,11 @@ static unsigned int core_parking_performance(unsigned int event)
             if ( core_weight < core_tmp )
             {
                 core_weight = core_tmp;
-                cpumask_copy(&core_candidate_map, cpumask_of(cpu));
+                cpumask_clear(&core_candidate_map);
+                cpumask_set_cpu(cpu, &core_candidate_map);
             }
             else if ( core_weight == core_tmp )
-                __cpumask_set_cpu(cpu, &core_candidate_map);
+                cpumask_set_cpu(cpu, &core_candidate_map);
         }
 
         for_each_cpu(cpu, &core_candidate_map)
@@ -89,10 +88,11 @@ static unsigned int core_parking_performance(unsigned int event)
             if ( sibling_weight < sibling_tmp )
             {
                 sibling_weight = sibling_tmp;
-                cpumask_copy(&sibling_candidate_map, cpumask_of(cpu));
+                cpumask_clear(&sibling_candidate_map);
+                cpumask_set_cpu(cpu, &sibling_candidate_map);
             }
             else if ( sibling_weight == sibling_tmp )
-                __cpumask_set_cpu(cpu, &sibling_candidate_map);
+                cpumask_set_cpu(cpu, &sibling_candidate_map);
         }
 
         cpu = cpumask_first(&sibling_candidate_map);
@@ -135,10 +135,11 @@ static unsigned int core_parking_power(unsigned int event)
             if ( core_weight > core_tmp )
             {
                 core_weight = core_tmp;
-                cpumask_copy(&core_candidate_map, cpumask_of(cpu));
+                cpumask_clear(&core_candidate_map);
+                cpumask_set_cpu(cpu, &core_candidate_map);
             }
             else if ( core_weight == core_tmp )
-                __cpumask_set_cpu(cpu, &core_candidate_map);
+                cpumask_set_cpu(cpu, &core_candidate_map);
         }
 
         for_each_cpu(cpu, &core_candidate_map)
@@ -147,10 +148,11 @@ static unsigned int core_parking_power(unsigned int event)
             if ( sibling_weight > sibling_tmp )
             {
                 sibling_weight = sibling_tmp;
-                cpumask_copy(&sibling_candidate_map, cpumask_of(cpu));
+                cpumask_clear(&sibling_candidate_map);
+                cpumask_set_cpu(cpu, &sibling_candidate_map);
             }
             else if ( sibling_weight == sibling_tmp )
-                __cpumask_set_cpu(cpu, &sibling_candidate_map);
+                cpumask_set_cpu(cpu, &sibling_candidate_map);
         }
 
         cpu = cpumask_first(&sibling_candidate_map);

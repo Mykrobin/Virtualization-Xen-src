@@ -19,27 +19,35 @@
 #define SUPERPAGE_ORDER         PAGETABLE_ORDER
 #define SUPERPAGE_PAGES         (1<<SUPERPAGE_ORDER)
 
+#define __PAGE_OFFSET           DIRECTMAP_VIRT_START
 #define __XEN_VIRT_START        XEN_VIRT_START
 
 /* These are architectural limits. Current CPUs support only 40-bit phys. */
 #define PADDR_BITS              52
 #define VADDR_BITS              48
-#define PADDR_MASK              ((_AC(1,UL) << PADDR_BITS) - 1)
-#define VADDR_MASK              ((_AC(1,UL) << VADDR_BITS) - 1)
-
-#define VADDR_TOP_BIT           (1UL << (VADDR_BITS - 1))
-#define CANONICAL_MASK          (~0UL & ~VADDR_MASK)
+#define PADDR_MASK              ((1UL << PADDR_BITS)-1)
+#define VADDR_MASK              ((1UL << VADDR_BITS)-1)
 
 #define is_canonical_address(x) (((long)(x) >> 47) == ((long)(x) >> 63))
 
 #ifndef __ASSEMBLY__
 
+#include <xen/config.h>
 #include <asm/types.h>
-
-#include <xen/pdx.h>
 
 extern unsigned long xen_virt_end;
 
+extern unsigned long max_pdx;
+extern unsigned long pfn_pdx_bottom_mask, ma_va_bottom_mask;
+extern unsigned int pfn_pdx_hole_shift;
+extern unsigned long pfn_hole_mask;
+extern unsigned long pfn_top_mask, ma_top_mask;
+extern void pfn_pdx_hole_setup(unsigned long);
+
+#define page_to_pdx(pg)  ((pg) - frame_table)
+#define pdx_to_page(pdx) (frame_table + (pdx))
+#define spage_to_pdx(spg) (((spg) - spage_table)<<(SUPERPAGE_SHIFT-PAGE_SHIFT))
+#define pdx_to_spage(pdx) (spage_table + ((pdx)>>(SUPERPAGE_SHIFT-PAGE_SHIFT)))
 /*
  * Note: These are solely for the use by page_{get,set}_owner(), and
  *       therefore don't need to handle the XEN_VIRT_{START,END} range.
@@ -49,18 +57,39 @@ extern unsigned long xen_virt_end;
 #define pdx_to_virt(pdx) ((void *)(DIRECTMAP_VIRT_START + \
                                    ((unsigned long)(pdx) << PAGE_SHIFT)))
 
+extern int __mfn_valid(unsigned long mfn);
+
+static inline unsigned long pfn_to_pdx(unsigned long pfn)
+{
+    return (pfn & pfn_pdx_bottom_mask) |
+           ((pfn & pfn_top_mask) >> pfn_pdx_hole_shift);
+}
+
+static inline unsigned long pdx_to_pfn(unsigned long pdx)
+{
+    return (pdx & pfn_pdx_bottom_mask) |
+           ((pdx << pfn_pdx_hole_shift) & pfn_top_mask);
+}
+
+static inline unsigned long pfn_to_sdx(unsigned long pfn)
+{
+    return pfn_to_pdx(pfn) >> (SUPERPAGE_SHIFT-PAGE_SHIFT);
+}
+
+static inline unsigned long sdx_to_pfn(unsigned long sdx)
+{
+    return pdx_to_pfn(sdx << (SUPERPAGE_SHIFT-PAGE_SHIFT));
+}
+
 static inline unsigned long __virt_to_maddr(unsigned long va)
 {
+    ASSERT(va >= XEN_VIRT_START);
     ASSERT(va < DIRECTMAP_VIRT_END);
     if ( va >= DIRECTMAP_VIRT_START )
         va -= DIRECTMAP_VIRT_START;
     else
     {
-        BUILD_BUG_ON(XEN_VIRT_END - XEN_VIRT_START != GB(1));
-        /* Signed, so ((long)XEN_VIRT_START >> 30) fits in an imm32. */
-        ASSERT(((long)va >> (PAGE_ORDER_1G + PAGE_SHIFT)) ==
-               ((long)XEN_VIRT_START >> (PAGE_ORDER_1G + PAGE_SHIFT)));
-
+        ASSERT(va < XEN_VIRT_END);
         va += xen_phys_start - XEN_VIRT_START;
     }
     return (va & ma_va_bottom_mask) |
@@ -97,17 +126,18 @@ typedef l4_pgentry_t root_pgentry_t;
 #define l3_linear_offset(_a) (((_a) & VADDR_MASK) >> L3_PAGETABLE_SHIFT)
 #define l4_linear_offset(_a) (((_a) & VADDR_MASK) >> L4_PAGETABLE_SHIFT)
 
+#define is_guest_l1_slot(_s) (1)
 #define is_guest_l2_slot(_d, _t, _s)                   \
     ( !is_pv_32bit_domain(_d) ||                       \
       !((_t) & PGT_pae_xen_l2) ||                      \
       ((_s) < COMPAT_L2_PAGETABLE_FIRST_XEN_SLOT(_d)) )
+#define is_guest_l3_slot(_s) (1)
 #define is_guest_l4_slot(_d, _s)                    \
     ( is_pv_32bit_domain(_d)                        \
       ? ((_s) == 0)                                 \
       : (((_s) < ROOT_PAGETABLE_FIRST_XEN_SLOT) ||  \
          ((_s) > ROOT_PAGETABLE_LAST_XEN_SLOT)))
 
-#define root_table_offset         l4_table_offset
 #define root_get_pfn              l4e_get_pfn
 #define root_get_flags            l4e_get_flags
 #define root_get_intpte           l4e_get_intpte
@@ -122,29 +152,8 @@ typedef l4_pgentry_t root_pgentry_t;
  */
 
 /* Extract flags into 24-bit integer, or turn 24-bit flags into a pte mask. */
-#ifndef __ASSEMBLY__
-static inline unsigned int get_pte_flags(intpte_t x)
-{
-    return ((x >> 40) & ~0xfff) | (x & 0xfff);
-}
-
-static inline intpte_t put_pte_flags(unsigned int x)
-{
-    return (((intpte_t)x & ~0xfff) << 40) | (x & 0xfff);
-}
-#endif
-
-/*
- * Protection keys define a new 4-bit protection key field
- * (PKEY) in bits 62:59 of leaf entries of the page tables.
- * This corresponds to bit 22:19 of a 24-bit flags.
- *
- * Notice: Bit 22 is used by _PAGE_GNTTAB which is visible to PV guests,
- * so Protection keys must be disabled on PV guests.
- */
-#define _PAGE_PKEY_BITS  (0x780000)	 /* Protection Keys, 22:19 */
-
-#define get_pte_pkey(x) (MASK_EXTR(get_pte_flags(x), _PAGE_PKEY_BITS))
+#define get_pte_flags(x) (((int)((x) >> 40) & ~0xFFF) | ((int)(x) & 0xFFF))
+#define put_pte_flags(x) (((intpte_t)((x) & ~0xFFF) << 40) | ((x) & 0xFFF))
 
 /* Bit 23 of a 24-bit flag mask. This corresponds to bit 63 of a pte.*/
 #define _PAGE_NX_BIT (1U<<23)
@@ -152,30 +161,27 @@ static inline intpte_t put_pte_flags(unsigned int x)
 /* Bit 22 of a 24-bit flag mask. This corresponds to bit 62 of a pte.*/
 #define _PAGE_GNTTAB (1U<<22)
 
+#define PAGE_HYPERVISOR         (__PAGE_HYPERVISOR         | _PAGE_GLOBAL)
+#define PAGE_HYPERVISOR_NOCACHE (__PAGE_HYPERVISOR_NOCACHE | _PAGE_GLOBAL)
+
+#define USER_MAPPINGS_ARE_GLOBAL
+#ifdef USER_MAPPINGS_ARE_GLOBAL
+
 /*
  * Bit 12 of a 24-bit flag mask. This corresponds to bit 52 of a pte.
  * This is needed to distinguish between user and kernel PTEs since _PAGE_USER
  * is asserted for both.
  */
 #define _PAGE_GUEST_KERNEL (1U<<12)
-
-#define PAGE_HYPERVISOR_RO      (__PAGE_HYPERVISOR_RO      | _PAGE_GLOBAL)
-#define PAGE_HYPERVISOR_RW      (__PAGE_HYPERVISOR_RW      | _PAGE_GLOBAL)
-#define PAGE_HYPERVISOR_RX      (__PAGE_HYPERVISOR_RX      | _PAGE_GLOBAL)
-#define PAGE_HYPERVISOR_RWX     (__PAGE_HYPERVISOR         | _PAGE_GLOBAL)
-
-#ifdef __ASSEMBLY__
-/* Dependency on NX being available can't be expressed. */
-# define PAGE_HYPERVISOR         PAGE_HYPERVISOR_RWX
-# define PAGE_HYPERVISOR_UCMINUS (__PAGE_HYPERVISOR_UCMINUS | _PAGE_GLOBAL)
-# define PAGE_HYPERVISOR_UC      (__PAGE_HYPERVISOR_UC      | _PAGE_GLOBAL)
 #else
-# define PAGE_HYPERVISOR         PAGE_HYPERVISOR_RW
-# define PAGE_HYPERVISOR_UCMINUS (__PAGE_HYPERVISOR_UCMINUS | \
-                                  _PAGE_GLOBAL | _PAGE_NX)
-# define PAGE_HYPERVISOR_UC      (__PAGE_HYPERVISOR_UC | \
-                                  _PAGE_GLOBAL | _PAGE_NX)
+#define _PAGE_GUEST_KERNEL 0
 #endif
+
+/*
+ * Bit 24 of a 24-bit flag mask!  This is not any bit of a real pte,
+ * and is only used for signalling in variables that contain flags.
+ */
+#define _PAGE_INVALID_BIT (1U<<24)
 
 #endif /* __X86_64_PAGE_H__ */
 

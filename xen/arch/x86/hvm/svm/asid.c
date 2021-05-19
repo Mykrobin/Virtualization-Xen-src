@@ -12,9 +12,11 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/perfc.h>
@@ -22,7 +24,7 @@
 #include <asm/amd.h>
 #include <asm/hvm/nestedhvm.h>
 
-void svm_asid_init(const struct cpuinfo_x86 *c)
+void svm_asid_init(struct cpuinfo_x86 *c)
 {
     int nasids = 0;
 

@@ -77,11 +77,11 @@ void libxl__exec(libxl__gc *gc, int stdinfd, int stdoutfd, int stderrfd,
     if (stderrfd != -1)
         dup2(stderrfd, STDERR_FILENO);
 
-    if (stdinfd > 2)
+    if (stdinfd != -1)
         close(stdinfd);
-    if (stdoutfd > 2 && stdoutfd != stdinfd)
+    if (stdoutfd != -1 && stdoutfd != stdinfd)
         close(stdoutfd);
-    if (stderrfd > 2 && stderrfd != stdinfd && stderrfd != stdoutfd)
+    if (stderrfd != -1 && stderrfd != stdinfd && stderrfd != stdoutfd)
         close(stderrfd);
 
     check_open_fds(arg0);
@@ -144,7 +144,7 @@ int libxl__spawn_record_pid(libxl__gc *gc, libxl__spawn_state *spawn, pid_t pid)
     rc = libxl__ev_child_xenstore_reopen(gc, spawn->what);
     if (rc) goto out;
 
-    r = libxl__xs_printf(gc, XBT_NULL, spawn->pidpath, "%d", pid);
+    r = libxl__xs_write(gc, XBT_NULL, spawn->pidpath, "%d", pid);
     if (r) {
         LOGE(ERROR,
              "write %s = %d: xenstore write failed", spawn->pidpath, pid);
@@ -168,6 +168,7 @@ int libxl__xenstore_child_wait_deprecated(libxl__gc *gc,
                                                        void *userdata),
                                  void *check_callback_userdata)
 {
+    libxl_ctx *ctx = libxl__gc_owner(gc);
     char *p;
     unsigned int len;
     int rc = 0;
@@ -180,7 +181,7 @@ int libxl__xenstore_child_wait_deprecated(libxl__gc *gc,
 
     xsh = xs_daemon_open();
     if (xsh == NULL) {
-        LOG(ERROR, "Unable to open xenstore connection");
+        LIBXL__LOG(ctx, LIBXL__LOG_ERROR, "Unable to open xenstore connection");
         goto err;
     }
 
@@ -223,7 +224,7 @@ again:
             }
         }
     }
-    LOG(ERROR, "%s not ready", what);
+    LIBXL__LOG(ctx, LIBXL__LOG_ERROR, "%s not ready", what);
 
     xs_unwatch(xsh, path, path);
     xs_daemon_close(xsh);
@@ -237,11 +238,11 @@ err:
 /*
  * Full set of possible states of a libxl__spawn_state and its _detachable:
  *
- *                   detaching rc      mid     timeout      xswatch
+ *                   detaching failed  mid     timeout      xswatch          
  *  - Undefined         undef   undef   -        undef        undef
  *  - Idle              any     any     Idle     Idle         Idle
  *  - Attached OK       0       0       Active   Active       Active
- *  - Attached Failed   0       non-0   Active   Idle         Idle
+ *  - Attached Failed   0       1       Active   Idle         Idle
  *  - Detaching         1       maybe   Active   Idle         Idle
  *  - Partial           any     any     Idle     Active/Idle  Active/Idle
  *
@@ -256,8 +257,10 @@ err:
  */
 
 /* Event callbacks. */
-static void spawn_watch_event(libxl__egc *egc, libxl__xswait_state *xswa,
-                              int rc, const char *xsdata);
+static void spawn_watch_event(libxl__egc *egc, libxl__ev_xswatch *xsw,
+                              const char *watch_path, const char *event_path);
+static void spawn_timeout(libxl__egc *egc, libxl__ev_time *ev,
+                          const struct timeval *requested_abs);
 static void spawn_middle_death(libxl__egc *egc, libxl__ev_child *childw,
                                pid_t pid, int status);
 
@@ -266,12 +269,13 @@ static void spawn_cleanup(libxl__gc *gc, libxl__spawn_state *ss);
 
 /* Precondition: Attached or Detaching; caller has logged failure reason.
  * Results: Detaching, or Attached Failed */
-static void spawn_fail(libxl__egc *egc, libxl__spawn_state *ss, int rc);
+static void spawn_fail(libxl__egc *egc, libxl__spawn_state *ss);
 
 void libxl__spawn_init(libxl__spawn_state *ss)
 {
     libxl__ev_child_init(&ss->mid);
-    libxl__xswait_init(&ss->xswait);
+    libxl__ev_time_init(&ss->timeout);
+    libxl__ev_xswatch_init(&ss->xswatch);
 }
 
 int libxl__spawn_spawn(libxl__egc *egc, libxl__spawn_state *ss)
@@ -282,14 +286,14 @@ int libxl__spawn_spawn(libxl__egc *egc, libxl__spawn_state *ss)
     int status, rc;
 
     libxl__spawn_init(ss);
-    ss->rc = ss->detaching = 0;
+    ss->failed = ss->detaching = 0;
 
-    ss->xswait.ao = ao;
-    ss->xswait.what = GCSPRINTF("%s startup", ss->what);
-    ss->xswait.path = ss->xspath;
-    ss->xswait.timeout_ms = ss->timeout_ms;
-    ss->xswait.callback = spawn_watch_event;
-    rc = libxl__xswait_start(gc, &ss->xswait);
+    rc = libxl__ev_time_register_rel(gc, &ss->timeout,
+                                     spawn_timeout, ss->timeout_ms);
+    if (rc) goto out_err;
+
+    rc = libxl__ev_xswatch_register(gc, &ss->xswatch,
+                                    spawn_watch_event, ss->xspath);
     if (rc) goto out_err;
 
     pid_t middle = libxl__ev_child_fork(gc, &ss->mid, spawn_middle_death);
@@ -346,19 +350,20 @@ int libxl__spawn_spawn(libxl__egc *egc, libxl__spawn_state *ss)
 static void spawn_cleanup(libxl__gc *gc, libxl__spawn_state *ss)
 {
     assert(!libxl__ev_child_inuse(&ss->mid));
-    libxl__xswait_stop(gc, &ss->xswait);
+    libxl__ev_time_deregister(gc, &ss->timeout);
+    libxl__ev_xswatch_deregister(gc, &ss->xswatch);
 }
 
 static void spawn_detach(libxl__gc *gc, libxl__spawn_state *ss)
 /* Precondition: Attached or Detaching, but caller must have just set
- * at least one of detaching or rc.
+ * at least one of detaching or failed.
  * Results: Detaching or Attached Failed */
 {
     int r;
 
     assert(libxl__ev_child_inuse(&ss->mid));
-    assert(ss->detaching || ss->rc);
-    libxl__xswait_stop(gc, &ss->xswait);
+    libxl__ev_time_deregister(gc, &ss->timeout);
+    libxl__ev_xswatch_deregister(gc, &ss->xswatch);
 
     pid_t child = ss->mid.pid;
     r = kill(child, SIGKILL);
@@ -373,29 +378,37 @@ void libxl__spawn_initiate_detach(libxl__gc *gc, libxl__spawn_state *ss)
     spawn_detach(gc, ss);
 }
 
-static void spawn_fail(libxl__egc *egc, libxl__spawn_state *ss, int rc)
+static void spawn_fail(libxl__egc *egc, libxl__spawn_state *ss)
 /* Caller must have logged.  Must be last thing in calling function,
  * as it may make the callback.  Precondition: Attached or Detaching. */
 {
     EGC_GC;
-    assert(rc);
-    ss->rc = rc;
+    ss->failed = 1;
     spawn_detach(gc, ss);
 }
 
-static void spawn_watch_event(libxl__egc *egc, libxl__xswait_state *xswa,
-                              int rc, const char *p)
+static void spawn_timeout(libxl__egc *egc, libxl__ev_time *ev,
+                          const struct timeval *requested_abs)
+{
+    /* Before event, was Attached. */
+    EGC_GC;
+    libxl__spawn_state *ss = CONTAINER_OF(ev, *ss, timeout);
+    LOG(ERROR, "%s: startup timed out", ss->what);
+    spawn_fail(egc, ss); /* must be last */
+}
+
+static void spawn_watch_event(libxl__egc *egc, libxl__ev_xswatch *xsw,
+                              const char *watch_path, const char *event_path)
 {
     /* On entry, is Attached. */
     EGC_GC;
-    libxl__spawn_state *ss = CONTAINER_OF(xswa, *ss, xswait);
-    if (rc) {
-        if (rc == ERROR_TIMEDOUT)
-            LOG(ERROR, "%s: startup timed out", ss->what);
-        spawn_fail(egc, ss, rc); /* must be last */
+    libxl__spawn_state *ss = CONTAINER_OF(xsw, *ss, xswatch);
+    char *p = libxl__xs_read(gc, 0, ss->xspath);
+    if (!p && errno != ENOENT) {
+        LOG(ERROR, "%s: xenstore read of %s failed", ss->what, ss->xspath);
+        spawn_fail(egc, ss); /* must be last */
         return;
     }
-    LOG(DEBUG, "%s: spawn watch p=%s", ss->what, p);
     ss->confirm_cb(egc, ss, p); /* must be last */
 }
 
@@ -406,18 +419,16 @@ static void spawn_middle_death(libxl__egc *egc, libxl__ev_child *childw,
     EGC_GC;
     libxl__spawn_state *ss = CONTAINER_OF(childw, *ss, mid);
 
-    if ((ss->rc || ss->detaching) &&
+    if ((ss->failed || ss->detaching) &&
         ((WIFEXITED(status) && WEXITSTATUS(status)==0) ||
          (WIFSIGNALED(status) && WTERMSIG(status)==SIGKILL))) {
         /* as expected */
-        const char *what = GCSPRINTF("%s (dying as expected)", ss->what);
-        libxl_report_child_exitstatus(CTX, XTL_DEBUG, what, pid, status);
     } else if (!WIFEXITED(status)) {
         int loglevel = ss->detaching ? XTL_WARN : XTL_ERROR;
         const char *what =
             GCSPRINTF("%s intermediate process (startup monitor)", ss->what);
         libxl_report_child_exitstatus(CTX, loglevel, what, pid, status);
-        ss->rc = ERROR_FAIL;
+        ss->failed = 1;
     } else {
         if (!status)
             LOG(ERROR, "%s [%ld]: unexpectedly exited with exit status 0,"
@@ -436,20 +447,19 @@ static void spawn_middle_death(libxl__egc *egc, libxl__ev_child *childw,
                 LOG(ERROR, "%s [%ld]: died during startup due to unknown fatal"
                     " signal number %d", ss->what, (unsigned long)pid, sig);
         }
-        ss->rc = ERROR_FAIL;
+        ss->failed = 1;
     }
 
     spawn_cleanup(gc, ss);
 
-    if (ss->rc && !ss->detaching) {
-        ss->failure_cb(egc, ss, ss->rc); /* must be last */
+    if (ss->failed && !ss->detaching) {
+        ss->failure_cb(egc, ss); /* must be last */
         return;
     }
     
-    if (ss->rc && ss->detaching)
-        LOG(WARN,"%s underlying machinery seemed to fail (%d),"
-            " but its function seems to have been successful",
-            ss->what, ss->rc);
+    if (ss->failed && ss->detaching)
+        LOG(WARN,"%s underlying machinery seemed to fail,"
+            " but its function seems to have been successful", ss->what);
 
     assert(ss->detaching);
     ss->detached_cb(egc, ss);

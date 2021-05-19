@@ -13,14 +13,17 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #include "xc_private.h"
+#include <errno.h>
 
 int xc_gnttab_op(xc_interface *xch, int cmd, void * op, int op_size, int count)
 {
     int ret = 0;
+    DECLARE_HYPERCALL;
     DECLARE_HYPERCALL_BOUNCE(op, count * op_size, XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
 
     if ( xc_hypercall_bounce_pre(xch, op) )
@@ -29,8 +32,12 @@ int xc_gnttab_op(xc_interface *xch, int cmd, void * op, int op_size, int count)
         goto out1;
     }
 
-    ret = xencall3(xch->xcall,  __HYPERVISOR_grant_table_op,
-                   cmd, HYPERCALL_BUFFER_AS_ARG(op), count);
+    hypercall.op = __HYPERVISOR_grant_table_op;
+    hypercall.arg[0] = cmd;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(op);
+    hypercall.arg[2] = count;
+
+    ret = do_xen_hypercall(xch, &hypercall);
 
     xc_hypercall_bounce_post(xch, op);
 
@@ -38,19 +45,7 @@ int xc_gnttab_op(xc_interface *xch, int cmd, void * op, int op_size, int count)
     return ret;
 }
 
-int xc_gnttab_query_size(xc_interface *xch, struct gnttab_query_size *query)
-{
-    int rc;
-
-    rc = xc_gnttab_op(xch, GNTTABOP_query_size, query, sizeof(*query), 1);
-
-    if ( rc || (query->status != GNTST_okay) )
-        ERROR("Could not query dom %u's grant size\n", query->dom);
-
-    return rc;
-}
-
-int xc_gnttab_get_version(xc_interface *xch, uint32_t domid)
+int xc_gnttab_get_version(xc_interface *xch, int domid)
 {
     struct gnttab_get_version query;
     int rc;
@@ -64,7 +59,7 @@ int xc_gnttab_get_version(xc_interface *xch, uint32_t domid)
         return query.version;
 }
 
-static void *_gnttab_map_table(xc_interface *xch, uint32_t domid, int *gnt_num)
+static void *_gnttab_map_table(xc_interface *xch, int domid, int *gnt_num)
 {
     int rc, i;
     struct gnttab_query_size query;
@@ -81,7 +76,7 @@ static void *_gnttab_map_table(xc_interface *xch, uint32_t domid, int *gnt_num)
 
     if ( rc || (query.status != GNTST_okay) )
     {
-        ERROR("Could not query dom%d's grant size\n", domid);
+        ERROR("Could not query dom's grant size\n", domid);
         return NULL;
     }
 
@@ -134,7 +129,7 @@ err:
     return gnt;
 }
 
-grant_entry_v1_t *xc_gnttab_map_table_v1(xc_interface *xch, uint32_t domid,
+grant_entry_v1_t *xc_gnttab_map_table_v1(xc_interface *xch, int domid,
                                          int *gnt_num)
 {
     if (xc_gnttab_get_version(xch, domid) == 2)
@@ -142,13 +137,97 @@ grant_entry_v1_t *xc_gnttab_map_table_v1(xc_interface *xch, uint32_t domid,
     return _gnttab_map_table(xch, domid, gnt_num);
 }
 
-grant_entry_v2_t *xc_gnttab_map_table_v2(xc_interface *xch, uint32_t domid,
+grant_entry_v2_t *xc_gnttab_map_table_v2(xc_interface *xch, int domid,
                                          int *gnt_num)
 {
     if (xc_gnttab_get_version(xch, domid) != 2)
         return NULL;
     return _gnttab_map_table(xch, domid, gnt_num);
 }
+
+void *xc_gnttab_map_grant_ref(xc_gnttab *xcg,
+                              uint32_t domid,
+                              uint32_t ref,
+                              int prot)
+{
+	return xcg->ops->u.gnttab.grant_map(xcg, xcg->ops_handle, 1, 0, prot,
+	                                    &domid, &ref, -1, -1);
+}
+
+void *xc_gnttab_map_grant_refs(xc_gnttab *xcg,
+                               uint32_t count,
+                               uint32_t *domids,
+                               uint32_t *refs,
+                               int prot)
+{
+	return xcg->ops->u.gnttab.grant_map(xcg, xcg->ops_handle, count, 0,
+	                                    prot, domids, refs, -1, -1);
+}
+
+void *xc_gnttab_map_domain_grant_refs(xc_gnttab *xcg,
+                                      uint32_t count,
+                                      uint32_t domid,
+                                      uint32_t *refs,
+                                      int prot)
+{
+	return xcg->ops->u.gnttab.grant_map(xcg, xcg->ops_handle, count,
+	                                    XC_GRANT_MAP_SINGLE_DOMAIN,
+	                                    prot, &domid, refs, -1, -1);
+}
+
+void *xc_gnttab_map_grant_ref_notify(xc_gnttab *xcg,
+                                     uint32_t domid,
+                                     uint32_t ref,
+                                     int prot,
+                                     uint32_t notify_offset,
+                                     evtchn_port_t notify_port)
+{
+	return xcg->ops->u.gnttab.grant_map(xcg, xcg->ops_handle, 1, 0, prot,
+	                              &domid, &ref, notify_offset, notify_port);
+}
+
+
+int xc_gnttab_munmap(xc_gnttab *xcg,
+                     void *start_address,
+                     uint32_t count)
+{
+	return xcg->ops->u.gnttab.munmap(xcg, xcg->ops_handle,
+					 start_address, count);
+}
+
+int xc_gnttab_set_max_grants(xc_gnttab *xcg, uint32_t count)
+{
+	if (!xcg->ops->u.gnttab.set_max_grants)
+		return 0;
+	return xcg->ops->u.gnttab.set_max_grants(xcg, xcg->ops_handle, count);
+}
+
+void *xc_gntshr_share_pages(xc_gntshr *xcg, uint32_t domid,
+                            int count, uint32_t *refs, int writable)
+{
+	return xcg->ops->u.gntshr.share_pages(xcg, xcg->ops_handle, domid,
+	                                      count, refs, writable, -1, -1);
+}
+
+void *xc_gntshr_share_page_notify(xc_gntshr *xcg, uint32_t domid,
+                                  uint32_t *ref, int writable,
+                                  uint32_t notify_offset,
+                                  evtchn_port_t notify_port)
+{
+	return xcg->ops->u.gntshr.share_pages(xcg, xcg->ops_handle,
+			domid, 1, ref, writable, notify_offset, notify_port);
+}
+
+/*
+ * Unmaps the @count pages starting at @start_address, which were mapped by a
+ * call to xc_gntshr_share_*. Never logs.
+ */
+int xc_gntshr_munmap(xc_gntshr *xcg, void *start_address, uint32_t count)
+{
+	return xcg->ops->u.gntshr.munmap(xcg, xcg->ops_handle,
+					 start_address, count);
+}
+
 
 /*
  * Local variables:

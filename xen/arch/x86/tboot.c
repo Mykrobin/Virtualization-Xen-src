@@ -1,3 +1,4 @@
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/lib.h>
@@ -11,12 +12,11 @@
 #include <asm/processor.h>
 #include <asm/e820.h>
 #include <asm/tboot.h>
-#include <asm/setup.h>
 #include <crypto/vmac.h>
 
 /* tboot=<physical address of shared page> */
-static unsigned long __initdata opt_tboot_pa;
-integer_param("tboot", opt_tboot_pa);
+static char __initdata opt_tboot[20] = "";
+string_param("tboot", opt_tboot);
 
 /* Global pointer to shared data; NULL means no measured launch. */
 tboot_shared_t *g_tboot_shared;
@@ -47,6 +47,8 @@ static uint64_t __initdata sinit_base, __initdata sinit_size;
 #define TXTCR_SINIT_SIZE            0x0278
 #define TXTCR_HEAP_BASE             0x0300
 #define TXTCR_HEAP_SIZE             0x0308
+
+extern char __init_begin[], __bss_start[];
 
 #define SHA1_SIZE      20
 typedef uint8_t   sha1_hash_t[SHA1_SIZE];
@@ -82,7 +84,7 @@ static void __init tboot_copy_memory(unsigned char *va, uint32_t size,
         {
             map_base = PFN_DOWN(pa + i);
             set_fixmap(FIX_TBOOT_MAP_ADDRESS, map_base << PAGE_SHIFT);
-            map_addr = fix_to_virt(FIX_TBOOT_MAP_ADDRESS);
+            map_addr = (unsigned char *)fix_to_virt(FIX_TBOOT_MAP_ADDRESS);
         }
         va[i] = map_addr[pa + i - (map_base << PAGE_SHIFT)];
     }
@@ -91,14 +93,16 @@ static void __init tboot_copy_memory(unsigned char *va, uint32_t size,
 void __init tboot_probe(void)
 {
     tboot_shared_t *tboot_shared;
+    unsigned long p_tboot_shared;
 
     /* Look for valid page-aligned address for shared page. */
-    if ( !opt_tboot_pa || (opt_tboot_pa & ~PAGE_MASK) )
+    p_tboot_shared = simple_strtoul(opt_tboot, NULL, 0);
+    if ( (p_tboot_shared == 0) || ((p_tboot_shared & ~PAGE_MASK) != 0) )
         return;
 
     /* Map and check for tboot UUID. */
-    set_fixmap(FIX_TBOOT_SHARED_BASE, opt_tboot_pa);
-    tboot_shared = fix_to_virt(FIX_TBOOT_SHARED_BASE);
+    set_fixmap(FIX_TBOOT_SHARED_BASE, p_tboot_shared);
+    tboot_shared = (tboot_shared_t *)fix_to_virt(FIX_TBOOT_SHARED_BASE);
     if ( tboot_shared == NULL )
         return;
     if ( memcmp(&tboot_shared_uuid, (uuid_t *)tboot_shared, sizeof(uuid_t)) )
@@ -113,7 +117,7 @@ void __init tboot_probe(void)
     }
 
     g_tboot_shared = tboot_shared;
-    printk("TBOOT: found shared page at phys addr %#lx:\n", opt_tboot_pa);
+    printk("TBOOT: found shared page at phys addr %lx:\n", p_tboot_shared);
     printk("  version: %d\n", tboot_shared->version);
     printk("  log_addr: %#x\n", tboot_shared->log_addr);
     printk("  shutdown_entry: %#x\n", tboot_shared->shutdown_entry);
@@ -136,7 +140,7 @@ void __init tboot_probe(void)
                       TXT_PUB_CONFIG_REGS_BASE + TXTCR_SINIT_BASE);
     tboot_copy_memory((unsigned char *)&sinit_size, sizeof(sinit_size),
                       TXT_PUB_CONFIG_REGS_BASE + TXTCR_SINIT_SIZE);
-    clear_fixmap(FIX_TBOOT_MAP_ADDRESS);
+    __set_fixmap(FIX_TBOOT_MAP_ADDRESS, 0, 0);
 }
 
 /* definitions from xen/drivers/passthrough/vtd/iommu.h
@@ -159,7 +163,7 @@ static void update_iommu_mac(vmac_ctx_t *ctx, uint64_t pt_maddr, int level)
     if ( pt_maddr == 0 )
         return;
 
-    pt_vaddr = (struct dma_pte *)map_domain_page(_mfn(paddr_to_pfn(pt_maddr)));
+    pt_vaddr = (struct dma_pte *)map_domain_page(pt_maddr >> PAGE_SHIFT_4K);
     vmac_update((void *)pt_vaddr, PAGE_SIZE, ctx);
 
     for ( i = 0; i < PTE_NUM; i++ )
@@ -184,16 +188,15 @@ static void update_pagetable_mac(vmac_ctx_t *ctx)
 
     for ( mfn = 0; mfn < max_page; mfn++ )
     {
-        struct page_info *page = mfn_to_page(_mfn(mfn));
+        struct page_info *page = mfn_to_page(mfn);
 
-        if ( !mfn_valid(_mfn(mfn)) )
+        if ( !mfn_valid(mfn) )
             continue;
         if ( is_page_in_use(page) && !is_xen_heap_page(page) )
         {
             if ( page->count_info & PGC_page_table )
             {
-                void *pg = map_domain_page(_mfn(mfn));
-
+                void *pg = map_domain_page(mfn);
                 vmac_update(pg, PAGE_SIZE, ctx);
                 unmap_domain_page(pg);
             }
@@ -227,10 +230,8 @@ static void tboot_gen_domain_integrity(const uint8_t key[TB_KEY_SIZE],
 
         if ( !is_idle_domain(d) )
         {
-            const struct domain_iommu *dio = dom_iommu(d);
-
-            update_iommu_mac(&ctx, dio->arch.pgd_maddr,
-                             agaw_to_level(dio->arch.agaw));
+            struct hvm_iommu *hd = domain_hvm_iommu(d);
+            update_iommu_mac(&ctx, hd->pgd_maddr, agaw_to_level(hd->agaw));
         }
     }
 
@@ -276,11 +277,11 @@ static void tboot_gen_xenheap_integrity(const uint8_t key[TB_KEY_SIZE],
     vmac_set_key((uint8_t *)key, &ctx);
     for ( mfn = 0; mfn < max_page; mfn++ )
     {
-        struct page_info *page = mfn_to_page(_mfn(mfn));
+        struct page_info *page = __mfn_to_page(mfn);
 
-        if ( !mfn_valid(_mfn(mfn)) )
+        if ( !mfn_valid(mfn) )
             continue;
-        if ( is_xen_fixed_mfn(mfn) )
+        if ( (mfn << PAGE_SHIFT) < __pa(&_end) )
             continue; /* skip Xen */
         if ( (mfn >= PFN_DOWN(g_tboot_shared->tboot_base - 3 * PAGE_SIZE))
              && (mfn < PFN_UP(g_tboot_shared->tboot_base
@@ -336,50 +337,45 @@ static void tboot_gen_frametable_integrity(const uint8_t key[TB_KEY_SIZE],
 
 void tboot_shutdown(uint32_t shutdown_type)
 {
-    mfn_t map_base;
-    uint32_t map_size;
+    uint32_t map_base, map_size;
     int err;
 
     g_tboot_shared->shutdown_type = shutdown_type;
 
+    local_irq_disable();
+
     /* Create identity map for tboot shutdown code. */
     /* do before S3 integrity because mapping tboot may change xenheap */
-    map_base = maddr_to_mfn(g_tboot_shared->tboot_base);
+    map_base = PFN_DOWN(g_tboot_shared->tboot_base);
     map_size = PFN_UP(g_tboot_shared->tboot_size);
 
-    err = map_pages_to_xen(mfn_to_maddr(map_base), map_base, map_size,
+    err = map_pages_to_xen(map_base << PAGE_SHIFT, map_base, map_size,
                            __PAGE_HYPERVISOR);
     if ( err != 0 )
     {
-        printk("error (%#x) mapping tboot pages (mfns) @ %"PRI_mfn", %#x\n",
-               err, mfn_x(map_base), map_size);
+        printk("error (%#x) mapping tboot pages (mfns) @ %#x, %#x\n", err,
+               map_base, map_size);
         return;
     }
-
-    /* Disable interrupts as early as possible but not prior to */
-    /* calling map_pages_to_xen */
-    local_irq_disable();
 
     /* if this is S3 then set regions to MAC */
     if ( shutdown_type == TB_SHUTDOWN_S3 )
     {
         /*
-         * Xen regions for tboot to MAC. This needs to remain in sync with
-         * xen_in_range().
+         * Xen regions for tboot to MAC
          */
         g_tboot_shared->num_mac_regions = 3;
         /* S3 resume code (and other real mode trampoline code) */
         g_tboot_shared->mac_regions[0].start = bootsym_phys(trampoline_start);
         g_tboot_shared->mac_regions[0].size = bootsym_phys(trampoline_end) -
                                               bootsym_phys(trampoline_start);
-        /* hypervisor .text + .rodata */
+        /* hypervisor code + data */
         g_tboot_shared->mac_regions[1].start = (uint64_t)__pa(&_stext);
-        g_tboot_shared->mac_regions[1].size = __pa(&__2M_rodata_end) -
+        g_tboot_shared->mac_regions[1].size = __pa(&__init_begin) -
                                               __pa(&_stext);
-        /* hypervisor .data + .bss */
-        g_tboot_shared->mac_regions[2].start = (uint64_t)__pa(&__2M_rwdata_start);
-        g_tboot_shared->mac_regions[2].size = __pa(&__2M_rwdata_end) -
-                                              __pa(&__2M_rwdata_start);
+        /* bss */
+        g_tboot_shared->mac_regions[2].start = (uint64_t)__pa(&__bss_start);
+        g_tboot_shared->mac_regions[2].size = __pa(&_end) - __pa(&__bss_start);
 
         /*
          * MAC domains and other Xen memory
@@ -440,12 +436,13 @@ int __init tboot_protect_mem_regions(void)
 
 int __init tboot_parse_dmar_table(acpi_table_handler dmar_handler)
 {
+    struct acpi_table_header *dmar_table;
     int rc;
     uint64_t size;
     uint32_t dmar_table_length;
     unsigned long pa;
     sinit_mle_data_t sinit_mle_data;
-    void *dmar_table;
+    unsigned char *dmar_table_raw;
 
     if ( !tboot_in_measured_env() )
         return acpi_table_parse(ACPI_SIG_DMAR, dmar_handler);
@@ -478,12 +475,13 @@ int __init tboot_parse_dmar_table(acpi_table_handler dmar_handler)
     tboot_copy_memory((unsigned char *)&dmar_table_length,
                       sizeof(dmar_table_length),
                       pa + sizeof(char) * ACPI_NAME_SIZE);
-    dmar_table = xmalloc_bytes(dmar_table_length);
-    tboot_copy_memory(dmar_table, dmar_table_length, pa);
-    clear_fixmap(FIX_TBOOT_MAP_ADDRESS);
+    dmar_table_raw = xmalloc_array(unsigned char, dmar_table_length);
+    tboot_copy_memory(dmar_table_raw, dmar_table_length, pa);
+    dmar_table = (struct acpi_table_header *)dmar_table_raw;
+    __set_fixmap(FIX_TBOOT_MAP_ADDRESS, 0, 0);
 
     rc = dmar_handler(dmar_table);
-    xfree(dmar_table);
+    xfree(dmar_table_raw);
 
     /* acpi_parse_dmar() zaps APCI DMAR signature in TXT heap table */
     /* but dom0 will read real table, so must zap it there too */

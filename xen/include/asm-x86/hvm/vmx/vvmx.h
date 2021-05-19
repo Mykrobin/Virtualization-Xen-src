@@ -16,7 +16,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  */
 #ifndef __ASM_X86_HVM_VVMX_H__
@@ -28,13 +29,6 @@ struct vvmcs_list {
 };
 
 struct nestedvmx {
-    /*
-     * vmxon_region_pa is also used to indicate whether a vcpu is in
-     * the VMX operation. When a vcpu is out of the VMX operation, its
-     * vmxon_region_pa is set to an invalid address INVALID_PADDR. We
-     * cannot use 0 for this purpose, because it's a valid VMXON region
-     * address.
-     */
     paddr_t    vmxon_region_pa;
     void       *iobitmap[2];		/* map (va) of L1 guest I/O bitmap */
     void       *msrbitmap;		/* map (va) of L1 guest MSR bitmap */
@@ -64,6 +58,37 @@ struct nestedvmx {
 /* bit 0-8, and 12 must be 1 */
 #define VMX_ENTRY_CTLS_DEFAULT1		0x11ff
 
+/*
+ * Encode of VMX instructions base on Table 24-11 & 24-12 of SDM 3B
+ */
+
+enum vmx_regs_enc {
+    VMX_REG_RAX,
+    VMX_REG_RCX,
+    VMX_REG_RDX,
+    VMX_REG_RBX,
+    VMX_REG_RSP,
+    VMX_REG_RBP,
+    VMX_REG_RSI,
+    VMX_REG_RDI,
+    VMX_REG_R8,
+    VMX_REG_R9,
+    VMX_REG_R10,
+    VMX_REG_R11,
+    VMX_REG_R12,
+    VMX_REG_R13,
+    VMX_REG_R14,
+    VMX_REG_R15,
+};
+
+enum vmx_sregs_enc {
+    VMX_SREG_ES,
+    VMX_SREG_CS,
+    VMX_SREG_SS,
+    VMX_SREG_DS,
+    VMX_SREG_FS,
+    VMX_SREG_GS,
+};
 
 union vmx_inst_info {
     struct {
@@ -86,13 +111,18 @@ union vmx_inst_info {
 int nvmx_vcpu_initialise(struct vcpu *v);
 void nvmx_vcpu_destroy(struct vcpu *v);
 int nvmx_vcpu_reset(struct vcpu *v);
+uint64_t nvmx_vcpu_guestcr3(struct vcpu *v);
 uint64_t nvmx_vcpu_eptp_base(struct vcpu *v);
+uint32_t nvmx_vcpu_asid(struct vcpu *v);
 enum hvm_intblk nvmx_intr_blocked(struct vcpu *v);
-bool_t nvmx_intercepts_exception(
-    struct vcpu *v, unsigned int vector, int error_code);
+int nvmx_intercepts_exception(struct vcpu *v, 
+                              unsigned int trap, int error_code);
 void nvmx_domain_relinquish_resources(struct domain *d);
 
 bool_t nvmx_ept_enabled(struct vcpu *v);
+
+int nvmx_handle_vmxon(struct cpu_user_regs *regs);
+int nvmx_handle_vmxoff(struct cpu_user_regs *regs);
 
 #define EPT_TRANSLATE_SUCCEED       0
 #define EPT_TRANSLATE_VIOLATION     1
@@ -154,43 +184,35 @@ enum vvmcs_encoding_type {
     VVMCS_TYPE_HSTATE,
 };
 
-u64 get_vvmcs_virtual(void *vvmcs, u32 encoding);
-u64 get_vvmcs_real(const struct vcpu *, u32 encoding);
-void set_vvmcs_virtual(void *vvmcs, u32 encoding, u64 val);
-void set_vvmcs_real(const struct vcpu *, u32 encoding, u64 val);
-enum vmx_insn_errno get_vvmcs_virtual_safe(void *vvmcs, u32 encoding, u64 *val);
-enum vmx_insn_errno get_vvmcs_real_safe(const struct vcpu *, u32 encoding,
-                                        u64 *val);
-enum vmx_insn_errno set_vvmcs_virtual_safe(void *vvmcs, u32 encoding, u64 val);
-enum vmx_insn_errno set_vvmcs_real_safe(const struct vcpu *, u32 encoding,
-                                        u64 val);
+u64 __get_vvmcs_virtual(void *vvmcs, u32 vmcs_encoding);
+u64 __get_vvmcs_real(void *vvmcs, u32 vmcs_encoding);
+void __set_vvmcs_virtual(void *vvmcs, u32 vmcs_encoding, u64 val);
+void __set_vvmcs_real(void *vvmcs, u32 vmcs_encoding, u64 val);
 
-#define get_vvmcs(vcpu, encoding) \
-  (cpu_has_vmx_vmcs_shadowing ? \
-   get_vvmcs_real(vcpu, encoding) : \
-   get_vvmcs_virtual(vcpu_nestedhvm(vcpu).nv_vvmcx, encoding))
+#define __get_vvmcs(_vvmcs, _vmcs_encoding) \
+  (cpu_has_vmx_vmcs_shadowing ? __get_vvmcs_real(_vvmcs, _vmcs_encoding) \
+                              : __get_vvmcs_virtual(_vvmcs, _vmcs_encoding))
 
-#define set_vvmcs(vcpu, encoding, val) \
-  (cpu_has_vmx_vmcs_shadowing ? \
-   set_vvmcs_real(vcpu, encoding, val) : \
-   set_vvmcs_virtual(vcpu_nestedhvm(vcpu).nv_vvmcx, encoding, val))
-
-#define get_vvmcs_safe(vcpu, encoding, val) \
-  (cpu_has_vmx_vmcs_shadowing ? \
-   get_vvmcs_real_safe(vcpu, encoding, val) : \
-   get_vvmcs_virtual_safe(vcpu_nestedhvm(vcpu).nv_vvmcx, encoding, val))
-
-#define set_vvmcs_safe(vcpu, encoding, val) \
-  (cpu_has_vmx_vmcs_shadowing ? \
-   set_vvmcs_real_safe(vcpu, encoding, val) : \
-   set_vvmcs_virtual_safe(vcpu_nestedhvm(vcpu).nv_vvmcx, encoding, val))
+#define __set_vvmcs(_vvmcs, _vmcs_encoding, _val) \
+  (cpu_has_vmx_vmcs_shadowing ? __set_vvmcs_real(_vvmcs, _vmcs_encoding, _val) \
+                              : __set_vvmcs_virtual(_vvmcs, _vmcs_encoding, _val))
 
 uint64_t get_shadow_eptp(struct vcpu *v);
 
 void nvmx_destroy_vmcs(struct vcpu *v);
-int nvmx_handle_vmx_insn(struct cpu_user_regs *regs, unsigned int exit_reason);
+int nvmx_handle_vmptrld(struct cpu_user_regs *regs);
+int nvmx_handle_vmptrst(struct cpu_user_regs *regs);
+int nvmx_handle_vmclear(struct cpu_user_regs *regs);
+int nvmx_handle_vmread(struct cpu_user_regs *regs);
+int nvmx_handle_vmwrite(struct cpu_user_regs *regs);
+int nvmx_handle_vmresume(struct cpu_user_regs *regs);
+int nvmx_handle_vmlaunch(struct cpu_user_regs *regs);
+int nvmx_handle_invept(struct cpu_user_regs *regs);
+int nvmx_handle_invvpid(struct cpu_user_regs *regs);
 int nvmx_msr_read_intercept(unsigned int msr,
                                 u64 *msr_content);
+int nvmx_msr_write_intercept(unsigned int msr,
+                                 u64 msr_content);
 
 void nvmx_update_exec_control(struct vcpu *v, u32 value);
 void nvmx_update_secondary_exec_control(struct vcpu *v,

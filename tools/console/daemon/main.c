@@ -14,7 +14,8 @@
  *  GNU General Public License for more details.
  * 
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 \*/
 
 #include <getopt.h>
@@ -31,7 +32,6 @@
 
 #include "utils.h"
 #include "io.h"
-#include "_paths.h"
 
 int log_reload = 0;
 int log_guest = 0;
@@ -177,7 +177,7 @@ int main(int argc, char **argv)
 	}
 
 	if (!log_dir) {
-		log_dir = strdup(XEN_LOG_DIR "/console");
+		log_dir = strdup("/var/log/xen/console");
 	}
 
 	if (geteuid() != 0) {
@@ -193,7 +193,7 @@ int main(int argc, char **argv)
 	increase_fd_limit();
 
 	if (!is_interactive) {
-		daemonize(pidfile ? pidfile : XEN_RUN_DIR "/xenconsoled.pid");
+		daemonize(pidfile ? pidfile : "/var/run/xenconsoled.pid");
 	}
 
 	if (!xen_setup())

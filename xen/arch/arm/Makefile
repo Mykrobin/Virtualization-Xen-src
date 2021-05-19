@@ -1,66 +1,37 @@
-subdir-$(CONFIG_ARM_32) += arm32
-subdir-$(CONFIG_ARM_64) += arm64
+subdir-$(arm32) += arm32
+subdir-$(arm64) += arm64
 subdir-y += platforms
-subdir-$(CONFIG_ARM_64) += efi
-subdir-$(CONFIG_ACPI) += acpi
 
-obj-$(CONFIG_HAS_ALTERNATIVE) += alternative.o
-obj-y += bootfdt.init.o
-obj-y += cpu.o
-obj-y += cpuerrata.o
-obj-y += cpufeature.o
-obj-y += decode.o
-obj-y += device.o
-obj-y += domain.o
-obj-y += domain_build.o
-obj-y += domctl.o
 obj-$(EARLY_PRINTK) += early_printk.o
+obj-y += cpu.o
+obj-y += domain.o
+obj-y += psci.o
+obj-y += vpsci.o
+obj-y += domctl.o
+obj-y += sysctl.o
+obj-y += domain_build.o
 obj-y += gic.o
-obj-y += gic-v2.o
-obj-$(CONFIG_HAS_GICV3) += gic-v3.o
-obj-$(CONFIG_HAS_ITS) += gic-v3-its.o
-obj-$(CONFIG_HAS_ITS) += gic-v3-lpi.o
-obj-y += guestcopy.o
-obj-y += guest_atomics.o
-obj-y += guest_walk.o
-obj-y += hvm.o
 obj-y += io.o
 obj-y += irq.o
 obj-y += kernel.o
-obj-$(CONFIG_LIVEPATCH) += livepatch.o
-obj-y += mem_access.o
 obj-y += mm.o
-obj-y += monitor.o
 obj-y += p2m.o
 obj-y += percpu.o
-obj-y += platform.o
-obj-y += platform_hypercall.o
+obj-y += guestcopy.o
 obj-y += physdev.o
-obj-y += processor.o
-obj-y += psci.o
+obj-y += platform.o
 obj-y += setup.o
-obj-y += shutdown.o
-obj-y += smc.o
-obj-y += smp.o
-obj-y += smpboot.o
-obj-y += sysctl.o
 obj-y += time.o
+obj-y += smpboot.o
+obj-y += smp.o
+obj-y += shutdown.o
 obj-y += traps.o
-obj-y += vcpreg.o
-subdir-$(CONFIG_NEW_VGIC) += vgic
-ifneq ($(CONFIG_NEW_VGIC),y)
-obj-y += gic-vgic.o
 obj-y += vgic.o
-obj-y += vgic-v2.o
-obj-$(CONFIG_HAS_GICV3) += vgic-v3.o
-obj-$(CONFIG_HAS_ITS) += vgic-v3-its.o
-endif
-obj-y += vm_event.o
 obj-y += vtimer.o
-obj-$(CONFIG_SBSA_VUART_CONSOLE) += vpl011.o
-obj-y += vsmc.o
-obj-y += vpsci.o
 obj-y += vuart.o
+obj-y += hvm.o
+obj-y += device.o
+obj-y += decode.o
 
 #obj-bin-y += ....o
 
@@ -71,24 +42,16 @@ endif
 
 ALL_OBJS := $(TARGET_SUBARCH)/head.o $(ALL_OBJS)
 
-DEPS += $(TARGET_SUBARCH)/.head.o.d
-
-ifdef CONFIG_LIVEPATCH
-all_symbols = --all-symbols
-ifdef CONFIG_FAST_SYMBOL_LOOKUP
-all_symbols = --all-symbols --sort-by-name
-endif
-else
-all_symbols =
-endif
-
-$(TARGET): $(TARGET)-syms
+$(TARGET): $(TARGET)-syms $(TARGET).axf
 	$(OBJCOPY) -O binary -S $< $@
-ifeq ($(CONFIG_ARM_64),y)
-	ln -sf $(notdir $@)  ../../$(notdir $@).efi
-endif
 
-ifeq ($(CONFIG_LTO),y)
+$(TARGET).axf: $(TARGET)-syms
+	# XXX: VE model loads by VMA so instead of
+	# making a proper ELF we link with LMA == VMA and adjust crudely
+	$(OBJCOPY) --change-addresses +0x80000000 $< $@
+	$(STRIP) $@
+
+ifeq ($(lto),y)
 # Gather all LTO objects together
 prelink_lto.o: $(ALL_OBJS)
 	$(LD_LTO) -r -o $@ $^
@@ -107,26 +70,21 @@ $(BASEDIR)/common/symbols-dummy.o:
 $(TARGET)-syms: prelink.o xen.lds $(BASEDIR)/common/symbols-dummy.o
 	$(LD) $(LDFLAGS) -T xen.lds -N prelink.o \
 	    $(BASEDIR)/common/symbols-dummy.o -o $(@D)/.$(@F).0
-	$(NM) -pa --format=sysv $(@D)/.$(@F).0 \
-		| $(BASEDIR)/tools/symbols $(all_symbols) --sysv --sort >$(@D)/.$(@F).0.S
+	$(NM) -n $(@D)/.$(@F).0 | $(BASEDIR)/tools/symbols >$(@D)/.$(@F).0.S
 	$(MAKE) -f $(BASEDIR)/Rules.mk $(@D)/.$(@F).0.o
 	$(LD) $(LDFLAGS) -T xen.lds -N prelink.o \
 	    $(@D)/.$(@F).0.o -o $(@D)/.$(@F).1
-	$(NM) -pa --format=sysv $(@D)/.$(@F).1 \
-		| $(BASEDIR)/tools/symbols $(all_symbols) --sysv --sort >$(@D)/.$(@F).1.S
+	$(NM) -n $(@D)/.$(@F).1 | $(BASEDIR)/tools/symbols >$(@D)/.$(@F).1.S
 	$(MAKE) -f $(BASEDIR)/Rules.mk $(@D)/.$(@F).1.o
-	$(LD) $(LDFLAGS) -T xen.lds -N prelink.o $(build_id_linker) \
+	$(LD) $(LDFLAGS) -T xen.lds -N prelink.o \
 	    $(@D)/.$(@F).1.o -o $@
-	$(NM) -pa --format=sysv $(@D)/$(@F) \
-		| $(BASEDIR)/tools/symbols --xensyms --sysv --sort \
-		>$(@D)/$(@F).map
 	rm -f $(@D)/.$(@F).[0-9]*
 
 asm-offsets.s: $(TARGET_SUBARCH)/asm-offsets.c
 	$(CC) $(filter-out -flto,$(CFLAGS)) -S -o $@ $<
 
 xen.lds: xen.lds.S
-	$(CC) -P -E -Ui386 $(AFLAGS) -o $@ $<
+	$(CC) -P -E -Ui386 $(AFLAGS) -DXEN_PHYS_START=$(CONFIG_LOAD_ADDRESS) -o $@ $<
 	sed -e 's/xen\.lds\.o:/xen\.lds:/g' <.xen.lds.d >.xen.lds.d.new
 	mv -f .xen.lds.d.new .xen.lds.d
 
@@ -136,4 +94,4 @@ dtb.o: $(CONFIG_DTB_FILE)
 clean::
 	rm -f asm-offsets.s xen.lds
 	rm -f $(BASEDIR)/.xen-syms.[0-9]*
-	rm -f $(TARGET).efi
+	rm -f $(TARGET).axf

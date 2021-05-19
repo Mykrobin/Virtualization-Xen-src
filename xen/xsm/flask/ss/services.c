@@ -40,7 +40,6 @@
 #include <xen/xmalloc.h>
 #include <xen/string.h>
 #include <xen/spinlock.h>
-#include <xen/rwlock.h>
 #include <xen/errno.h>
 #include "flask.h"
 #include "avc.h"
@@ -1353,7 +1352,7 @@ static int security_preserve_bools(struct policydb *p);
  * This function will flush the access vector cache after
  * loading the new policy.
  */
-int security_load_policy(const void *data, size_t len)
+int security_load_policy(void *data, size_t len)
 {
     struct policydb oldpolicydb, newpolicydb;
     struct sidtab oldsidtab, newsidtab;
@@ -1465,11 +1464,6 @@ err:
 
 }
 
-int security_get_allow_unknown(void)
-{
-    return policydb.allow_unknown;
-}
-
 /**
  * security_irq_sid - Obtain the SID for a physical irq.
  * @pirq: physical irq
@@ -1493,13 +1487,13 @@ int security_irq_sid(int pirq, u32 *out_sid)
 
     if ( c )
     {
-        if ( !c->sid )
+        if ( !c->sid[0] )
         {
-            rc = sidtab_context_to_sid(&sidtab, &c->context, &c->sid);
+            rc = sidtab_context_to_sid(&sidtab, &c->context[0], &c->sid[0]);
             if ( rc )
                 goto out;
         }
-        *out_sid = c->sid;
+        *out_sid = c->sid[0];
     }
     else
     {
@@ -1533,13 +1527,13 @@ int security_iomem_sid(unsigned long mfn, u32 *out_sid)
 
     if ( c )
     {
-        if ( !c->sid )
+        if ( !c->sid[0] )
         {
-            rc = sidtab_context_to_sid(&sidtab, &c->context, &c->sid);
+            rc = sidtab_context_to_sid(&sidtab, &c->context[0], &c->sid[0]);
             if ( rc )
                 goto out;
         }
-        *out_sid = c->sid;
+        *out_sid = c->sid[0];
     }
     else
     {
@@ -1564,9 +1558,9 @@ int security_iterate_iomem_sids(unsigned long start, unsigned long end,
         c = c->next;
 
     while (c && c->u.iomem.low_iomem <= end) {
-        if (!c->sid)
+        if (!c->sid[0])
         {
-            rc = sidtab_context_to_sid(&sidtab, &c->context, &c->sid);
+            rc = sidtab_context_to_sid(&sidtab, &c->context[0], &c->sid[0]);
             if ( rc )
                 goto out;
         }
@@ -1579,11 +1573,11 @@ int security_iterate_iomem_sids(unsigned long start, unsigned long end,
         }
         if (end <= c->u.iomem.high_iomem) {
             /* iteration ends in the middle of this range */
-            rc = fn(data, c->sid, start, end);
+            rc = fn(data, c->sid[0], start, end);
             goto out;
         }
 
-        rc = fn(data, c->sid, start, c->u.iomem.high_iomem);
+        rc = fn(data, c->sid[0], start, c->u.iomem.high_iomem);
         if (rc)
             goto out;
         start = c->u.iomem.high_iomem + 1;
@@ -1621,13 +1615,13 @@ int security_ioport_sid(u32 ioport, u32 *out_sid)
 
     if ( c )
     {
-        if ( !c->sid )
+        if ( !c->sid[0] )
         {
-            rc = sidtab_context_to_sid(&sidtab, &c->context, &c->sid);
+            rc = sidtab_context_to_sid(&sidtab, &c->context[0], &c->sid[0]);
             if ( rc )
                 goto out;
         }
-        *out_sid = c->sid;
+        *out_sid = c->sid[0];
     }
     else
     {
@@ -1652,9 +1646,9 @@ int security_iterate_ioport_sids(u32 start, u32 end,
         c = c->next;
 
     while (c && c->u.ioport.low_ioport <= end) {
-        if (!c->sid)
+        if (!c->sid[0])
         {
-            rc = sidtab_context_to_sid(&sidtab, &c->context, &c->sid);
+            rc = sidtab_context_to_sid(&sidtab, &c->context[0], &c->sid[0]);
             if ( rc )
                 goto out;
         }
@@ -1667,11 +1661,11 @@ int security_iterate_ioport_sids(u32 start, u32 end,
         }
         if (end <= c->u.ioport.high_ioport) {
             /* iteration ends in the middle of this range */
-            rc = fn(data, c->sid, start, end);
+            rc = fn(data, c->sid[0], start, end);
             goto out;
         }
 
-        rc = fn(data, c->sid, start, c->u.ioport.high_ioport);
+        rc = fn(data, c->sid[0], start, c->u.ioport.high_ioport);
         if (rc)
             goto out;
         start = c->u.ioport.high_ioport + 1;
@@ -1708,13 +1702,13 @@ int security_device_sid(u32 device, u32 *out_sid)
 
     if ( c )
     {
-        if ( !c->sid )
+        if ( !c->sid[0] )
         {
-            rc = sidtab_context_to_sid(&sidtab, &c->context, &c->sid);
+            rc = sidtab_context_to_sid(&sidtab, &c->context[0], &c->sid[0]);
             if ( rc )
                 goto out;
         }
-        *out_sid = c->sid;
+        *out_sid = c->sid[0];
     }
     else
     {
@@ -1726,38 +1720,116 @@ out:
     return rc;
 }
 
-int security_devicetree_sid(const char *path, u32 *out_sid)
+#define SIDS_NEL 25
+
+/**
+ * security_get_user_sids - Obtain reachable SIDs for a user.
+ * @fromsid: starting SID
+ * @username: username
+ * @sids: array of reachable SIDs for user
+ * @nel: number of elements in @sids
+ *
+ * Generate the set of SIDs for legal security contexts
+ * for a given user that can be reached by @fromsid.
+ * Set *@sids to point to a dynamically allocated
+ * array containing the set of SIDs.  Set *@nel to the
+ * number of elements in the array.
+ */
+
+int security_get_user_sids(u32 fromsid, char *username, u32 **sids, u32 *nel)
 {
-    struct ocontext *c;
-    int rc = 0;
+    struct context *fromcon, usercon;
+    u32 *mysids, *mysids2, sid;
+    u32 mynel = 0, maxnel = SIDS_NEL;
+    struct user_datum *user;
+    struct role_datum *role;
+    struct av_decision avd;
+    struct ebitmap_node *rnode, *tnode;
+    int rc = 0, i, j;
+
+    if ( !ss_initialized )
+    {
+        *sids = NULL;
+        *nel = 0;
+        goto out;
+    }
 
     POLICY_RDLOCK;
 
-    c = policydb.ocontexts[OCON_DTREE];
-    while ( c )
+    fromcon = sidtab_search(&sidtab, fromsid);
+    if ( !fromcon )
     {
-        if ( strcmp(c->u.name, path) == 0 )
-            break;
-        c = c->next;
+        rc = -EINVAL;
+        goto out_unlock;
     }
 
-    if ( c )
+    user = hashtab_search(policydb.p_users.table, username);
+    if ( !user )
     {
-        if ( !c->sid )
-        {
-            rc = sidtab_context_to_sid(&sidtab, &c->context, &c->sid);
+        rc = -EINVAL;
+        goto out_unlock;
+    }
+    usercon.user = user->value;
+
+    mysids = xmalloc_array(u32, maxnel);
+    if ( !mysids )
+    {
+        rc = -ENOMEM;
+        goto out_unlock;
+    }
+    memset(mysids, 0, maxnel*sizeof(*mysids));
+
+    ebitmap_for_each_positive_bit(&user->roles, rnode, i)
+    {
+        role = policydb.role_val_to_struct[i];
+        usercon.role = i+1;
+        ebitmap_for_each_positive_bit(&role->types, tnode, j) {
+            usercon.type = j+1;
+
+            if ( mls_setup_user_range(fromcon, user, &usercon) )
+                continue;
+
+            rc = context_struct_compute_av(fromcon, &usercon,
+                               SECCLASS_DOMAIN,
+                               DOMAIN__TRANSITION,
+                               &avd);
+            if ( rc ||  !(avd.allowed & DOMAIN__TRANSITION) )
+                continue;
+            rc = sidtab_context_to_sid(&sidtab, &usercon, &sid);
             if ( rc )
-                goto out;
+            {
+                xfree(mysids);
+                goto out_unlock;
+            }
+            if ( mynel < maxnel )
+            {
+                mysids[mynel++] = sid;
+            }
+            else
+            {
+                maxnel += SIDS_NEL;
+                mysids2 = xmalloc_array(u32, maxnel);
+                if ( !mysids2 )
+                {
+                    rc = -ENOMEM;
+                    xfree(mysids);
+                    goto out_unlock;
+                }
+                memset(mysids2, 0, maxnel*sizeof(*mysids2));
+                memcpy(mysids2, mysids, mynel * sizeof(*mysids2));
+                xfree(mysids);
+                mysids = mysids2;
+                mysids[mynel++] = sid;
+            }
         }
-        *out_sid = c->sid;
-    }
-    else
-    {
-        *out_sid = SECINITSID_DEVICE;
     }
 
-out:
+    *sids = mysids;
+    *nel = mynel;
+
+out_unlock:
     POLICY_RDUNLOCK;
+out:
     return rc;
 }
 
@@ -1796,14 +1868,14 @@ int security_get_bools(int *len, char ***names, int **values, size_t *maxstr)
         goto out;
     }
 
-    if ( names )
-    {
-        *names = xzalloc_array(char *, *len);
+    if ( names ) {
+        *names = (char**)xmalloc_array(char*, *len);
         if ( !*names )
             goto err;
+        memset(*names, 0, sizeof(char*) * *len);
     }
 
-    *values = xmalloc_array(int, *len);
+    *values = (int*)xmalloc_array(int, *len);
     if ( !*values )
         goto err;
 
@@ -1888,7 +1960,7 @@ out:
     return rc;
 }
 
-int security_get_bool_value(unsigned int b)
+int security_get_bool_value(unsigned int bool)
 {
     int rc = 0;
     unsigned int len;
@@ -1896,19 +1968,19 @@ int security_get_bool_value(unsigned int b)
     POLICY_RDLOCK;
 
     len = policydb.p_bools.nprim;
-    if ( b >= len )
+    if ( bool >= len )
     {
         rc = -ENOENT;
         goto out;
     }
 
-    rc = policydb.bool_val_to_struct[b]->state;
+    rc = policydb.bool_val_to_struct[bool]->state;
 out:
     POLICY_RDUNLOCK;
     return rc;
 }
 
-char *security_get_bool_name(unsigned int b)
+char *security_get_bool_name(unsigned int bool)
 {
     unsigned int len;
     char *rv = NULL;
@@ -1916,16 +1988,16 @@ char *security_get_bool_name(unsigned int b)
     POLICY_RDLOCK;
 
     len = policydb.p_bools.nprim;
-    if ( b >= len )
+    if ( bool >= len )
     {
         goto out;
     }
 
-    len = strlen(policydb.p_bool_val_to_name[b]) + 1;
+    len = strlen(policydb.p_bool_val_to_name[bool]) + 1;
     rv = xmalloc_array(char, len);
     if ( !rv )
         goto out;
-    memcpy(rv, policydb.p_bool_val_to_name[b], len);
+    memcpy(rv, policydb.p_bool_val_to_name[bool], len);
 out:
     POLICY_RDUNLOCK;
     return rv;
@@ -1965,6 +2037,20 @@ out:
     return rc;
 }
 
+int determine_ocontext( char *ocontext )
+{
+    if ( strcmp(ocontext, "pirq") == 0 )
+        return OCON_PIRQ;
+    else if ( strcmp(ocontext, "ioport") == 0 )
+        return OCON_IOPORT;
+    else if ( strcmp(ocontext, "iomem") == 0 )
+        return OCON_IOMEM;
+    else if ( strcmp(ocontext, "pcidevice") == 0 )
+        return OCON_DEVICE;
+    else
+        return -1;
+}
+
 int security_ocontext_add( u32 ocon, unsigned long low, unsigned long high
                             ,u32 sid )
 {
@@ -1973,9 +2059,10 @@ int security_ocontext_add( u32 ocon, unsigned long low, unsigned long high
     struct ocontext *prev;
     struct ocontext *add;
 
-    if ( (add = xzalloc(struct ocontext)) == NULL )
+    if ( (add = xmalloc(struct ocontext)) == NULL )
         return -ENOMEM;
-    add->sid = sid;
+    memset(add, 0, sizeof(struct ocontext));
+    add->sid[0] = sid;
 
     POLICY_WRLOCK;
     switch( ocon )
@@ -1993,9 +2080,9 @@ int security_ocontext_add( u32 ocon, unsigned long low, unsigned long high
         {
             if ( c->u.pirq == add->u.pirq )
             {
-                if ( c->sid == sid )
+                if ( c->sid[0] == sid )
                     break;
-                printk("flask: Duplicate pirq %d\n", add->u.pirq);
+                printk("%s: Duplicate pirq %d\n", __FUNCTION__, add->u.pirq);
                 ret = -EEXIST;
                 break;
             }
@@ -2024,11 +2111,12 @@ int security_ocontext_add( u32 ocon, unsigned long low, unsigned long high
         if (c && c->u.ioport.low_ioport <= high)
         {
             if (c->u.ioport.low_ioport == low &&
-                c->u.ioport.high_ioport == high && c->sid == sid)
+                c->u.ioport.high_ioport == high && c->sid[0] == sid)
                 break;
 
-            printk("flask: IO Port overlap with entry %#x - %#x\n",
-                   c->u.ioport.low_ioport, c->u.ioport.high_ioport);
+            printk("%s: IO Port overlap with entry 0x%x - 0x%x\n",
+                   __FUNCTION__, c->u.ioport.low_ioport,
+                   c->u.ioport.high_ioport);
             ret = -EEXIST;
             break;
         }
@@ -2057,11 +2145,12 @@ int security_ocontext_add( u32 ocon, unsigned long low, unsigned long high
         if (c && c->u.iomem.low_iomem <= high)
         {
             if (c->u.iomem.low_iomem == low &&
-                c->u.iomem.high_iomem == high && c->sid == sid)
+                c->u.iomem.high_iomem == high && c->sid[0] == sid)
                 break;
 
-            printk("flask: IO Memory overlap with entry %#"PRIx64" - %#"PRIx64"\n",
-                   c->u.iomem.low_iomem, c->u.iomem.high_iomem);
+            printk("%s: IO Memory overlap with entry 0x%x - 0x%x\n",
+                   __FUNCTION__, c->u.iomem.low_iomem,
+                   c->u.iomem.high_iomem);
             ret = -EEXIST;
             break;
         }
@@ -2088,10 +2177,11 @@ int security_ocontext_add( u32 ocon, unsigned long low, unsigned long high
         {
             if ( c->u.device == add->u.device )
             {
-                if ( c->sid == sid )
+                if ( c->sid[0] == sid )
                     break;
 
-                printk("flask: Duplicate PCI Device %#x\n", add->u.device);
+                printk("%s: Duplicate PCI Device 0x%x\n", __FUNCTION__,
+                        add->u.device);
                 ret = -EEXIST;
                 break;
             }
@@ -2115,7 +2205,7 @@ int security_ocontext_add( u32 ocon, unsigned long low, unsigned long high
     return ret;
 }
 
-int security_ocontext_del( u32 ocon, unsigned long low, unsigned long high )
+int security_ocontext_del( u32 ocon, unsigned int low, unsigned int high )
 {
     int ret = 0;
     struct ocontext *c, *before_c;
@@ -2144,7 +2234,7 @@ int security_ocontext_del( u32 ocon, unsigned long low, unsigned long high )
             }
         }
 
-        printk("flask: ocontext not found: pirq %ld\n", low);
+        printk("%s: ocontext not found: pirq %d\n", __FUNCTION__, low);
         ret = -ENOENT;
         break;
 
@@ -2170,7 +2260,8 @@ int security_ocontext_del( u32 ocon, unsigned long low, unsigned long high )
             }
         }
 
-        printk("flask: ocontext not found: ioport %#lx - %#lx\n", low, high);
+        printk("%s: ocontext not found: ioport 0x%x - 0x%x\n", __FUNCTION__,
+                low, high);
         ret = -ENOENT;
         break;
 
@@ -2196,7 +2287,8 @@ int security_ocontext_del( u32 ocon, unsigned long low, unsigned long high )
             }
         }
 
-        printk("flask: ocontext not found: iomem %#lx - %#lx\n", low, high);
+        printk("%s: ocontext not found: iomem 0x%x - 0x%x\n", __FUNCTION__,
+                low, high);
         ret = -ENOENT;
         break;
 
@@ -2221,7 +2313,7 @@ int security_ocontext_del( u32 ocon, unsigned long low, unsigned long high )
             }
         }
 
-        printk("flask: ocontext not found: pcidevice %#lx\n", low);
+        printk("%s: ocontext not found: pcidevice 0x%x\n", __FUNCTION__, low);
         ret = -ENOENT;
         break;
 
@@ -2231,69 +2323,5 @@ int security_ocontext_del( u32 ocon, unsigned long low, unsigned long high )
 
   out:
     POLICY_WRUNLOCK;
-    return ret;
-}
-
-int security_devicetree_setlabel(char *path, u32 sid)
-{
-    int ret = 0;
-    struct ocontext *c;
-    struct ocontext **pcurr;
-    struct ocontext *add = NULL;
-
-    if ( sid )
-    {
-        add = xzalloc(struct ocontext);
-        if ( add == NULL )
-        {
-            xfree(path);
-            return -ENOMEM;
-        }
-        add->sid = sid;
-        add->u.name = path;
-    }
-    else
-    {
-        ret = -ENOENT;
-    }
-
-    POLICY_WRLOCK;
-
-    pcurr = &policydb.ocontexts[OCON_DTREE];
-    c = *pcurr;
-    while ( c )
-    {
-        if ( strcmp(c->u.name, path) == 0 )
-        {
-            if ( sid )
-            {
-                ret = -EEXIST;
-                break;
-            }
-            else
-            {
-                *pcurr = c->next;
-                xfree(c->u.name);
-                xfree(c);
-                ret = 0;
-                break;
-            }
-        }
-        pcurr = &c->next;
-        c = *pcurr;
-    }
-
-    if ( add && ret == 0 )
-    {
-        add->next = policydb.ocontexts[OCON_DTREE];
-        policydb.ocontexts[OCON_DTREE] = add;
-        add = NULL;
-        path = NULL;
-    }
-
-    POLICY_WRUNLOCK;
-
-    xfree(add);
-    xfree(path);
     return ret;
 }

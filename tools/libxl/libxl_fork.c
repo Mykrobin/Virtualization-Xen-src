@@ -112,12 +112,9 @@ libxl__carefd *libxl__carefd_record(libxl_ctx *ctx, int fd)
 libxl__carefd *libxl__carefd_opened(libxl_ctx *ctx, int fd)
 {
     libxl__carefd *cf = 0;
-    int saved_errno = errno;
 
-    if (fd >= 0)
-        cf = libxl__carefd_record(ctx, fd);
+    cf = libxl__carefd_record(ctx, fd);
     libxl__carefd_unlock();
-    errno = saved_errno;
     return cf;
 }
 
@@ -239,7 +236,7 @@ static void sigchld_handler(int signo)
 
     LIBXL_LIST_FOREACH(notify, &sigchld_users, sigchld_users_entry) {
         int e = libxl__self_pipe_wakeup(notify->sigchld_selfpipe[1]);
-        if (e) abort(); /* errors are probably EBADF, very bad */
+        assert(!e); /* errors are probably EBADF, very bad */
     }
 
     r = pthread_mutex_unlock(&sigchld_defer_mutex);
@@ -375,8 +372,15 @@ static void sigchld_user_remove(libxl_ctx *ctx) /* idempotent */
 
 void libxl__sigchld_notneeded(libxl__gc *gc) /* non-reentrant, idempotent */
 {
+    int rc;
+
     sigchld_user_remove(CTX);
-    libxl__ev_fd_deregister(gc, &CTX->sigchld_selfpipe_efd);
+
+    if (libxl__ev_fd_isregistered(&CTX->sigchld_selfpipe_efd)) {
+        rc = libxl__ev_fd_modify(gc, &CTX->sigchld_selfpipe_efd, 0);
+        if (rc)
+            libxl__ev_fd_deregister(gc, &CTX->sigchld_selfpipe_efd);
+    }
 }
 
 int libxl__sigchld_needed(libxl__gc *gc) /* non-reentrant, idempotent */
@@ -450,10 +454,9 @@ static int perhaps_sigchld_needed(libxl__gc *gc, bool creating)
 static void childproc_reaped_ours(libxl__egc *egc, libxl__ev_child *ch,
                                  int status)
 {
-    pid_t pid = ch->pid;
     LIBXL_LIST_REMOVE(ch, entry);
     ch->pid = -1;
-    ch->callback(egc, ch, pid, status);
+    ch->callback(egc, ch, ch->pid, status);
 }
 
 static int childproc_reaped(libxl__egc *egc, pid_t pid, int status)

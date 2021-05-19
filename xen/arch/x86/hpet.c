@@ -4,6 +4,7 @@
  * HPET management.
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/time.h>
 #include <xen/timer.h>
@@ -51,14 +52,13 @@ DEFINE_PER_CPU(struct hpet_event_channel *, cpu_bc_channel);
 
 unsigned long __initdata hpet_address;
 u8 __initdata hpet_blockid;
-u8 __initdata hpet_flags;
 
 /*
  * force_hpet_broadcast: by default legacy hpet broadcast will be stopped
  * if RTC interrupts are enabled. Enable this option if want to always enable
  * legacy hpet broadcast for deep C state
  */
-static bool __initdata force_hpet_broadcast;
+static bool_t __initdata force_hpet_broadcast;
 boolean_param("hpetbroadcast", force_hpet_broadcast);
 
 /*
@@ -157,7 +157,7 @@ static void evt_do_broadcast(cpumask_t *mask)
 {
     unsigned int cpu = smp_processor_id();
 
-    if ( __cpumask_test_and_clear_cpu(cpu, mask) )
+    if ( cpumask_test_and_clear_cpu(cpu, mask) )
         raise_softirq(TIMER_SOFTIRQ);
 
     cpuidle_wakeup_mwait(mask);
@@ -189,13 +189,14 @@ again:
     {
         s_time_t deadline;
 
+        rmb();
+        deadline = per_cpu(timer_deadline, cpu);
+        rmb();
         if ( !cpumask_test_cpu(cpu, ch->cpumask) )
             continue;
 
-        deadline = ACCESS_ONCE(per_cpu(timer_deadline, cpu));
-
         if ( deadline <= now )
-            __cpumask_set_cpu(cpu, &mask);
+            cpumask_set_cpu(cpu, &mask);
         else if ( deadline < next_event )
             next_event = deadline;
     }
@@ -239,7 +240,7 @@ static void hpet_msi_unmask(struct irq_desc *desc)
     cfg = hpet_read32(HPET_Tn_CFG(ch->idx));
     cfg |= HPET_TN_ENABLE;
     hpet_write32(cfg, HPET_Tn_CFG(ch->idx));
-    ch->msi.msi_attrib.host_masked = 0;
+    ch->msi.msi_attrib.masked = 0;
 }
 
 static void hpet_msi_mask(struct irq_desc *desc)
@@ -250,7 +251,7 @@ static void hpet_msi_mask(struct irq_desc *desc)
     cfg = hpet_read32(HPET_Tn_CFG(ch->idx));
     cfg &= ~HPET_TN_ENABLE;
     hpet_write32(cfg, HPET_Tn_CFG(ch->idx));
-    ch->msi.msi_attrib.host_masked = 1;
+    ch->msi.msi_attrib.masked = 1;
 }
 
 static int hpet_msi_write(struct hpet_event_channel *ch, struct msi_msg *msg)
@@ -354,7 +355,7 @@ static int __init hpet_setup_msi_irq(struct hpet_event_channel *ch)
     hpet_write32(cfg, HPET_Tn_CFG(ch->idx));
 
     desc->handler = &hpet_msi_type;
-    ret = request_irq(ch->msi.irq, 0, hpet_interrupt_handler, "HPET", ch);
+    ret = request_irq(ch->msi.irq, hpet_interrupt_handler, "HPET", ch);
     if ( ret >= 0 )
         ret = __hpet_setup_msi_irq(desc);
     if ( ret < 0 )
@@ -509,8 +510,6 @@ static void hpet_attach_channel(unsigned int cpu,
 static void hpet_detach_channel(unsigned int cpu,
                                 struct hpet_event_channel *ch)
 {
-    unsigned int next;
-
     spin_lock_irq(&ch->lock);
 
     ASSERT(ch == per_cpu(cpu_bc_channel, cpu));
@@ -519,7 +518,7 @@ static void hpet_detach_channel(unsigned int cpu,
 
     if ( cpu != ch->cpu )
         spin_unlock_irq(&ch->lock);
-    else if ( (next = cpumask_first(ch->cpumask)) >= nr_cpu_ids )
+    else if ( cpumask_empty(ch->cpumask) )
     {
         ch->cpu = -1;
         clear_bit(HPET_EVT_USED_BIT, &ch->flags);
@@ -527,7 +526,7 @@ static void hpet_detach_channel(unsigned int cpu,
     }
     else
     {
-        ch->cpu = next;
+        ch->cpu = cpumask_first(ch->cpumask);
         set_channel_irq_affinity(ch);
         local_irq_enable();
     }
@@ -610,7 +609,7 @@ void __init hpet_broadcast_init(void)
         hpet_events[i].shift = 32;
         hpet_events[i].next_event = STIME_MAX;
         spin_lock_init(&hpet_events[i].lock);
-        smp_wmb();
+        wmb();
         hpet_events[i].event_handler = handle_hpet_broadcast;
 
         hpet_events[i].msi.msi_attrib.maskbit = 1;
@@ -698,9 +697,8 @@ void hpet_broadcast_enter(void)
 {
     unsigned int cpu = smp_processor_id();
     struct hpet_event_channel *ch = per_cpu(cpu_bc_channel, cpu);
-    s_time_t deadline = per_cpu(timer_deadline, cpu);
 
-    if ( deadline == 0 )
+    if ( per_cpu(timer_deadline, cpu) == 0 )
         return;
 
     if ( !ch )
@@ -716,12 +714,9 @@ void hpet_broadcast_enter(void)
     cpumask_set_cpu(cpu, ch->cpumask);
 
     spin_lock(&ch->lock);
-    /*
-     * Reprogram if current cpu expire time is nearer.  deadline is never
-     * written by a remote cpu, so the value read earlier is still valid.
-     */
-    if ( deadline < ch->next_event )
-        reprogram_hpet_evt_channel(ch, deadline, NOW(), 1);
+    /* reprogram if current cpu expire time is nearer */
+    if ( per_cpu(timer_deadline, cpu) < ch->next_event )
+        reprogram_hpet_evt_channel(ch, per_cpu(timer_deadline, cpu), NOW(), 1);
     spin_unlock(&ch->lock);
 }
 
@@ -729,9 +724,8 @@ void hpet_broadcast_exit(void)
 {
     unsigned int cpu = smp_processor_id();
     struct hpet_event_channel *ch = per_cpu(cpu_bc_channel, cpu);
-    s_time_t deadline = per_cpu(timer_deadline, cpu);
 
-    if ( deadline == 0 )
+    if ( per_cpu(timer_deadline, cpu) == 0 )
         return;
 
     if ( !ch )
@@ -739,7 +733,7 @@ void hpet_broadcast_exit(void)
 
     /* Reprogram the deadline; trigger timer work now if it has passed. */
     enable_APIC_timer();
-    if ( !reprogram_timer(deadline) )
+    if ( !reprogram_timer(per_cpu(timer_deadline, cpu)) )
         raise_softirq(TIMER_SOFTIRQ);
 
     cpumask_clear_cpu(cpu, ch->cpumask);

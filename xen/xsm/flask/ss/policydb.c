@@ -74,55 +74,55 @@ static struct policydb_compat_info policydb_compat[] = {
     {
         .version        = POLICYDB_VERSION_BASE,
         .sym_num        = SYM_NUM - 3,
-        .ocon_num       = 4,
+        .ocon_num       = OCON_NUM - 1,
         .target_type    = TARGET_XEN_OLD,
     },
     {
         .version        = POLICYDB_VERSION_BOOL,
         .sym_num        = SYM_NUM - 2,
-        .ocon_num       = 4,
+        .ocon_num       = OCON_NUM - 1,
         .target_type    = TARGET_XEN_OLD,
     },
     {
         .version        = POLICYDB_VERSION_IPV6,
         .sym_num        = SYM_NUM - 2,
-        .ocon_num       = 5,
+        .ocon_num       = OCON_NUM,
         .target_type    = TARGET_XEN_OLD,
     },
     {
         .version        = POLICYDB_VERSION_NLCLASS,
         .sym_num        = SYM_NUM - 2,
-        .ocon_num       = 5,
+        .ocon_num       = OCON_NUM,
         .target_type    = TARGET_XEN_OLD,
     },
     {
         .version        = POLICYDB_VERSION_MLS,
         .sym_num        = SYM_NUM,
-        .ocon_num       = 5,
+        .ocon_num       = OCON_NUM,
         .target_type    = TARGET_XEN_OLD,
     },
     {
         .version        = POLICYDB_VERSION_AVTAB,
         .sym_num        = SYM_NUM,
-        .ocon_num       = 5,
+        .ocon_num       = OCON_NUM,
         .target_type    = TARGET_XEN_OLD,
     },
     {
 	.version	= POLICYDB_VERSION_RANGETRANS,
 	.sym_num	= SYM_NUM,
-	.ocon_num	= 5,
+	.ocon_num	= OCON_NUM,
         .target_type    = TARGET_XEN_OLD,
     },
     {
 	.version	= POLICYDB_VERSION_POLCAP,
 	.sym_num	= SYM_NUM,
-	.ocon_num	= 5,
+	.ocon_num	= OCON_NUM,
         .target_type    = TARGET_XEN_OLD,
     },
     {
 	.version	= POLICYDB_VERSION_PERMISSIVE,
 	.sym_num	= SYM_NUM,
-	.ocon_num	= 5,
+	.ocon_num	= OCON_NUM,
         .target_type    = TARGET_XEN_OLD,
     },
     {
@@ -134,13 +134,7 @@ static struct policydb_compat_info policydb_compat[] = {
     {
 	.version	= POLICYDB_VERSION_BOUNDARY,
 	.sym_num	= SYM_NUM,
-	.ocon_num	= OCON_DEVICE + 1,
-        .target_type    = TARGET_XEN,
-    },
-    {
-	.version	= POLICYDB_VERSION_XEN_DEVICETREE,
-	.sym_num	= SYM_NUM,
-	.ocon_num	= OCON_DTREE + 1,
+	.ocon_num	= OCON_NUM,
         .target_type    = TARGET_XEN,
     },
 };
@@ -172,12 +166,13 @@ static int roles_init(struct policydb *p)
     int rc;
     struct role_datum *role;
 
-    role = xzalloc(struct role_datum);
+    role = xmalloc(struct role_datum);
     if ( !role )
     {
         rc = -ENOMEM;
         goto out;
     }
+    memset(role, 0, sizeof(*role));
     role->value = ++p->p_roles.nprim;
     if ( role->value != OBJECT_R_VAL )
     {
@@ -638,8 +633,9 @@ static int (*destroy_f[SYM_NUM]) (void *key, void *datum, void *datap) =
 
 static void ocontext_destroy(struct ocontext *c, int i)
 {
-    context_destroy(&c->context);
-    if ( i == OCON_ISID || i == OCON_DTREE )
+    context_destroy(&c->context[0]);
+    context_destroy(&c->context[1]);
+    if ( i == OCON_ISID )
         xfree(c->u.name);
     xfree(c);
 }
@@ -687,17 +683,17 @@ void policydb_destroy(struct policydb *p)
 
     for ( tr = p->role_tr; tr; tr = tr->next )
     {
-        xfree(ltr);
+        if ( ltr ) xfree(ltr);
         ltr = tr;
     }
-    xfree(ltr);
+    if ( ltr ) xfree(ltr);
 
     for ( ra = p->role_allow; ra; ra = ra -> next )
     {
-        xfree(lra);
+        if ( lra ) xfree(lra);
         lra = ra;
     }
-    xfree(lra);
+    if ( lra ) xfree(lra);
 
     for ( rt = p->range_tr; rt; rt = rt -> next )
     {
@@ -746,14 +742,14 @@ int policydb_load_isids(struct policydb *p, struct sidtab *s)
     head = p->ocontexts[OCON_ISID];
     for ( c = head; c; c = c->next )
     {
-        if ( !c->context.user )
+        if ( !c->context[0].user )
         {
             printk(KERN_ERR "Flask:  SID %s was never "
                    "defined.\n", c->u.name);
             rc = -EINVAL;
             goto out;
         }
-        if ( sidtab_insert(s, c->sid, &c->context) )
+        if ( sidtab_insert(s, c->sid[0], &c->context[0]) )
         {
             printk(KERN_ERR "Flask:  unable to load initial "
                    "SID %s.\n", c->u.name);
@@ -954,12 +950,13 @@ static int perm_read(struct policydb *p, struct hashtab *h, void *fp)
     __le32 buf[2];
     u32 len;
 
-    perdatum = xzalloc(struct perm_datum);
+    perdatum = xmalloc(struct perm_datum);
     if ( !perdatum )
     {
         rc = -ENOMEM;
         goto out;
     }
+    memset(perdatum, 0, sizeof(*perdatum));
 
     rc = next_entry(buf, fp, sizeof buf);
     if ( rc < 0 )
@@ -997,12 +994,13 @@ static int common_read(struct policydb *p, struct hashtab *h, void *fp)
     u32 len, nel;
     int i, rc;
 
-    comdatum = xzalloc(struct common_datum);
+    comdatum = xmalloc(struct common_datum);
     if ( !comdatum )
     {
         rc = -ENOMEM;
         goto out;
     }
+    memset(comdatum, 0, sizeof(*comdatum));
 
     rc = next_entry(buf, fp, sizeof buf);
     if ( rc < 0 )
@@ -1045,8 +1043,8 @@ bad:
     goto out;
 }
 
-static int read_cons_helper(struct policydb *p, struct constraint_node **nodep,
-                            int ncons, int allowxtarget, void *fp)
+static int read_cons_helper(struct constraint_node **nodep, int ncons,
+                                                    int allowxtarget, void *fp)
 {
     struct constraint_node *c, *lc;
     struct constraint_expr *e, *le;
@@ -1057,9 +1055,10 @@ static int read_cons_helper(struct policydb *p, struct constraint_node **nodep,
     lc = NULL;
     for ( i = 0; i < ncons; i++ )
     {
-        c = xzalloc(struct constraint_node);
+        c = xmalloc(struct constraint_node);
         if ( !c )
             return -ENOMEM;
+        memset(c, 0, sizeof(*c));
 
         if ( lc )
         {
@@ -1079,9 +1078,10 @@ static int read_cons_helper(struct policydb *p, struct constraint_node **nodep,
         depth = -1;
         for ( j = 0; j < nexpr; j++ )
         {
-            e = xzalloc(struct constraint_expr);
+            e = xmalloc(struct constraint_expr);
             if ( !e )
                 return -ENOMEM;
+            memset(e, 0, sizeof(*e));
 
             if ( le )
                 le->next = e;
@@ -1120,23 +1120,6 @@ static int read_cons_helper(struct policydb *p, struct constraint_node **nodep,
                     depth++;
                     if ( ebitmap_read(&e->names, fp) )
                         return -EINVAL;
-                    if ( p->policyvers >= POLICYDB_VERSION_CONSTRAINT_NAMES )
-                    {
-                        struct ebitmap dummy;
-                        ebitmap_init(&dummy);
-                        if ( ebitmap_read(&dummy, fp) )
-                            return -EINVAL;
-                        ebitmap_destroy(&dummy);
-
-                        ebitmap_init(&dummy);
-                        if ( ebitmap_read(&dummy, fp) )
-                            return -EINVAL;
-                        ebitmap_destroy(&dummy);
-
-                        rc = next_entry(buf, fp, sizeof(u32));
-                        if ( rc < 0 )
-                            return rc;
-                    }
                 break;
                 default:
                     return -EINVAL;
@@ -1159,12 +1142,13 @@ static int class_read(struct policydb *p, struct hashtab *h, void *fp)
     u32 len, len2, ncons, nel;
     int i, rc;
 
-    cladatum = xzalloc(struct class_datum);
+    cladatum = xmalloc(struct class_datum);
     if ( !cladatum )
     {
         rc = -ENOMEM;
         goto out;
     }
+    memset(cladatum, 0, sizeof(*cladatum));
 
     rc = next_entry(buf, fp, sizeof(u32)*6);
     if ( rc < 0 )
@@ -1206,7 +1190,7 @@ static int class_read(struct policydb *p, struct hashtab *h, void *fp)
             goto bad;
     }
 
-    rc = read_cons_helper(p, &cladatum->constraints, ncons, 0, fp);
+    rc = read_cons_helper(&cladatum->constraints, ncons, 0, fp);
     if ( rc )
         goto bad;
 
@@ -1217,25 +1201,9 @@ static int class_read(struct policydb *p, struct hashtab *h, void *fp)
         if ( rc < 0 )
             goto bad;
         ncons = le32_to_cpu(buf[0]);
-        rc = read_cons_helper(p, &cladatum->validatetrans, ncons, 1, fp);
+        rc = read_cons_helper(&cladatum->validatetrans, ncons, 1, fp);
         if ( rc )
             goto bad;
-    }
-
-    if ( p->policyvers >= POLICYDB_VERSION_NEW_OBJECT_DEFAULTS )
-    {
-        rc = next_entry(buf, fp, sizeof(u32) * 3);
-        if ( rc )
-            goto bad;
-        /* these values are ignored by Xen */
-    }
-
-    if ( p->policyvers >= POLICYDB_VERSION_DEFAULT_TYPE )
-    {
-        rc = next_entry(buf, fp, sizeof(u32) * 1);
-        if ( rc )
-            goto bad;
-        /* ignored by Xen */
     }
 
     rc = hashtab_insert(h, key, cladatum);
@@ -1259,12 +1227,13 @@ static int role_read(struct policydb *p, struct hashtab *h, void *fp)
     u32 len;
     u32 ver = p->policyvers;
 
-    role = xzalloc(struct role_datum);
+    role = xmalloc(struct role_datum);
     if ( !role )
     {
         rc = -ENOMEM;
         goto out;
     }
+    memset(role, 0, sizeof(*role));
 
     if ( ver >= POLICYDB_VERSION_BOUNDARY )
         rc = next_entry(buf, fp, sizeof(buf[0]) * 3);
@@ -1330,12 +1299,13 @@ static int type_read(struct policydb *p, struct hashtab *h, void *fp)
     u32 len;
     u32 ver = p->policyvers;
 
-    typdatum = xzalloc(struct type_datum);
+    typdatum = xmalloc(struct type_datum);
     if ( !typdatum )
     {
         rc = -ENOMEM;
         return rc;
     }
+    memset(typdatum, 0, sizeof(*typdatum));
 
     if ( ver >= POLICYDB_VERSION_BOUNDARY )
         rc = next_entry(buf, fp, sizeof(buf[0]) * 4);
@@ -1424,12 +1394,13 @@ static int user_read(struct policydb *p, struct hashtab *h, void *fp)
     u32 len;
     u32 ver = p->policyvers;
 
-    usrdatum = xzalloc(struct user_datum);
+    usrdatum = xmalloc(struct user_datum);
     if ( !usrdatum )
     {
         rc = -ENOMEM;
         goto out;
     }
+    memset(usrdatum, 0, sizeof(*usrdatum));
 
     if ( ver >= POLICYDB_VERSION_BOUNDARY )
         rc = next_entry(buf, fp, sizeof(buf[0]) * 3);
@@ -1487,12 +1458,13 @@ static int sens_read(struct policydb *p, struct hashtab *h, void *fp)
     __le32 buf[2];
     u32 len;
 
-    levdatum = xzalloc(struct level_datum);
+    levdatum = xmalloc(struct level_datum);
     if ( !levdatum )
     {
         rc = -ENOMEM;
         goto out;
     }
+    memset(levdatum, 0, sizeof(*levdatum));
 
     rc = next_entry(buf, fp, sizeof buf);
     if ( rc < 0 )
@@ -1542,12 +1514,13 @@ static int cat_read(struct policydb *p, struct hashtab *h, void *fp)
     __le32 buf[3];
     u32 len;
 
-    catdatum = xzalloc(struct cat_datum);
+    catdatum = xmalloc(struct cat_datum);
     if ( !catdatum )
     {
         rc = -ENOMEM;
         goto out;
     }
+    memset(catdatum, 0, sizeof(*catdatum));
 
     rc = next_entry(buf, fp, sizeof buf);
     if ( rc < 0 )
@@ -1757,8 +1730,8 @@ int policydb_read(struct policydb *p, void *fp)
 
     if ( le32_to_cpu(buf[0]) != POLICYDB_MAGIC )
     {
-        printk(KERN_ERR "Flask:  policydb magic number %#x does "
-               "not match expected magic number %#x\n",
+        printk(KERN_ERR "Flask:  policydb magic number 0x%x does "
+               "not match expected magic number 0x%x\n",
                le32_to_cpu(buf[0]), POLICYDB_MAGIC);
         goto bad;
     }
@@ -1843,7 +1816,6 @@ int policydb_read(struct policydb *p, void *fp)
             goto bad;
         }
     }
-    p->allow_unknown = !!(le32_to_cpu(buf[1]) & ALLOW_UNKNOWN);
 
     if ( p->policyvers >= POLICYDB_VERSION_POLCAP &&
          ebitmap_read(&p->policycaps, fp) != 0 )
@@ -1906,20 +1878,18 @@ int policydb_read(struct policydb *p, void *fp)
     ltr = NULL;
     for ( i = 0; i < nel; i++ )
     {
-        tr = xzalloc(struct role_trans);
+        tr = xmalloc(struct role_trans);
         if ( !tr )
         {
             rc = -ENOMEM;
             goto bad;
         }
+        memset(tr, 0, sizeof(*tr));
         if ( ltr )
             ltr->next = tr;
         else
             p->role_tr = tr;
-        if ( p->policyvers >= POLICYDB_VERSION_ROLETRANS )
-            rc = next_entry(buf, fp, sizeof(u32)*4);
-        else
-            rc = next_entry(buf, fp, sizeof(u32)*3);
+        rc = next_entry(buf, fp, sizeof(u32)*3);
         if ( rc < 0 )
             goto bad;
         tr->role = le32_to_cpu(buf[0]);
@@ -1942,12 +1912,13 @@ int policydb_read(struct policydb *p, void *fp)
     lra = NULL;
     for ( i = 0; i < nel; i++ )
     {
-        ra = xzalloc(struct role_allow);
+        ra = xmalloc(struct role_allow);
         if ( !ra )
         {
             rc = -ENOMEM;
             goto bad;
         }
+        memset(ra, 0, sizeof(*ra));
         if ( lra )
             lra->next = ra;
         else
@@ -1964,20 +1935,6 @@ int policydb_read(struct policydb *p, void *fp)
             goto bad;
         }
         lra = ra;
-    }
-
-    if ( p->policyvers >= POLICYDB_VERSION_FILENAME_TRANS )
-    {
-        rc = next_entry(buf, fp, sizeof(u32));
-        if ( rc )
-            goto bad;
-        nel = le32_to_cpu(buf[0]);
-        if ( nel )
-        {
-            printk(KERN_ERR "Flask:  unsupported genfs config data\n");
-            rc = -EINVAL;
-            goto bad;
-        }
     }
 
     rc = policydb_index_classes(p);
@@ -1997,12 +1954,13 @@ int policydb_read(struct policydb *p, void *fp)
         l = NULL;
         for ( j = 0; j < nel; j++ )
         {
-            c = xzalloc(struct ocontext);
+            c = xmalloc(struct ocontext);
             if ( !c )
             {
                 rc = -ENOMEM;
                 goto bad;
             }
+            memset(c, 0, sizeof(*c));
             if ( l )
                 l->next = c;
             else
@@ -2015,8 +1973,8 @@ int policydb_read(struct policydb *p, void *fp)
                 rc = next_entry(buf, fp, sizeof(u32));
                 if ( rc < 0 )
                     goto bad;
-                c->sid = le32_to_cpu(buf[0]);
-                rc = context_read_and_validate(&c->context, p, fp);
+                c->sid[0] = le32_to_cpu(buf[0]);
+                rc = context_read_and_validate(&c->context[0], p, fp);
                 if ( rc )
                     goto bad;
                 break;
@@ -2031,7 +1989,7 @@ int policydb_read(struct policydb *p, void *fp)
                 if ( rc < 0 )
                     goto bad;
                 c->u.pirq = le32_to_cpu(buf[0]);
-                rc = context_read_and_validate(&c->context, p, fp);
+                rc = context_read_and_validate(&c->context[0], p, fp);
                 if ( rc )
                     goto bad;
                 break;
@@ -2047,7 +2005,7 @@ int policydb_read(struct policydb *p, void *fp)
                     goto bad;
                 c->u.ioport.low_ioport = le32_to_cpu(buf[0]);
                 c->u.ioport.high_ioport = le32_to_cpu(buf[1]);
-                rc = context_read_and_validate(&c->context, p, fp);
+                rc = context_read_and_validate(&c->context[0], p, fp);
                 if ( rc )
                     goto bad;
                 break;
@@ -2058,24 +2016,12 @@ int policydb_read(struct policydb *p, void *fp)
                         "Old xen policy does not support iomemcon");
                     goto bad;
                 }
-                if ( p->policyvers >= POLICYDB_VERSION_XEN_DEVICETREE )
-                {
-                    u64 b64[2];
-                    rc = next_entry(b64, fp, sizeof(u64) *2);
-                    if ( rc < 0 )
-                        goto bad;
-                    c->u.iomem.low_iomem = le64_to_cpu(b64[0]);
-                    c->u.iomem.high_iomem = le64_to_cpu(b64[1]);
-                }
-                else
-                {
-                    rc = next_entry(buf, fp, sizeof(u32) *2);
-                    if ( rc < 0 )
-                        goto bad;
-                    c->u.iomem.low_iomem = le32_to_cpu(buf[0]);
-                    c->u.iomem.high_iomem = le32_to_cpu(buf[1]);
-                }
-                rc = context_read_and_validate(&c->context, p, fp);
+                rc = next_entry(buf, fp, sizeof(u32) *2);
+                if ( rc < 0 )
+                    goto bad;
+                c->u.iomem.low_iomem = le32_to_cpu(buf[0]);
+                c->u.iomem.high_iomem = le32_to_cpu(buf[1]);
+                rc = context_read_and_validate(&c->context[0], p, fp);
                 if ( rc )
                     goto bad;
                 break;
@@ -2090,30 +2036,7 @@ int policydb_read(struct policydb *p, void *fp)
                 if ( rc < 0 )
                     goto bad;
                 c->u.device = le32_to_cpu(buf[0]);
-                rc = context_read_and_validate(&c->context, p, fp);
-                if ( rc )
-                    goto bad;
-                break;
-            case OCON_DTREE:
-                if ( p->target_type != TARGET_XEN )
-                {
-                    printk(KERN_ERR
-                        "Old xen policy does not support devicetreecon");
-                    goto bad;
-                }
-                rc = next_entry(buf, fp, sizeof(u32));
-                if ( rc < 0 )
-                    goto bad;
-                len = le32_to_cpu(buf[0]);
-                rc = -ENOMEM;
-                c->u.name = xmalloc_array(char, len + 1);
-                if (!c->u.name)
-                    goto bad;
-                rc = next_entry(c->u.name, fp, len);
-                if ( rc < 0 )
-                    goto bad;
-                c->u.name[len] = 0;
-                rc = context_read_and_validate(&c->context, p, fp);
+                rc = context_read_and_validate(&c->context[0], p, fp);
                 if ( rc )
                     goto bad;
                 break;
@@ -2147,12 +2070,13 @@ int policydb_read(struct policydb *p, void *fp)
         lrt = NULL;
         for ( i = 0; i < nel; i++ )
         {
-            rt = xzalloc(struct range_trans);
+            rt = xmalloc(struct range_trans);
             if ( !rt )
             {
                 rc = -ENOMEM;
                 goto bad;
             }
+            memset(rt, 0, sizeof(*rt));
             if ( lrt )
                 lrt->next = rt;
             else

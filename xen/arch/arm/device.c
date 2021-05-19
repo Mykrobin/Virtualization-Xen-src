@@ -22,24 +22,40 @@
 #include <xen/lib.h>
 
 extern const struct device_desc _sdevice[], _edevice[];
-extern const struct acpi_device_desc _asdevice[], _aedevice[];
 
-int __init device_init(struct dt_device_node *dev, enum device_class class,
+static bool_t __init device_is_compatible(const struct device_desc *desc,
+                                          const struct dt_device_node *dev)
+{
+    const char *const *compat;
+
+    if ( !desc->compatible )
+        return 0;
+
+    for ( compat = desc->compatible; *compat; compat++ )
+    {
+        if ( dt_device_is_compatible(dev, *compat) )
+            return 1;
+    }
+
+    return 0;
+}
+
+int __init device_init(struct dt_device_node *dev, enum device_type type,
                        const void *data)
 {
     const struct device_desc *desc;
 
     ASSERT(dev != NULL);
 
-    if ( !dt_device_is_available(dev) || dt_device_for_passthrough(dev) )
+    if ( !dt_device_is_available(dev) )
         return  -ENODEV;
 
     for ( desc = _sdevice; desc != _edevice; desc++ )
     {
-        if ( desc->class != class )
+        if ( desc->type != type )
             continue;
 
-        if ( dt_match_node(desc->dt_match, dev) )
+        if ( device_is_compatible(desc, dev) )
         {
             ASSERT(desc->init != NULL);
 
@@ -49,38 +65,6 @@ int __init device_init(struct dt_device_node *dev, enum device_class class,
     }
 
     return -EBADF;
-}
-
-int __init acpi_device_init(enum device_class class, const void *data, int class_type)
-{
-    const struct acpi_device_desc *desc;
-
-    for ( desc = _asdevice; desc != _aedevice; desc++ )
-    {
-        if ( ( desc->class != class ) || ( desc->class_type != class_type ) )
-            continue;
-
-        ASSERT(desc->init != NULL);
-
-        return desc->init(data);
-    }
-
-    return -EBADF;
-}
-
-enum device_class device_get_class(const struct dt_device_node *dev)
-{
-    const struct device_desc *desc;
-
-    ASSERT(dev != NULL);
-
-    for ( desc = _sdevice; desc != _edevice; desc++ )
-    {
-        if ( dt_match_node(desc->dt_match, dev) )
-            return desc->class;
-    }
-
-    return DEVICE_UNKNOWN;
 }
 
 /*

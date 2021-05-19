@@ -15,6 +15,7 @@
 #include <xen/types.h>
 #include <xen/errno.h>
 #include <xen/init.h>
+#include <xen/nmi.h>
 #include <xen/string.h>
 #include <xen/delay.h>
 #include <xen/xenoprof.h>
@@ -23,7 +24,6 @@
 #include <asm/apic.h>
 #include <asm/regs.h>
 #include <asm/current.h>
-#include <asm/nmi.h>
 
 #include "op_counter.h"
 #include "op_x86_model.h"
@@ -82,7 +82,7 @@ void passive_domain_destroy(struct vcpu *v)
 		model->free_msr(v);
 }
 
-static int nmi_callback(const struct cpu_user_regs *regs, int cpu)
+static int nmi_callback(struct cpu_user_regs *regs, int cpu)
 {
 	int xen_mode, ovf;
 
@@ -182,7 +182,7 @@ int nmi_reserve_counters(void)
 	if (!allocate_msrs())
 		return -ENOMEM;
 
-	/*
+	/* We walk a thin line between law and rape here.
 	 * We need to be careful to install our NMI handler
 	 * without actually triggering any NMIs as this will
 	 * break the core code horrifically.
@@ -274,7 +274,7 @@ static void nmi_cpu_stop(void * dummy)
 	 * power on apic lvt contain a zero vector nr which are legal only for
 	 * NMI delivery mode. So inhibit apic err before restoring lvtpc
 	 */
-	if ( (apic_read(APIC_LVTPC) & APIC_MODE_MASK) != APIC_DM_NMI
+	if ( !(apic_read(APIC_LVTPC) & APIC_DM_NMI)
 	     || (apic_read(APIC_LVTPC) & APIC_LVT_MASKED) )
 	{
 		printk("nmi_stop: APIC not good %ul\n", apic_read(APIC_LVTPC));
@@ -323,15 +323,12 @@ static int __init p4_init(char ** cpu_type)
 
 
 static int force_arch_perfmon;
-
 static int force_cpu_type(const char *str)
 {
 	if (!strcmp(str, "arch_perfmon")) {
 		force_arch_perfmon = 1;
 		printk(KERN_INFO "oprofile: forcing architectural perfmon\n");
 	}
-	else
-		return -EINVAL;
 
 	return 0;
 }
@@ -442,7 +439,7 @@ static int __init nmi_init(void)
 			}
 			if (!cpu_type && !arch_perfmon_init(&cpu_type)) {
 				printk("xenoprof: Initialization failed. "
-				       "Intel processor family %d model %d "
+				       "Intel processor family %d model %d"
 				       "is not supported\n", family, _model);
 				return -ENODEV;
 			}

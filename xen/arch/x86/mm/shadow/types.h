@@ -1,22 +1,23 @@
 /******************************************************************************
  * arch/x86/mm/shadow/types.h
- *
+ * 
  * Parts of this code are Copyright (c) 2006 by XenSource Inc.
  * Parts of this code are Copyright (c) 2006 by Michael A Fetterman
  * Parts based on earlier work by Michael A Fetterman, Ian Pratt et al.
- *
+ * 
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- *
+ * 
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- *
+ * 
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #ifndef _XEN_SHADOW_TYPES_H
@@ -30,7 +31,7 @@
 #define SHADOW_PAGING_LEVELS 3
 #endif
 
-/*
+/* 
  * Define various types for handling pagetabels, based on these options:
  * SHADOW_PAGING_LEVELS : Number of levels of shadow pagetables
  * GUEST_PAGING_LEVELS  : Number of levels of guest pagetables
@@ -75,14 +76,14 @@ static inline paddr_t shadow_l4e_get_paddr(shadow_l4e_t sl4e)
 #endif
 
 static inline mfn_t shadow_l1e_get_mfn(shadow_l1e_t sl1e)
-{ return l1e_get_mfn(sl1e); }
+{ return _mfn(l1e_get_pfn(sl1e)); }
 static inline mfn_t shadow_l2e_get_mfn(shadow_l2e_t sl2e)
-{ return l2e_get_mfn(sl2e); }
+{ return _mfn(l2e_get_pfn(sl2e)); }
 static inline mfn_t shadow_l3e_get_mfn(shadow_l3e_t sl3e)
-{ return l3e_get_mfn(sl3e); }
+{ return _mfn(l3e_get_pfn(sl3e)); }
 #if SHADOW_PAGING_LEVELS >= 4
 static inline mfn_t shadow_l4e_get_mfn(shadow_l4e_t sl4e)
-{ return l4e_get_mfn(sl4e); }
+{ return _mfn(l4e_get_pfn(sl4e)); }
 #endif
 
 static inline u32 shadow_l1e_get_flags(shadow_l1e_t sl1e)
@@ -103,26 +104,26 @@ static inline shadow_l1e_t
 shadow_l1e_flip_flags(shadow_l1e_t sl1e, u32 flags)
 { l1e_flip_flags(sl1e, flags); return sl1e; }
 
-static inline shadow_l1e_t shadow_l1e_empty(void)
+static inline shadow_l1e_t shadow_l1e_empty(void) 
 { return l1e_empty(); }
-static inline shadow_l2e_t shadow_l2e_empty(void)
+static inline shadow_l2e_t shadow_l2e_empty(void) 
 { return l2e_empty(); }
-static inline shadow_l3e_t shadow_l3e_empty(void)
+static inline shadow_l3e_t shadow_l3e_empty(void) 
 { return l3e_empty(); }
 #if SHADOW_PAGING_LEVELS >= 4
-static inline shadow_l4e_t shadow_l4e_empty(void)
+static inline shadow_l4e_t shadow_l4e_empty(void) 
 { return l4e_empty(); }
 #endif
 
 static inline shadow_l1e_t shadow_l1e_from_mfn(mfn_t mfn, u32 flags)
-{ return l1e_from_mfn(mfn, flags); }
+{ return l1e_from_pfn(mfn_x(mfn), flags); }
 static inline shadow_l2e_t shadow_l2e_from_mfn(mfn_t mfn, u32 flags)
-{ return l2e_from_mfn(mfn, flags); }
+{ return l2e_from_pfn(mfn_x(mfn), flags); }
 static inline shadow_l3e_t shadow_l3e_from_mfn(mfn_t mfn, u32 flags)
-{ return l3e_from_mfn(mfn, flags); }
+{ return l3e_from_pfn(mfn_x(mfn), flags); }
 #if SHADOW_PAGING_LEVELS >= 4
 static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
-{ return l4e_from_mfn(mfn, flags); }
+{ return l4e_from_pfn(mfn_x(mfn), flags); }
 #endif
 
 #define shadow_l1_table_offset(a) l1_table_offset(a)
@@ -143,10 +144,10 @@ static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
 #define shadow_l4_linear_offset(_a)                                           \
         (((_a) & VADDR_MASK) >> SHADOW_L4_PAGETABLE_SHIFT)
 
-/* Where to find each level of the linear mapping.  For PV guests, we use
- * the shadow linear-map self-entry as many times as we need.  For HVM
- * guests, the shadow doesn't have a linear-map self-entry so we must use
- * the monitor-table's linear-map entry N-1 times and then the shadow-map
+/* Where to find each level of the linear mapping.  For PV guests, we use 
+ * the shadow linear-map self-entry as many times as we need.  For HVM 
+ * guests, the shadow doesn't have a linear-map self-entry so we must use 
+ * the monitor-table's linear-map entry N-1 times and then the shadow-map 
  * entry once. */
 #define __sh_linear_l1_table ((shadow_l1e_t *)(SH_LINEAR_PT_VIRT_START))
 #define __sh_linear_l2_table ((shadow_l2e_t *)                               \
@@ -248,6 +249,9 @@ static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
 #define sh_unhook_64b_mappings     INTERNAL_NAME(sh_unhook_64b_mappings)
 #define sh_paging_mode             INTERNAL_NAME(sh_paging_mode)
 #define sh_detach_old_tables       INTERNAL_NAME(sh_detach_old_tables)
+#define sh_x86_emulate_write       INTERNAL_NAME(sh_x86_emulate_write)
+#define sh_x86_emulate_cmpxchg     INTERNAL_NAME(sh_x86_emulate_cmpxchg)
+#define sh_x86_emulate_cmpxchg8b   INTERNAL_NAME(sh_x86_emulate_cmpxchg8b)
 #define sh_audit_l1_table          INTERNAL_NAME(sh_audit_l1_table)
 #define sh_audit_fl1_table         INTERNAL_NAME(sh_audit_fl1_table)
 #define sh_audit_l2_table          INTERNAL_NAME(sh_audit_l2_table)
@@ -262,14 +266,17 @@ static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
 #define sh_rm_write_access_from_sl1p INTERNAL_NAME(sh_rm_write_access_from_sl1p)
 #endif
 
+/* The sh_guest_(map|get)_* functions depends on Xen's paging levels */
+#define sh_guest_map_l1e \
+        SHADOW_INTERNAL_NAME(sh_guest_map_l1e, CONFIG_PAGING_LEVELS)
+#define sh_guest_get_eff_l1e \
+        SHADOW_INTERNAL_NAME(sh_guest_get_eff_l1e, CONFIG_PAGING_LEVELS)
+
 /* sh_make_monitor_table depends only on the number of shadow levels */
 #define sh_make_monitor_table \
-        SHADOW_SH_NAME(sh_make_monitor_table, SHADOW_PAGING_LEVELS)
+        SHADOW_INTERNAL_NAME(sh_make_monitor_table, SHADOW_PAGING_LEVELS)
 #define sh_destroy_monitor_table \
-        SHADOW_SH_NAME(sh_destroy_monitor_table, SHADOW_PAGING_LEVELS)
-
-mfn_t sh_make_monitor_table(struct vcpu *v);
-void sh_destroy_monitor_table(struct vcpu *v, mfn_t mmfn);
+        SHADOW_INTERNAL_NAME(sh_destroy_monitor_table, SHADOW_PAGING_LEVELS)
 
 #if SHADOW_PAGING_LEVELS == 3
 #define MFN_FITS_IN_HVM_CR3(_MFN) !(mfn_x(_MFN) >> 20)
@@ -300,12 +307,12 @@ static inline int sh_l1e_is_magic(shadow_l1e_t sl1e)
 }
 
 /* Guest not present: a single magic value */
-static inline shadow_l1e_t sh_l1e_gnp(void)
+static inline shadow_l1e_t sh_l1e_gnp(void) 
 {
     return (shadow_l1e_t){ -1ULL };
 }
 
-static inline int sh_l1e_is_gnp(shadow_l1e_t sl1e)
+static inline int sh_l1e_is_gnp(shadow_l1e_t sl1e) 
 {
     return (sl1e.l1 == sh_l1e_gnp().l1);
 }
@@ -319,24 +326,24 @@ static inline int sh_l1e_is_gnp(shadow_l1e_t sl1e)
 #define SH_L1E_MMIO_GFN_MASK    0x00000000fffffff0ULL
 #define SH_L1E_MMIO_GFN_SHIFT   4
 
-static inline shadow_l1e_t sh_l1e_mmio(gfn_t gfn, u32 gflags)
+static inline shadow_l1e_t sh_l1e_mmio(gfn_t gfn, u32 gflags) 
 {
-    return (shadow_l1e_t) { (SH_L1E_MMIO_MAGIC
-                             | (gfn_x(gfn) << SH_L1E_MMIO_GFN_SHIFT)
+    return (shadow_l1e_t) { (SH_L1E_MMIO_MAGIC 
+                             | (gfn_x(gfn) << SH_L1E_MMIO_GFN_SHIFT) 
                              | (gflags & (_PAGE_USER|_PAGE_RW))) };
 }
 
-static inline int sh_l1e_is_mmio(shadow_l1e_t sl1e)
+static inline int sh_l1e_is_mmio(shadow_l1e_t sl1e) 
 {
     return ((sl1e.l1 & SH_L1E_MMIO_MAGIC_MASK) == SH_L1E_MMIO_MAGIC);
 }
 
-static inline gfn_t sh_l1e_mmio_get_gfn(shadow_l1e_t sl1e)
+static inline gfn_t sh_l1e_mmio_get_gfn(shadow_l1e_t sl1e) 
 {
     return _gfn((sl1e.l1 & SH_L1E_MMIO_GFN_MASK) >> SH_L1E_MMIO_GFN_SHIFT);
 }
 
-static inline u32 sh_l1e_mmio_get_flags(shadow_l1e_t sl1e)
+static inline u32 sh_l1e_mmio_get_flags(shadow_l1e_t sl1e) 
 {
     return (u32)((sl1e.l1 & (_PAGE_USER|_PAGE_RW)));
 }

@@ -50,12 +50,13 @@ int ebitmap_cpy(struct ebitmap *dst, struct ebitmap *src)
     prev = NULL;
     while ( n )
     {
-        new = xzalloc(struct ebitmap_node);
+        new = xmalloc(struct ebitmap_node);
         if ( !new )
         {
             ebitmap_destroy(dst);
             return -ENOMEM;
         }
+        memset(new, 0, sizeof(*new));
         new->startbit = n->startbit;
         memcpy(new->maps, n->maps, EBITMAP_SIZE / 8);
         new->next = NULL;
@@ -175,9 +176,10 @@ int ebitmap_set_bit(struct ebitmap *e, unsigned long bit, int value)
     if ( !value )
         return 0;
 
-    new = xzalloc(struct ebitmap_node);
+    new = xmalloc(struct ebitmap_node);
     if ( !new )
         return -ENOMEM;
+    memset(new, 0, sizeof(*new));
 
     new->startbit = bit - (bit % EBITMAP_SIZE);
     ebitmap_node_set_bit(new, bit);
@@ -282,8 +284,8 @@ int ebitmap_read(struct ebitmap *e, void *fp)
 
         if ( !n || startbit >= n->startbit + EBITMAP_SIZE )
         {
-            struct ebitmap_node *tmp = xzalloc(struct ebitmap_node);
-
+            struct ebitmap_node *tmp;
+            tmp = xmalloc(struct ebitmap_node);
             if ( !tmp )
             {
                 printk(KERN_ERR
@@ -291,6 +293,7 @@ int ebitmap_read(struct ebitmap *e, void *fp)
                 rc = -ENOMEM;
                 goto bad;
             }
+            memset(tmp, 0, sizeof(*tmp));
             /* round down */
             tmp->startbit = startbit - (startbit % EBITMAP_SIZE);
             if ( n )

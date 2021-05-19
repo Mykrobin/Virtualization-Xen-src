@@ -7,7 +7,6 @@
 #include <xen/vmap.h>
 #include <asm/io.h>
 #include <asm/psci.h>
-#include <asm/acpi.h>
 
 struct smp_enable_ops {
         int             (*prepare_cpu)(int);
@@ -33,13 +32,14 @@ static int __init smp_spin_table_cpu_up(int cpu)
         return -EFAULT;
     }
 
-    writeq(__pa(init_secondary), release);
+    release[0] = __pa(init_secondary);
+    flush_xen_data_tlb_range_va((vaddr_t)release, sizeof(*release));
 
     iounmap(release);
 
     sev();
 
-    return 0;
+    return cpu_up_send_sgi(cpu);
 }
 
 static void __init smp_spin_table_init(int cpu, struct dt_device_node *dn)
@@ -55,7 +55,7 @@ static void __init smp_spin_table_init(int cpu, struct dt_device_node *dn)
 
 static int __init smp_psci_init(int cpu)
 {
-    if ( !psci_ver )
+    if ( !psci_available )
     {
         printk("CPU%d asks for PSCI, but DTB has no PSCI node\n", cpu);
         return -ENODEV;
@@ -71,7 +71,7 @@ int __init arch_smp_init(void)
     return 0;
 }
 
-static int __init dt_arch_cpu_init(int cpu, struct dt_device_node *dn)
+int __init arch_cpu_init(int cpu, struct dt_device_node *dn)
 {
     const char *enable_method;
 
@@ -93,15 +93,6 @@ static int __init dt_arch_cpu_init(int cpu, struct dt_device_node *dn)
     }
 
     return 0;
-}
-
-int __init arch_cpu_init(int cpu, struct dt_device_node *dn)
-{
-    if ( acpi_disabled )
-        return dt_arch_cpu_init(cpu, dn);
-    else
-        /* acpi only supports psci at present */
-        return smp_psci_init(cpu);
 }
 
 int __init arch_cpu_up(int cpu)

@@ -13,11 +13,13 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <xen/sched.h>
 #include <asm/p2m.h>
+#include <asm/hvm/iommu.h>
 #include <asm/amd-iommu.h>
 #include <asm/hvm/svm/amd-iommu-proto.h>
 
@@ -58,12 +60,12 @@ static uint16_t guest_bdf(struct domain *d, uint16_t machine_bdf)
 
 static inline struct guest_iommu *domain_iommu(struct domain *d)
 {
-    return dom_iommu(d)->arch.g_iommu;
+    return domain_hvm_iommu(d)->g_iommu;
 }
 
 static inline struct guest_iommu *vcpu_iommu(struct vcpu *v)
 {
-    return dom_iommu(v->domain)->arch.g_iommu;
+    return domain_hvm_iommu(v->domain)->g_iommu;
 }
 
 static void guest_iommu_enable(struct guest_iommu *iommu)
@@ -199,9 +201,9 @@ void guest_iommu_add_ppr_log(struct domain *d, u32 entry[])
 
     mfn = guest_iommu_get_table_mfn(d, reg_to_u64(iommu->ppr_log.reg_base),
                                     sizeof(ppr_entry_t), tail);
-    ASSERT(mfn_valid(_mfn(mfn)));
+    ASSERT(mfn_valid(mfn));
 
-    log_base = map_domain_page(_mfn(mfn));
+    log_base = map_domain_page(mfn);
     log = log_base + tail % (PAGE_SIZE / sizeof(ppr_entry_t));
 
     /* Convert physical device id back into virtual device id */
@@ -248,9 +250,9 @@ void guest_iommu_add_event_log(struct domain *d, u32 entry[])
 
     mfn = guest_iommu_get_table_mfn(d, reg_to_u64(iommu->event_log.reg_base),
                                     sizeof(event_entry_t), tail);
-    ASSERT(mfn_valid(_mfn(mfn)));
+    ASSERT(mfn_valid(mfn));
 
-    log_base = map_domain_page(_mfn(mfn));
+    log_base = map_domain_page(mfn);
     log = log_base + tail % (PAGE_SIZE / sizeof(event_entry_t));
 
     /* re-write physical device id into virtual device id */
@@ -375,7 +377,7 @@ static int do_completion_wait(struct domain *d, cmd_entry_t *cmd)
         gaddr_64 = (gaddr_hi << 32) | (gaddr_lo << 3);
 
         gfn = gaddr_64 >> PAGE_SHIFT;
-        vaddr = map_domain_page(get_gfn(d, gfn ,&p2mt));
+        vaddr = map_domain_page(mfn_x(get_gfn(d, gfn ,&p2mt)));
         put_gfn(d, gfn);
 
         write_u64_atomic((uint64_t *)(vaddr + (gaddr_64 & (PAGE_SIZE-1))),
@@ -420,10 +422,10 @@ static int do_invalidate_dte(struct domain *d, cmd_entry_t *cmd)
     dte_mfn = guest_iommu_get_table_mfn(d,
                                         reg_to_u64(g_iommu->dev_table.reg_base),
                                         sizeof(dev_entry_t), gbdf);
-    ASSERT(mfn_valid(_mfn(dte_mfn)));
+    ASSERT(mfn_valid(dte_mfn));
 
     /* Read guest dte information */
-    dte_base = map_domain_page(_mfn(dte_mfn));
+    dte_base = map_domain_page(dte_mfn);
 
     gdte = dte_base + gbdf % (PAGE_SIZE / sizeof(dev_entry_t));
 
@@ -441,7 +443,7 @@ static int do_invalidate_dte(struct domain *d, cmd_entry_t *cmd)
     gcr3_mfn = mfn_x(get_gfn(d, gcr3_gfn, &p2mt));
     put_gfn(d, gcr3_gfn);
 
-    ASSERT(mfn_valid(_mfn(gcr3_mfn)));
+    ASSERT(mfn_valid(gcr3_mfn));
 
     iommu = find_iommu_for_device(0, mbdf);
     if ( !iommu )
@@ -502,9 +504,9 @@ static void guest_iommu_process_command(unsigned long _d)
         cmd_mfn = guest_iommu_get_table_mfn(d,
                                             reg_to_u64(iommu->cmd_buffer.reg_base),
                                             sizeof(cmd_entry_t), head);
-        ASSERT(mfn_valid(_mfn(cmd_mfn)));
+        ASSERT(mfn_valid(cmd_mfn));
 
-        cmd_base = map_domain_page(_mfn(cmd_mfn));
+        cmd_base = map_domain_page(cmd_mfn);
         cmd = cmd_base + head % entries_per_page;
 
         opcode = get_field_from_reg_u32(cmd->data[1],
@@ -680,7 +682,7 @@ static uint64_t iommu_mmio_read64(struct guest_iommu *iommu,
 }
 
 static int guest_iommu_mmio_read(struct vcpu *v, unsigned long addr,
-                                 unsigned int len, unsigned long *pval)
+                                 unsigned long len, unsigned long *pval)
 {
     struct guest_iommu *iommu = vcpu_iommu(v);
     unsigned long offset;
@@ -693,7 +695,7 @@ static int guest_iommu_mmio_read(struct vcpu *v, unsigned long addr,
     if ( unlikely((offset & (len - 1 )) || (len > 8)) )
     {
         AMD_IOMMU_DEBUG("iommu mmio read access is not aligned:"
-                        " offset = %lx, len = %x\n", offset, len);
+                        " offset = %lx, len = %lx\n", offset, len);
         return X86EMUL_UNHANDLEABLE;
     }
 
@@ -770,7 +772,7 @@ static void guest_iommu_mmio_write64(struct guest_iommu *iommu,
 }
 
 static int guest_iommu_mmio_write(struct vcpu *v, unsigned long addr,
-                                  unsigned int len, unsigned long val)
+                                  unsigned long len, unsigned long val)
 {
     struct guest_iommu *iommu = vcpu_iommu(v);
     unsigned long offset;
@@ -783,7 +785,7 @@ static int guest_iommu_mmio_write(struct vcpu *v, unsigned long addr,
     if ( unlikely((offset & (len - 1)) || (len > 8)) )
     {
         AMD_IOMMU_DEBUG("iommu mmio write access is not aligned:"
-                        " offset = %lx, len = %x\n", offset, len);
+                        " offset = %lx, len = %lx\n", offset, len);
         return X86EMUL_UNHANDLEABLE;
     }
 
@@ -821,7 +823,7 @@ int guest_iommu_set_base(struct domain *d, uint64_t base)
         unsigned long gfn = base + i;
 
         get_gfn_query(d, gfn, &t);
-        p2m_change_type_one(d, gfn, t, p2m_mmio_dm);
+        p2m_change_type(d, gfn, t, p2m_mmio_dm);
         put_gfn(d, gfn);
     }
 
@@ -866,28 +868,13 @@ static void guest_iommu_reg_init(struct guest_iommu *iommu)
     iommu->reg_ext_feature.hi = upper;
 }
 
-static int guest_iommu_mmio_range(struct vcpu *v, unsigned long addr)
-{
-    struct guest_iommu *iommu = vcpu_iommu(v);
-
-    return iommu && addr >= iommu->mmio_base &&
-           addr < iommu->mmio_base + IOMMU_MMIO_SIZE;
-}
-
-static const struct hvm_mmio_ops iommu_mmio_ops = {
-    .check = guest_iommu_mmio_range,
-    .read = guest_iommu_mmio_read,
-    .write = guest_iommu_mmio_write
-};
-
 /* Domain specific initialization */
 int guest_iommu_init(struct domain* d)
 {
     struct guest_iommu *iommu;
-    struct domain_iommu *hd = dom_iommu(d);
+    struct hvm_iommu *hd  = domain_hvm_iommu(d);
 
-    if ( !is_hvm_domain(d) || !iommu_enabled || !iommuv2_enabled ||
-         !has_viommu(d) )
+    if ( !is_hvm_domain(d) || !iommu_enabled || !iommuv2_enabled )
         return 0;
 
     iommu = xzalloc(struct guest_iommu);
@@ -900,14 +887,12 @@ int guest_iommu_init(struct domain* d)
     guest_iommu_reg_init(iommu);
     iommu->mmio_base = ~0ULL;
     iommu->domain = d;
-    hd->arch.g_iommu = iommu;
+    hd->g_iommu = iommu;
 
     tasklet_init(&iommu->cmd_buffer_tasklet,
                  guest_iommu_process_command, (unsigned long)d);
 
     spin_lock_init(&iommu->lock);
-
-    register_mmio_handler(d, &iommu_mmio_ops);
 
     return 0;
 }
@@ -923,5 +908,19 @@ void guest_iommu_destroy(struct domain *d)
     tasklet_kill(&iommu->cmd_buffer_tasklet);
     xfree(iommu);
 
-    dom_iommu(d)->arch.g_iommu = NULL;
+    domain_hvm_iommu(d)->g_iommu = NULL;
 }
+
+static int guest_iommu_mmio_range(struct vcpu *v, unsigned long addr)
+{
+    struct guest_iommu *iommu = vcpu_iommu(v);
+
+    return iommu && addr >= iommu->mmio_base &&
+           addr < iommu->mmio_base + IOMMU_MMIO_SIZE;
+}
+
+const struct hvm_mmio_handler iommu_mmio_handler = {
+    .check_handler = guest_iommu_mmio_range,
+    .read_handler = guest_iommu_mmio_read,
+    .write_handler = guest_iommu_mmio_write
+};

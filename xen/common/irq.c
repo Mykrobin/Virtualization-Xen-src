@@ -1,3 +1,4 @@
+#include <xen/config.h>
 #include <xen/irq.h>
 #include <xen/errno.h>
 

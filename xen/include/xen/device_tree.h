@@ -11,15 +11,49 @@
 #define __XEN_DEVICE_TREE_H__
 
 #include <asm/byteorder.h>
-#include <asm/device.h>
 #include <public/xen.h>
-#include <xen/kernel.h>
 #include <xen/init.h>
 #include <xen/string.h>
 #include <xen/types.h>
-#include <xen/list.h>
 
 #define DEVICE_TREE_MAX_DEPTH 16
+
+#define NR_MEM_BANKS 8
+
+#define MOD_XEN    0
+#define MOD_FDT    1
+#define MOD_KERNEL 2
+#define MOD_INITRD 3
+#define NR_MODULES 4
+
+#define MOD_DISCARD_FIRST MOD_FDT
+
+struct membank {
+    paddr_t start;
+    paddr_t size;
+};
+
+struct dt_mem_info {
+    int nr_banks;
+    struct membank bank[NR_MEM_BANKS];
+};
+
+struct dt_mb_module {
+    paddr_t start;
+    paddr_t size;
+    char cmdline[1024];
+};
+
+struct dt_module_info {
+    int nr_mods;
+    /* Module 0 is Xen itself, followed by the provided modules-proper */
+    struct dt_mb_module module[NR_MODULES];
+};
+
+struct dt_early_info {
+    struct dt_mem_info mem;
+    struct dt_module_info modules;
+};
 
 /*
  * Struct used for matching a device
@@ -28,26 +62,11 @@ struct dt_device_match {
     const char *path;
     const char *type;
     const char *compatible;
-    const bool_t not_available;
-    /*
-     * Property name to search for. We only search for the property's
-     * existence.
-     */
-    const char *prop;
-    const void *data;
 };
 
-#define __DT_MATCH_PATH(p)              .path = p
-#define __DT_MATCH_TYPE(typ)            .type = typ
-#define __DT_MATCH_COMPATIBLE(compat)   .compatible = compat
-#define __DT_MATCH_NOT_AVAILABLE()      .not_available = 1
-#define __DT_MATCH_PROP(p)              .prop = p
-
-#define DT_MATCH_PATH(p)                { __DT_MATCH_PATH(p) }
-#define DT_MATCH_TYPE(typ)              { __DT_MATCH_TYPE(typ) }
-#define DT_MATCH_COMPATIBLE(compat)     { __DT_MATCH_COMPATIBLE(compat) }
-#define DT_MATCH_NOT_AVAILABLE()        { __DT_MATCH_NOT_AVAILABLE() }
-#define DT_MATCH_PROP(p)                { __DT_MATCH_PROP(p) }
+#define DT_MATCH_PATH(p)                { .path = p }
+#define DT_MATCH_TYPE(typ)              { .type = typ }
+#define DT_MATCH_COMPATIBLE(compat)     { .compatible = compat }
 
 typedef u32 dt_phandle;
 
@@ -90,59 +109,35 @@ struct dt_device_node {
     struct dt_device_node *next; /* TODO: Remove it. Only use to know the last children */
     struct dt_device_node *allnext;
 
-    /* IOMMU specific fields */
-    bool is_protected;
-    struct list_head domain_list;
-
-    struct device dev;
-};
-
-#define dt_to_dev(dt_node)  (&(dt_node)->dev)
-
-static inline struct dt_device_node *dev_to_dt(struct device *dev)
-{
-    ASSERT(dev->type == DEV_DT);
-
-    return container_of(dev, struct dt_device_node, dev);
-}
-
-#define MAX_PHANDLE_ARGS 16
-struct dt_phandle_args {
-    struct dt_device_node *np;
-    int args_count;
-    uint32_t args[MAX_PHANDLE_ARGS];
 };
 
 /**
  * IRQ line type.
  *
- * IRQ_TYPE_NONE            - default, unspecified type
- * IRQ_TYPE_EDGE_RISING     - rising edge triggered
- * IRQ_TYPE_EDGE_FALLING    - falling edge triggered
- * IRQ_TYPE_EDGE_BOTH       - rising and falling edge triggered
- * IRQ_TYPE_LEVEL_HIGH      - high level triggered
- * IRQ_TYPE_LEVEL_LOW       - low level triggered
- * IRQ_TYPE_LEVEL_MASK      - Mask to filter out the level bits
- * IRQ_TYPE_SENSE_MASK      - Mask for all the above bits
- * IRQ_TYPE_INVALID         - Use to initialize the type
+ * DT_IRQ_TYPE_NONE            - default, unspecified type
+ * DT_IRQ_TYPE_EDGE_RISING     - rising edge triggered
+ * DT_IRQ_TYPE_EDGE_FALLING    - falling edge triggered
+ * DT_IRQ_TYPE_EDGE_BOTH       - rising and falling edge triggered
+ * DT_IRQ_TYPE_LEVEL_HIGH      - high level triggered
+ * DT_IRQ_TYPE_LEVEL_LOW       - low level triggered
+ * DT_IRQ_TYPE_LEVEL_MASK      - Mask to filter out the level bits
+ * DT_IRQ_TYPE_SENSE_MASK      - Mask for all the above bits
  */
-#define IRQ_TYPE_NONE           0x00000000
-#define IRQ_TYPE_EDGE_RISING    0x00000001
-#define IRQ_TYPE_EDGE_FALLING   0x00000002
-#define IRQ_TYPE_EDGE_BOTH                           \
-    (IRQ_TYPE_EDGE_FALLING | IRQ_TYPE_EDGE_RISING)
-#define IRQ_TYPE_LEVEL_HIGH     0x00000004
-#define IRQ_TYPE_LEVEL_LOW      0x00000008
-#define IRQ_TYPE_LEVEL_MASK                          \
-    (IRQ_TYPE_LEVEL_LOW | IRQ_TYPE_LEVEL_HIGH)
-#define IRQ_TYPE_SENSE_MASK     0x0000000f
-
-#define IRQ_TYPE_INVALID        0x00000010
+#define DT_IRQ_TYPE_NONE           0x00000000
+#define DT_IRQ_TYPE_EDGE_RISING    0x00000001
+#define DT_IRQ_TYPE_EDGE_FALLING   0x00000002
+#define DT_IRQ_TYPE_EDGE_BOTH                           \
+    (DT_IRQ_TYPE_EDGE_FALLING | DT_IRQ_TYPE_EDGE_RISING)
+#define DT_IRQ_TYPE_LEVEL_HIGH     0x00000004
+#define DT_IRQ_TYPE_LEVEL_LOW      0x00000008
+#define DT_IRQ_TYPE_LEVEL_MASK                          \
+    (DT_IRQ_TYPE_LEVEL_LOW | DT_IRQ_TYPE_LEVEL_HIGH)
+#define DT_IRQ_TYPE_SENSE_MASK     0x0000000f
 
 /**
  * dt_irq - describe an IRQ in the device tree
  * @irq: IRQ number
- * @type: IRQ type (see IRQ_TYPE_*)
+ * @type: IRQ type (see DT_IRQ_TYPE_*)
  *
  * This structure is returned when an interrupt is mapped.
  */
@@ -151,12 +146,12 @@ struct dt_irq {
     unsigned int type;
 };
 
-/* If type == IRQ_TYPE_NONE, assume we use level triggered */
+/* If type == DT_IRQ_TYPE_NONE, assume we use level triggered */
 static inline bool_t dt_irq_is_level_triggered(const struct dt_irq *irq)
 {
     unsigned int type = irq->type;
 
-    return (type & IRQ_TYPE_LEVEL_MASK) || (type == IRQ_TYPE_NONE);
+    return (type & DT_IRQ_TYPE_LEVEL_MASK) || (type == DT_IRQ_TYPE_NONE);
 }
 
 /**
@@ -182,11 +177,13 @@ typedef int (*device_tree_node_func)(const void *fdt,
                                      u32 address_cells, u32 size_cells,
                                      void *data);
 
+extern struct dt_early_info early_info;
 extern const void *device_tree_flattened;
 
-int device_tree_for_each_node(const void *fdt,
-                                     device_tree_node_func func,
-                                     void *data);
+size_t __init device_tree_early_init(const void *fdt, paddr_t paddr);
+
+const char __init *device_tree_bootargs(const void *fdt);
+void __init device_tree_dump(const void *fdt);
 
 /**
  * dt_unflatten_host_device_tree - Unflatten the host device tree
@@ -320,16 +317,6 @@ static inline domid_t dt_device_used_by(const struct dt_device_node *device)
     return device->used_by;
 }
 
-static inline void dt_device_set_protected(struct dt_device_node *device)
-{
-    device->is_protected = true;
-}
-
-static inline bool dt_device_is_protected(const struct dt_device_node *device)
-{
-    return device->is_protected;
-}
-
 static inline bool_t dt_property_name_is_equal(const struct dt_property *pp,
                                                const char *name)
 {
@@ -360,10 +347,6 @@ struct dt_device_node *dt_find_compatible_node(struct dt_device_node *from,
 const void *dt_get_property(const struct dt_device_node *np,
                             const char *name, u32 *lenp);
 
-const struct dt_property *dt_find_property(const struct dt_device_node *np,
-                                           const char *name, u32 *lenp);
-
-
 /**
  * dt_property_read_u32 - Helper to read a u32 property.
  * @np: node to get the value
@@ -384,22 +367,6 @@ bool_t dt_property_read_u32(const struct dt_device_node *np,
  */
 bool_t dt_property_read_u64(const struct dt_device_node *np,
                             const char *name, u64 *out_value);
-
-/**
- * dt_property_read_bool - Check if a property exists
- * @np: node to get the value
- * @name: name of the property
- *
- * Search for a property in a device node.
- * Return true if the property exists false otherwise.
- */
-static inline bool_t dt_property_read_bool(const struct dt_device_node *np,
-                                           const char *name)
-{
-    const struct dt_property *prop = dt_find_property(np, name, NULL);
-
-    return prop ? true : false;
-}
 
 /**
  * dt_property_read_string - Find and read a string from a property
@@ -471,20 +438,6 @@ struct dt_device_node *dt_find_node_by_alias(const char *alias);
  */
 struct dt_device_node *dt_find_node_by_path(const char *path);
 
-
-/**
- * dt_find_node_by_gpath - Same as dt_find_node_by_path but retrieve the
- * path from the guest
- *
- * @u_path: Xen Guest handle to the buffer containing the path
- * @u_plen: Length of the buffer
- * @node: TODO
- *
- * Return 0 if succeed otherwise -errno
- */
-int dt_find_node_by_gpath(XEN_GUEST_HANDLE(char) u_path, uint32_t u_plen,
-                          struct dt_device_node **node);
-
 /**
  * dt_get_parent - Get a node's parent if any
  * @node: Node to get parent
@@ -503,7 +456,7 @@ const struct dt_device_node *dt_get_parent(const struct dt_device_node *node);
  * This function resolves an address, walking the tree, for a give
  * device-tree node. It returns 0 on success.
  */
-int dt_device_get_address(const struct dt_device_node *dev, unsigned int index,
+int dt_device_get_address(const struct dt_device_node *dev, int index,
                           u64 *addr, u64 *size);
 
 /**
@@ -533,7 +486,7 @@ unsigned int dt_number_of_address(const struct dt_device_node *device);
  * This function resolves an interrupt, walking the tree, for a given
  * device-tree node. It's the high level pendant to dt_device_get_raw_irq().
  */
-int dt_device_get_irq(const struct dt_device_node *device, unsigned int index,
+int dt_device_get_irq(const struct dt_device_node *device, int index,
                       struct dt_irq *irq);
 
 /**
@@ -545,8 +498,7 @@ int dt_device_get_irq(const struct dt_device_node *device, unsigned int index,
  * This function resolves an interrupt for a device, no translation is
  * made. dt_irq_translate can be called after.
  */
-int dt_device_get_raw_irq(const struct dt_device_node *device,
-                          unsigned int index,
+int dt_device_get_raw_irq(const struct dt_device_node *device, int index,
                           struct dt_raw_irq *irq);
 
 /**
@@ -555,30 +507,6 @@ int dt_device_get_raw_irq(const struct dt_device_node *device,
  * @out_irq: structure dt_irq filled by this function
  */
 int dt_irq_translate(const struct dt_raw_irq *raw, struct dt_irq *out_irq);
-
-/**
- * dt_for_each_irq_map - Iterate over a nodes interrupt-map property
- * @dev: The node whose interrupt-map property should be iterated over
- * @cb: Call back to call for each entry
- * @data: Caller data passed to callback
- */
-int dt_for_each_irq_map(const struct dt_device_node *dev,
-                        int (*cb)(const struct dt_device_node *,
-                                  const struct dt_irq *,
-                                  void *),
-                        void *data);
-
-/**
- * dt_for_each_range - Iterate over a nodes ranges property
- * @dev: The node whose interrupt-map property should be iterated over
- * @cb: Call back to call for each entry
- * @data: Caller data passed to callback
- */
-int dt_for_each_range(const struct dt_device_node *dev,
-                      int (*cb)(const struct dt_device_node *,
-                                u64 addr, u64 length,
-                                void *),
-                      void *data);
 
 /**
  * dt_n_size_cells - Helper to retrieve the number of cell for the size
@@ -599,25 +527,6 @@ int dt_n_size_cells(const struct dt_device_node *np);
 int dt_n_addr_cells(const struct dt_device_node *np);
 
 /**
- * dt_child_n_size_cells - Helper to retrieve the number of cell for the size
- * @parent: parent of the child to get the value
- *
- * This function retrieves for a given device-tree node the number of
- * cell for the size field of there child
- */
-int dt_child_n_size_cells(const struct dt_device_node *parent);
-
-/**
- * dt_child_n_addr_cells - Helper to retrieve the number of cell for the
- * address
- * @parent: parent of the child to get the value
- *
- * This function retrieves for a given device-tree node the number of
- * cell for the address field of there child
- */
-int dt_child_n_addr_cells(const struct dt_device_node *parent);
-
-/**
  * dt_device_is_available - Check if a device is available for use
  *
  * @device: Node to check for availability
@@ -628,26 +537,14 @@ int dt_child_n_addr_cells(const struct dt_device_node *parent);
 bool_t dt_device_is_available(const struct dt_device_node *device);
 
 /**
- * dt_device_for_passthrough - Check if a device will be used for
- * passthrough later
- *
- * @device: Node to check
- *
- * Return true if the property "xen,passthrough" is present in the node,
- * false otherwise.
- */
-bool_t dt_device_for_passthrough(const struct dt_device_node *device);
-
-/**
  * dt_match_node - Tell if a device_node has a matching of dt_device_match
  * @matches: array of dt_device_match structures to search in
  * @node: the dt_device_node structure to match against
  *
  * Returns true if the device node match one of dt_device_match.
  */
-const struct dt_device_match *
-dt_match_node(const struct dt_device_match *matches,
-              const struct dt_device_node *node);
+bool_t dt_match_node(const struct dt_device_match *matches,
+                     const struct dt_device_node *node);
 
 /**
  * dt_find_matching_node - Find a node based on an dt_device_match match table
@@ -689,20 +586,6 @@ void dt_set_range(__be32 **cellp, const struct dt_device_node *np,
                   u64 address, u64 size);
 
 /**
- * dt_child_set_range - Write range into a series of cells
- *
- * @cellp: Pointer to cells
- * @parent: Parent node which contains the encode for the address and the size
- * @address: Start of range
- * @size: Size of the range
- *
- * Write a range into a series of cells and update cellp to point to the
- * cell just after.
- */
-void dt_child_set_range(__be32 **cellp, const struct dt_device_node *parent,
-                        u64 address, u64 size);
-
-/**
  * dt_get_range - Read a range (address/size) from a series of cells
  *
  * @cellp: Pointer to cells
@@ -716,62 +599,6 @@ void dt_child_set_range(__be32 **cellp, const struct dt_device_node *parent,
  */
 void dt_get_range(const __be32 **cellp, const struct dt_device_node *np,
                   u64 *address, u64 *size);
-
-/**
- * dt_parse_phandle - Resolve a phandle property to a device_node pointer
- * @np: Pointer to device node holding phandle property
- * @phandle_name: Name of property holding a phandle value
- * @index: For properties holding a table of phandles, this is the index into
- *         the table
- *
- * Returns the device_node pointer.
- */
-struct dt_device_node *dt_parse_phandle(const struct dt_device_node *np,
-				                        const char *phandle_name,
-                                        int index);
-
-/**
- * dt_parse_phandle_with_args() - Find a node pointed by phandle in a list
- * @np:	pointer to a device tree node containing a list
- * @list_name: property name that contains a list
- * @cells_name: property name that specifies phandles' arguments count
- * @index: index of a phandle to parse out
- * @out_args: optional pointer to output arguments structure (will be filled)
- *
- * This function is useful to parse lists of phandles and their arguments.
- * Returns 0 on success and fills out_args, on error returns appropriate
- * errno value.
- *
- * Example:
- *
- * phandle1: node1 {
- * 	#list-cells = <2>;
- * }
- *
- * phandle2: node2 {
- * 	#list-cells = <1>;
- * }
- *
- * node3 {
- * 	list = <&phandle1 1 2 &phandle2 3>;
- * }
- *
- * To get a device_node of the `node2' node you may call this:
- * dt_parse_phandle_with_args(node3, "list", "#list-cells", 1, &args);
- */
-int dt_parse_phandle_with_args(const struct dt_device_node *np,
-                               const char *list_name,
-                               const char *cells_name, int index,
-                               struct dt_phandle_args *out_args);
-
-#ifdef CONFIG_DEVICE_TREE_DEBUG
-#define dt_dprintk(fmt, args...)  \
-    printk(XENLOG_DEBUG fmt, ## args)
-#else
-static inline void
-__attribute__ ((__format__ (__printf__, 1, 2)))
-dt_dprintk(const char *fmt, ...) {}
-#endif
 
 #endif /* __XEN_DEVICE_TREE_H */
 

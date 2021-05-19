@@ -14,9 +14,11 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/acpi.h>
 #include <xen/pci.h>
@@ -34,7 +36,6 @@ static int __initdata nr_amd_iommus;
 static struct tasklet amd_iommu_irq_tasklet;
 
 unsigned int __read_mostly ivrs_bdf_entries;
-u8 __read_mostly ivhd_type;
 static struct radix_tree_root ivrs_maps;
 struct list_head amd_iommu_head;
 struct table_struct device_table;
@@ -450,7 +451,7 @@ static void iommu_msi_unmask(struct irq_desc *desc)
     spin_lock_irqsave(&iommu->lock, flags);
     amd_iommu_msi_enable(iommu, IOMMU_CONTROL_ENABLED);
     spin_unlock_irqrestore(&iommu->lock, flags);
-    iommu->msi.msi_attrib.host_masked = 0;
+    iommu->msi.msi_attrib.masked = 0;
 }
 
 static void iommu_msi_mask(struct irq_desc *desc)
@@ -463,7 +464,7 @@ static void iommu_msi_mask(struct irq_desc *desc)
     spin_lock_irqsave(&iommu->lock, flags);
     amd_iommu_msi_enable(iommu, IOMMU_CONTROL_DISABLED);
     spin_unlock_irqrestore(&iommu->lock, flags);
-    iommu->msi.msi_attrib.host_masked = 1;
+    iommu->msi.msi_attrib.masked = 1;
 }
 
 static unsigned int iommu_msi_startup(struct irq_desc *desc)
@@ -558,7 +559,7 @@ static void parse_event_log_entry(struct amd_iommu *iommu, u32 entry[])
             return;
         }
         udelay(1);
-        barrier(); /* Prevent hoisting of the entry[] read. */
+        rmb();
         code = get_field_from_reg_u32(entry[1], IOMMU_EVENT_CODE_MASK,
                                       IOMMU_EVENT_CODE_SHIFT);
     }
@@ -663,7 +664,7 @@ void parse_ppr_log_entry(struct amd_iommu *iommu, u32 entry[])
             return;
         }
         udelay(1);
-        barrier(); /* Prevent hoisting of the entry[] read. */
+        rmb();
         code = get_field_from_reg_u32(entry[1], IOMMU_PPR_LOG_CODE_MASK,
                                       IOMMU_PPR_LOG_CODE_SHIFT);
     }
@@ -673,9 +674,9 @@ void parse_ppr_log_entry(struct amd_iommu *iommu, u32 entry[])
     bus = PCI_BUS(device_id);
     devfn = PCI_DEVFN2(device_id);
 
-    pcidevs_lock();
+    spin_lock(&pcidevs_lock);
     pdev = pci_get_real_pdev(iommu->seg, bus, devfn);
-    pcidevs_unlock();
+    spin_unlock(&pcidevs_lock);
 
     if ( pdev )
         guest_iommu_add_ppr_log(pdev->domain, entry);
@@ -778,6 +779,7 @@ static bool_t __init set_iommu_interrupt_handler(struct amd_iommu *iommu)
 {
     int irq, ret;
     hw_irq_controller *handler;
+    unsigned long flags;
     u16 control;
 
     irq = create_irq(NUMA_NO_NODE);
@@ -787,10 +789,10 @@ static bool_t __init set_iommu_interrupt_handler(struct amd_iommu *iommu)
         return 0;
     }
 
-    pcidevs_lock();
+    spin_lock_irqsave(&pcidevs_lock, flags);
     iommu->msi.dev = pci_get_pdev(iommu->seg, PCI_BUS(iommu->bdf),
                                   PCI_DEVFN2(iommu->bdf));
-    pcidevs_unlock();
+    spin_unlock_irqrestore(&pcidevs_lock, flags);
     if ( !iommu->msi.dev )
     {
         AMD_IOMMU_DEBUG("IOMMU: no pdev for %04x:%02x:%02x.%u\n",
@@ -813,7 +815,7 @@ static bool_t __init set_iommu_interrupt_handler(struct amd_iommu *iommu)
         handler = &iommu_msi_type;
     ret = __setup_msi_irq(irq_to_desc(irq), &iommu->msi, handler);
     if ( !ret )
-        ret = request_irq(irq, 0, iommu_interrupt_handler, "amd_iommu", iommu);
+        ret = request_irq(irq, iommu_interrupt_handler, "amd_iommu", iommu);
     if ( ret )
     {
         destroy_irq(irq);
@@ -882,7 +884,7 @@ static void enable_iommu(struct amd_iommu *iommu)
     register_iommu_event_log_in_mmio_space(iommu);
     register_iommu_exclusion_range(iommu);
 
-    if ( amd_iommu_has_feature(iommu, IOMMU_EXT_FEATURE_PPRSUP_SHIFT) )
+    if ( iommu_has_feature(iommu, IOMMU_EXT_FEATURE_PPRSUP_SHIFT) )
         register_iommu_ppr_log_in_mmio_space(iommu);
 
     desc = irq_to_desc(iommu->msi.irq);
@@ -896,48 +898,20 @@ static void enable_iommu(struct amd_iommu *iommu)
     set_iommu_command_buffer_control(iommu, IOMMU_CONTROL_ENABLED);
     set_iommu_event_log_control(iommu, IOMMU_CONTROL_ENABLED);
 
-    if ( amd_iommu_has_feature(iommu, IOMMU_EXT_FEATURE_PPRSUP_SHIFT) )
+    if ( iommu_has_feature(iommu, IOMMU_EXT_FEATURE_PPRSUP_SHIFT) )
         set_iommu_ppr_log_control(iommu, IOMMU_CONTROL_ENABLED);
 
-    if ( amd_iommu_has_feature(iommu, IOMMU_EXT_FEATURE_GTSUP_SHIFT) )
+    if ( iommu_has_feature(iommu, IOMMU_EXT_FEATURE_GTSUP_SHIFT) )
         set_iommu_guest_translation_control(iommu, IOMMU_CONTROL_ENABLED);
 
     set_iommu_translation_control(iommu, IOMMU_CONTROL_ENABLED);
 
-    if ( amd_iommu_has_feature(iommu, IOMMU_EXT_FEATURE_IASUP_SHIFT) )
+    if ( iommu_has_feature(iommu, IOMMU_EXT_FEATURE_IASUP_SHIFT) )
         amd_iommu_flush_all_caches(iommu);
 
     iommu->enabled = 1;
     spin_unlock_irqrestore(&iommu->lock, flags);
-}
 
-static void disable_iommu(struct amd_iommu *iommu)
-{
-    unsigned long flags;
-
-    spin_lock_irqsave(&iommu->lock, flags);
-
-    if ( !iommu->enabled )
-    {
-        spin_unlock_irqrestore(&iommu->lock, flags);
-        return;
-    }
-
-    amd_iommu_msi_enable(iommu, IOMMU_CONTROL_DISABLED);
-    set_iommu_command_buffer_control(iommu, IOMMU_CONTROL_DISABLED);
-    set_iommu_event_log_control(iommu, IOMMU_CONTROL_DISABLED);
-
-    if ( amd_iommu_has_feature(iommu, IOMMU_EXT_FEATURE_PPRSUP_SHIFT) )
-        set_iommu_ppr_log_control(iommu, IOMMU_CONTROL_DISABLED);
-
-    if ( amd_iommu_has_feature(iommu, IOMMU_EXT_FEATURE_GTSUP_SHIFT) )
-        set_iommu_guest_translation_control(iommu, IOMMU_CONTROL_DISABLED);
-
-    set_iommu_translation_control(iommu, IOMMU_CONTROL_DISABLED);
-
-    iommu->enabled = 0;
-
-    spin_unlock_irqrestore(&iommu->lock, flags);
 }
 
 static void __init deallocate_buffer(void *buf, uint32_t sz)
@@ -1035,7 +1009,7 @@ static int __init amd_iommu_init_one(struct amd_iommu *iommu)
     if ( allocate_event_log(iommu) == NULL )
         goto error_out;
 
-    if ( amd_iommu_has_feature(iommu, IOMMU_EXT_FEATURE_PPRSUP_SHIFT) )
+    if ( iommu_has_feature(iommu, IOMMU_EXT_FEATURE_PPRSUP_SHIFT) )
         if ( allocate_ppr_log(iommu) == NULL )
             goto error_out;
 
@@ -1071,12 +1045,12 @@ static void __init amd_iommu_init_cleanup(void)
     {
         list_del(&iommu->list);
         if ( iommu->enabled )
-            disable_iommu(iommu);
-
-        deallocate_ring_buffer(&iommu->cmd_buffer);
-        deallocate_ring_buffer(&iommu->event_log);
-        deallocate_ring_buffer(&iommu->ppr_log);
-        unmap_iommu_mmio_region(iommu);
+        {
+            deallocate_ring_buffer(&iommu->cmd_buffer);
+            deallocate_ring_buffer(&iommu->event_log);
+            deallocate_ring_buffer(&iommu->ppr_log);
+            unmap_iommu_mmio_region(iommu);
+        }
         xfree(iommu);
     }
 
@@ -1253,7 +1227,6 @@ static bool_t __init amd_sp5100_erratum28(void)
 int __init amd_iommu_init(void)
 {
     struct amd_iommu *iommu;
-    int rc = -ENODEV;
 
     BUG_ON( !iommu_found() );
 
@@ -1261,66 +1234,67 @@ int __init amd_iommu_init(void)
          amd_sp5100_erratum28() )
         goto error_out;
 
-    /* We implies no IOMMU if ACPI indicates no MSI. */
-    if ( unlikely(acpi_gbl_FADT.boot_flags & ACPI_FADT_NO_MSI) )
-        goto error_out;
+    ivrs_bdf_entries = amd_iommu_get_ivrs_dev_entries();
 
-    rc = amd_iommu_get_supported_ivhd_type();
-    if ( rc < 0 )
+    if ( !ivrs_bdf_entries )
         goto error_out;
-    ivhd_type = rc;
-
-    rc = amd_iommu_get_ivrs_dev_entries();
-    if ( !rc )
-        rc = -ENODEV;
-    if ( rc < 0 )
-        goto error_out;
-    ivrs_bdf_entries = rc;
 
     radix_tree_init(&ivrs_maps);
     for_each_amd_iommu ( iommu )
-    {
-        rc = alloc_ivrs_mappings(iommu->seg);
-        if ( rc )
+        if ( alloc_ivrs_mappings(iommu->seg) != 0 )
             goto error_out;
-    }
 
-    rc = amd_iommu_update_ivrs_mapping_acpi();
-    if ( rc )
+    if ( amd_iommu_update_ivrs_mapping_acpi() != 0 )
         goto error_out;
 
     /* initialize io-apic interrupt remapping entries */
-    if ( iommu_intremap )
-        rc = amd_iommu_setup_ioapic_remapping();
-    if ( rc )
+    if ( iommu_intremap && amd_iommu_setup_ioapic_remapping() != 0 )
         goto error_out;
 
     /* allocate and initialize a global device table shared by all iommus */
-    rc = iterate_ivrs_mappings(amd_iommu_setup_device_table);
-    if ( rc )
+    if ( iterate_ivrs_mappings(amd_iommu_setup_device_table) != 0 )
         goto error_out;
-
-    /*
-     * Disable sharing HAP page tables with AMD IOMMU,
-     * since it only supports p2m_ram_rw, and this would
-     * prevent doing IO to/from mapped grant frames.
-     */
-    iommu_hap_pt_share = 0;
-    printk(XENLOG_DEBUG "AMD-Vi: Disabled HAP memory map sharing with IOMMU\n");
 
     /* per iommu initialization  */
     for_each_amd_iommu ( iommu )
-    {
-        rc = amd_iommu_init_one(iommu);
-        if ( rc )
+        if ( amd_iommu_init_one(iommu) != 0 )
             goto error_out;
-    }
 
     return 0;
 
 error_out:
     amd_iommu_init_cleanup();
-    return rc;
+    return -ENODEV;
+}
+
+static void disable_iommu(struct amd_iommu *iommu)
+{
+    unsigned long flags;
+
+    spin_lock_irqsave(&iommu->lock, flags);
+
+    if ( !iommu->enabled )
+    {
+        spin_unlock_irqrestore(&iommu->lock, flags); 
+        return;
+    }
+
+    amd_iommu_msi_enable(iommu, IOMMU_CONTROL_DISABLED);
+    set_iommu_command_buffer_control(iommu, IOMMU_CONTROL_DISABLED);
+    set_iommu_event_log_control(iommu, IOMMU_CONTROL_DISABLED);
+
+    if ( iommu_has_feature(iommu, IOMMU_EXT_FEATURE_PPRSUP_SHIFT) )
+        set_iommu_ppr_log_control(iommu, IOMMU_CONTROL_DISABLED);
+
+    if ( iommu_has_feature(iommu, IOMMU_EXT_FEATURE_GTSUP_SHIFT) )
+        set_iommu_guest_translation_control(iommu, IOMMU_CONTROL_DISABLED);
+
+    set_iommu_translation_control(iommu, IOMMU_CONTROL_DISABLED);
+
+    iommu->enabled = 0;
+
+    spin_unlock_irqrestore(&iommu->lock, flags);
+
 }
 
 static void invalidate_all_domain_pages(void)
@@ -1359,14 +1333,7 @@ static void invalidate_all_devices(void)
     iterate_ivrs_mappings(_invalidate_all_devices);
 }
 
-int amd_iommu_suspend(void)
-{
-    amd_iommu_crash_shutdown();
-
-    return 0;
-}
-
-void amd_iommu_crash_shutdown(void)
+void amd_iommu_suspend(void)
 {
     struct amd_iommu *iommu;
 
@@ -1389,7 +1356,7 @@ void amd_iommu_resume(void)
     }
 
     /* flush all cache entries after iommu re-enabled */
-    if ( !amd_iommu_has_feature(iommu, IOMMU_EXT_FEATURE_IASUP_SHIFT) )
+    if ( !iommu_has_feature(iommu, IOMMU_EXT_FEATURE_IASUP_SHIFT) )
     {
         invalidate_all_devices();
         invalidate_all_domain_pages();

@@ -10,6 +10,7 @@
  * Slimmed with Xen specific support.
  */
 
+#include <xen/config.h>
 #include <asm/io.h>
 #include <xen/acpi.h>
 #include <xen/errno.h>
@@ -28,7 +29,6 @@
 #include <asm/tboot.h>
 #include <asm/apic.h>
 #include <asm/io_apic.h>
-#include <asm/spec_ctrl.h>
 #include <acpi/cpufreq/cpufreq.h>
 
 uint32_t system_reset_counter = 1;
@@ -43,70 +43,36 @@ struct acpi_sleep_info acpi_sinfo;
 
 void do_suspend_lowlevel(void);
 
-enum dev_power_saved
-{
-    SAVED_NONE,
-    SAVED_CONSOLE,
-    SAVED_TIME,
-    SAVED_I8259A,
-    SAVED_IOAPIC,
-    SAVED_IOMMU,
-    SAVED_LAPIC,
-    SAVED_ALL,
-};
-
 static int device_power_down(void)
 {
-    if ( console_suspend() )
-        return SAVED_NONE;
+    console_suspend();
 
-    if ( time_suspend() )
-        return SAVED_CONSOLE;
+    time_suspend();
 
-    if ( i8259A_suspend() )
-        return SAVED_TIME;
+    i8259A_suspend();
 
-    /* ioapic_suspend cannot fail */
     ioapic_suspend();
 
-    if ( iommu_suspend() )
-        return SAVED_IOAPIC;
+    iommu_suspend();
 
-    if ( lapic_suspend() )
-        return SAVED_IOMMU;
+    lapic_suspend();
 
-    return SAVED_ALL;
+    return 0;
 }
 
-static void device_power_up(enum dev_power_saved saved)
+static void device_power_up(void)
 {
-    switch ( saved )
-    {
-    case SAVED_ALL:
-    case SAVED_LAPIC:
-        lapic_resume();
-        /* fall through */
-    case SAVED_IOMMU:
-        iommu_resume();
-        /* fall through */
-    case SAVED_IOAPIC:
-        ioapic_resume();
-        /* fall through */
-    case SAVED_I8259A:
-        i8259A_resume();
-        /* fall through */
-    case SAVED_TIME:
-        time_resume();
-        /* fall through */
-    case SAVED_CONSOLE:
-        console_resume();
-        /* fall through */
-    case SAVED_NONE:
-        break;
-    default:
-        BUG();
-        break;
-    }
+    lapic_resume();
+
+    iommu_resume();
+
+    ioapic_resume();
+
+    i8259A_resume();
+
+    time_resume();
+
+    console_resume();
 }
 
 static void freeze_domains(void)
@@ -164,7 +130,6 @@ static int enter_state(u32 state)
 {
     unsigned long flags;
     int error;
-    struct cpu_info *ci;
     unsigned long cr4;
 
     if ( (state <= ACPI_STATE_S0) || (state > ACPI_S_STATES_MAX) )
@@ -200,22 +165,12 @@ static int enter_state(u32 state)
     local_irq_save(flags);
     spin_debug_disable();
 
-    if ( (error = device_power_down()) != SAVED_ALL )
+    if ( (error = device_power_down()) )
     {
         printk(XENLOG_ERR "Some devices failed to power down.");
         system_state = SYS_STATE_resume;
-        device_power_up(error);
-        console_end_sync();
-        error = -EIO;
         goto done;
     }
-    else
-        error = 0;
-
-    ci = get_cpu_info();
-    spec_ctrl_enter_idle(ci);
-    /* Avoid NMI/#MC using MSR_SPEC_CTRL until we've reloaded microcode. */
-    ci->spec_ctrl_flags &= ~SCF_ist_wrmsr;
 
     ACPI_FLUSH_CPU_CACHE();
 
@@ -239,11 +194,12 @@ static int enter_state(u32 state)
     /* Restore CR4 and EFER from cached values. */
     cr4 = read_cr4();
     write_cr4(cr4 & ~X86_CR4_MCE);
-    write_efer(read_efer());
+    if ( cpu_has_efer )
+        write_efer(read_efer());
 
-    device_power_up(SAVED_ALL);
+    device_power_up();
 
-    mcheck_init(&boot_cpu_data, false);
+    mcheck_init(&boot_cpu_data, 0);
     write_cr4(cr4);
 
     printk(XENLOG_INFO "Finishing wakeup from ACPI S%d state.\n", state);
@@ -251,26 +207,17 @@ static int enter_state(u32 state)
     if ( (state == ACPI_STATE_S3) && error )
         tboot_s3_error(error);
 
-    console_end_sync();
-
-    microcode_resume_cpu(0);
-
-    if ( !recheck_cpu_features(0) )
-        panic("Missing previously available feature(s).");
-
-    /* Re-enabled default NMI/#MC use of MSR_SPEC_CTRL. */
-    ci->spec_ctrl_flags |= (default_spec_ctrl_flags & SCF_ist_wrmsr);
-    spec_ctrl_exit_idle(ci);
-
  done:
     spin_debug_enable();
     local_irq_restore(flags);
+    console_end_sync();
     acpi_sleep_post(state);
     if ( hvm_cpu_up() )
         BUG();
-    cpufreq_add_cpu(0);
 
  enable_cpu:
+    cpufreq_add_cpu(0);
+    microcode_resume_cpu(0);
     rcu_barrier();
     mtrr_aps_sync_begin();
     enable_nonboot_cpus();
@@ -322,7 +269,7 @@ int acpi_enter_sleep(struct xenpf_enter_acpi_sleep *sleep)
     else if ( sleep->val_b &&
               ((sleep->val_a ^ sleep->val_b) & ACPI_BITMASK_SLEEP_ENABLE) )
     {
-        gdprintk(XENLOG_ERR, "Mismatched pm1a/pm1b setting\n");
+        gdprintk(XENLOG_ERR, "Mismatched pm1a/pm1b setting.");
         return -EINVAL;
     }
 

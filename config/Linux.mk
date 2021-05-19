@@ -1,3 +1,8 @@
 include $(XEN_ROOT)/config/StdGNU.mk
 
-SYSCONFIG_DIR = $(CONFIG_DIR)/$(CONFIG_LEAF_DIR)
+# You may use wildcards, e.g. KERNELS=*2.6*
+KERNELS ?= 
+
+XKERNELS := $(foreach kernel, $(KERNELS), \
+              $(patsubst buildconfigs/mk.%,%, \
+                $(wildcard buildconfigs/mk.$(kernel))) )

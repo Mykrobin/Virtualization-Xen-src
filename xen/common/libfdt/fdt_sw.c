@@ -16,7 +16,9 @@
  *     GNU General Public License for more details.
  *
  *     You should have received a copy of the GNU General Public
- *     License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ *     License along with this library; if not, write to the Free
+ *     Software Foundation, Inc., 51 Franklin St, Fifth Floor, Boston,
+ *     MA 02110-1301 USA
  *
  * Alternatively,
  *
@@ -151,7 +153,7 @@ int fdt_begin_node(void *fdt, const char *name)
 
 int fdt_end_node(void *fdt)
 {
-	fdt32_t *en;
+	uint32_t *en;
 
 	FDT_SW_CHECK_HEADER(fdt);
 
@@ -211,7 +213,7 @@ int fdt_property(void *fdt, const char *name, const void *val, int len)
 int fdt_finish(void *fdt)
 {
 	char *p = (char *)fdt;
-	fdt32_t *end;
+	uint32_t *end;
 	int oldstroffset, newstroffset;
 	uint32_t tag;
 	int offset, nextoffset;

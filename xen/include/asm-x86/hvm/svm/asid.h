@@ -12,18 +12,19 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #ifndef __ASM_X86_HVM_SVM_ASID_H__
 #define __ASM_X86_HVM_SVM_ASID_H__
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <asm/hvm/asid.h>
 #include <asm/processor.h>
 
-void svm_asid_init(const struct cpuinfo_x86 *c);
-void svm_asid_handle_vmrun(void);
+void svm_asid_init(struct cpuinfo_x86 *c);
 
 static inline void svm_asid_g_invlpg(struct vcpu *v, unsigned long g_vaddr)
 {

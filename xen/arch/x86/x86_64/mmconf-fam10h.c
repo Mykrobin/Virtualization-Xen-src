@@ -6,7 +6,6 @@
 #include <xen/acpi.h>
 #include <xen/pci.h>
 #include <xen/pci_regs.h>
-#include <xen/pci_ids.h>
 #include <xen/init.h>
 #include <xen/dmi.h>
 #include <asm/amd.h>
@@ -23,9 +22,9 @@ struct pci_hostbridge_probe {
 	u32 device;
 };
 
-static u64 fam10h_pci_mmconf_base;
+static u64 __cpuinitdata fam10h_pci_mmconf_base;
 
-static struct pci_hostbridge_probe pci_probes[] = {
+static struct pci_hostbridge_probe pci_probes[] __cpuinitdata = {
 	{ 0, 0x18, PCI_VENDOR_ID_AMD, 0x1200 },
 	{ 0xff, 0, PCI_VENDOR_ID_AMD, 0x1200 },
 };
@@ -137,7 +136,7 @@ out:
 		fam10h_pci_mmconf_base = start;
 }
 
-void fam10h_check_enable_mmcfg(void)
+void __cpuinit fam10h_check_enable_mmcfg(void)
 {
 	u64 val;
 	bool_t print = opt_cpu_info;

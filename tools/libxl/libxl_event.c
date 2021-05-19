@@ -31,11 +31,6 @@
 #define DBG(args, ...) LIBXL__DBG_LOG(CTX, args, __VA_ARGS__)
 
 
-static libxl__ao *ao_nested_root(libxl__ao *ao);
-
-static void ao__check_destroy(libxl_ctx *ctx, libxl__ao *ao);
-
-
 /*
  * The counter osevent_in_hook is used to ensure that the application
  * honours the reentrancy restriction documented in libxl_event.h.
@@ -245,29 +240,6 @@ void libxl__ev_fd_deregister(libxl__gc *gc, libxl__ev_fd *ev)
     CTX_UNLOCK;
 }
 
-short libxl__fd_poll_recheck(libxl__egc *egc, int fd, short events) {
-    struct pollfd check;
-    int r;
-
-    for (;;) {
-        check.fd = fd;
-        check.events = events;
-        r = poll(&check, 1, 0);
-        DBG("poll recheck fd=%d r=%d revents=%#x", fd, r, check.revents);
-        if (!r)
-            break;
-        if (r==1)
-            break;
-        assert(r<0);
-        if (errno != EINTR) {
-            LIBXL__EVENT_DISASTER(egc, "failed poll to check for fd", errno, 0);
-            return 0;
-        }
-    }
-    assert(!!r == !!check.revents);
-    return check.revents;
-}
-
 /*
  * timeouts
  */
@@ -277,7 +249,7 @@ int libxl__gettimeofday(libxl__gc *gc, struct timeval *now_r)
 {
     int rc = gettimeofday(now_r, 0);
     if (rc) {
-        LOGE(ERROR, "gettimeofday failed");
+        LIBXL__LOG_ERRNO(CTX, LIBXL__LOG_ERROR, "gettimeofday failed");
         return ERROR_FAIL;
     }
     return 0;
@@ -319,8 +291,6 @@ static int time_register_finite(libxl__gc *gc, libxl__ev_time *ev,
 
 static void time_deregister(libxl__gc *gc, libxl__ev_time *ev)
 {
-    libxl__ao_abortable_deregister(&ev->abrt);
-
     if (!ev->infinite) {
         struct timeval right_away = { 0, 0 };
         if (ev->nexus) /* only set if app provided hooks */
@@ -343,37 +313,16 @@ static void time_done_debug(libxl__gc *gc, const char *func,
 #endif
 }
 
-static void time_aborted(libxl__egc *egc, libxl__ao_abortable *abrt, int rc)
-{
-    libxl__ev_time *ev = CONTAINER_OF(abrt, *ev, abrt);
-    EGC_GC;
-
-    time_deregister(gc, ev);
-    DBG("ev_time=%p aborted", ev);
-    ev->func(egc, ev, &ev->abs, rc);
-}
-
-static int time_register_abortable(libxl__ao *ao, libxl__ev_time *ev)
-{
-    ev->abrt.ao = ao;
-    ev->abrt.callback = time_aborted;
-    return libxl__ao_abortable_register(&ev->abrt);
-}
-
-int libxl__ev_time_register_abs(libxl__ao *ao, libxl__ev_time *ev,
+int libxl__ev_time_register_abs(libxl__gc *gc, libxl__ev_time *ev,
                                 libxl__ev_time_callback *func,
                                 struct timeval absolute)
 {
-    AO_GC;
     int rc;
 
     CTX_LOCK;
 
     DBG("ev_time=%p register abs=%lu.%06lu",
         ev, (unsigned long)absolute.tv_sec, (unsigned long)absolute.tv_usec);
-
-    rc = time_register_abortable(ao, ev);
-    if (rc) goto out;
 
     rc = time_register_finite(gc, ev, absolute);
     if (rc) goto out;
@@ -382,27 +331,22 @@ int libxl__ev_time_register_abs(libxl__ao *ao, libxl__ev_time *ev,
 
     rc = 0;
  out:
-    libxl__ao_abortable_deregister(&ev->abrt);
     time_done_debug(gc,__func__,ev,rc);
     CTX_UNLOCK;
     return rc;
 }
 
 
-int libxl__ev_time_register_rel(libxl__ao *ao, libxl__ev_time *ev,
+int libxl__ev_time_register_rel(libxl__gc *gc, libxl__ev_time *ev,
                                 libxl__ev_time_callback *func,
                                 int milliseconds /* as for poll(2) */)
 {
-    AO_GC;
     struct timeval absolute;
     int rc;
 
     CTX_LOCK;
 
     DBG("ev_time=%p register ms=%d", ev, milliseconds);
-
-    rc = time_register_abortable(ao, ev);
-    if (rc) goto out;
 
     if (milliseconds < 0) {
         ev->infinite = 1;
@@ -418,8 +362,6 @@ int libxl__ev_time_register_rel(libxl__ao *ao, libxl__ev_time *ev,
     rc = 0;
 
  out:
-    if (!libxl__ev_time_isregistered(ev))
-        libxl__ao_abortable_deregister(&ev->abrt);
     time_done_debug(gc,__func__,ev,rc);
     CTX_UNLOCK;
     return rc;
@@ -443,7 +385,7 @@ void libxl__ev_time_deregister(libxl__gc *gc, libxl__ev_time *ev)
     return;
 }
 
-static void time_occurs(libxl__egc *egc, libxl__ev_time *etime, int rc)
+static void time_occurs(libxl__egc *egc, libxl__ev_time *etime)
 {
     DBG("ev_time=%p occurs abs=%lu.%06lu",
         etime, (unsigned long)etime->abs.tv_sec,
@@ -451,7 +393,7 @@ static void time_occurs(libxl__egc *egc, libxl__ev_time *etime, int rc)
 
     libxl__ev_time_callback *func = etime->func;
     etime->func = 0;
-    func(egc, etime, &etime->abs, rc);
+    func(egc, etime, &etime->abs);
 }
 
 
@@ -523,8 +465,9 @@ static void watchfd_callback(libxl__egc *egc, libxl__ev_fd *ev,
         uint32_t counterval;
         int rc = sscanf(token, "%d/%"SCNx32, &slotnum, &counterval);
         if (rc != 2) {
-            LOG(ERROR, "watch epath=%s token=%s: failed to parse token",
-                epath, token);
+            LIBXL__LOG(CTX, LIBXL__LOG_ERROR,
+                       "watch epath=%s token=%s: failed to parse token",
+                       epath, token);
             /* oh well */
             goto ignore;
         }
@@ -539,7 +482,9 @@ static void watchfd_callback(libxl__egc *egc, libxl__ev_fd *ev,
         libxl__ev_xswatch *w = libxl__watch_slot_contents(gc, slotnum);
 
         if (!w) {
-            LOG(DEBUG, "watch epath=%s token=%s: empty slot", epath, token);
+            LIBXL__LOG(CTX, LIBXL__LOG_DEBUG,
+                       "watch epath=%s token=%s: empty slot",
+                       epath, token);
             goto ignore;
         }
 
@@ -580,14 +525,7 @@ static void watchfd_callback(libxl__egc *egc, libxl__ev_fd *ev,
 
 static char *watch_token(libxl__gc *gc, int slotnum, uint32_t counterval)
 {
-    return GCSPRINTF("%d/%"PRIx32, slotnum, counterval);
-}
-
-static void watches_check_fd_deregister(libxl__gc *gc)
-{
-    assert(CTX->nwatches>=0);
-    if (!CTX->nwatches)
-        libxl__ev_fd_deregister(gc, &CTX->watch_efd);
+    return libxl__sprintf(gc, "%d/%"PRIx32, slotnum, counterval);
 }
 
 int libxl__ev_xswatch_register(libxl__gc *gc, libxl__ev_xswatch *w,
@@ -636,7 +574,8 @@ int libxl__ev_xswatch_register(libxl__gc *gc, libxl__ev_xswatch *w,
         w, path, token, slotnum);
 
     if (!xs_watch(CTX->xsh, path, token)) {
-        LOGEV(ERROR, errno, "create watch for path %s", path);
+        LIBXL__LOG_ERRNOVAL(CTX, LIBXL__LOG_ERROR, errno,
+                            "create watch for path %s", path);
         rc = ERROR_FAIL;
         goto out_rc;
     }
@@ -644,7 +583,6 @@ int libxl__ev_xswatch_register(libxl__gc *gc, libxl__ev_xswatch *w,
     w->slotnum = slotnum;
     w->path = path_copy;
     w->callback = func;
-    CTX->nwatches++;
     libxl__set_watch_slot_contents(use, w);
 
     CTX_UNLOCK;
@@ -656,7 +594,6 @@ int libxl__ev_xswatch_register(libxl__gc *gc, libxl__ev_xswatch *w,
     if (use)
         LIBXL_SLIST_INSERT_HEAD(&CTX->watch_freeslots, use, empty);
     free(path_copy);
-    watches_check_fd_deregister(gc);
     CTX_UNLOCK;
     return rc;
 }
@@ -675,13 +612,12 @@ void libxl__ev_xswatch_deregister(libxl__gc *gc, libxl__ev_xswatch *w)
         if (!xs_unwatch(CTX->xsh, w->path, token))
             /* Oh well, we will just get watch events forever more
              * and ignore them.  But we should complain to the log. */
-            LOGEV(ERROR, errno, "remove watch for path %s", w->path);
+            LIBXL__LOG_ERRNOVAL(CTX, LIBXL__LOG_ERROR, errno,
+                                "remove watch for path %s", w->path);
 
         libxl__ev_watch_slot *slot = &CTX->watch_slots[w->slotnum];
         LIBXL_SLIST_INSERT_HEAD(&CTX->watch_freeslots, slot, empty);
         w->slotnum = -1;
-        CTX->nwatches--;
-        watches_check_fd_deregister(gc);
     } else {
         LOG(DEBUG, "watch w=%p: deregister unregistered", w);
     }
@@ -693,215 +629,71 @@ void libxl__ev_xswatch_deregister(libxl__gc *gc, libxl__ev_xswatch *w)
 }
 
 /*
- * evtchn
- */
-
-static int evtchn_revents_check(libxl__egc *egc, int revents)
-{
-    EGC_GC;
-
-    if (revents & ~POLLIN) {
-        LOG(ERROR, "unexpected poll event on event channel fd: %x", revents);
-        LIBXL__EVENT_DISASTER(egc,
-                   "unexpected poll event on event channel fd", 0, 0);
-        libxl__ev_fd_deregister(gc, &CTX->evtchn_efd);
-        return ERROR_FAIL;
-    }
-
-    assert(revents & POLLIN);
-
-    return 0;
-}
-
-static void evtchn_fd_callback(libxl__egc *egc, libxl__ev_fd *ev,
-                               int fd, short events, short revents)
-{
-    EGC_GC;
-    libxl__ev_evtchn *evev;
-    int rc;
-    xenevtchn_port_or_error_t port;
-
-    rc = evtchn_revents_check(egc, revents);
-    if (rc) return;
-
-    for (;;) {
-        /* Check the fd again.  The incoming revent may no longer be
-         * true, because the libxl ctx lock has not necessarily been
-         * held continuously since someone noticed the fd.  Normally
-         * this wouldn't be a problem but evtchn devices don't always
-         * honour O_NONBLOCK (see xenctrl.h). */
-        revents = libxl__fd_poll_recheck(egc,fd,POLLIN);
-        if (!revents)
-            break;
-        rc = evtchn_revents_check(egc, revents);
-        if (rc) return;
-
-        /* OK, that's that workaround done.  We can actually check for
-         * work for us to do: */
-
-        port = xenevtchn_pending(CTX->xce);
-        if (port < 0) {
-            if (errno == EAGAIN)
-                break;
-            LIBXL__EVENT_DISASTER(egc,
-     "unexpected failure fetching occurring event port number from evtchn",
-                                  errno, 0);
-            return;
-        }
-
-        LIBXL_LIST_FOREACH(evev, &CTX->evtchns_waiting, entry)
-            if (port == evev->port)
-                goto found;
-        /* not found */
-        DBG("ev_evtchn port=%d no-one cared", port);
-        continue;
-
-    found:
-        DBG("ev_evtchn=%p port=%d signaled", evev, port);
-        evev->waiting = 0;
-        LIBXL_LIST_REMOVE(evev, entry);
-        evev->callback(egc, evev);
-    }
-}
-
-int libxl__ctx_evtchn_init(libxl__gc *gc) {
-    xenevtchn_handle *xce;
-    int rc, fd;
-
-    if (CTX->xce)
-        return 0;
-
-    xce = xenevtchn_open(CTX->lg, 0);
-    if (!xce) {
-        LOGE(ERROR,"cannot open libxc evtchn handle");
-        rc = ERROR_FAIL;
-        goto out;
-    }
-
-    fd = xenevtchn_fd(xce);
-    assert(fd >= 0);
-
-    rc = libxl_fd_set_nonblock(CTX, fd, 1);
-    if (rc) goto out;
-
-    CTX->xce = xce;
-    return 0;
-
- out:
-    xenevtchn_close(xce);
-    return rc;
-}
-
-static void evtchn_check_fd_deregister(libxl__gc *gc)
-{
-    if (CTX->xce && LIBXL_LIST_EMPTY(&CTX->evtchns_waiting))
-        libxl__ev_fd_deregister(gc, &CTX->evtchn_efd);
-}
-
-int libxl__ev_evtchn_wait(libxl__gc *gc, libxl__ev_evtchn *evev)
-{
-    int r, rc;
-
-    DBG("ev_evtchn=%p port=%d wait (was waiting=%d)",
-        evev, evev->port, evev->waiting);
-
-    rc = libxl__ctx_evtchn_init(gc);
-    if (rc) goto out;
-
-    if (!libxl__ev_fd_isregistered(&CTX->evtchn_efd)) {
-        rc = libxl__ev_fd_register(gc, &CTX->evtchn_efd, evtchn_fd_callback,
-                                   xenevtchn_fd(CTX->xce), POLLIN);
-        if (rc) goto out;
-    }
-
-    if (evev->waiting)
-        return 0;
-
-    r = xenevtchn_unmask(CTX->xce, evev->port);
-    if (r) {
-        LOGE(ERROR,"cannot unmask event channel %d",evev->port);
-        rc = ERROR_FAIL;
-        goto out;
-    }
-
-    evev->waiting = 1;
-    LIBXL_LIST_INSERT_HEAD(&CTX->evtchns_waiting, evev, entry);
-    return 0;
-
- out:
-    evtchn_check_fd_deregister(gc);
-    return rc;
-}
-
-void libxl__ev_evtchn_cancel(libxl__gc *gc, libxl__ev_evtchn *evev)
-{
-    DBG("ev_evtchn=%p port=%d cancel (was waiting=%d)",
-        evev, evev->port, evev->waiting);
-
-    if (!evev->waiting)
-        return;
-
-    evev->waiting = 0;
-    LIBXL_LIST_REMOVE(evev, entry);
-    evtchn_check_fd_deregister(gc);
-}
-
-/*
  * waiting for device state
  */
 
-static void devstate_callback(libxl__egc *egc, libxl__xswait_state *xsw,
-                              int rc, const char *sstate)
+static void devstate_watch_callback(libxl__egc *egc, libxl__ev_xswatch *watch,
+                                const char *watch_path, const char *event_path)
 {
     EGC_GC;
-    libxl__ev_devstate *ds = CONTAINER_OF(xsw, *ds, w);
+    libxl__ev_devstate *ds = CONTAINER_OF(watch, *ds, watch);
+    int rc;
 
-    if (rc) {
-        if (rc == ERROR_TIMEDOUT)
-            LOG(DEBUG, "backend %s wanted state %d "" timed out", ds->w.path,
-                ds->wanted);
-        goto out;
-    }
+    char *sstate = libxl__xs_read(gc, XBT_NULL, watch_path);
     if (!sstate) {
-        LOG(DEBUG, "backend %s wanted state %d"" but it was removed",
-            ds->w.path, ds->wanted);
-        rc = ERROR_INVAL;
-        goto out;
-    }
-
-    int got = atoi(sstate);
-    if (got == ds->wanted) {
-        LOG(DEBUG, "backend %s wanted state %d ok", ds->w.path, ds->wanted);
-        rc = 0;
+        if (errno == ENOENT) {
+            LIBXL__LOG(CTX, LIBXL__LOG_DEBUG, "backend %s wanted state %d"
+                       " but it was removed", watch_path, ds->wanted);
+            rc = ERROR_INVAL;
+        } else {
+            LIBXL__LOG_ERRNO(CTX, LIBXL__LOG_ERROR, "backend %s wanted state"
+                             " %d but read failed", watch_path, ds->wanted);
+            rc = ERROR_FAIL;
+        }
     } else {
-        LOG(DEBUG, "backend %s wanted state %d"" still waiting state %d",
-            ds->w.path, ds->wanted, got);
-        return;
+        int got = atoi(sstate);
+        if (got == ds->wanted) {
+            LIBXL__LOG(CTX, LIBXL__LOG_DEBUG, "backend %s wanted state %d ok",
+                       watch_path, ds->wanted);
+            rc = 0;
+        } else {
+            LIBXL__LOG(CTX, LIBXL__LOG_DEBUG, "backend %s wanted state %d"
+                       " still waiting state %d", watch_path, ds->wanted, got);
+            return;
+        }
     }
-
- out:
     libxl__ev_devstate_cancel(gc, ds);
     ds->callback(egc, ds, rc);
 }
 
-int libxl__ev_devstate_wait(libxl__ao *ao, libxl__ev_devstate *ds,
+static void devstate_timeout(libxl__egc *egc, libxl__ev_time *ev,
+                             const struct timeval *requested_abs)
+{
+    EGC_GC;
+    libxl__ev_devstate *ds = CONTAINER_OF(ev, *ds, timeout);
+    LIBXL__LOG(CTX, LIBXL__LOG_DEBUG, "backend %s wanted state %d "
+               " timed out", ds->watch.path, ds->wanted);
+    libxl__ev_devstate_cancel(gc, ds);
+    ds->callback(egc, ds, ERROR_TIMEDOUT);
+}
+
+int libxl__ev_devstate_wait(libxl__gc *gc, libxl__ev_devstate *ds,
                             libxl__ev_devstate_callback cb,
                             const char *state_path, int state, int milliseconds)
 {
-    AO_GC;
     int rc;
 
-    libxl__xswait_init(&ds->w);
+    libxl__ev_time_init(&ds->timeout);
+    libxl__ev_xswatch_init(&ds->watch);
     ds->wanted = state;
     ds->callback = cb;
 
-    ds->w.ao = ao;
-    ds->w.what = GCSPRINTF("backend %s (hoping for state change to %d)",
-                           state_path, state);
-    ds->w.path = state_path;
-    ds->w.timeout_ms = milliseconds;
-    ds->w.callback = devstate_callback;
-    rc = libxl__xswait_start(gc, &ds->w);
+    rc = libxl__ev_time_register_rel(gc, &ds->timeout, devstate_timeout,
+                                     milliseconds);
+    if (rc) goto out;
+
+    rc = libxl__ev_xswatch_register(gc, &ds->watch, devstate_watch_callback,
+                                    state_path);
     if (rc) goto out;
 
     return 0;
@@ -931,18 +723,6 @@ int libxl__ev_devstate_wait(libxl__ao *ao, libxl__ev_devstate *ds,
  * futile.
  */
 
-void libxl__domaindeathcheck_init(libxl__domaindeathcheck *dc)
-{
-    libxl__ao_abortable_init(&dc->abrt);
-    libxl__ev_xswatch_init(&dc->watch);
-}
-
-void libxl__domaindeathcheck_stop(libxl__gc *gc, libxl__domaindeathcheck *dc)
-{
-    libxl__ao_abortable_deregister(&dc->abrt);
-    libxl__ev_xswatch_deregister(gc,&dc->watch);
-}
-
 static void domaindeathcheck_callback(libxl__egc *egc, libxl__ev_xswatch *w,
                             const char *watch_path, const char *event_path)
 {
@@ -950,8 +730,6 @@ static void domaindeathcheck_callback(libxl__egc *egc, libxl__ev_xswatch *w,
     EGC_GC;
     const char *p = libxl__xs_read(gc, XBT_NULL, watch_path);
     if (p) return;
-
-    libxl__domaindeathcheck_stop(gc,dc);
 
     if (errno!=ENOENT) {
         LIBXL__EVENT_DISASTER(egc,"failed to read xenstore"
@@ -961,43 +739,15 @@ static void domaindeathcheck_callback(libxl__egc *egc, libxl__ev_xswatch *w,
 
     LOG(ERROR,"%s: domain %"PRIu32" removed (%s no longer in xenstore)",
         dc->what, dc->domid, watch_path);
-    dc->callback(egc, dc, ERROR_DOMAIN_DESTROYED);
+    dc->callback(egc, dc);
 }
 
-static void domaindeathcheck_abort(libxl__egc *egc,
-                                   libxl__ao_abortable *abrt,
-                                   int rc)
-{
-    libxl__domaindeathcheck *dc = CONTAINER_OF(abrt, *dc, abrt);
-    EGC_GC;
-
-    libxl__domaindeathcheck_stop(gc,dc);
-    dc->callback(egc, dc, rc);
-}
-
-int libxl__domaindeathcheck_start(libxl__ao *ao,
+int libxl__domaindeathcheck_start(libxl__gc *gc,
                                   libxl__domaindeathcheck *dc)
 {
-    AO_GC;
-    int rc;
     const char *path = GCSPRINTF("/local/domain/%"PRIu32, dc->domid);
-
-    libxl__domaindeathcheck_init(dc);
-
-    dc->abrt.ao = ao;
-    dc->abrt.callback = domaindeathcheck_abort;
-    rc = libxl__ao_abortable_register(&dc->abrt);
-    if (rc) goto out;
-
-    rc = libxl__ev_xswatch_register(gc, &dc->watch,
-                                    domaindeathcheck_callback, path);
-    if (rc) goto out;
-
-    return 0;
-
- out:
-    libxl__domaindeathcheck_stop(gc,dc);
-    return rc;
+    return libxl__ev_xswatch_register(gc, &dc->watch,
+                                      domaindeathcheck_callback, path);
 }
 
 /*
@@ -1189,17 +939,6 @@ static int afterpoll_check_fd(libxl__poller *poller,
     return revents;
 }
 
-static void fd_occurs(libxl__egc *egc, libxl__ev_fd *efd, short revents_ign)
-{
-    short revents_current = libxl__fd_poll_recheck(egc, efd->fd, efd->events);
-
-    DBG("ev_fd=%p occurs fd=%d events=%x revents_ign=%x revents_current=%x",
-        efd, efd->fd, efd->events, revents_ign, revents_current);
-
-    if (revents_current)
-        efd->func(egc, efd, efd->fd, efd->events, revents_current);
-}
-
 static void afterpoll_internal(libxl__egc *egc, libxl__poller *poller,
                                int nfds, const struct pollfd *fds,
                                struct timeval now)
@@ -1262,7 +1001,10 @@ static void afterpoll_internal(libxl__egc *egc, libxl__poller *poller,
         break;
 
     found_fd_event:
-        fd_occurs(egc, efd, revents);
+        DBG("ev_fd=%p occurs fd=%d events=%x revents=%x",
+            efd, efd->fd, efd->events, revents);
+
+        efd->func(egc, efd, efd->fd, efd->events, revents);
     }
 
     if (afterpoll_check_fd(poller,fds,nfds, poller->wakeup_pipe[0],POLLIN)) {
@@ -1282,7 +1024,7 @@ static void afterpoll_internal(libxl__egc *egc, libxl__poller *poller,
 
         time_deregister(gc, etime);
 
-        time_occurs(egc, etime, ERROR_TIMEDOUT);
+        time_occurs(egc, etime);
     }
 }
 
@@ -1306,8 +1048,6 @@ void libxl_osevent_register_hooks(libxl_ctx *ctx,
 {
     GC_INIT(ctx);
     CTX_LOCK;
-    assert(LIBXL_LIST_EMPTY(&ctx->efds));
-    assert(LIBXL_TAILQ_EMPTY(&ctx->etimes));
     ctx->osevent_hooks = hooks;
     ctx->osevent_user = user;
     CTX_UNLOCK;
@@ -1326,7 +1066,24 @@ void libxl_osevent_occurred_fd(libxl_ctx *ctx, void *for_libxl,
     if (!ev) goto out;
     if (ev->fd != fd) goto out;
 
-    fd_occurs(egc, ev, revents_ign);
+    struct pollfd check;
+    for (;;) {
+        check.fd = fd;
+        check.events = ev->events;
+        int r = poll(&check, 1, 0);
+        if (!r)
+            goto out;
+        if (r==1)
+            break;
+        assert(r<0);
+        if (errno != EINTR) {
+            LIBXL__EVENT_DISASTER(egc, "failed poll to check for fd", errno, 0);
+            goto out;
+        }
+    }
+
+    if (check.revents)
+        ev->func(egc, ev, fd, ev->events, check.revents);
 
  out:
     CTX_UNLOCK;
@@ -1349,7 +1106,7 @@ void libxl_osevent_occurred_timeout(libxl_ctx *ctx, void *for_libxl)
 
     LIBXL_TAILQ_REMOVE(&CTX->etimes, ev, entry);
 
-    time_occurs(egc, ev, ERROR_TIMEDOUT);
+    time_occurs(egc, ev);
 
  out:
     CTX_UNLOCK;
@@ -1362,7 +1119,7 @@ void libxl__event_disaster(libxl__egc *egc, const char *msg, int errnoval,
 {
     EGC_GC;
 
-    libxl__log(CTX, XTL_CRITICAL, errnoval, file, line, func, INVALID_DOMID,
+    libxl__log(CTX, XTL_CRITICAL, errnoval, file, line, func,
                "DISASTER in event loop: %s%s%s%s",
                msg,
                type ? " (relates to event type " : "",
@@ -1405,7 +1162,6 @@ static void egc_run_callbacks(libxl__egc *egc)
         aop->how->callback(CTX, aop->ev, aop->how->for_callback);
 
         CTX_LOCK;
-        assert(aop->ao->magic == LIBXL__AO_MAGIC);
         aop->ao->progress_reports_outstanding--;
         libxl__ao_complete_check_progress_reports(egc, aop->ao);
         CTX_UNLOCK;
@@ -1419,7 +1175,8 @@ static void egc_run_callbacks(libxl__egc *egc)
         ao->how.callback(CTX, ao->rc, ao->how.u.for_callback);
         CTX_LOCK;
         ao->notified = 1;
-        ao__check_destroy(CTX, ao);
+        if (!ao->in_initiator)
+            libxl__ao__destroy(CTX, ao);
         CTX_UNLOCK;
     }
 }
@@ -1564,7 +1321,6 @@ int libxl__pipe_nonblock(libxl_ctx *ctx, int fds[2])
 
 int libxl__self_pipe_wakeup(int fd)
 {
-    /* Called from signal handlers, so needs to be async-signal-safe */
     static const char buf[1] = "";
 
     for (;;) {
@@ -1573,7 +1329,7 @@ int libxl__self_pipe_wakeup(int fd)
         assert(r==-1);
         if (errno == EINTR) continue;
         if (errno == EWOULDBLOCK) return 0;
-        if (!errno) abort();
+        assert(errno);
         return errno;
     }
 }
@@ -1597,14 +1353,14 @@ int libxl__self_pipe_eatall(int fd)
  * Manipulation of pollers
  */
 
-int libxl__poller_init(libxl__gc *gc, libxl__poller *p)
+int libxl__poller_init(libxl_ctx *ctx, libxl__poller *p)
 {
     int rc;
     p->fd_polls = 0;
     p->fd_rindices = 0;
     p->fds_changed = 0;
 
-    rc = libxl__pipe_nonblock(CTX, p->wakeup_pipe);
+    rc = libxl__pipe_nonblock(ctx, p->wakeup_pipe);
     if (rc) goto out;
 
     return 0;
@@ -1621,25 +1377,30 @@ void libxl__poller_dispose(libxl__poller *p)
     free(p->fd_rindices);
 }
 
-libxl__poller *libxl__poller_get(libxl__gc *gc)
+libxl__poller *libxl__poller_get(libxl_ctx *ctx)
 {
     /* must be called with ctx locked */
     int rc;
 
-    libxl__poller *p = LIBXL_LIST_FIRST(&CTX->pollers_idle);
+    libxl__poller *p = LIBXL_LIST_FIRST(&ctx->pollers_idle);
     if (p) {
         LIBXL_LIST_REMOVE(p, entry);
     } else {
-        p = libxl__zalloc(NOGC, sizeof(*p));
+        p = malloc(sizeof(*p));
+        if (!p) {
+            LIBXL__LOG_ERRNO(ctx, LIBXL__LOG_ERROR, "cannot allocate poller");
+            return 0;
+        }
+        memset(p, 0, sizeof(*p));
 
-        rc = libxl__poller_init(gc, p);
+        rc = libxl__poller_init(ctx, p);
         if (rc) {
             free(p);
             return NULL;
         }
     }
 
-    LIBXL_LIST_INSERT_HEAD(&CTX->pollers_fds_changed, p,
+    LIBXL_LIST_INSERT_HEAD(&ctx->pollers_fds_changed, p,
                            fds_changed_entry);
     return p;
 }
@@ -1700,7 +1461,7 @@ static int eventloop_iteration(libxl__egc *egc, libxl__poller *poller) {
         if (errno == EINTR)
             return 0; /* will go round again if caller requires */
 
-        LOGEV(ERROR, errno, "poll failed");
+        LIBXL__LOG_ERRNOVAL(CTX, LIBXL__LOG_ERROR, errno, "poll failed");
         rc = ERROR_FAIL;
         goto out;
     }
@@ -1725,7 +1486,7 @@ int libxl_event_wait(libxl_ctx *ctx, libxl_event **event_r,
     EGC_INIT(ctx);
     CTX_LOCK;
 
-    poller = libxl__poller_get(gc);
+    poller = libxl__poller_get(ctx);
     if (!poller) { rc = ERROR_FAIL; goto out; }
 
     for (;;) {
@@ -1804,33 +1565,6 @@ int libxl_event_wait(libxl_ctx *ctx, libxl_event **event_r,
  *                              - destroy the ao
  */
 
-
-/*
- * A "manip" is a libxl public function manipulating this ao, which
- * has a pointer to it.  We have to not destroy it while that's the
- * case, obviously.  Callers must have the ctx locked, obviously.
- */
-static void ao__manip_enter(libxl__ao *ao)
-{
-    assert(ao->manip_refcnt < INT_MAX);
-    ao->manip_refcnt++;
-}
-
-static void ao__manip_leave(libxl_ctx *ctx, libxl__ao *ao)
-{
-    assert(ao->manip_refcnt > 0);
-    ao->manip_refcnt--;
-    ao__check_destroy(ctx, ao);
-}
-
-static void ao__check_destroy(libxl_ctx *ctx, libxl__ao *ao)
-{
-    if (!ao->manip_refcnt && ao->notified) {
-        assert(ao->complete);
-        libxl__ao__destroy(ctx, ao);
-    }
-}
-
 void libxl__ao__destroy(libxl_ctx *ctx, libxl__ao *ao)
 {
     AO_GC;
@@ -1842,22 +1576,19 @@ void libxl__ao__destroy(libxl_ctx *ctx, libxl__ao *ao)
     free(ao);
 }
 
-void libxl__ao_create_fail(libxl__ao *ao)
+void libxl__ao_abort(libxl__ao *ao)
 {
     AO_GC;
-    LOG(DEBUG,"ao %p: create fail",ao);
+    LOG(DEBUG,"ao %p: abort",ao);
     assert(ao->magic == LIBXL__AO_MAGIC);
     assert(ao->in_initiator);
     assert(!ao->complete);
     assert(!ao->progress_reports_outstanding);
-    assert(!ao->aborting);
-    LIBXL_LIST_REMOVE(ao, inprogress_entry);
     libxl__ao__destroy(CTX, ao);
 }
 
 libxl__gc *libxl__ao_inprogress_gc(libxl__ao *ao)
 {
-    assert(ao);
     assert(ao->magic == LIBXL__AO_MAGIC);
     assert(!ao->complete);
     return &ao->gc;
@@ -1869,11 +1600,10 @@ void libxl__ao_complete(libxl__egc *egc, libxl__ao *ao, int rc)
     LOG(DEBUG,"ao %p: complete, rc=%d",ao,rc);
     assert(ao->magic == LIBXL__AO_MAGIC);
     assert(!ao->complete);
-    assert(!ao->nested_root);
-    assert(!ao->nested_progeny);
+    assert(!ao->nested);
     ao->complete = 1;
     ao->rc = rc;
-    LIBXL_LIST_REMOVE(ao, inprogress_entry);
+
     libxl__ao_complete_check_progress_reports(egc, ao);
 }
 
@@ -1892,7 +1622,6 @@ static bool ao_work_outstanding(libxl__ao *ao)
 
 void libxl__ao_complete_check_progress_reports(libxl__egc *egc, libxl__ao *ao)
 {
-    EGC_GC;
     libxl_ctx *ctx = libxl__gc_owner(&egc->gc);
     assert(ao->progress_reports_outstanding >= 0);
 
@@ -1905,7 +1634,7 @@ void libxl__ao_complete_check_progress_reports(libxl__egc *egc, libxl__ao *ao)
             /* don't bother with this if we're not in the event loop */
             libxl__poller_wakeup(egc, ao->poller);
     } else if (ao->how.callback) {
-        LOG(DEBUG, "ao %p: complete for callback", ao);
+        LIBXL__LOG(ctx, XTL_DEBUG, "ao %p: complete for callback",ao);
         LIBXL_TAILQ_INSERT_TAIL(&egc->aos_for_callback, ao, entry_for_callback);
     } else {
         libxl_event *ev;
@@ -1916,8 +1645,8 @@ void libxl__ao_complete_check_progress_reports(libxl__egc *egc, libxl__ao *ao)
         }
         ao->notified = 1;
     }
-    
-    ao__check_destroy(ctx, ao);
+    if (!ao->in_initiator && ao->notified)
+        libxl__ao__destroy(ctx, ao);
 }
 
 libxl__ao *libxl__ao_create(libxl_ctx *ctx, uint32_t domid,
@@ -1932,7 +1661,6 @@ libxl__ao *libxl__ao_create(libxl_ctx *ctx, uint32_t domid,
     ao->magic = LIBXL__AO_MAGIC;
     ao->constructing = 1;
     ao->in_initiator = 1;
-    ao__manip_enter(ao);
     ao->poller = 0;
     ao->domid = domid;
     LIBXL_INIT_GC(ao->gc, ctx);
@@ -1940,14 +1668,12 @@ libxl__ao *libxl__ao_create(libxl_ctx *ctx, uint32_t domid,
     if (how) {
         ao->how = *how;
     } else {
-        ao->poller = libxl__poller_get(&ao->gc);
+        ao->poller = libxl__poller_get(ctx);
         if (!ao->poller) goto out;
     }
-    libxl__log(ctx,XTL_DEBUG,-1,file,line,func,domid,
+    libxl__log(ctx,XTL_DEBUG,-1,file,line,func,
                "ao %p: create: how=%p callback=%p poller=%p",
                ao, how, ao->how.callback, ao->poller);
-
-    LIBXL_LIST_INSERT_HEAD(&ctx->aos_inprogress, ao, inprogress_entry);
 
     return ao;
 
@@ -1962,17 +1688,13 @@ int libxl__ao_inprogress(libxl__ao *ao,
 {
     AO_GC;
     int rc;
-    uint32_t domid = ao->domid;
 
     assert(ao->magic == LIBXL__AO_MAGIC);
     assert(ao->constructing);
     assert(ao->in_initiator);
     ao->constructing = 0;
 
-    if (ao->nested_root)
-        domid = ao->nested_root->domid;
-
-    libxl__log(CTX,XTL_DEBUG,-1,file,line,func,domid,
+    libxl__log(CTX,XTL_DEBUG,-1,file,line,func,
                "ao %p: inprogress: poller=%p, flags=%s%s%s%s",
                ao, ao->poller,
                ao->constructing ? "o" : "",
@@ -2001,14 +1723,13 @@ int libxl__ao_inprogress(libxl__ao *ao,
             rc = eventloop_iteration(&egc,ao->poller);
             if (rc) {
                 /* Oh dear, this is quite unfortunate. */
-                LOG(ERROR,
-                    "Error waiting for"" event during long-running operation (rc=%d)",
-                    rc);
+                LIBXL__LOG(CTX, LIBXL__LOG_ERROR, "Error waiting for"
+                           " event during long-running operation (rc=%d)", rc);
                 sleep(1);
                 /* It's either this or return ERROR_I_DONT_KNOW_WHETHER
                  * _THE_THING_YOU_ASKED_FOR_WILL_BE_DONE_LATER_WHEN
-                 * _YOU_DIDNT_EXPECT_IT, since we don't have a
-                 * synchronous cancellation ability. */
+                 * _YOU_DIDNT_EXPECT_IT, since we don't have any kind of
+                 * cancellation ability. */
             }
 
             CTX_UNLOCK;
@@ -2020,142 +1741,13 @@ int libxl__ao_inprogress(libxl__ao *ao,
     }
 
     ao->in_initiator = 0;
-    ao__manip_leave(CTX, ao);
+
+    if (ao->notified) {
+        assert(ao->complete);
+        libxl__ao__destroy(CTX,ao);
+    }
 
     return rc;
-}
-
-
-/* abort requests */
-
-static int ao__abort(libxl_ctx *ctx, libxl__ao *parent)
-/* Temporarily unlocks ctx, which must be locked exactly once on entry. */
-{
-    int rc;
-    ao__manip_enter(parent);
-
-    if (parent->aborting) {
-        rc = ERROR_ABORTED;
-        goto out;
-    }
-
-    parent->aborting = 1;
-
-    if (LIBXL_LIST_EMPTY(&parent->abortables)) {
-        LIBXL__LOG(ctx, LIBXL__LOG_DEBUG,
-                   "ao %p: abort requested and noted, but no-one interested",
-                   parent);
-        rc = 0;
-        goto out;
-    }
-
-    /* We keep calling abort hooks until there are none left */
-    while (!LIBXL_LIST_EMPTY(&parent->abortables)) {
-        libxl__egc egc;
-        LIBXL_INIT_EGC(egc,ctx);
-
-        assert(!parent->complete);
-
-        libxl__ao_abortable *abrt = LIBXL_LIST_FIRST(&parent->abortables);
-        assert(parent == ao_nested_root(abrt->ao));
-
-        LIBXL_LIST_REMOVE(abrt, entry);
-        abrt->registered = 0;
-
-        LIBXL__LOG(ctx, LIBXL__LOG_DEBUG,
-                   "ao %p: abrt=%p: aborting", parent, abrt->ao);
-        abrt->callback(&egc, abrt, ERROR_ABORTED);
-
-        libxl__ctx_unlock(ctx);
-        libxl__egc_cleanup(&egc);
-        libxl__ctx_lock(ctx);
-    }
-
-    rc = 0;
-
- out:
-    ao__manip_leave(ctx, parent);
-    return rc;
-}
-
-int libxl_ao_abort(libxl_ctx *ctx, const libxl_asyncop_how *how)
-{
-    libxl__ao *search;
-    libxl__ctx_lock(ctx);
-    int rc;
-
-    LIBXL_LIST_FOREACH(search, &ctx->aos_inprogress, inprogress_entry) {
-        if (how) {
-            /* looking for ao to be reported by callback or event */
-            if (search->poller)
-                /* sync */
-                continue;
-            if (how->callback != search->how.callback)
-                continue;
-            if (how->callback
-                ? (how->u.for_callback != search->how.u.for_callback)
-                : (how->u.for_event != search->how.u.for_event))
-                continue;
-        } else {
-            /* looking for synchronous call */
-            if (!search->poller)
-                /* async */
-                continue;
-        }
-        goto found;
-    }
-    rc = ERROR_NOTFOUND;
-    goto out;
-
- found:
-    rc = ao__abort(ctx, search);
- out:
-    libxl__ctx_unlock(ctx);
-    return rc;
-}
-
-int libxl__ao_aborting(libxl__ao *ao)
-{
-    libxl__ao *root = ao_nested_root(ao);
-    if (root->aborting) {
-        DBG("ao=%p: aborting at explicit check (root=%p)", ao, root);
-        return ERROR_ABORTED;
-    }
-
-    return 0;
-}
-
-int libxl__ao_abortable_register(libxl__ao_abortable *abrt)
-{
-    libxl__ao *ao = abrt->ao;
-    libxl__ao *root = ao_nested_root(ao);
-    AO_GC;
-
-    if (root->aborting) {
- DBG("ao=%p: preemptively aborting ao_abortable registration %p (root=%p)",
-            ao, abrt, root);
-        return ERROR_ABORTED;
-    }
-
-    DBG("ao=%p, abrt=%p: registering (root=%p)", ao, abrt, root);
-    LIBXL_LIST_INSERT_HEAD(&root->abortables, abrt, entry);
-    abrt->registered = 1;
-
-    return 0;
-}
-
-_hidden void libxl__ao_abortable_deregister(libxl__ao_abortable *abrt)
-{
-    if (!abrt->registered)
-        return;
-
-    libxl__ao *ao = abrt->ao;
-    libxl__ao *root __attribute__((unused)) = ao_nested_root(ao);
-    AO_GC;
-
-    DBG("ao=%p, abrt=%p: deregistering (root=%p)", ao, abrt, root);
-    LIBXL_LIST_REMOVE(abrt, entry);
-    abrt->registered = 0;
 }
 
 
@@ -2179,7 +1771,7 @@ void libxl__ao_progress_report(libxl__egc *egc, libxl__ao *ao,
         const libxl_asyncprogress_how *how, libxl_event *ev)
 {
     AO_GC;
-    assert(!ao->nested_root);
+    assert(!ao->nested);
     if (how->callback == dummy_asyncprogress_callback_ignore) {
         LOG(DEBUG,"ao %p: progress report: ignored",ao);
         libxl_event_free(CTX,ev);
@@ -2202,25 +1794,21 @@ void libxl__ao_progress_report(libxl__egc *egc, libxl__ao *ao,
 
 /* nested ao */
 
-static libxl__ao *ao_nested_root(libxl__ao *ao) {
-    libxl__ao *root = ao->nested_root ? : ao;
-    assert(!root->nested_root);
-    return root;
-}
-
 _hidden libxl__ao *libxl__nested_ao_create(libxl__ao *parent)
 {
-    libxl__ao *child = NULL, *root;
+    /* We only use the parent to get the ctx.  However, we require the
+     * caller to provide us with an ao, not just a ctx, to prove that
+     * they are already in an asynchronous operation.  That will avoid
+     * people using this to (for example) make an ao in a non-ao_how
+     * function somewhere in the middle of libxl. */
+    libxl__ao *child = NULL;
     libxl_ctx *ctx = libxl__gc_owner(&parent->gc);
 
     assert(parent->magic == LIBXL__AO_MAGIC);
-    root = ao_nested_root(parent);
 
     child = libxl__zalloc(&ctx->nogc_gc, sizeof(*child));
     child->magic = LIBXL__AO_MAGIC;
-    child->nested_root = root;
-    assert(root->nested_progeny < INT_MAX);
-    root->nested_progeny++;
+    child->nested = 1;
     LIBXL_INIT_GC(child->gc, ctx);
     libxl__gc *gc = &child->gc;
 
@@ -2231,10 +1819,7 @@ _hidden libxl__ao *libxl__nested_ao_create(libxl__ao *parent)
 _hidden void libxl__nested_ao_free(libxl__ao *child)
 {
     assert(child->magic == LIBXL__AO_MAGIC);
-    libxl__ao *root = child->nested_root;
-    assert(root);
-    assert(root->nested_progeny > 0);
-    root->nested_progeny--;
+    assert(child->nested);
     libxl_ctx *ctx = libxl__gc_owner(&child->gc);
     libxl__ao__destroy(ctx, child);
 }

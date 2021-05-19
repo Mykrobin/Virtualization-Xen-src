@@ -11,8 +11,6 @@ all: gx_all.a
 clean:
 	rm -rf gx_all.a *.o .*.d
 
-.PHONY: distclean
-distclean: clean
 
 #%.o: %.c $(GX_HDRS) Makefile
 #	$(CC) -c $(CFLAGS) -o $@ $<

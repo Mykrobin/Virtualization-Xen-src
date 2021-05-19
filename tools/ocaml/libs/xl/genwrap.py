@@ -18,7 +18,6 @@ builtins = {
     "libxl_string_list":    ("string list",            "libxl_string_list_val(&%(c)s, %(o)s)", "Val_string_list(&%(c)s)"),
     "libxl_mac":            ("int array",              "Mac_val(&%(c)s, %(o)s)",    "Val_mac(&%(c)s)"),
     "libxl_hwcap":          ("int32 array",            None,                                "Val_hwcap(&%(c)s)"),
-    "libxl_ms_vm_genid":    ("int array",              "Ms_vm_genid_val(&%(c)s, %(o)s)",    "Val_ms_vm_genid(&%(c)s)"),
     # The following needs to be sorted out later
     "libxl_cpuid_policy_list": ("unit",                "%(c)s = 0",                         "Val_unit"),
     }
@@ -87,10 +86,7 @@ def ocaml_type_of(ty):
     elif isinstance(ty,idl.KeyedUnion):
         return ty.union_name
     elif isinstance(ty,idl.Aggregate):
-        if ty.rawname is None:
-            return ty.anon_struct
-        else:
-            return ty.rawname.capitalize() + ".t"
+        return ty.rawname.capitalize() + ".t"
     else:
         return ty.rawname
 
@@ -114,14 +110,14 @@ def ocaml_instance_of_field(f):
         name = f.name
     return "%s : %s" % (munge_name(name), ocaml_type_of(f.type))
 
-def gen_struct(ty, indent):
+def gen_struct(ty):
     s = ""
     for f in ty.fields:
         if f.type.private:
             continue
         x = ocaml_instance_of_field(f)
-        x = x.replace("\n", "\n"+indent)
-        s += indent + x + ";\n"
+        x = x.replace("\n", "\n\t\t")
+        s += "\t\t" + x + ";\n"
     return s
 
 def gen_ocaml_keyedunions(ty, interface, indent, parent = None):
@@ -143,7 +139,7 @@ def gen_ocaml_keyedunions(ty, interface, indent, parent = None):
             if isinstance(f.type, idl.Struct) and not f.type.has_fields(): continue
             s += "\ntype %s_%s =\n" % (nparent,f.name)
             s += "{\n"
-            s += gen_struct(f.type, indent + "\t")
+            s += gen_struct(f.type)
             s += "}\n"
 
         name = "%s__union" % ty.keyvar.name
@@ -155,7 +151,7 @@ def gen_ocaml_keyedunions(ty, interface, indent, parent = None):
                 u.append("%s" % (f.name.capitalize()))
             elif isinstance(f.type, idl.Struct):
                 if f.type.rawname is not None:
-                    u.append("%s of %s.t" % (f.name.capitalize(), f.type.rawname.capitalize()))
+                    u.append("%s of %s" % (f.name.capitalize(), f.type.rawname.capitalize()))
                 elif f.type.has_fields():
                     u.append("%s of %s_%s" % (f.name.capitalize(), nparent, f.name))
                 else:
@@ -171,23 +167,6 @@ def gen_ocaml_keyedunions(ty, interface, indent, parent = None):
     if s == "":
         return None, None
     return s.replace("\n", "\n%s" % indent), union_type
-
-def gen_ocaml_anonstruct(ty, interface, indent, parent = None):
-    s= ""
-
-    if ty.rawname is not None:
-        # Non-anonymous types need no special handling
-        pass
-    elif isinstance(ty, idl.Struct):
-        name = "%s__anon" % parent
-        s += "type %s = {\n" % name
-        s += gen_struct(ty, indent)
-        s += "}\n"
-        ty.anon_struct = name
-    if s == "":
-        return None
-    s = indent + s
-    return s.replace("\n", "\n%s" % indent)
 
 def gen_ocaml_ml(ty, interface, indent=""):
 
@@ -232,16 +211,9 @@ def gen_ocaml_ml(ty, interface, indent=""):
             if union_type is not None:
                 union_types.append(union_type)
 
-        # Handle anonymous structs...
-        for f in ty.fields:
-            anon = gen_ocaml_anonstruct(f.type, interface, "\t", f.name)
-            if anon is not None:
-                s += anon
-                s += "\n"
-
         s += "\ttype t =\n"
         s += "\t{\n"
-        s += gen_struct(ty, "\t\t")
+        s += gen_struct(ty)
         s += "\t}\n"
 
         if ty.init_fn is not None:
@@ -325,7 +297,7 @@ def c_val(ty, c, o, indent="", parent = None):
                 s += "\t\t    case %d:\n" % (n)
                 s += "\t\t        %s = %s;\n" % (parent + ty.keyvar.name, f.enumname)
                 (nparent,fexpr) = ty.member(c, f, False)
-                s += "%s" % c_val(f.type, fexpr, "Field(%s, 0)" % o, parent=nparent, indent=indent+"\t\t        ")
+                s += "%s" % c_val(f.type, fexpr, "Field(%s, 0)" % o, indent=indent+"\t\t        ")
                 s += "break;\n"
                 n += 1
         s += "\t\t    default: failwith_xl(ERROR_FAIL, \"variant handling bug %s%s (block)\"); break;\n" % (parent, ty.keyvar.name)

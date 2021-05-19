@@ -26,12 +26,6 @@
 /* Free any of the above. */
 extern void xfree(void *);
 
-/* Free an allocation, and zero the pointer to it. */
-#define XFREE(p) do { \
-    xfree(p);         \
-    (p) = NULL;       \
-} while ( false )
-
 /* Underlying functions */
 extern void *_xmalloc(unsigned long size, unsigned long align);
 extern void *_xzalloc(unsigned long size, unsigned long align);
@@ -39,17 +33,17 @@ extern void *_xzalloc(unsigned long size, unsigned long align);
 static inline void *_xmalloc_array(
     unsigned long size, unsigned long align, unsigned long num)
 {
-    /* Check for overflow. */
-    if ( size && num > UINT_MAX / size )
-        return NULL;
-    return _xmalloc(size * num, align);
+	/* Check for overflow. */
+	if (size && num > UINT_MAX / size)
+		return NULL;
+ 	return _xmalloc(size * num, align);
 }
 
 static inline void *_xzalloc_array(
     unsigned long size, unsigned long align, unsigned long num)
 {
     /* Check for overflow. */
-    if ( size && num > UINT_MAX / size )
+    if (size && num > UINT_MAX / size)
         return NULL;
     return _xzalloc(size * num, align);
 }

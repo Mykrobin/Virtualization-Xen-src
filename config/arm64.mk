@@ -6,9 +6,10 @@ CONFIG_XEN_INSTALL_SUFFIX :=
 
 CFLAGS += #-marm -march= -mcpu= etc
 
+HAS_PL011 := y
+HAS_NS16550 := y
+
 # Use only if calling $(LD) directly.
 LDFLAGS_DIRECT += -EL
 
-IOEMU_CPU_ARCH ?= aarch64
-
-EFI_DIR ?= /usr/lib64/efi
+CONFIG_LOAD_ADDRESS ?= 0x80000000

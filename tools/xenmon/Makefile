@@ -14,10 +14,8 @@ XEN_ROOT=$(CURDIR)/../..
 include $(XEN_ROOT)/tools/Rules.mk
 
 CFLAGS  += -Werror
-CFLAGS  += $(CFLAGS_libxenevtchn)
 CFLAGS  += $(CFLAGS_libxenctrl)
 LDLIBS  += $(LDLIBS_libxenctrl)
-LDLIBS  += $(LDLIBS_libxenevtchn)
 
 SCRIPTS = xenmon.py
 
@@ -29,25 +27,18 @@ build: xentrace_setmask xenbaked
 
 .PHONY: install
 install: build
-	$(INSTALL_DIR) $(DESTDIR)$(sbindir)
-	$(INSTALL_PROG) xenbaked $(DESTDIR)$(sbindir)/xenbaked
-	$(INSTALL_PROG) xentrace_setmask  $(DESTDIR)$(sbindir)/xentrace_setmask
-	$(INSTALL_PROG) xenmon.py  $(DESTDIR)$(sbindir)/xenmon.py
-
-.PHONY: uninstall
-uninstall:
-	rm -f $(DESTDIR)$(sbindir)/xenbaked
-	rm -f $(DESTDIR)$(sbindir)/xentrace_setmask
-	rm -f $(DESTDIR)$(sbindir)/xenmon.py
+	$(INSTALL_DIR) $(DESTDIR)$(SBINDIR)
+	$(INSTALL_PROG) xenbaked $(DESTDIR)$(SBINDIR)/xenbaked
+	$(INSTALL_PROG) xentrace_setmask  $(DESTDIR)$(SBINDIR)/xentrace_setmask
+	$(INSTALL_PROG) xenmon.py  $(DESTDIR)$(SBINDIR)/xenmon.py
+	$(INSTALL_DIR) $(DESTDIR)$(DOCDIR)
+	$(INSTALL_DATA) README $(DESTDIR)$(DOCDIR)/README.xenmon
 
 .PHONY: clean
 clean:
-	$(RM) -f $(DEPS_RM)
+	$(RM) -f $(DEPS)
 	$(RM) -f xenbaked xenbaked.o
 	$(RM) -f xentrace_setmask setmask.o
-
-.PHONY: distclean
-distclean: clean
 
 xenbaked: xenbaked.o Makefile
 	$(CC) $(LDFLAGS) $< -o $@ $(LDLIBS) $(APPEND_LDFLAGS)
@@ -55,4 +46,4 @@ xenbaked: xenbaked.o Makefile
 xentrace_setmask: setmask.o Makefile
 	$(CC) $(LDFLAGS) $< -o $@ $(LDLIBS) $(APPEND_LDFLAGS)
 
--include $(DEPS_INCLUDE)
+-include $(DEPS)

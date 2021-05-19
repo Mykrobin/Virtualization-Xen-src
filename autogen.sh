@@ -1,12 +1,12 @@
 #!/bin/sh -e
-autoconf -f
+autoconf
 ( cd tools
-  autoconf -f
+  autoconf
   autoheader
 )
 ( cd stubdom
-  autoconf -f
+  autoconf
 )
 ( cd docs
-  autoconf -f
+  autoconf
 )

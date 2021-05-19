@@ -26,7 +26,7 @@
 #include "decode.h"
 
 static void update_dabt(struct hsr_dabt *dabt, int reg,
-                        uint8_t size, bool sign)
+                        uint8_t size, bool_t sign)
 {
     dabt->reg = reg;
     dabt->size = size;
@@ -41,14 +41,14 @@ static int decode_thumb2(register_t pc, struct hsr_dabt *dabt, uint16_t hw1)
     if ( raw_copy_from_guest(&hw2, (void *__user)(pc + 2), sizeof (hw2)) )
         return -EFAULT;
 
-    rt = (hw2 >> 12) & 0xf;
+    rt = (hw2 >> 12) & 0x7;
 
     switch ( (hw1 >> 9) & 0xf )
     {
     case 12:
     {
-        bool sign = (hw1 & (1u << 8));
-        bool load = (hw1 & (1u << 4));
+        bool_t sign = !!(hw1 & (1 << 8));
+        bool_t load = !!(hw1 & (1 << 4));
 
         if ( (hw1 & 0x0110) == 0x0100 )
             /* NEON instruction */
@@ -78,7 +78,7 @@ static int decode_thumb2(register_t pc, struct hsr_dabt *dabt, uint16_t hw1)
     return 0;
 
 bad_thumb2:
-    gprintk(XENLOG_ERR, "unhandled THUMB2 instruction 0x%x%x\n", hw1, hw2);
+    gdprintk(XENLOG_ERR, "unhandled THUMB2 instruction 0x%x%x\n", hw1, hw2);
 
     return 1;
 }
@@ -101,16 +101,16 @@ static int decode_thumb(register_t pc, struct hsr_dabt *dabt)
         switch ( opB & 0x3 )
         {
         case 0: /* Non-signed word */
-            update_dabt(dabt, reg, 2, false);
+            update_dabt(dabt, reg, 2, 0);
             break;
         case 1: /* Non-signed halfword */
-            update_dabt(dabt, reg, 1, false);
+            update_dabt(dabt, reg, 1, 0);
             break;
         case 2: /* Non-signed byte */
-            update_dabt(dabt, reg, 0, false);
+            update_dabt(dabt, reg, 0, 0);
             break;
         case 3: /* Signed byte */
-            update_dabt(dabt, reg, 0, true);
+            update_dabt(dabt, reg, 0, 1);
             break;
         }
 
@@ -118,19 +118,19 @@ static int decode_thumb(register_t pc, struct hsr_dabt *dabt)
     }
     case 6:
         /* Load/Store word immediate offset */
-        update_dabt(dabt, instr & 7, 2, false);
+        update_dabt(dabt, instr & 7, 2, 0);
         break;
     case 7:
         /* Load/Store byte immediate offset */
-        update_dabt(dabt, instr & 7, 0, false);
+        update_dabt(dabt, instr & 7, 0, 0);
         break;
     case 8:
         /* Load/Store halfword immediate offset */
-        update_dabt(dabt, instr & 7, 1, false);
+        update_dabt(dabt, instr & 7, 1, 0);
         break;
     case 9:
         /* Load/Store word sp offset */
-        update_dabt(dabt, (instr >> 8) & 7, 2, false);
+        update_dabt(dabt, (instr >> 8) & 7, 2, 0);
         break;
     case 14:
         if ( instr & (1 << 11) )
@@ -145,17 +145,17 @@ static int decode_thumb(register_t pc, struct hsr_dabt *dabt)
     return 0;
 
 bad_thumb:
-    gprintk(XENLOG_ERR, "unhandled THUMB instruction 0x%x\n", instr);
+    gdprintk(XENLOG_ERR, "unhandled THUMB instruction 0x%x\n", instr);
     return 1;
 }
 
 int decode_instruction(const struct cpu_user_regs *regs, struct hsr_dabt *dabt)
 {
-    if ( is_32bit_domain(current->domain) && regs->cpsr & PSR_THUMB )
+    if ( is_pv32_domain(current->domain) && regs->cpsr & PSR_THUMB )
         return decode_thumb(regs->pc, dabt);
 
     /* TODO: Handle ARM instruction */
-    gprintk(XENLOG_ERR, "unhandled ARM instruction\n");
+    gdprintk(XENLOG_ERR, "unhandled ARM instruction\n");
 
     return 1;
 }

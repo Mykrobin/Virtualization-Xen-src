@@ -32,7 +32,6 @@ struct vcpu;
 typedef s64 s_time_t;
 #define PRI_stime PRId64
 
-s_time_t get_s_time_fixed(u64 at_tick);
 s_time_t get_s_time(void);
 unsigned long get_localtime(struct domain *d);
 uint64_t get_localtime_us(struct domain *d);
@@ -49,7 +48,6 @@ struct tm {
     int     tm_isdst;       /* daylight saving time */
 };
 struct tm gmtime(unsigned long t);
-struct tm wallclock_time(uint64_t *ns);
 
 #define SYSTEM_TIME_HZ  1000000000ULL
 #define NOW()           ((s_time_t)get_s_time())
@@ -60,18 +58,15 @@ struct tm wallclock_time(uint64_t *ns);
 /* Chosen so (NOW() + delta) wont overflow without an uptime of 200 years */
 #define STIME_DELTA_MAX ((s_time_t)((uint64_t)~0ull>>2))
 
-/* Explicitly OR with 1 just in case version number gets out of sync. */
-#define version_update_begin(v) (((v) + 1) | 1)
-#define version_update_end(v)   ((v) + 1)
 extern void update_vcpu_system_time(struct vcpu *v);
 extern void update_domain_wallclock_time(struct domain *d);
 
 extern void do_settime(
-    u64 secs, unsigned int nsecs, u64 system_time_base);
+    unsigned long secs, unsigned long nsecs, u64 system_time_base);
 
 extern void send_timer_event(struct vcpu *v);
 
-void domain_set_time_offset(struct domain *d, int64_t time_offset_seconds);
+void domain_set_time_offset(struct domain *d, int32_t time_offset_seconds);
 
 #include <asm/time.h>
 

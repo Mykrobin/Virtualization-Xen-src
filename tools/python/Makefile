@@ -4,32 +4,38 @@ include $(XEN_ROOT)/tools/Rules.mk
 .PHONY: all
 all: build
 
-PY_CFLAGS = $(CFLAGS) $(PY_NOOPT_CFLAGS)
-PY_LDFLAGS = $(LDFLAGS) $(APPEND_LDFLAGS)
-INSTALL_LOG = build/installed_files.txt
+XENPATH = "xen/util/path.py"
+
+genpath-target = $(call buildmakevars2file,$(XENPATH))
+$(eval $(genpath-target))
 
 .PHONY: build
-build:
-	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" $(PYTHON) setup.py build
+build: genpath genwrap.py $(XEN_ROOT)/tools/libxl/libxl_types.idl \
+		$(XEN_ROOT)/tools/libxl/idl.py
+	PYTHONPATH=$(XEN_ROOT)/tools/libxl $(PYTHON) genwrap.py \
+		$(XEN_ROOT)/tools/libxl/libxl_types.idl \
+		xen/lowlevel/xl/_pyxl_types.h \
+		xen/lowlevel/xl/_pyxl_types.c
+	CC="$(CC)" CFLAGS="$(CFLAGS)" $(PYTHON) setup.py build --xend=$(CONFIG_XEND)
 
 .PHONY: install
-install:
-	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC_BIN)
+install: install-dtd
+	CC="$(CC)" CFLAGS="$(CFLAGS)" $(PYTHON) setup.py install \
+		$(PYTHON_PREFIX_ARG) --root="$(DESTDIR)" --force --xend=$(CONFIG_XEND)
 
-	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" LDFLAGS="$(PY_LDFLAGS)" $(PYTHON) \
-		setup.py install --record $(INSTALL_LOG) $(PYTHON_PREFIX_ARG) \
-		--root="$(DESTDIR)" --force
+	$(INSTALL_DIR) $(DESTDIR)$(SBINDIR)
+ifeq ($(CONFIG_XEND),y)
+	$(INSTALL_PYTHON_PROG) xen/xm/xm $(DESTDIR)$(SBINDIR)/xm
+	$(INSTALL_PYTHON_PROG) xen/xend/xend $(DESTDIR)$(SBINDIR)/xend
+endif
 
-	$(INSTALL_PROG) scripts/convert-legacy-stream $(DESTDIR)$(LIBEXEC_BIN)
-	$(INSTALL_PROG) scripts/verify-stream-v2 $(DESTDIR)$(LIBEXEC_BIN)
-
-.PHONY: uninstall
-uninstall:
-	rm -f $(DESTDIR)$(LIBEXEC_BIN)/verify-stream-v2
-	rm -f $(DESTDIR)$(LIBEXEC_BIN)/convert-legacy-stream
-	if [ -e $(INSTALL_LOG) ]; then \
-		cat $(INSTALL_LOG) | xargs -i rm -f $(DESTDIR)/{}; \
-	fi
+install-dtd: all
+ifeq ($(CONFIG_XEND),y)
+	$(INSTALL_DIR) $(DESTDIR)$(SHAREDIR)/xen
+	$(INSTALL_DATA) xen/xm/create.dtd $(DESTDIR)$(SHAREDIR)/xen
+else
+	:
+endif
 
 .PHONY: test
 test:
@@ -37,11 +43,10 @@ test:
 
 .PHONY: clean
 clean:
-	find . \( -name "*.py[ocd]" -o -name "*~" -o -name "_*.[hc]" \) -delete
-	rm -rf build/
-	rm -f $(DEPS_RM)
+	rm -f $(XENPATH)
+	rm -rf build/ *.pyc *.pyo *.o *.a *~ xen/util/auxbin.pyc
+	rm -f xen/lowlevel/xl/_pyxl_types.h
+	rm -f xen/lowlevel/xl/_pyxl_types.c
+	rm -f $(DEPS)
 
-.PHONY: distclean
-distclean: clean
-
--include $(DEPS_INCLUDE)
+-include $(DEPS)

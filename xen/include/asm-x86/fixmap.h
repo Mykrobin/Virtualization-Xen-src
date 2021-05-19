@@ -12,17 +12,18 @@
 #ifndef _ASM_FIXMAP_H
 #define _ASM_FIXMAP_H
 
+#include <xen/config.h>
 #include <asm/page.h>
 
 #define FIXADDR_TOP (VMAP_VIRT_END - PAGE_SIZE)
 
 #ifndef __ASSEMBLY__
 
-#include <xen/acpi.h>
 #include <xen/pfn.h>
 #include <xen/kexec.h>
 #include <xen/iommu.h>
 #include <asm/apicdef.h>
+#include <asm/acpi.h>
 #include <asm/amd-iommu.h>
 #include <asm/msi.h>
 #include <acpi/apei.h>
@@ -45,16 +46,15 @@ enum fixed_addresses {
     FIX_COM_BEGIN,
     FIX_COM_END,
     FIX_EHCI_DBGP,
-#ifdef CONFIG_XEN_GUEST
-    FIX_PV_CONSOLE,
-    FIX_XEN_SHARED_INFO,
-#endif /* CONFIG_XEN_GUEST */
     /* Everything else should go further down. */
+    FIX_VGC_END,
+    FIX_VGC_BEGIN = FIX_VGC_END
+      + PFN_UP(sizeof(struct vcpu_guest_context)) * NR_CPUS - 1,
     FIX_APIC_BASE,
     FIX_IO_APIC_BASE_0,
     FIX_IO_APIC_BASE_END = FIX_IO_APIC_BASE_0 + MAX_IO_APICS-1,
     FIX_ACPI_BEGIN,
-    FIX_ACPI_END = FIX_ACPI_BEGIN + NUM_FIXMAP_ACPI_PAGES - 1,
+    FIX_ACPI_END = FIX_ACPI_BEGIN + FIX_ACPI_PAGES - 1,
     FIX_HPET_BASE,
     FIX_TBOOT_SHARED_BASE,
     FIX_MSIX_IO_RESERV_BASE,
@@ -62,6 +62,7 @@ enum fixed_addresses {
     FIX_TBOOT_MAP_ADDRESS,
     FIX_APEI_RANGE_BASE,
     FIX_APEI_RANGE_END = FIX_APEI_RANGE_BASE + FIX_APEI_RANGE_MAX -1,
+    FIX_IGD_MMIO,
     FIX_EFI_MPF,
     __end_of_fixed_addresses
 };
@@ -76,14 +77,12 @@ extern void __set_fixmap(
     __set_fixmap(idx, (phys)>>PAGE_SHIFT, PAGE_HYPERVISOR)
 
 #define set_fixmap_nocache(idx, phys) \
-    __set_fixmap(idx, (phys)>>PAGE_SHIFT, PAGE_HYPERVISOR_UCMINUS)
-
-#define clear_fixmap(idx) __set_fixmap(idx, 0, 0)
+    __set_fixmap(idx, (phys)>>PAGE_SHIFT, PAGE_HYPERVISOR_NOCACHE)
 
 #define __fix_to_virt(x) (FIXADDR_TOP - ((x) << PAGE_SHIFT))
 #define __virt_to_fix(x) ((FIXADDR_TOP - ((x)&PAGE_MASK)) >> PAGE_SHIFT)
 
-#define fix_to_virt(x)   ((void *)__fix_to_virt(x))
+#define fix_to_virt(x)   (__fix_to_virt(x))
 
 static inline unsigned long virt_to_fix(const unsigned long vaddr)
 {

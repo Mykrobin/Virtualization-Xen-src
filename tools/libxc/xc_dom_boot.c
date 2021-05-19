@@ -18,7 +18,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  *
  * written 2006 by Gerd Hoffmann <kraxel@suse.de>.
  *
@@ -32,7 +33,6 @@
 
 #include "xg_private.h"
 #include "xc_dom.h"
-#include "xc_core.h"
 #include <xen/hvm/params.h>
 #include <xen/grant_table.h>
 
@@ -53,12 +53,44 @@ static int setup_hypercall_page(struct xc_dom_image *dom)
                   dom->parms.virt_hypercall, pfn);
     domctl.cmd = XEN_DOMCTL_hypercall_init;
     domctl.domain = dom->guest_domid;
-    domctl.u.hypercall_init.gmfn = xc_dom_p2m(dom, pfn);
+    domctl.u.hypercall_init.gmfn = xc_dom_p2m_guest(dom, pfn);
     rc = do_domctl(dom->xch, &domctl);
     if ( rc != 0 )
+        xc_dom_panic(dom->xch,
+                     XC_INTERNAL_ERROR, "%s: HYPERCALL_INIT failed (rc=%d)",
+                     __FUNCTION__, rc);
+    return rc;
+}
+
+static int launch_vm(xc_interface *xch, domid_t domid,
+                     vcpu_guest_context_any_t *ctxt)
+{
+    int rc;
+
+    xc_dom_printf(xch, "%s: called, ctxt=%p", __FUNCTION__, ctxt);
+    rc = xc_vcpu_setcontext(xch, domid, 0, ctxt);
+    if ( rc != 0 )
+        xc_dom_panic(xch, XC_INTERNAL_ERROR,
+                     "%s: SETVCPUCONTEXT failed (rc=%d)", __FUNCTION__, rc);
+    return rc;
+}
+
+static int clear_page(struct xc_dom_image *dom, xen_pfn_t pfn)
+{
+    xen_pfn_t dst;
+    int rc;
+
+    if ( pfn == 0 )
+        return 0;
+
+    dst = xc_dom_p2m_host(dom, pfn);
+    DOMPRINTF("%s: pfn 0x%" PRIpfn ", mfn 0x%" PRIpfn "",
+              __FUNCTION__, pfn, dst);
+    rc = xc_clear_domain_page(dom->xch, dom->guest_domid, dst);
+    if ( rc != 0 )
         xc_dom_panic(dom->xch, XC_INTERNAL_ERROR,
-                     "%s: HYPERCALL_INIT failed: %d - %s)",
-                     __FUNCTION__, errno, strerror(errno));
+                     "%s: xc_clear_domain_page failed (pfn 0x%" PRIpfn
+                     ", rc=%d)", __FUNCTION__, pfn, rc);
     return rc;
 }
 
@@ -91,7 +123,7 @@ int xc_dom_compat_check(struct xc_dom_image *dom)
     return found;
 }
 
-int xc_dom_boot_xen_init(struct xc_dom_image *dom, xc_interface *xch, uint32_t domid)
+int xc_dom_boot_xen_init(struct xc_dom_image *dom, xc_interface *xch, domid_t domid)
 {
     dom->xch = xch;
     dom->guest_domid = domid;
@@ -114,7 +146,7 @@ int xc_dom_boot_mem_init(struct xc_dom_image *dom)
 
     DOMPRINTF_CALLED(dom->xch);
 
-    rc = dom->arch_hooks->meminit(dom);
+    rc = arch_setup_meminit(dom);
     if ( rc != 0 )
     {
         xc_dom_panic(dom->xch, XC_OUT_OF_MEMORY,
@@ -145,7 +177,7 @@ void *xc_dom_boot_domU_map(struct xc_dom_image *dom, xen_pfn_t pfn,
     }
 
     for ( i = 0; i < count; i++ )
-        entries[i].mfn = xc_dom_p2m(dom, pfn + i);
+        entries[i].mfn = xc_dom_p2m_host(dom, pfn + i);
 
     ptr = xc_map_foreign_ranges(dom->xch, dom->guest_domid,
                 count << page_shift, PROT_READ | PROT_WRITE, 1 << page_shift,
@@ -165,13 +197,18 @@ void *xc_dom_boot_domU_map(struct xc_dom_image *dom, xen_pfn_t pfn,
 
 int xc_dom_boot_image(struct xc_dom_image *dom)
 {
+    DECLARE_HYPERCALL_BUFFER(vcpu_guest_context_any_t, ctxt);
     xc_dominfo_t info;
     int rc;
+
+    ctxt = xc_hypercall_buffer_alloc(dom->xch, ctxt, sizeof(*ctxt));
+    if ( ctxt == NULL )
+        return -1;
 
     DOMPRINTF_CALLED(dom->xch);
 
     /* misc stuff*/
-    if ( (rc = dom->arch_hooks->bootearly(dom)) != 0 )
+    if ( (rc = arch_setup_bootearly(dom)) != 0 )
         return rc;
 
     /* collect some info */
@@ -203,6 +240,11 @@ int xc_dom_boot_image(struct xc_dom_image *dom)
         if ( (rc = dom->arch_hooks->setup_pgtables(dom)) != 0 )
             return rc;
 
+    if ( (rc = clear_page(dom, dom->console_pfn)) != 0 )
+        return rc;
+    if ( (rc = clear_page(dom, dom->xenstore_pfn)) != 0 )
+        return rc;
+
     /* start info page */
     if ( dom->arch_hooks->start_info )
         dom->arch_hooks->start_info(dom);
@@ -213,18 +255,21 @@ int xc_dom_boot_image(struct xc_dom_image *dom)
     xc_dom_log_memory_footprint(dom);
 
     /* misc x86 stuff */
-    if ( (rc = dom->arch_hooks->bootlate(dom)) != 0 )
+    if ( (rc = arch_setup_bootlate(dom)) != 0 )
         return rc;
 
     /* let the vm run */
-    if ( (rc = dom->arch_hooks->vcpu(dom)) != 0 )
+    memset(ctxt, 0, sizeof(*ctxt));
+    if ( (rc = dom->arch_hooks->vcpu(dom, ctxt)) != 0 )
         return rc;
     xc_dom_unmap_all(dom);
+    rc = launch_vm(dom->xch, dom->guest_domid, ctxt);
 
+    xc_hypercall_buffer_free(dom->xch, ctxt);
     return rc;
 }
 
-static xen_pfn_t xc_dom_gnttab_setup(xc_interface *xch, uint32_t domid)
+static xen_pfn_t xc_dom_gnttab_setup(xc_interface *xch, domid_t domid)
 {
     gnttab_setup_table_t setup;
     DECLARE_HYPERCALL_BUFFER(xen_pfn_t, gmfnp);
@@ -256,11 +301,11 @@ static xen_pfn_t xc_dom_gnttab_setup(xc_interface *xch, uint32_t domid)
     return gmfn;
 }
 
-int xc_dom_gnttab_seed(xc_interface *xch, uint32_t domid,
+int xc_dom_gnttab_seed(xc_interface *xch, domid_t domid,
                        xen_pfn_t console_gmfn,
                        xen_pfn_t xenstore_gmfn,
-                       uint32_t console_domid,
-                       uint32_t xenstore_domid)
+                       domid_t console_domid,
+                       domid_t xenstore_domid)
 {
 
     xen_pfn_t gnttab_gmfn;
@@ -313,14 +358,14 @@ int xc_dom_gnttab_seed(xc_interface *xch, uint32_t domid,
     return 0;
 }
 
-int xc_dom_gnttab_hvm_seed(xc_interface *xch, uint32_t domid,
+int xc_dom_gnttab_hvm_seed(xc_interface *xch, domid_t domid,
                            xen_pfn_t console_gpfn,
                            xen_pfn_t xenstore_gpfn,
-                           uint32_t console_domid,
-                           uint32_t xenstore_domid)
+                           domid_t console_domid,
+                           domid_t xenstore_domid)
 {
     int rc;
-    xen_pfn_t scratch_gpfn;
+    xen_pfn_t max_gfn;
     struct xen_add_to_physmap xatp = {
         .domid = domid,
         .space = XENMAPSPACE_grant_table,
@@ -330,21 +375,16 @@ int xc_dom_gnttab_hvm_seed(xc_interface *xch, uint32_t domid,
         .domid = domid,
     };
 
-    rc = xc_core_arch_get_scratch_gpfn(xch, domid, &scratch_gpfn);
-    if ( rc < 0 )
-    {
+    max_gfn = xc_domain_maximum_gpfn(xch, domid);
+    if ( max_gfn <= 0 ) {
         xc_dom_panic(xch, XC_INTERNAL_ERROR,
-                     "%s: failed to get a scratch gfn "
+                     "%s: failed to get max gfn "
                      "[errno=%d]\n",
                      __FUNCTION__, errno);
         return -1;
     }
-    xatp.gpfn = scratch_gpfn;
-    xrfp.gpfn = scratch_gpfn;
-
-    xc_dom_printf(xch, "%s: called, pfn=0x%"PRI_xen_pfn, __FUNCTION__,
-                  scratch_gpfn);
-
+    xatp.gpfn = max_gfn + 1;
+    xrfp.gpfn = max_gfn + 1;
 
     rc = do_memory_op(xch, XENMEM_add_to_physmap, &xatp, sizeof(xatp));
     if ( rc != 0 )
@@ -383,14 +423,14 @@ int xc_dom_gnttab_hvm_seed(xc_interface *xch, uint32_t domid,
 
 int xc_dom_gnttab_init(struct xc_dom_image *dom)
 {
-    if ( xc_dom_translated(dom) ) {
+    if ( xc_dom_feature_translated(dom) ) {
         return xc_dom_gnttab_hvm_seed(dom->xch, dom->guest_domid,
                                       dom->console_pfn, dom->xenstore_pfn,
                                       dom->console_domid, dom->xenstore_domid);
     } else {
         return xc_dom_gnttab_seed(dom->xch, dom->guest_domid,
-                                  xc_dom_p2m(dom, dom->console_pfn),
-                                  xc_dom_p2m(dom, dom->xenstore_pfn),
+                                  xc_dom_p2m_host(dom, dom->console_pfn),
+                                  xc_dom_p2m_host(dom, dom->xenstore_pfn),
                                   dom->console_domid, dom->xenstore_domid);
     }
 }

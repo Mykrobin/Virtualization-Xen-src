@@ -14,17 +14,17 @@
 #define __DEFINE_COMPAT_HANDLE(name, type) \
     typedef struct { \
         compat_ptr_t c; \
-        type *_[0] __packed; \
-    } __compat_handle_ ## name; \
-    typedef struct { \
-        compat_ptr_t c; \
-        const type *_[0] __packed; \
-    } __compat_handle_const_ ## name
+        type *_[0] __attribute__((__packed__)); \
+    } __compat_handle_ ## name
 
 #define DEFINE_COMPAT_HANDLE(name) \
-    __DEFINE_COMPAT_HANDLE(name, name)
+    __DEFINE_COMPAT_HANDLE(name, name); \
+    __DEFINE_COMPAT_HANDLE(const_ ## name, const name)
 #define COMPAT_HANDLE(name)          __compat_handle_ ## name
 
+/* NB: it is assumed that if an arch uses the compat layer it does not
+ * distinguish handles from parameter handles. */
+#define COMPAT_HANDLE_PARAM(name)    __compat_handle_ ## name
 /* Is the compat handle a NULL reference? */
 #define compat_handle_is_null(hnd)        ((hnd).c == 0)
 
@@ -134,16 +134,14 @@
 #define CHECK_NAME_(k, n, tag) __check ## tag ## k ## _ ## n
 
 #define CHECK_TYPE(name) \
-static inline int __maybe_unused \
-CHECK_NAME(name, T)(xen_ ## name ## _t *x, \
-                    compat_ ## name ## _t *c) \
+static inline int CHECK_NAME(name, T)(xen_ ## name ## _t *x, \
+                                      compat_ ## name ## _t *c) \
 { \
     return x == c; \
 }
 #define CHECK_TYPE_(k, n) \
-static inline int __maybe_unused \
-CHECK_NAME_(k, n, T)(k xen_ ## n *x, \
-                     k compat_ ## n *c) \
+static inline int CHECK_NAME_(k, n, T)(k xen_ ## n *x, \
+                                       k compat_ ## n *c) \
 { \
     return x == c; \
 }
@@ -156,14 +154,14 @@ CHECK_NAME_(k, n, T)(k xen_ ## n *x, \
                                           sizeof(k compat_ ## n)) * 2]
 
 #define CHECK_FIELD_COMMON(name, t, f) \
-static inline int __maybe_unused name(xen_ ## t ## _t *x, compat_ ## t ## _t *c) \
+static inline int name(xen_ ## t ## _t *x, compat_ ## t ## _t *c) \
 { \
     BUILD_BUG_ON(offsetof(xen_ ## t ## _t, f) != \
                  offsetof(compat_ ## t ## _t, f)); \
     return &x->f == &c->f; \
 }
 #define CHECK_FIELD_COMMON_(k, name, n, f) \
-static inline int __maybe_unused name(k xen_ ## n *x, k compat_ ## n *c) \
+static inline int name(k xen_ ## n *x, k compat_ ## n *c) \
 { \
     BUILD_BUG_ON(offsetof(k xen_ ## n, f) != \
                  offsetof(k compat_ ## n, f)); \
@@ -227,8 +225,8 @@ void xlat_start_info(struct start_info *, enum XLAT_start_info_console);
 struct vcpu_runstate_info;
 void xlat_vcpu_runstate_info(struct vcpu_runstate_info *);
 
-struct domain;
 int switch_compat(struct domain *);
+int switch_native(struct domain *);
 
 #else
 

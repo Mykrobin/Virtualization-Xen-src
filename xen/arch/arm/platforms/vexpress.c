@@ -22,6 +22,7 @@
 #include <xen/mm.h>
 #include <xen/vmap.h>
 #include <asm/io.h>
+#include <asm/gic.h>
 
 #define DCC_SHIFT      26
 #define FUNCTION_SHIFT 20
@@ -47,7 +48,7 @@ static inline int vexpress_ctrl_start(uint32_t *syscfg, int write,
     /* wait for complete flag to be set */
     do {
         stat = syscfg[V2M_SYS_CFGSTAT/4];
-        dsb(sy);
+        dsb();
     } while ( !(stat & V2M_SYS_CFG_COMPLETE) );
 
     /* check error status and return error flag if set */
@@ -64,8 +65,7 @@ int vexpress_syscfg(int write, int function, int device, uint32_t *data)
     uint32_t *syscfg = (uint32_t *) FIXMAP_ADDR(FIXMAP_MISC);
     int ret = -1;
 
-    set_fixmap(FIXMAP_MISC, maddr_to_mfn(V2M_SYS_MMIO_BASE),
-               PAGE_HYPERVISOR_NOCACHE);
+    set_fixmap(FIXMAP_MISC, V2M_SYS_MMIO_BASE >> PAGE_SHIFT, DEV_SHARED);
 
     if ( syscfg[V2M_SYS_CFGCTRL/4] & V2M_SYS_CFG_START )
         goto out;
@@ -113,10 +113,10 @@ static void vexpress_reset(void)
 
     /* switch to slow mode */
     writel(0x3, sp810);
-    dsb(sy); isb();
+    dsb(); isb();
     /* writing any value to SCSYSSTAT reg will reset the system */
     writel(0x1, sp810 + 4);
-    dsb(sy); isb();
+    dsb(); isb();
 
     iounmap(sp810);
 }

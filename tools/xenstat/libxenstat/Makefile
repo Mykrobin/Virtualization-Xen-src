@@ -15,6 +15,10 @@
 XEN_ROOT=$(CURDIR)/../../..
 include $(XEN_ROOT)/tools/Rules.mk
 
+prefix=$(PREFIX)
+includedir=$(prefix)/include
+libdir=$(prefix)/lib
+
 LDCONFIG=ldconfig
 MAKE_LINK=ln -sf
 
@@ -24,39 +28,22 @@ MINOR=0
 LIB=src/libxenstat.a
 SHLIB=src/libxenstat.so.$(MAJOR).$(MINOR)
 SHLIB_LINKS=src/libxenstat.so.$(MAJOR) src/libxenstat.so
-OBJECTS-y=src/xenstat.o src/xenstat_qmp.o
+OBJECTS-y=src/xenstat.o
 OBJECTS-$(CONFIG_Linux) += src/xenstat_linux.o
 OBJECTS-$(CONFIG_SunOS) += src/xenstat_solaris.o
 OBJECTS-$(CONFIG_NetBSD) += src/xenstat_netbsd.o
-OBJECTS-$(CONFIG_FreeBSD) += src/xenstat_freebsd.o
 SONAME_FLAGS=-Wl,$(SONAME_LDFLAG) -Wl,libxenstat.so.$(MAJOR)
 
-CFLAGS+=-fPIC
-CFLAGS+=-Isrc $(CFLAGS_libxenctrl) $(CFLAGS_libxenstore) $(CFLAGS_xeninclude) -include $(XEN_ROOT)/tools/config.h
+WARN_FLAGS=-Wall -Werror
 
-LDLIBS-y = $(LDLIBS_libxenstore) $(LDLIBS_libxenctrl) -lyajl
+CFLAGS+=-fPIC
+CFLAGS+=-Isrc $(CFLAGS_libxenctrl) $(CFLAGS_libxenstore) $(CFLAGS_xeninclude)
+
+LDLIBS-y = $(LDLIBS_libxenstore) $(LDLIBS_libxenctrl)
 LDLIBS-$(CONFIG_SunOS) += -lkstat
 
-PKG_CONFIG := xenstat.pc
-PKG_CONFIG_VERSION := $(MAJOR).$(MINOR)
-
-ifneq ($(CONFIG_LIBXC_MINIOS),y)
-PKG_CONFIG_INST := $(PKG_CONFIG)
-$(PKG_CONFIG_INST): PKG_CONFIG_PREFIX = $(prefix)
-$(PKG_CONFIG_INST): PKG_CONFIG_INCDIR = $(includedir)
-$(PKG_CONFIG_INST): PKG_CONFIG_LIBDIR = $(libdir)
-endif
-
-PKG_CONFIG_LOCAL := $(foreach pc,$(PKG_CONFIG),$(PKG_CONFIG_DIR)/$(pc))
-
-$(PKG_CONFIG_LOCAL): PKG_CONFIG_PREFIX = $(XEN_ROOT)
-$(PKG_CONFIG_LOCAL): PKG_CONFIG_INCDIR = $(XEN_LIBXENSTAT)
-$(PKG_CONFIG_LOCAL): PKG_CONFIG_LIBDIR = $(CURDIR)
-
 .PHONY: all
-all: $(LIB) $(SHLIB) $(SHLIB_LINKS) $(PKG_CONFIG_INST) $(PKG_CONFIG_LOCAL)
-
-$(OBJECTS-y): src/_paths.h
+all: $(LIB) $(SHLIB) $(SHLIB_LINKS)
 
 $(LIB): $(OBJECTS-y)
 	$(AR) rc $@ $^
@@ -74,21 +61,11 @@ src/libxenstat.so: src/libxenstat.so.$(MAJOR)
 
 .PHONY: install
 install: all
-	$(INSTALL_DATA) src/xenstat.h $(DESTDIR)$(includedir)
-	$(INSTALL_DATA) $(LIB) $(DESTDIR)$(libdir)/libxenstat.a
-	$(INSTALL_PROG) src/libxenstat.so.$(MAJOR).$(MINOR) $(DESTDIR)$(libdir)
-	ln -sf libxenstat.so.$(MAJOR).$(MINOR) $(DESTDIR)$(libdir)/libxenstat.so.$(MAJOR)
-	ln -sf libxenstat.so.$(MAJOR) $(DESTDIR)$(libdir)/libxenstat.so
-	$(INSTALL_DATA) xenstat.pc $(DESTDIR)$(PKG_INSTALLDIR)
-
-.PHONY: uninstall
-uninstall:
-	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xenstat.pc
-	rm -f $(DESTDIR)$(libdir)/libxenstat.so
-	rm -f $(DESTDIR)$(libdir)/libxenstat.so.$(MAJOR)
-	rm -f $(DESTDIR)$(libdir)/libxenstat.so.$(MAJOR).$(MINOR)
-	rm -f $(DESTDIR)$(libdir)/libxenstat.a
-	rm -f $(DESTDIR)$(includedir)/xenstat.h
+	$(INSTALL_DATA) src/xenstat.h $(DESTDIR)$(INCLUDEDIR)
+	$(INSTALL_DATA) $(LIB) $(DESTDIR)$(LIBDIR)/libxenstat.a
+	$(INSTALL_PROG) src/libxenstat.so.$(MAJOR).$(MINOR) $(DESTDIR)$(LIBDIR)
+	ln -sf libxenstat.so.$(MAJOR).$(MINOR) $(DESTDIR)$(LIBDIR)/libxenstat.so.$(MAJOR)
+	ln -sf libxenstat.so.$(MAJOR) $(DESTDIR)$(LIBDIR)/libxenstat.so
 
 PYLIB=bindings/swig/python/_xenstat.so
 PYMOD=bindings/swig/python/xenstat.py
@@ -106,15 +83,12 @@ all-bindings: perl-bindings python-bindings
 # The install-bindings target installs all the language bindings
 install-bindings: install-perl-bindings install-python-bindings
 
-.PHONY: uninstall-bindings
-uninstall-bindings: uninstall-perl-bindings uninstall-python-bindings
-
 $(BINDINGS): $(SHLIB) $(SHLIB_LINKS) src/xenstat.h
 
 SWIG_FLAGS=-module xenstat -Isrc
 
 # Python bindings
-PYTHON_VERSION=$(PYTHON:python%=%)
+PYTHON_VERSION=2.3
 PYTHON_FLAGS=-I/usr/include/python$(PYTHON_VERSION) -lpython$(PYTHON_VERSION)
 $(PYMOD): $(PYSRC)
 $(PYSRC): bindings/swig/xenstat.i
@@ -130,16 +104,10 @@ install-python-bindings: $(PYLIB) $(PYMOD)
 	$(INSTALL_PROG) $(PYLIB) $(DESTDIR)$(pythonlibdir)/_xenstat.so
 	$(INSTALL_PROG) $(PYMOD) $(DESTDIR)$(pythonlibdir)/xenstat.py
 
-.PHONY: uninstall-python-bindings
-uninstall-python-bindings:
-	rm -f $(DESTDIR)$(pythonlibdir)/_xenstat.so
-	rm -f $(DESTDIR)$(pythonlibdir)/xenstat.py
-
 ifeq ($(XENSTAT_PYTHON_BINDINGS),y)
 .PHONY: all
 all: python-bindings
 install: install-python-bindings
-uninstall: uninstall-python-bindings
 endif
 
 # Perl bindings
@@ -161,30 +129,17 @@ install-perl-bindings: $(PERLLIB) $(PERLMOD)
 	$(INSTALL_PROG) $(PERLLIB) $(DESTDIR)$(perllibdir)/xenstat.so
 	$(INSTALL_PROG) $(PERLMOD) $(DESTDIR)$(perlmoddir)/xenstat.pm
 
-.PHONY: uninstall-perl-bindings
-uninstall-perl-bindings:
-	rm -f $(DESTDIR)$(perllibdir)/xenstat.so
-	rm -f $(DESTDIR)$(perlmoddir)/xenstat.pm
-
 ifeq ($(XENSTAT_PERL_BINDINGS),y)
 .PHONY: all
 all: perl-bindings
 
 .PHONY: install
 install: install-perl-bindings
-uninstall: uninstall-perl-bindings
 endif
 
 .PHONY: clean
 clean:
 	rm -f $(LIB) $(SHLIB) $(SHLIB_LINKS) $(OBJECTS-y) \
-	      $(BINDINGS) $(BINDINGSRC) $(DEPS_RM) src/_paths.h
-	rm -f xenstat.pc
+	      $(BINDINGS) $(BINDINGSRC) $(DEPS)
 
-.PHONY: distclean
-distclean: clean
-
--include $(DEPS_INCLUDE)
-
-genpath-target = $(call buildmakevars2header,src/_paths.h)
-$(eval $(genpath-target))
+-include $(DEPS)

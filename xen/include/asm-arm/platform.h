@@ -37,12 +37,21 @@ struct platform_desc {
      * List of devices which must not pass-through to a guest
      */
     const struct dt_device_match *blacklist_dev;
+    /*
+     * The IRQ (PPI) to use to inject event channels to dom0.
+     */
+    unsigned int dom0_evtchn_ppi;
+    /*
+     * The location of a region of physical address space which dom0
+     * can use for grant table mappings. If size is zero defaults to
+     * 0xb0000000-0xb0020000.
+     */
+    paddr_t dom0_gnttab_start, dom0_gnttab_size;
 };
 
 /*
- * Quirk for platforms where device tree incorrectly reports 4K GICC
- * size, but actually the two GICC register ranges are placed at 64K
- * stride.
+ * Quirk for platforms where the 4K GIC register ranges are placed at
+ * 64K stride.
  */
 #define PLATFORM_QUIRK_GIC_64K_STRIDE (1 << 0)
 
@@ -55,12 +64,14 @@ int platform_cpu_up(int cpu);
 #endif
 void platform_reset(void);
 void platform_poweroff(void);
-bool platform_has_quirk(uint32_t quirk);
-bool platform_device_is_blacklisted(const struct dt_device_node *node);
+bool_t platform_has_quirk(uint32_t quirk);
+bool_t platform_device_is_blacklisted(const struct dt_device_node *node);
+unsigned int platform_dom0_evtchn_ppi(void);
+void platform_dom0_gnttab(paddr_t *start, paddr_t *size);
 
 #define PLATFORM_START(_name, _namestr)                         \
 static const struct platform_desc  __plat_desc_##_name __used   \
-__section(".arch.info") = {                                     \
+__attribute__((__section__(".arch.info"))) = {                  \
     .name = _namestr,
 
 #define PLATFORM_END                                            \

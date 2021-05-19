@@ -31,7 +31,7 @@
 
 /*
  * Prototype for this hypercall is:
- *  long vcpu_op(int cmd, unsigned int vcpuid, void *extra_args)
+ *  int vcpu_op(int cmd, int vcpuid, void *extra_args)
  * @cmd        == VCPUOP_??? (VCPU operation).
  * @vcpuid     == VCPU to operate on.
  * @extra_args == Operation-specific extra arguments (NULL if none).
@@ -41,10 +41,8 @@
  * Initialise a VCPU. Each VCPU can be initialised only once. A 
  * newly-initialised VCPU will not run until it is brought up by VCPUOP_up.
  * 
- * @extra_arg == For PV or ARM guests this is a pointer to a vcpu_guest_context
- *               structure containing the initial state for the VCPU. For x86
- *               HVM based guests this is a pointer to a vcpu_hvm_context
- *               structure.
+ * @extra_arg == pointer to vcpu_guest_context structure containing initial
+ *               state for the VCPU.
  */
 #define VCPUOP_initialise            0
 
@@ -83,12 +81,6 @@ struct vcpu_runstate_info {
     int      state;
     /* When was current state entered (system time, ns)? */
     uint64_t state_entry_time;
-    /*
-     * Update indicator set in state_entry_time:
-     * When activated via VMASST_TYPE_runstate_update_flag, set during
-     * updates in guest memory mapped copy of vcpu_runstate_info.
-     */
-#define XEN_RUNSTATE_UPDATE          (xen_mk_ullong(1) << 63)
     /*
      * Time spent in each RUNSTATE_* (ns). The sum of these times is
      * guaranteed not to drift from system time.

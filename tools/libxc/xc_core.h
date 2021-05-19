@@ -13,7 +13,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  *
  */
 
@@ -146,9 +147,6 @@ int xc_core_arch_map_p2m_writable(xc_interface *xch, unsigned int guest_width,
                                   xc_dominfo_t *info,
                                   shared_info_any_t *live_shinfo,
                                   xen_pfn_t **live_p2m, unsigned long *pfnp);
-
-int xc_core_arch_get_scratch_gpfn(xc_interface *xch, uint32_t domid,
-                                  xen_pfn_t *gpfn);
 
 
 #if defined (__i386__) || defined (__x86_64__)

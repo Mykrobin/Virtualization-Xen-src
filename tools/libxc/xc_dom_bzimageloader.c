@@ -18,7 +18,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  *
  * written 2006 by Gerd Hoffmann <kraxel@suse.de>.
  * written 2007 by Jeremy Fitzhardinge <jeremy@xensource.com>
@@ -33,8 +34,6 @@
 
 #include "xg_private.h"
 #include "xc_dom_decompress.h"
-
-#include <xen-tools/libs.h>
 
 #ifndef __MINIOS__
 
@@ -162,13 +161,6 @@ static int xc_try_bzip2_decode(
 
     total = (((uint64_t)stream.total_out_hi32) << 32) | stream.total_out_lo32;
 
-    if ( xc_dom_register_external(dom, out_buf, total) )
-    {
-        DOMPRINTF("BZIP2: Error registering stream output");
-        free(out_buf);
-        goto bzip2_cleanup;
-    }
-
     DOMPRINTF("%s: BZIP2 decompress OK, 0x%zx -> 0x%lx",
               __FUNCTION__, *size, (long unsigned int) total);
 
@@ -186,9 +178,8 @@ static int xc_try_bzip2_decode(
 static int xc_try_bzip2_decode(
     struct xc_dom_image *dom, void **blob, size_t *size)
 {
-    xc_dom_panic(dom->xch, XC_INTERNAL_ERROR,
-                 "%s: BZIP2 decompress support unavailable",
-                 __FUNCTION__);
+    DOMPRINTF("%s: BZIP2 decompress support unavailable",
+              __FUNCTION__);
     return -1;
 }
 
@@ -314,13 +305,6 @@ static int _xc_try_lzma_decode(
         }
     }
 
-    if ( xc_dom_register_external(dom, out_buf, stream->total_out) )
-    {
-        DOMPRINTF("%s: Error registering stream output", what);
-        free(out_buf);
-        goto lzma_cleanup;
-    }
-
     DOMPRINTF("%s: %s decompress OK, 0x%zx -> 0x%zx",
               __FUNCTION__, what, *size, (size_t)stream->total_out);
 
@@ -369,18 +353,16 @@ static int xc_try_lzma_decode(
 static int xc_try_xz_decode(
     struct xc_dom_image *dom, void **blob, size_t *size)
 {
-    xc_dom_panic(dom->xch, XC_INTERNAL_ERROR,
-                 "%s: XZ decompress support unavailable",
-                 __FUNCTION__);
+    DOMPRINTF("%s: XZ decompress support unavailable",
+              __FUNCTION__);
     return -1;
 }
 
 static int xc_try_lzma_decode(
     struct xc_dom_image *dom, void **blob, size_t *size)
 {
-    xc_dom_panic(dom->xch, XC_INTERNAL_ERROR,
-                 "%s: LZMA decompress support unavailable",
-                 __FUNCTION__);
+    DOMPRINTF("%s: LZMA decompress support unavailable",
+              __FUNCTION__);
     return -1;
 }
 
@@ -420,7 +402,7 @@ static int xc_try_lzo1x_decode(
      * lzo_uint should match size_t. Check that this is the case to be
      * sure we won't overflow various lzo_uint fields.
      */
-    BUILD_BUG_ON(sizeof(lzo_uint) != sizeof(size_t));
+    XC_BUILD_BUG_ON(sizeof(lzo_uint) != sizeof(size_t));
 
     ret = lzo_init();
     if ( ret != LZO_E_OK )
@@ -482,13 +464,7 @@ static int xc_try_lzo1x_decode(
 
         dst_len = lzo_read_32(cur);
         if ( !dst_len )
-        {
-            msg = "Error registering stream output";
-            if ( xc_dom_register_external(dom, out_buf, *size) )
-                break;
-
             return 0;
-        }
 
         if ( dst_len > LZOP_MAX_BLOCK_SIZE )
         {
@@ -581,9 +557,8 @@ static int xc_try_lzo1x_decode(
 static int xc_try_lzo1x_decode(
     struct xc_dom_image *dom, void **blob, size_t *size)
 {
-    xc_dom_panic(dom->xch, XC_INTERNAL_ERROR,
-                 "%s: LZO1x decompress support unavailable\n",
-                 __FUNCTION__);
+    DOMPRINTF("%s: LZO1x decompress support unavailable\n",
+                  __FUNCTION__);
     return -1;
 }
 

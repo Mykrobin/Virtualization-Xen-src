@@ -21,7 +21,8 @@
  *  Lesser General Public License for more details.
  *
  *  You should have received a copy of the GNU Lesser General Public
- *  License along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  License along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA
  *
  * @section DESCRIPTION
  *
@@ -38,7 +39,7 @@
 
 #include <libxenvchan.h>
 
-static void usage(char** argv)
+void usage(char** argv)
 {
 	fprintf(stderr, "usage:\n"
 		"\t%s [client|server] domainid nodepath [rbufsiz wbufsiz]\n",
@@ -53,12 +54,10 @@ int insiz = 0;
 int outsiz = 0;
 struct libxenvchan *ctrl = 0;
 
-static void vchan_wr(void) {
-	int ret;
-
+void vchan_wr() {
 	if (!insiz)
 		return;
-	ret = libxenvchan_write(ctrl, inbuf, insiz);
+	int ret = libxenvchan_write(ctrl, inbuf, insiz);
 	if (ret < 0) {
 		fprintf(stderr, "vchan write failed\n");
 		exit(1);
@@ -69,12 +68,10 @@ static void vchan_wr(void) {
 	}
 }
 
-static void stdout_wr(void) {
-	int ret;
-
+void stdout_wr() {
 	if (!outsiz)
 		return;
-	ret = write(1, outbuf, outsiz);
+	int ret = write(1, outbuf, outsiz);
 	if (ret < 0 && errno != EAGAIN)
 		exit(1);
 	if (ret > 0) {

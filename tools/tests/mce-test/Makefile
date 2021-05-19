@@ -1,10 +1,7 @@
-.PHONY: all clean distclean
+.PHONY: all clean
 
 all: 
 	$(MAKE) -C tools
 
 clean:
 	$(MAKE) -C tools clean
-
-distclean:
-	$(MAKE) -C tools distclean

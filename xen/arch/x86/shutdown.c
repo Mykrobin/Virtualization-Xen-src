@@ -4,6 +4,7 @@
  * x86-specific shutdown handling.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
@@ -25,7 +26,6 @@
 #include <asm/mpspec.h>
 #include <asm/tboot.h>
 #include <asm/apic.h>
-#include <asm/guest.h>
 
 enum reboot_type {
         BOOT_INVALID,
@@ -33,11 +33,10 @@ enum reboot_type {
         BOOT_KBD = 'k',
         BOOT_ACPI = 'a',
         BOOT_CF9 = 'p',
-        BOOT_CF9_PWR = 'P',
         BOOT_EFI = 'e',
-        BOOT_XEN = 'x',
 };
 
+static long no_idt[2];
 static int reboot_mode;
 
 /*
@@ -49,16 +48,11 @@ static int reboot_mode;
  * kbd    Use the keyboard controller. cold reset (default)
  * acpi   Use the RESET_REG in the FADT
  * pci    Use the so-called "PCI reset register", CF9
- * Power  Like 'pci' but for a full power-cyle reset
  * efi    Use the EFI reboot (if running under EFI)
- * xen    Use Xen SCHEDOP hypercall (if running under Xen as a guest)
  */
 static enum reboot_type reboot_type = BOOT_INVALID;
-
-static int __init set_reboot_type(const char *str)
+static void __init set_reboot_type(char *str)
 {
-    int rc = 0;
-
     for ( ; ; )
     {
         switch ( *str )
@@ -75,36 +69,15 @@ static int __init set_reboot_type(const char *str)
         case 'a':
         case 'e':
         case 'k':
-        case 'P':
-        case 'p':
         case 't':
-        case 'x':
+        case 'p':
             reboot_type = *str;
-            break;
-        default:
-            rc = -EINVAL;
             break;
         }
         if ( (str = strchr(str, ',')) == NULL )
             break;
         str++;
     }
-
-    if ( reboot_type == BOOT_EFI && !efi_enabled(EFI_RS) )
-    {
-        printk("EFI reboot selected, but no EFI runtime services available.\n"
-               "Falling back to default reboot type.\n");
-        reboot_type = BOOT_INVALID;
-    }
-
-    if ( reboot_type == BOOT_XEN && !xen_guest )
-    {
-        printk("Xen reboot selected, but Xen hypervisor not detected\n"
-               "Falling back to default\n");
-        reboot_type = BOOT_INVALID;
-    }
-
-    return rc;
 }
 custom_param("reboot", set_reboot_type);
 
@@ -117,13 +90,9 @@ static inline void kb_wait(void)
             break;
 }
 
-static void noreturn __machine_halt(void *unused)
+static void __attribute__((noreturn)) __machine_halt(void *unused)
 {
     local_irq_disable();
-
-    if ( reboot_type == BOOT_XEN )
-        xen_hypercall_shutdown(SHUTDOWN_poweroff);
-
     for ( ; ; )
         halt();
 }
@@ -132,44 +101,28 @@ void machine_halt(void)
 {
     watchdog_disable();
     console_start_sync();
-
-    if ( system_state >= SYS_STATE_smp_boot )
-    {
-        local_irq_enable();
-        smp_call_function(__machine_halt, NULL, 0);
-    }
-
+    local_irq_enable();
+    smp_call_function(__machine_halt, NULL, 0);
     __machine_halt(NULL);
 }
 
 static void default_reboot_type(void)
 {
-    if ( reboot_type != BOOT_INVALID )
-        return;
-
-    if ( xen_guest )
-        reboot_type = BOOT_XEN;
-    else if ( efi_enabled(EFI_RS) )
-        reboot_type = BOOT_EFI;
-    else if ( acpi_disabled )
-        reboot_type = BOOT_KBD;
-    else
-        reboot_type = BOOT_ACPI;
+    if ( reboot_type == BOOT_INVALID )
+        reboot_type = efi_enabled ? BOOT_EFI
+                                  : acpi_disabled ? BOOT_KBD
+                                                  : BOOT_ACPI;
 }
 
 static int __init override_reboot(struct dmi_system_id *d)
 {
     enum reboot_type type = (long)d->driver_data;
 
-    if ( type == BOOT_ACPI && acpi_disabled )
-        type = BOOT_KBD;
-
     if ( reboot_type != type )
     {
         static const char *__initdata msg[] =
         {
             [BOOT_KBD]  = "keyboard controller",
-            [BOOT_ACPI] = "ACPI",
             [BOOT_CF9]  = "PCI",
         };
 
@@ -475,15 +428,6 @@ static struct dmi_system_id __initdata reboot_dmi_table[] = {
             DMI_MATCH(DMI_PRODUCT_NAME, "OptiPlex 390"),
         },
     },
-    {    /* Handle problems with rebooting on Dell OptiPlex 9020. */
-        .callback = override_reboot,
-        .driver_data = (void *)(long)BOOT_ACPI,
-        .ident = "Dell OptiPlex 9020",
-        .matches = {
-            DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-            DMI_MATCH(DMI_PRODUCT_NAME, "OptiPlex 9020"),
-        },
-    },
     {    /* Handle problems with rebooting on the Latitude E6320. */
         .callback = override_reboot,
         .driver_data = (void *)(long)BOOT_CF9,
@@ -511,24 +455,6 @@ static struct dmi_system_id __initdata reboot_dmi_table[] = {
             DMI_MATCH(DMI_PRODUCT_NAME, "Latitude E6520"),
         },
     },
-    {    /* Handle problems with rebooting on Dell PowerEdge R540. */
-        .callback = override_reboot,
-        .driver_data = (void *)(long)BOOT_ACPI,
-        .ident = "Dell PowerEdge R540",
-        .matches = {
-            DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-            DMI_MATCH(DMI_PRODUCT_NAME, "PowerEdge R540"),
-        },
-    },
-    {    /* Handle problems with rebooting on Dell PowerEdge R740. */
-        .callback = override_reboot,
-        .driver_data = (void *)(long)BOOT_ACPI,
-        .ident = "Dell PowerEdge R740",
-        .matches = {
-            DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-            DMI_MATCH(DMI_PRODUCT_NAME, "PowerEdge R740"),
-        },
-    },
     { }
 };
 
@@ -547,7 +473,7 @@ static int __init reboot_init(void)
 }
 __initcall(reboot_init);
 
-static void noreturn __machine_restart(void *pdelay)
+static void __machine_restart(void *pdelay)
 {
     machine_restart(*(unsigned int *)pdelay);
 }
@@ -556,11 +482,22 @@ void machine_restart(unsigned int delay_millisecs)
 {
     unsigned int i, attempt;
     enum reboot_type orig_reboot_type;
-    const struct desc_ptr no_idt = { 0 };
 
     watchdog_disable();
     console_start_sync();
     spin_debug_disable();
+
+    local_irq_enable();
+
+    /* Ensure we are the boot CPU. */
+    if ( get_apic_id() != boot_cpu_physical_apicid )
+    {
+        /* Send IPI to the boot CPU (logical cpu 0). */
+        on_selected_cpus(cpumask_of(0), __machine_restart,
+                         &delay_millisecs, 0);
+        for ( ; ; )
+            halt();
+    }
 
     /*
      * We may be called from an interrupt context, and various functions we
@@ -569,22 +506,7 @@ void machine_restart(unsigned int delay_millisecs)
      */
     local_irq_count(0) = 0;
 
-    if ( system_state >= SYS_STATE_smp_boot )
-    {
-        local_irq_enable();
-
-        /* Ensure we are the boot CPU. */
-        if ( get_apic_id() != boot_cpu_physical_apicid )
-        {
-            /* Send IPI to the boot CPU (logical cpu 0). */
-            on_selected_cpus(cpumask_of(0), __machine_restart,
-                             &delay_millisecs, 0);
-            for ( ; ; )
-                halt();
-        }
-
-        smp_send_stop();
-    }
+    smp_send_stop();
 
     mdelay(delay_millisecs);
 
@@ -608,7 +530,6 @@ void machine_restart(unsigned int delay_millisecs)
         {
         case BOOT_INVALID:
             ASSERT_UNREACHABLE();
-            /* fall through */
         case BOOT_KBD:
             /* Pulse the keyboard reset line. */
             for ( i = 0; i < 100; i++ )
@@ -634,7 +555,7 @@ void machine_restart(unsigned int delay_millisecs)
             *((unsigned short *)__va(0x472)) = reboot_mode;
             break;
         case BOOT_TRIPLE:
-            asm volatile ("lidt %0; int3" : : "m" (no_idt));
+            asm volatile ( "lidt %0 ; int3" : "=m" (no_idt) );
             reboot_type = BOOT_KBD;
             break;
         case BOOT_ACPI:
@@ -642,30 +563,14 @@ void machine_restart(unsigned int delay_millisecs)
             reboot_type = BOOT_KBD;
             break;
         case BOOT_CF9:
-        case BOOT_CF9_PWR:
             {
-                u8 cf9 = inb(0xcf9) & ~0x0e;
-
-                /* Request warm, hard, or power-cycle reset. */
-                if ( reboot_type == BOOT_CF9_PWR )
-                    cf9 |= 0x0a;
-                else if ( reboot_mode == 0 )
-                    cf9 |= 0x02;
-                outb(cf9, 0xcf9);
+                u8 cf9 = inb(0xcf9) & ~6;
+                outb(cf9|2, 0xcf9); /* Request hard reset */
                 udelay(50);
-                outb(cf9 | 0x04, 0xcf9); /* Actually do the reset. */
+                outb(cf9|6, 0xcf9); /* Actually do the reset */
                 udelay(50);
             }
             reboot_type = BOOT_ACPI;
-            break;
-
-        case BOOT_XEN:
-            /*
-             * When running in PV shim mode guest shutdown calls are
-             * forwarded to L0, hence the only way to get here is if a
-             * shim crash happens.
-             */
-            xen_hypercall_shutdown(pv_shim ? SHUTDOWN_crash : SHUTDOWN_reboot);
             break;
         }
     }

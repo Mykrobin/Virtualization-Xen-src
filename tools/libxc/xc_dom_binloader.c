@@ -10,7 +10,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  *
  * Some of the field descriptions were copied from "The Multiboot
  * Specification", Copyright 1995, 96 Bryan Ford <baford@cs.utah.edu>,
@@ -238,7 +239,7 @@ static int xc_dom_parse_bin_kernel(struct xc_dom_image *dom)
         {
             DOMPRINTF("%s: PAE fixup", __FUNCTION__);
             dom->guest_type = "xen-3.0-x86_32p";
-            dom->parms.pae  = XEN_PAE_EXTCR3;
+            dom->parms.pae  = 2;
         }
         break;
     }

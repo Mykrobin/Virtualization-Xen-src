@@ -687,7 +687,7 @@ static void kdd_handle_read_ctrl(kdd_state *s)
         }
     } else {
         /* 32-bit control-register space starts at 0x[2]cc, for 84 bytes */
-        uint32_t offset = addr;
+        uint64_t offset = addr;
         if (offset > 0x200)
             offset -= 0x200;
         offset -= 0xcc;
@@ -710,13 +710,11 @@ static void kdd_handle_read_ctrl(kdd_state *s)
 static void kdd_handle_read_msr(kdd_state *s)
 {
     uint32_t msr = s->rxp.cmd.msr.msr;
-    uint64_t val;
     int ok;
     KDD_LOG(s, "Read MSR 0x%"PRIx32"\n", msr);
 
-    ok = (kdd_rdmsr(s->guest, s->cpuid, msr, &val) == 0);
+    ok = (kdd_rdmsr(s->guest, s->cpuid, msr, &s->txp.cmd.msr.val) == 0);
     s->txp.cmd.msr.msr = msr;
-    s->txp.cmd.msr.val = val;
     s->txp.cmd.msr.status = (ok ? KDD_STATUS_SUCCESS : KDD_STATUS_FAILURE);
     kdd_send_cmd(s, KDD_CMD_READ_MSR, 0);
 }
@@ -1000,7 +998,7 @@ void kdd_select_callback(kdd_state *s)
 }
 
 
-static void __attribute__((noreturn)) usage(void)
+static void usage(void)
 {
     fprintf(stderr, 
 " usage: kdd [-v] <domid> <address> <port>\n"

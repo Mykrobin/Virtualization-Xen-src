@@ -51,23 +51,16 @@ CHECK_gnttab_get_version;
 CHECK_gnttab_swap_grant_ref;
 #undef xen_gnttab_swap_grant_ref
 
-#define xen_gnttab_cache_flush gnttab_cache_flush
-CHECK_gnttab_cache_flush;
-#undef xen_gnttab_cache_flush
-
 int compat_grant_table_op(unsigned int cmd,
                           XEN_GUEST_HANDLE_PARAM(void) cmp_uop,
                           unsigned int count)
 {
     int rc = 0;
-    unsigned int i, cmd_op;
+    unsigned int i;
     XEN_GUEST_HANDLE_PARAM(void) cnt_uop;
 
     set_xen_guest_handle(cnt_uop, NULL);
-    cmd_op = cmd & GNTTABOP_CMD_MASK;
-    if ( cmd_op != GNTTABOP_cache_flush )
-        cmd_op = cmd;
-    switch ( cmd_op )
+    switch ( cmd )
     {
 #define CASE(name) \
     case GNTTABOP_##name: \
@@ -113,10 +106,6 @@ int compat_grant_table_op(unsigned int cmd,
     CASE(swap_grant_ref);
 #endif
 
-#ifndef CHECK_gnttab_cache_flush
-    CASE(cache_flush);
-#endif
-
 #undef CASE
     default:
         return do_grant_table_op(cmd, cmp_uop, count);
@@ -143,7 +132,7 @@ int compat_grant_table_op(unsigned int cmd,
         } cmp;
 
         set_xen_guest_handle(nat.uop, COMPAT_ARG_XLAT_VIRT_BASE);
-        switch ( cmd_op )
+        switch ( cmd )
         {
         case GNTTABOP_setup_table:
             if ( unlikely(count > 1) )
@@ -157,14 +146,21 @@ int compat_grant_table_op(unsigned int cmd,
                 unsigned int max_frame_list_size_in_page =
                     (COMPAT_ARG_XLAT_SIZE - sizeof(*nat.setup)) /
                     sizeof(*nat.setup->frame_list.p);
-
+                if ( max_frame_list_size_in_page < max_nr_grant_frames )
+                {
+                    gdprintk(XENLOG_WARNING,
+                             "max_nr_grant_frames is too large (%u,%u)\n",
+                             max_nr_grant_frames, max_frame_list_size_in_page);
+                    rc = -EINVAL;
+                }
+                else
+                {
 #define XLAT_gnttab_setup_table_HNDL_frame_list(_d_, _s_) \
-                set_xen_guest_handle((_d_)->frame_list, (unsigned long *)(nat.setup + 1))
-                XLAT_gnttab_setup_table(nat.setup, &cmp.setup);
+                    set_xen_guest_handle((_d_)->frame_list, (unsigned long *)(nat.setup + 1))
+                    XLAT_gnttab_setup_table(nat.setup, &cmp.setup);
 #undef XLAT_gnttab_setup_table_HNDL_frame_list
-                rc = gnttab_setup_table(guest_handle_cast(nat.uop,
-                                                          gnttab_setup_table_t),
-                                        1, max_frame_list_size_in_page);
+                    rc = gnttab_setup_table(guest_handle_cast(nat.uop, gnttab_setup_table_t), 1);
+                }
             }
             ASSERT(rc <= 0);
             if ( rc == 0 )
@@ -251,9 +247,9 @@ int compat_grant_table_op(unsigned int cmd,
                 rc = gnttab_copy(guest_handle_cast(nat.uop, gnttab_copy_t), n);
             if ( rc > 0 )
             {
-                ASSERT(rc <= n);
-                i -= rc;
-                n -= rc;
+                ASSERT(rc < n);
+                i -= n - rc;
+                n = rc;
             }
             if ( rc >= 0 )
             {
@@ -287,6 +283,16 @@ int compat_grant_table_op(unsigned int cmd,
                 rc = -EFAULT;
                 break;
             }
+            if ( max_frame_list_size_in_pages <
+                 grant_to_status_frames(max_nr_grant_frames) )
+            {
+                gdprintk(XENLOG_WARNING,
+                         "grant_to_status_frames(max_nr_grant_frames) is too large (%u,%u)\n",
+                         grant_to_status_frames(max_nr_grant_frames),
+                         max_frame_list_size_in_pages);
+                rc = -EINVAL;
+                break;
+            }
 
 #define XLAT_gnttab_get_status_frames_HNDL_frame_list(_d_, _s_) \
             set_xen_guest_handle((_d_)->frame_list, (uint64_t *)(nat.get_status + 1))
@@ -295,7 +301,7 @@ int compat_grant_table_op(unsigned int cmd,
 
             rc = gnttab_get_status_frames(
                 guest_handle_cast(nat.uop, gnttab_get_status_frames_t),
-                count, max_frame_list_size_in_pages);
+                count);
             if ( rc >= 0 )
             {
 #define XLAT_gnttab_get_status_frames_HNDL_frame_list(_d_, _s_) \

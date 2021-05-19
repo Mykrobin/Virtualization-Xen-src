@@ -14,106 +14,134 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #include "xc_private.h"
-#include <inttypes.h>
-#include <assert.h>
 #include <xen/tmem.h>
+
+static int do_tmem_op(xc_interface *xch, tmem_op_t *op)
+{
+    int ret;
+    DECLARE_HYPERCALL;
+    DECLARE_HYPERCALL_BOUNCE(op, sizeof(*op), XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
+
+    if ( xc_hypercall_bounce_pre(xch, op) )
+    {
+        PERROR("Could not bounce buffer for tmem op hypercall");
+        return -EFAULT;
+    }
+
+    hypercall.op = __HYPERVISOR_tmem_op;
+    hypercall.arg[0] = HYPERCALL_BUFFER_AS_ARG(op);
+    if ((ret = do_xen_hypercall(xch, &hypercall)) < 0)
+    {
+        if ( errno == EACCES )
+            DPRINTF("tmem operation failed -- need to"
+                    " rebuild the user-space tool set?\n");
+    }
+    xc_hypercall_bounce_post(xch, op);
+
+    return ret;
+}
 
 int xc_tmem_control(xc_interface *xch,
                     int32_t pool_id,
-                    uint32_t cmd,
+                    uint32_t subop,
                     uint32_t cli_id,
-                    uint32_t len,
-                    uint32_t arg,
+                    uint32_t arg1,
+                    uint32_t arg2,
+                    uint64_t arg3,
                     void *buf)
 {
-    DECLARE_SYSCTL;
-    DECLARE_HYPERCALL_BOUNCE(buf, len, XC_HYPERCALL_BUFFER_BOUNCE_OUT);
+    tmem_op_t op;
+    DECLARE_HYPERCALL_BOUNCE(buf, arg1, XC_HYPERCALL_BUFFER_BOUNCE_OUT);
     int rc;
 
-    sysctl.cmd = XEN_SYSCTL_tmem_op;
-    sysctl.u.tmem_op.pool_id = pool_id;
-    sysctl.u.tmem_op.cmd = cmd;
-    sysctl.u.tmem_op.cli_id = cli_id;
-    sysctl.u.tmem_op.len = len;
-    sysctl.u.tmem_op.arg = arg;
-    sysctl.u.tmem_op.pad = 0;
-    sysctl.u.tmem_op.oid.oid[0] = 0;
-    sysctl.u.tmem_op.oid.oid[1] = 0;
-    sysctl.u.tmem_op.oid.oid[2] = 0;
+    op.cmd = TMEM_CONTROL;
+    op.pool_id = pool_id;
+    op.u.ctrl.subop = subop;
+    op.u.ctrl.cli_id = cli_id;
+    op.u.ctrl.arg1 = arg1;
+    op.u.ctrl.arg2 = arg2;
+    /* use xc_tmem_control_oid if arg3 is required */
+    op.u.ctrl.oid[0] = 0;
+    op.u.ctrl.oid[1] = 0;
+    op.u.ctrl.oid[2] = 0;
 
-    if ( cmd == XEN_SYSCTL_TMEM_OP_SET_CLIENT_INFO ||
-         cmd == XEN_SYSCTL_TMEM_OP_SET_AUTH )
-        HYPERCALL_BOUNCE_SET_DIR(buf, XC_HYPERCALL_BUFFER_BOUNCE_IN);
-    if ( len )
+#ifdef VALGRIND
+    if (arg1 != 0)
+        memset(buf, 0, arg1);
+#endif
+
+    if ( subop == TMEMC_LIST && arg1 != 0 )
     {
         if ( buf == NULL )
-        {
-            errno = EINVAL;
-            return -1;
-        }
+            return -EINVAL;
         if ( xc_hypercall_bounce_pre(xch, buf) )
         {
             PERROR("Could not bounce buffer for tmem control hypercall");
-            return -1;
+            return -ENOMEM;
         }
     }
 
-    set_xen_guest_handle(sysctl.u.tmem_op.u.buf, buf);
+    set_xen_guest_handle(op.u.ctrl.buf, buf);
 
-    rc = do_sysctl(xch, &sysctl);
+    rc = do_tmem_op(xch, &op);
 
-    if ( len )
-        xc_hypercall_bounce_post(xch, buf);
+    if (subop == TMEMC_LIST && arg1 != 0)
+            xc_hypercall_bounce_post(xch, buf);
 
     return rc;
 }
 
 int xc_tmem_control_oid(xc_interface *xch,
                         int32_t pool_id,
-                        uint32_t cmd,
+                        uint32_t subop,
                         uint32_t cli_id,
-                        uint32_t len,
-                        uint32_t arg,
-                        struct xen_tmem_oid oid,
+                        uint32_t arg1,
+                        uint32_t arg2,
+                        struct tmem_oid oid,
                         void *buf)
 {
-    DECLARE_SYSCTL;
-    DECLARE_HYPERCALL_BOUNCE(buf, len, XC_HYPERCALL_BUFFER_BOUNCE_OUT);
+    tmem_op_t op;
+    DECLARE_HYPERCALL_BOUNCE(buf, arg1, XC_HYPERCALL_BUFFER_BOUNCE_OUT);
     int rc;
 
-    sysctl.cmd = XEN_SYSCTL_tmem_op;
-    sysctl.u.tmem_op.pool_id = pool_id;
-    sysctl.u.tmem_op.cmd = cmd;
-    sysctl.u.tmem_op.cli_id = cli_id;
-    sysctl.u.tmem_op.len = len;
-    sysctl.u.tmem_op.arg = arg;
-    sysctl.u.tmem_op.pad = 0;
-    sysctl.u.tmem_op.oid = oid;
+    op.cmd = TMEM_CONTROL;
+    op.pool_id = pool_id;
+    op.u.ctrl.subop = subop;
+    op.u.ctrl.cli_id = cli_id;
+    set_xen_guest_handle(op.u.ctrl.buf,buf);
+    op.u.ctrl.arg1 = arg1;
+    op.u.ctrl.arg2 = arg2;
+    op.u.ctrl.oid[0] = oid.oid[0];
+    op.u.ctrl.oid[1] = oid.oid[1];
+    op.u.ctrl.oid[2] = oid.oid[2];
 
-    if ( len  )
+#ifdef VALGRIND
+    if (arg1 != 0)
+        memset(buf, 0, arg1);
+#endif
+
+    if ( subop == TMEMC_LIST && arg1 != 0 )
     {
         if ( buf == NULL )
-        {
-            errno = EINVAL;
-            return -1;
-        }
+            return -EINVAL;
         if ( xc_hypercall_bounce_pre(xch, buf) )
         {
             PERROR("Could not bounce buffer for tmem control (OID) hypercall");
-            return -1;
+            return -ENOMEM;
         }
     }
 
-    set_xen_guest_handle(sysctl.u.tmem_op.u.buf, buf);
+    set_xen_guest_handle(op.u.ctrl.buf, buf);
 
-    rc = do_sysctl(xch, &sysctl);
+    rc = do_tmem_op(xch, &op);
 
-    if ( len )
-        xc_hypercall_bounce_post(xch, buf);
+    if (subop == TMEMC_LIST && arg1 != 0)
+            xc_hypercall_bounce_post(xch, buf);
 
     return rc;
 }
@@ -138,9 +166,9 @@ static int xc_tmem_uuid_parse(char *uuid_str, uint64_t *uuid_lo, uint64_t *uuid_
         else if ( *p >= '0' && *p <= '9' )
             digit = *p - '0';
         else if ( *p >= 'A' && *p <= 'F' )
-            digit = *p - 'A' + 10;
+            digit = *p - 'A';
         else if ( *p >= 'a' && *p <= 'f' )
-            digit = *p - 'a' + 10;
+            digit = *p - 'a';
         else
             return -1;
         *x = (*x << 4) | digit;
@@ -153,25 +181,22 @@ static int xc_tmem_uuid_parse(char *uuid_str, uint64_t *uuid_lo, uint64_t *uuid_
 int xc_tmem_auth(xc_interface *xch,
                  int cli_id,
                  char *uuid_str,
-                 int enable)
+                 int arg1)
 {
-    xen_tmem_pool_info_t pool = {
-        .flags.u.auth = enable,
-        .id = 0,
-        .n_pages = 0,
-        .uuid[0] = 0,
-        .uuid[1] = 0,
-    };
-    if ( xc_tmem_uuid_parse(uuid_str, &pool.uuid[0],
-                                      &pool.uuid[1]) < 0 )
+    tmem_op_t op;
+
+    op.cmd = TMEM_AUTH;
+    op.pool_id = 0;
+    op.u.creat.arg1 = cli_id;
+    op.u.creat.flags = arg1;
+    if ( xc_tmem_uuid_parse(uuid_str, &op.u.creat.uuid[0],
+                                      &op.u.creat.uuid[1]) < 0 )
     {
         PERROR("Can't parse uuid, use xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx");
         return -1;
     }
-    return xc_tmem_control(xch, 0 /* pool_id */,
-                           XEN_SYSCTL_TMEM_OP_SET_AUTH,
-                           cli_id, sizeof(pool),
-                           0 /* arg */, &pool);
+
+    return do_tmem_op(xch, &op);
 }
 
 /* Save/restore/live migrate */
@@ -191,126 +216,112 @@ int xc_tmem_auth(xc_interface *xch,
 
 /* returns 0 if nothing to save, -1 if error saving, 1 if saved successfully */
 int xc_tmem_save(xc_interface *xch,
-                 uint32_t domid, int io_fd, int live, int field_marker)
+                 int dom, int io_fd, int live, int field_marker)
 {
     int marker = field_marker;
-    int i, j, rc;
+    int i, j;
+    uint32_t max_pools, version;
+    uint32_t weight, cap, flags;
+    uint32_t pool_id;
     uint32_t minusone = -1;
     struct tmem_handle *h;
-    xen_tmem_client_t info;
-    xen_tmem_pool_info_t *pools;
-    char *buf = NULL;
 
-    rc = xc_tmem_control(xch, 0, XEN_SYSCTL_TMEM_OP_SAVE_BEGIN,
-                         domid, 0 /* len*/ , live, NULL);
-    if ( rc )
-    {
-        /* Nothing to save - no tmem enabled. */
-        if ( errno == ENOENT )
-            return 0;
-
-        return rc;
-    }
-
-    if ( xc_tmem_control(xch, 0 /* pool_id */,
-                         XEN_SYSCTL_TMEM_OP_GET_CLIENT_INFO,
-                         domid /* cli_id */, sizeof(info), 0 /* arg */,
-                         &info) < 0 )
-        return -1;
-
-    /* Nothing to do. */
-    if ( !info.nr_pools )
+    if ( xc_tmem_control(xch,0,TMEMC_SAVE_BEGIN,dom,live,0,0,NULL) <= 0 )
         return 0;
 
-    pools = calloc(info.nr_pools, sizeof(*pools));
-    if ( !pools )
-        return -1;
-
-    rc = xc_tmem_control(xch, 0 /* pool_id is ignored. */,
-                         XEN_SYSCTL_TMEM_OP_GET_POOLS,
-                         domid /* cli_id */, sizeof(*pools) * info.nr_pools,
-                         0 /* arg */, pools);
-
-    if ( rc < 0 || (uint32_t)rc > info.nr_pools )
-        goto out_memory;
-
-    /* Update it - as we have less pools between the two hypercalls. */
-    info.nr_pools = (uint32_t)rc;
-
     if ( write_exact(io_fd, &marker, sizeof(marker)) )
-        goto out_memory;
-
-    if ( write_exact(io_fd, &info, sizeof(info)) )
-        goto out_memory;
-
+        return -1;
+    version = xc_tmem_control(xch,0,TMEMC_SAVE_GET_VERSION,0,0,0,0,NULL);
+    if ( write_exact(io_fd, &version, sizeof(version)) )
+        return -1;
+    max_pools = xc_tmem_control(xch,0,TMEMC_SAVE_GET_MAXPOOLS,0,0,0,0,NULL);
+    if ( write_exact(io_fd, &max_pools, sizeof(max_pools)) )
+        return -1;
+    if ( version == -1 || max_pools == -1 )
+        return -1;
     if ( write_exact(io_fd, &minusone, sizeof(minusone)) )
-        goto out_memory;
-
-    for ( i = 0; i < info.nr_pools; i++ )
+        return -1;
+    flags = xc_tmem_control(xch,0,TMEMC_SAVE_GET_CLIENT_FLAGS,dom,0,0,0,NULL);
+    if ( write_exact(io_fd, &flags, sizeof(flags)) )
+        return -1;
+    weight = xc_tmem_control(xch,0,TMEMC_SAVE_GET_CLIENT_WEIGHT,dom,0,0,0,NULL);
+    if ( write_exact(io_fd, &weight, sizeof(weight)) )
+        return -1;
+    cap = xc_tmem_control(xch,0,TMEMC_SAVE_GET_CLIENT_CAP,dom,0,0,0,NULL);
+    if ( write_exact(io_fd, &cap, sizeof(cap)) )
+        return -1;
+    if ( flags == -1 || weight == -1 || cap == -1 )
+        return -1;
+    if ( write_exact(io_fd, &minusone, sizeof(minusone)) )
+        return -1;
+    for ( i = 0; i < max_pools; i++ )
     {
+        uint64_t uuid[2];
+        uint32_t n_pages;
         uint32_t pagesize;
+        char *buf = NULL;
         int bufsize = 0;
         int checksum = 0;
-        xen_tmem_pool_info_t *pool = &pools[i];
 
-        if ( pool->flags.raw != -1 )
+        /* get pool id, flags, pagesize, n_pages, uuid */
+        flags = xc_tmem_control(xch,i,TMEMC_SAVE_GET_POOL_FLAGS,dom,0,0,0,NULL);
+        if ( flags != -1 )
         {
-            if ( !pool->flags.u.persist )
-                pool->n_pages = 0;
-
-            if ( write_exact(io_fd, pool, sizeof(*pool)) )
-                goto out_memory;
-
-            if ( !pool->flags.u.persist )
+            pool_id = i;
+            n_pages = xc_tmem_control(xch,i,TMEMC_SAVE_GET_POOL_NPAGES,dom,0,0,0,NULL);
+            if ( !(flags & TMEM_POOL_PERSIST) )
+                n_pages = 0;
+            (void)xc_tmem_control(xch,i,TMEMC_SAVE_GET_POOL_UUID,dom,sizeof(uuid),0,0,&uuid);
+            if ( write_exact(io_fd, &pool_id, sizeof(pool_id)) )
+                return -1;
+            if ( write_exact(io_fd, &flags, sizeof(flags)) )
+                return -1;
+            if ( write_exact(io_fd, &n_pages, sizeof(n_pages)) )
+                return -1;
+            if ( write_exact(io_fd, &uuid, sizeof(uuid)) )
+                return -1;
+            if ( n_pages == 0 )
                 continue;
 
-            pagesize = 1 << (pool->flags.u.pagebits + 12);
+            pagesize = 1 << (((flags >> TMEM_POOL_PAGESIZE_SHIFT) &
+                              TMEM_POOL_PAGESIZE_MASK) + 12);
             if ( pagesize > bufsize )
             {
                 bufsize = pagesize + sizeof(struct tmem_handle);
                 if ( (buf = realloc(buf,bufsize)) == NULL )
-                    goto out_memory;
+                    return -1;
             }
-            for ( j = pool->n_pages; j > 0; j-- )
+            for ( j = n_pages; j > 0; j-- )
             {
                 int ret;
-                if ( (ret = xc_tmem_control(
-                          xch, pool->id, XEN_SYSCTL_TMEM_OP_SAVE_GET_NEXT_PAGE,
-                          domid, bufsize, 0, buf)) > 0 )
+                if ( (ret = xc_tmem_control(xch, pool_id,
+                                            TMEMC_SAVE_GET_NEXT_PAGE, dom,
+                                            bufsize, 0, 0, buf)) > 0 )
                 {
                     h = (struct tmem_handle *)buf;
                     if ( write_exact(io_fd, &h->oid, sizeof(h->oid)) )
-                        goto out_memory;
-
+                        return -1;
                     if ( write_exact(io_fd, &h->index, sizeof(h->index)) )
-                        goto out_memory;
+                        return -1;
                     h++;
                     checksum += *(char *)h;
                     if ( write_exact(io_fd, h, pagesize) )
-                        goto out_memory;
+                        return -1;
                 } else if ( ret == 0 ) {
                     continue;
                 } else {
                     /* page list terminator */
                     h = (struct tmem_handle *)buf;
-                    h->oid.oid[0] = h->oid.oid[1] = h->oid.oid[2] = -1L;
+                    h->oid[0] = h->oid[1] = h->oid[2] = -1L;
                     if ( write_exact(io_fd, &h->oid, sizeof(h->oid)) )
-                    {
- out_memory:
-                        free(pools);
-                        free(buf);
                         return -1;
-                    }
                     break;
                 }
             }
-            DPRINTF("saved %"PRId64" tmem pages for dom=%d pool=%d, checksum=%x\n",
-                    pool->n_pages - j, domid, pool->id, checksum);
+            DPRINTF("saved %d tmem pages for dom=%d pool=%d, checksum=%x\n",
+                         n_pages-j,dom,pool_id,checksum);
         }
     }
-    free(pools);
-    free(buf);
-
     /* pool list terminator */
     minusone = -1;
     if ( write_exact(io_fd, &minusone, sizeof(minusone)) )
@@ -320,7 +331,7 @@ int xc_tmem_save(xc_interface *xch,
 }
 
 /* only called for live migration */
-int xc_tmem_save_extra(xc_interface *xch, uint32_t domid, int io_fd, int field_marker)
+int xc_tmem_save_extra(xc_interface *xch, int dom, int io_fd, int field_marker)
 {
     struct tmem_handle handle;
     int marker = field_marker;
@@ -329,8 +340,8 @@ int xc_tmem_save_extra(xc_interface *xch, uint32_t domid, int io_fd, int field_m
 
     if ( write_exact(io_fd, &marker, sizeof(marker)) )
         return -1;
-    while ( xc_tmem_control(xch, 0, XEN_SYSCTL_TMEM_OP_SAVE_GET_NEXT_INV, domid,
-                            sizeof(handle),0,&handle) > 0 ) {
+    while ( xc_tmem_control(xch, 0, TMEMC_SAVE_GET_NEXT_INV, dom,
+                            sizeof(handle),0,0,&handle) > 0 ) {
         if ( write_exact(io_fd, &handle.pool_id, sizeof(handle.pool_id)) )
             return -1;
         if ( write_exact(io_fd, &handle.oid, sizeof(handle.oid)) )
@@ -338,8 +349,8 @@ int xc_tmem_save_extra(xc_interface *xch, uint32_t domid, int io_fd, int field_m
         if ( write_exact(io_fd, &handle.index, sizeof(handle.index)) )
             return -1;
         count++;
-        checksum += handle.pool_id + handle.oid.oid[0] + handle.oid.oid[1] +
-                    handle.oid.oid[2] + handle.index;
+        checksum += handle.pool_id + handle.oid[0] + handle.oid[1] +
+                    handle.oid[2] + handle.index;
     }
     if ( count )
             DPRINTF("needed %d tmem invalidates, check=%d\n",count,checksum);
@@ -350,9 +361,9 @@ int xc_tmem_save_extra(xc_interface *xch, uint32_t domid, int io_fd, int field_m
 }
 
 /* only called for live migration */
-void xc_tmem_save_done(xc_interface *xch, uint32_t domid)
+void xc_tmem_save_done(xc_interface *xch, int dom)
 {
-    xc_tmem_control(xch, 0, XEN_SYSCTL_TMEM_OP_SAVE_END, domid, 0, 0, NULL);
+    xc_tmem_control(xch,0,TMEMC_SAVE_END,dom,0,0,0,NULL);
 }
 
 /* restore routines */
@@ -365,112 +376,124 @@ static int xc_tmem_restore_new_pool(
                     uint64_t uuid_lo,
                     uint64_t uuid_hi)
 {
-    xen_tmem_pool_info_t pool = {
-        .flags.raw = flags,
-        .id = pool_id,
-        .n_pages = 0,
-        .uuid[0] = uuid_lo,
-        .uuid[1] = uuid_hi,
-    };
+    tmem_op_t op;
 
-    return xc_tmem_control(xch, pool_id,
-                           XEN_SYSCTL_TMEM_OP_SET_POOLS,
-                           cli_id, sizeof(pool),
-                           0 /* arg */, &pool);
+    op.cmd = TMEM_RESTORE_NEW;
+    op.pool_id = pool_id;
+    op.u.creat.arg1 = cli_id;
+    op.u.creat.flags = flags;
+    op.u.creat.uuid[0] = uuid_lo;
+    op.u.creat.uuid[1] = uuid_hi;
+
+    return do_tmem_op(xch, &op);
 }
 
-int xc_tmem_restore(xc_interface *xch, uint32_t domid, int io_fd)
+int xc_tmem_restore(xc_interface *xch, int dom, int io_fd)
 {
+    uint32_t save_version;
+    uint32_t this_max_pools, this_version;
+    uint32_t pool_id;
     uint32_t minusone;
-    xen_tmem_client_t info;
+    uint32_t weight, cap, flags;
     int checksum = 0;
-    unsigned int i;
-    char *buf = NULL;
 
-    if ( read_exact(io_fd, &info, sizeof(info)) )
+    save_version = xc_tmem_control(xch,0,TMEMC_SAVE_GET_VERSION,dom,0,0,0,NULL);
+    if ( save_version == -1 )
+        return -1; /* domain doesn't exist */
+    if ( read_exact(io_fd, &this_version, sizeof(this_version)) )
         return -1;
-
-    /* We would never save if there weren't any pools! */
-    if ( !info.nr_pools )
+    if ( read_exact(io_fd, &this_max_pools, sizeof(this_max_pools)) )
         return -1;
-
-    if ( xc_tmem_control(xch, 0, XEN_SYSCTL_TMEM_OP_RESTORE_BEGIN, domid, 0, 0, NULL) < 0 )
-        return -1;
-
-    if ( xc_tmem_control(xch, 0 /* pool_id */,
-                         XEN_SYSCTL_TMEM_OP_SET_CLIENT_INFO,
-                         domid /* cli_id */, sizeof(info), 0 /* arg */,
-                         &info) < 0 )
-        return -1;
-
+    /* FIXME check here to ensure no version mismatch or maxpools mismatch */
     if ( read_exact(io_fd, &minusone, sizeof(minusone)) )
         return -1;
-
-    for ( i = 0; i < info.nr_pools; i++ )
+    if ( minusone != -1 )
+        return -1;
+    if ( xc_tmem_control(xch,0,TMEMC_RESTORE_BEGIN,dom,0,0,0,NULL) < 0 )
+        return -1;
+    if ( read_exact(io_fd, &flags, sizeof(flags)) )
+        return -1;
+    if ( flags & TMEM_CLIENT_COMPRESS )
+        if ( xc_tmem_control(xch,0,TMEMC_SET_COMPRESS,dom,1,0,0,NULL) < 0 )
+            return -1;
+    if ( flags & TMEM_CLIENT_FROZEN )
+        if ( xc_tmem_control(xch,0,TMEMC_FREEZE,dom,0,0,0,NULL) < 0 )
+            return -1;
+    if ( read_exact(io_fd, &weight, sizeof(weight)) )
+        return -1;
+    if ( xc_tmem_control(xch,0,TMEMC_SET_WEIGHT,dom,0,0,0,NULL) < 0 )
+        return -1;
+    if ( read_exact(io_fd, &cap, sizeof(cap)) )
+        return -1;
+    if ( xc_tmem_control(xch,0,TMEMC_SET_CAP,dom,0,0,0,NULL) < 0 )
+        return -1;
+    if ( read_exact(io_fd, &minusone, sizeof(minusone)) )
+        return -1;
+    while ( read_exact(io_fd, &pool_id, sizeof(pool_id)) == 0 && pool_id != -1 )
     {
+        uint64_t uuid[2];
+        uint32_t n_pages;
+        char *buf = NULL;
         int bufsize = 0, pagesize;
         int j;
-        xen_tmem_pool_info_t pool;
 
-        if ( read_exact(io_fd, &pool, sizeof(pool)) )
-            goto out_memory;
-
-        if ( xc_tmem_restore_new_pool(xch, domid, pool.id, pool.flags.raw,
-                                      pool.uuid[0], pool.uuid[1]) < 0 )
-            goto out_memory;
-
-        if ( pool.n_pages <= 0 )
+        if ( read_exact(io_fd, &flags, sizeof(flags)) )
+            return -1;
+        if ( read_exact(io_fd, &n_pages, sizeof(n_pages)) )
+            return -1;
+        if ( read_exact(io_fd, &uuid, sizeof(uuid)) )
+            return -1;
+        if ( xc_tmem_restore_new_pool(xch, dom, pool_id,
+                                 flags, uuid[0], uuid[1]) < 0)
+            return -1;
+        if ( n_pages <= 0 )
             continue;
 
-        pagesize = 1 << (pool.flags.u.pagebits + 12);
+        pagesize = 1 << (((flags >> TMEM_POOL_PAGESIZE_SHIFT) &
+                              TMEM_POOL_PAGESIZE_MASK) + 12);
         if ( pagesize > bufsize )
         {
             bufsize = pagesize;
             if ( (buf = realloc(buf,bufsize)) == NULL )
-                goto out_memory;
+                return -1;
         }
-        for ( j = pool.n_pages; j > 0; j-- )
+        for ( j = n_pages; j > 0; j-- )
         {
-            struct xen_tmem_oid oid;
+            struct tmem_oid oid;
             uint32_t index;
             int rc;
-
             if ( read_exact(io_fd, &oid, sizeof(oid)) )
-                goto out_memory;
-
+                return -1;
             if ( oid.oid[0] == -1L && oid.oid[1] == -1L && oid.oid[2] == -1L )
                 break;
             if ( read_exact(io_fd, &index, sizeof(index)) )
-                goto out_memory;
-
+                return -1;
             if ( read_exact(io_fd, buf, pagesize) )
-                goto out_memory;
-
+                return -1;
             checksum += *buf;
-            if ( (rc = xc_tmem_control_oid(
-                      xch, pool.id, XEN_SYSCTL_TMEM_OP_RESTORE_PUT_PAGE,
-                      domid, bufsize, index, oid, buf)) <= 0 )
+            if ( (rc = xc_tmem_control_oid(xch, pool_id,
+                                           TMEMC_RESTORE_PUT_PAGE, dom,
+                                           bufsize, index, oid, buf)) <= 0 )
             {
                 DPRINTF("xc_tmem_restore: putting page failed, rc=%d\n",rc);
- out_memory:
-                free(buf);
                 return -1;
             }
         }
-        if ( pool.n_pages )
-            DPRINTF("restored %"PRId64" tmem pages for dom=%d pool=%d, check=%x\n",
-                    pool.n_pages - j, domid, pool.id, checksum);
+        if ( n_pages )
+            DPRINTF("restored %d tmem pages for dom=%d pool=%d, check=%x\n",
+                    n_pages-j,dom,pool_id,checksum);
     }
-    free(buf);
+    if ( pool_id != -1 )
+        return -1;
 
     return 0;
 }
 
 /* only called for live migration, must be called after suspend */
-int xc_tmem_restore_extra(xc_interface *xch, uint32_t domid, int io_fd)
+int xc_tmem_restore_extra(xc_interface *xch, int dom, int io_fd)
 {
     uint32_t pool_id;
-    struct xen_tmem_oid oid;
+    struct tmem_oid oid;
     uint32_t index;
     int count = 0;
     int checksum = 0;
@@ -481,9 +504,8 @@ int xc_tmem_restore_extra(xc_interface *xch, uint32_t domid, int io_fd)
             return -1;
         if ( read_exact(io_fd, &index, sizeof(index)) )
             return -1;
-        if ( xc_tmem_control_oid(
-                 xch, pool_id, XEN_SYSCTL_TMEM_OP_RESTORE_FLUSH_PAGE,
-                 domid, 0, index, oid, NULL) <= 0 )
+        if ( xc_tmem_control_oid(xch, pool_id, TMEMC_RESTORE_FLUSH_PAGE, dom,
+                             0,index,oid,NULL) <= 0 )
             return -1;
         count++;
         checksum += pool_id + oid.oid[0] + oid.oid[1] + oid.oid[2] + index;

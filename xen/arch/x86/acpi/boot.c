@@ -17,11 +17,13 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/init.h>
 #include <xen/acpi.h>
@@ -42,24 +44,29 @@
 #include <mach_apic.h>
 #include <mach_mpparse.h>
 
+#define BAD_MADT_ENTRY(entry, end) (					    \
+		(!entry) || (unsigned long)entry + sizeof(*entry) > end ||  \
+		((struct acpi_subtable_header *)entry)->length != sizeof(*entry))
+
 #define PREFIX			"ACPI: "
 
-bool __initdata acpi_noirq;     /* skip ACPI IRQ initialization */
-bool __initdata acpi_ht = true; /* enable HT */
+bool_t __initdata acpi_noirq;	/* skip ACPI IRQ initialization */
+bool_t __initdata acpi_ht = 1;	/* enable HT */
 
-bool __initdata acpi_lapic;
-bool __initdata acpi_ioapic;
+bool_t __initdata acpi_lapic;
+bool_t __initdata acpi_ioapic;
 
-/* acpi_skip_timer_override: Skip IRQ0 overrides. */
-static bool __initdata acpi_skip_timer_override;
-boolean_param("acpi_skip_timer_override", acpi_skip_timer_override);
+bool_t acpi_skip_timer_override __initdata;
 
+#ifdef CONFIG_X86_LOCAL_APIC
 static u64 acpi_lapic_addr __initdata = APIC_DEFAULT_PHYS_BASE;
+#endif
 
 /* --------------------------------------------------------------------------
                               Boot-time Configuration
    -------------------------------------------------------------------------- */
 
+#ifdef CONFIG_X86_LOCAL_APIC
 static int __init acpi_parse_madt(struct acpi_table_header *table)
 {
 	struct acpi_table_madt *madt;
@@ -83,26 +90,21 @@ acpi_parse_x2apic(struct acpi_subtable_header *header, const unsigned long end)
 {
 	struct acpi_madt_local_x2apic *processor =
 		container_of(header, struct acpi_madt_local_x2apic, header);
-	bool enabled = false, log = false;
+	bool_t enabled = 0;
 
 	if (BAD_MADT_ENTRY(processor, end))
 		return -EINVAL;
 
-	if ((processor->lapic_flags & ACPI_MADT_ENABLED) ||
-	    processor->local_apic_id != 0xffffffff || opt_cpu_info) {
-		acpi_table_print_madt_entry(header);
-		log = true;
-	}
+	acpi_table_print_madt_entry(header);
 
 	/* Record local apic id only when enabled and fitting. */
 	if (processor->local_apic_id >= MAX_APICS ||
 	    processor->uid >= MAX_MADT_ENTRIES) {
-		if (log)
-			printk("%sAPIC ID %#x and/or ACPI ID %#x beyond limit"
-			       " - processor ignored\n",
-			       processor->lapic_flags & ACPI_MADT_ENABLED
-			       ? KERN_WARNING "WARNING: " : KERN_INFO,
-			       processor->local_apic_id, processor->uid);
+		printk("%sAPIC ID %#x and/or ACPI ID %#x beyond limit"
+		       " - processor ignored\n",
+		       processor->lapic_flags & ACPI_MADT_ENABLED ?
+				KERN_WARNING "WARNING: " : KERN_INFO,
+		       processor->local_apic_id, processor->uid);
 		/*
 		 * Must not return an error here, to prevent
 		 * acpi_table_parse_entries() from terminating early.
@@ -112,7 +114,7 @@ acpi_parse_x2apic(struct acpi_subtable_header *header, const unsigned long end)
 	if (processor->lapic_flags & ACPI_MADT_ENABLED) {
 		x86_acpiid_to_apicid[processor->uid] =
 			processor->local_apic_id;
-		enabled = true;
+		enabled = 1;
 	}
 
 	/*
@@ -132,19 +134,17 @@ acpi_parse_lapic(struct acpi_subtable_header * header, const unsigned long end)
 {
 	struct acpi_madt_local_apic *processor =
 		container_of(header, struct acpi_madt_local_apic, header);
-	bool enabled = false;
+	bool_t enabled = 0;
 
 	if (BAD_MADT_ENTRY(processor, end))
 		return -EINVAL;
 
-	if ((processor->lapic_flags & ACPI_MADT_ENABLED) ||
-	    processor->id != 0xff || opt_cpu_info)
-		acpi_table_print_madt_entry(header);
+	acpi_table_print_madt_entry(header);
 
 	/* Record local apic id only when enabled */
 	if (processor->lapic_flags & ACPI_MADT_ENABLED) {
 		x86_acpiid_to_apicid[processor->processor_id] = processor->id;
-		enabled = true;
+		enabled = 1;
 	}
 
 	/*
@@ -211,6 +211,10 @@ acpi_parse_lapic_nmi(struct acpi_subtable_header * header, const unsigned long e
 	return 0;
 }
 
+#endif				/*CONFIG_X86_LOCAL_APIC */
+
+#if defined(CONFIG_X86_IO_APIC) /*&& defined(CONFIG_ACPI_INTERPRETER)*/
+
 static int __init
 acpi_parse_ioapic(struct acpi_subtable_header * header, const unsigned long end)
 {
@@ -271,6 +275,8 @@ acpi_parse_nmi_src(struct acpi_subtable_header * header, const unsigned long end
 	return 0;
 }
 
+#endif /* CONFIG_X86_IO_APIC */
+
 #ifdef CONFIG_HPET_TIMER
 
 static int __init acpi_parse_hpet(struct acpi_table_header *table)
@@ -301,7 +307,6 @@ static int __init acpi_parse_hpet(struct acpi_table_header *table)
 
 	hpet_address = hpet_tbl->address.address;
 	hpet_blockid = hpet_tbl->sequence;
-	hpet_flags = hpet_tbl->flags;
 	printk(KERN_INFO PREFIX "HPET id: %#x base: %#lx\n",
 	       hpet_tbl->id, hpet_address);
 
@@ -397,15 +402,11 @@ acpi_fadt_parse_sleep_info(struct acpi_table_fadt *fadt)
 	acpi_fadt_copy_address(pm1b_evt, pm1b_event, pm1_event);
 
 	printk(KERN_INFO PREFIX
-	       "SLEEP INFO: pm1x_cnt[%d:%"PRIx64",%d:%"PRIx64"], "
-	       "pm1x_evt[%d:%"PRIx64",%d:%"PRIx64"]\n",
-	       acpi_sinfo.pm1a_cnt_blk.space_id,
+	       "SLEEP INFO: pm1x_cnt[%"PRIx64",%"PRIx64"], "
+	       "pm1x_evt[%"PRIx64",%"PRIx64"]\n",
 	       acpi_sinfo.pm1a_cnt_blk.address,
-	       acpi_sinfo.pm1b_cnt_blk.space_id,
 	       acpi_sinfo.pm1b_cnt_blk.address,
-	       acpi_sinfo.pm1a_evt_blk.space_id,
 	       acpi_sinfo.pm1a_evt_blk.address,
-	       acpi_sinfo.pm1b_evt_blk.space_id,
 	       acpi_sinfo.pm1b_evt_blk.address);
 
 	/* Now FACS... */
@@ -478,23 +479,22 @@ static int __init acpi_parse_fadt(struct acpi_table_header *table)
 	if (fadt->header.revision >= FADT2_REVISION_ID) {
 		/* FADT rev. 2 */
 		if (fadt->xpm_timer_block.space_id ==
-		    ACPI_ADR_SPACE_SYSTEM_IO) {
+		    ACPI_ADR_SPACE_SYSTEM_IO)
 			pmtmr_ioport = fadt->xpm_timer_block.address;
-			pmtmr_width = fadt->xpm_timer_block.bit_width;
-		}
-	}
-	/*
-	 * "X" fields are optional extensions to the original V1.0
-	 * fields, so we must selectively expand V1.0 fields if the
-	 * corresponding X field is zero.
- 	 */
-	if (!pmtmr_ioport) {
+		/*
+		 * "X" fields are optional extensions to the original V1.0
+		 * fields, so we must selectively expand V1.0 fields if the
+		 * corresponding X field is zero.
+	 	 */
+		if (!pmtmr_ioport)
+			pmtmr_ioport = fadt->pm_timer_block;
+	} else {
+		/* FADT rev. 1 */
 		pmtmr_ioport = fadt->pm_timer_block;
-		pmtmr_width = fadt->pm_timer_length == 4 ? 24 : 0;
 	}
 	if (pmtmr_ioport)
-		printk(KERN_INFO PREFIX "PM-Timer IO Port: %#x (%u bits)\n",
-		       pmtmr_ioport, pmtmr_width);
+		printk(KERN_INFO PREFIX "PM-Timer IO Port: %#x\n",
+		       pmtmr_ioport);
 #endif
 
 	acpi_smi_cmd       = fadt->smi_command;
@@ -508,6 +508,7 @@ static int __init acpi_parse_fadt(struct acpi_table_header *table)
 	return 0;
 }
 
+#ifdef	CONFIG_X86_LOCAL_APIC
 /*
  * Parse LAPIC entries in MADT
  * returns 0 on success, < 0 on error
@@ -563,7 +564,9 @@ static int __init acpi_parse_madt_lapic_entries(void)
 	}
 	return 0;
 }
+#endif /* CONFIG_X86_LOCAL_APIC */
 
+#ifdef CONFIG_X86_IO_APIC
 /*
  * Parse IOAPIC related entries in MADT
  * returns 0 on success, < 0 on error
@@ -629,9 +632,17 @@ static int __init acpi_parse_madt_ioapic_entries(void)
 
 	return 0;
 }
+#else
+static inline int acpi_parse_madt_ioapic_entries(void)
+{
+	return -1;
+}
+#endif /* !CONFIG_X86_IO_APIC */
+
 
 static void __init acpi_process_madt(void)
 {
+#ifdef CONFIG_X86_LOCAL_APIC
 	int error;
 
 	if (!acpi_table_parse(ACPI_SIG_MADT, acpi_parse_madt)) {
@@ -641,7 +652,7 @@ static void __init acpi_process_madt(void)
 		 */
 		error = acpi_parse_madt_lapic_entries();
 		if (!error) {
-			acpi_lapic = true;
+			acpi_lapic = 1;
 			generic_bigsmp_probe();
  
 			/*
@@ -649,9 +660,9 @@ static void __init acpi_process_madt(void)
 			 */
 			error = acpi_parse_madt_ioapic_entries();
 			if (!error) {
-				acpi_ioapic = true;
+				acpi_ioapic = 1;
 
-				smp_found_config = true;
+				smp_found_config = 1;
 				clustered_apic_check();
 			}
 		}
@@ -664,6 +675,8 @@ static void __init acpi_process_madt(void)
 			disable_acpi();
 		}
 	}
+#endif
+	return;
 }
 
 /*
@@ -677,9 +690,9 @@ static void __init acpi_process_madt(void)
  * other side effects.
  *
  * side effects of acpi_boot_init:
- *	acpi_lapic = true if LAPIC found
- *	acpi_ioapic = true if IOAPIC found
- *	if (acpi_lapic && acpi_ioapic) smp_found_config = true;
+ *	acpi_lapic = 1 if LAPIC found
+ *	acpi_ioapic = 1 if IOAPIC found
+ *	if (acpi_lapic && acpi_ioapic) smp_found_config = 1;
  *	...
  *
  * return value: (currently ignored)

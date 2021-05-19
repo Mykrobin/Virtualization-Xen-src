@@ -1,20 +1,4 @@
-/*
- * Trampoline code relocated to low memory.
- *
- * Care must taken when referencing symbols: they live in the relocated
- * trampoline and in the hypervisor binary. The hypervisor symbols can either
- * be accessed by their virtual address or by the physical address. When
- * using the physical address eventually the physical start address of the
- * hypervisor must be taken into account: after early boot the hypervisor
- * will copy itself to high memory and writes its physical start address to
- * trampoline_xen_phys_start in the low memory trampoline copy.
- *
- * Parts of the trampoline are needed for early boot only, while some other
- * parts are needed as long as the hypervisor is active (e.g. wakeup code
- * after suspend, bringup code for secondary cpus). The permanent parts should
- * not reference any temporary low memory trampoline parts as those parts are
- * not guaranteed to persist.
- */
+        .code16
 
 /* NB. bootsym() is only usable in real mode, or via BOOT_PSEUDORM_DS. */
 #undef bootsym
@@ -34,10 +18,6 @@
         .long 111b - (off) - .;            \
         .popsection
 
-/* Start of the permanent trampoline code. */
-
-        .code16
-
 GLOBAL(trampoline_realmode_entry)
         mov     %cs,%ax
         mov     %ax,%ds
@@ -52,13 +32,9 @@ GLOBAL(trampoline_realmode_entry)
         lmsw    %ax                       # CR0.PE = 1 (enter protected mode)
         ljmpl   $BOOT_CS32,$bootsym_rel(trampoline_protmode_entry,6)
 
-        .balign 8
-        .word   0
 idt_48: .word   0, 0, 0 # base = limit = 0
-        .word   0
 gdt_48: .word   6*8-1
         .long   bootsym_rel(trampoline_gdt,4)
-
 trampoline_gdt:
         /* 0x0000: unused */
         .quad   0x0000000000000000
@@ -74,19 +50,11 @@ trampoline_gdt:
         /* 0x0028: real-mode data @ BOOT_TRAMPOLINE */
         .long   0x0000ffff
         .long   0x00009200
-        /*
-         * 0x0030: ring 0 Xen data, 16 MiB size, base
-         * address is computed at runtime.
-         */
-        .quad   0x00c0920000000fff
 
         .pushsection .trampoline_rel, "a"
         .long   trampoline_gdt + BOOT_PSEUDORM_CS + 2 - .
         .long   trampoline_gdt + BOOT_PSEUDORM_DS + 2 - .
         .popsection
-
-GLOBAL(trampoline_misc_enable_off)
-        .quad   0
 
 GLOBAL(cpuid_ext_features)
         .long   0
@@ -112,37 +80,25 @@ trampoline_protmode_entry:
         mov     %ecx,%cr4
 
         /* Load pagetable base register. */
-        mov     $sym_offs(idle_pg_table),%eax
+        mov     $sym_phys(idle_pg_table),%eax
         add     bootsym_rel(trampoline_xen_phys_start,4,%eax)
         mov     %eax,%cr3
 
-        /* Adjust IA32_MISC_ENABLE if needed (for NX enabling below). */
-        mov     bootsym_rel(trampoline_misc_enable_off,4,%esi)
-        mov     bootsym_rel(trampoline_misc_enable_off+4,4,%edi)
-        mov     %esi,%eax
-        or      %edi,%eax
-        jz      1f
-        mov     $MSR_IA32_MISC_ENABLE,%ecx
-        rdmsr
-        not     %esi
-        not     %edi
-        and     %esi,%eax
-        and     %edi,%edx
-        wrmsr
-1:
-
         /* Set up EFER (Extended Feature Enable Register). */
         mov     bootsym_rel(cpuid_ext_features,4,%edi)
+        test    $0x20100800,%edi /* SYSCALL/SYSRET, No Execute, Long Mode? */
+        jz      .Lskip_efer
         movl    $MSR_EFER,%ecx
         rdmsr
-        or      $EFER_LME|EFER_SCE,%eax   /* Long Mode + SYSCALL/SYSRET */
-        bt      $cpufeat_bit(X86_FEATURE_NX),%edi /* No Execute? */
+        btsl    $_EFER_LME,%eax /* Long Mode      */
+        btsl    $_EFER_SCE,%eax /* SYSCALL/SYSRET */
+        btl     $20,%edi        /* No Execute?    */
         jnc     1f
         btsl    $_EFER_NX,%eax  /* No Execute     */
 1:      wrmsr
+.Lskip_efer:
 
-        mov     $(X86_CR0_PG | X86_CR0_AM | X86_CR0_WP | X86_CR0_NE |\
-                  X86_CR0_ET | X86_CR0_MP | X86_CR0_PE), %eax
+        mov     $0x80050033,%eax /* hi-to-lo: PG,AM,WP,NE,ET,MP,PE */
         mov     %eax,%cr0
         jmp     1f
 1:
@@ -153,37 +109,11 @@ trampoline_protmode_entry:
         .code64
 start64:
         /* Jump to high mappings. */
-        movabs  $__high_start, %rdi
+        mov     high_start(%rip),%rax
+        jmpq    *%rax
 
-#ifdef CONFIG_INDIRECT_THUNK
-        /*
-         * If booting virtualised, or hot-onlining a CPU, sibling threads can
-         * attempt Branch Target Injection against this jmp.
-         *
-         * We've got no usable stack so can't use a RETPOLINE thunk, and are
-         * further than disp32 from the high mappings so couldn't use
-         * JUMP_THUNK even if it was a non-RETPOLINE thunk.  Furthermore, an
-         * LFENCE isn't necessarily safe to use at this point.
-         *
-         * As this isn't a hotpath, use a fully serialising event to reduce
-         * the speculation window as much as possible.  %ebx needs preserving
-         * for __high_start.
-         */
-        mov     %ebx, %esi
-        cpuid
-        mov     %esi, %ebx
-#endif
-
-        jmpq    *%rdi
-
-#include "wakeup.S"
-
-/* The first page of trampoline is permanent, the rest boot-time only. */
-/* Reuse the boot trampoline on the 1st trampoline page as stack for wakeup. */
-        .equ    wakeup_stack, trampoline_start + PAGE_SIZE
-        .global wakeup_stack
-
-/* From here on early boot only. */
+high_start:
+        .quad   __high_start
 
         .code32
 trampoline_boot_cpu_entry:
@@ -239,9 +169,7 @@ trampoline_boot_cpu_entry:
          */
         call    get_memory_map
         call    get_edd
-#ifdef CONFIG_VIDEO
         call    video
-#endif
 
         mov     $0x0200,%ax
         int     $0x16
@@ -276,26 +204,8 @@ trampoline_boot_cpu_entry:
         /* Jump to the common bootstrap entry point. */
         jmp     trampoline_protmode_entry
 
-#include "video.h"
-
-        .align  2
-/* Keep in sync with cmdline.c:early_boot_opts_t type! */
-early_boot_opts:
 skip_realmode:
         .byte   0
-opt_edd:
-        .byte   0                               /* edd=on/off/skipmbr */
-opt_edid:
-        .byte   0                               /* EDID parsing option (force/no/default). */
-/* Padding. */
-        .byte   0
-
-#ifdef CONFIG_VIDEO
-GLOBAL(boot_vid_mode)
-        .word   VIDEO_80x25                     /* If we don't run at all, assume basic video mode 3 at 80x25. */
-vesa_size:
-        .word   0,0,0                           /* width x depth x height */
-#endif
 
 GLOBAL(kbd_shift_flags)
         .byte   0
@@ -304,6 +214,5 @@ rm_idt: .word   256*4-1, 0, 0
 
 #include "mem.S"
 #include "edd.S"
-#ifdef CONFIG_VIDEO
 #include "video.S"
-#endif
+#include "wakeup.S"

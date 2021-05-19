@@ -18,6 +18,7 @@
  */
 
 #include <asm/p2m.h>
+#include <xen/config.h>
 #include <asm/platform.h>
 #include <asm/platforms/omap5.h>
 #include <xen/mm.h>
@@ -51,7 +52,8 @@ static int omap5_init_time(void)
     unsigned int sys_clksel;
     unsigned int num, den, frac1, frac2;
 
-    ckgen_prm_base = ioremap_nocache(OMAP5_CKGEN_PRM_BASE, 0x20);
+    ckgen_prm_base = ioremap_attr(OMAP5_CKGEN_PRM_BASE,
+                                  0x20, PAGE_HYPERVISOR_NOCACHE);
     if ( !ckgen_prm_base )
     {
         dprintk(XENLOG_ERR, "%s: PRM_BASE ioremap failed\n", __func__);
@@ -63,7 +65,8 @@ static int omap5_init_time(void)
 
     iounmap(ckgen_prm_base);
 
-    rt_ct_base = ioremap_nocache(REALTIME_COUNTER_BASE, 0x20);
+    rt_ct_base = ioremap_attr(REALTIME_COUNTER_BASE,
+                              0x20, PAGE_HYPERVISOR_NOCACHE);
     if ( !rt_ct_base )
     {
         dprintk(XENLOG_ERR, "%s: REALTIME_COUNTER_BASE ioremap failed\n", __func__);
@@ -99,20 +102,21 @@ static int omap5_init_time(void)
 static int omap5_specific_mapping(struct domain *d)
 {
     /* Map the PRM module */
-    map_mmio_regions(d, gaddr_to_gfn(OMAP5_PRM_BASE), 2,
-                     maddr_to_mfn(OMAP5_PRM_BASE));
+    map_mmio_regions(d, OMAP5_PRM_BASE, OMAP5_PRM_BASE + (PAGE_SIZE * 2) - 1,
+                     OMAP5_PRM_BASE);
 
     /* Map the PRM_MPU */
-    map_mmio_regions(d, gaddr_to_gfn(OMAP5_PRCM_MPU_BASE), 1,
-                     maddr_to_mfn(OMAP5_PRCM_MPU_BASE));
+    map_mmio_regions(d, OMAP5_PRCM_MPU_BASE,
+                     OMAP5_PRCM_MPU_BASE + PAGE_SIZE - 1,
+                     OMAP5_PRCM_MPU_BASE);
 
     /* Map the Wakeup Gen */
-    map_mmio_regions(d, gaddr_to_gfn(OMAP5_WKUPGEN_BASE), 1,
-                     maddr_to_mfn(OMAP5_WKUPGEN_BASE));
+    map_mmio_regions(d, OMAP5_WKUPGEN_BASE, OMAP5_WKUPGEN_BASE + PAGE_SIZE - 1,
+                     OMAP5_WKUPGEN_BASE);
 
     /* Map the on-chip SRAM */
-    map_mmio_regions(d, gaddr_to_gfn(OMAP5_SRAM_PA), 32,
-                     maddr_to_mfn(OMAP5_SRAM_PA));
+    map_mmio_regions(d, OMAP5_SRAM_PA, OMAP5_SRAM_PA + (PAGE_SIZE * 32) - 1,
+                     OMAP5_SRAM_PA);
 
     return 0;
 }
@@ -140,15 +144,9 @@ static int __init omap5_smp_init(void)
     return 0;
 }
 
-static const char * const omap5_dt_compat[] __initconst =
+static const char const *omap5_dt_compat[] __initconst =
 {
     "ti,omap5",
-    NULL
-};
-
-static const char * const dra7_dt_compat[] __initconst =
-{
-    "ti,dra7",
     NULL
 };
 
@@ -158,13 +156,9 @@ PLATFORM_START(omap5, "TI OMAP5")
     .specific_mapping = omap5_specific_mapping,
     .smp_init = omap5_smp_init,
     .cpu_up = cpu_up_send_sgi,
-PLATFORM_END
 
-PLATFORM_START(dra7, "TI DRA7")
-    .compatible = dra7_dt_compat,
-    .init_time = omap5_init_time,
-    .cpu_up = cpu_up_send_sgi,
-    .smp_init = omap5_smp_init,
+    .dom0_gnttab_start = 0x4b000000,
+    .dom0_gnttab_size = 0x20000,
 PLATFORM_END
 
 /*

@@ -21,7 +21,7 @@ void watchdog_enable(void);
 void watchdog_disable(void);
 
 /* Is the watchdog currently enabled. */
-bool watchdog_enabled(void);
+bool_t watchdog_enabled(void);
 
 #else
 

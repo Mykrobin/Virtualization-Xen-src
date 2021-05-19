@@ -28,20 +28,31 @@ extern const struct platform_desc _splatform[], _eplatform[];
 static const struct platform_desc *platform;
 
 
-static bool __init platform_is_compatible(const struct platform_desc *plat)
+static bool_t __init platform_is_compatible(const struct platform_desc *plat)
 {
     const char *const *compat;
 
     if ( !plat->compatible )
-        return false;
+        return 0;
 
     for ( compat = plat->compatible; *compat; compat++ )
     {
         if ( dt_machine_is_compatible(*compat) )
-            return true;
+            return 1;
     }
 
-    return false;
+    return 0;
+}
+
+/* List of possible platform */
+static void dump_platform_table(void)
+{
+    const struct platform_desc *p;
+
+    printk("Available platform support:\n");
+
+    for ( p = _splatform; p != _eplatform; p++ )
+        printk("    - %s\n", p->name);
 }
 
 void __init platform_init(void)
@@ -61,7 +72,9 @@ void __init platform_init(void)
     if ( platform == _eplatform )
     {
         /* TODO: dump DT machine compatible node */
-        printk(XENLOG_INFO "Platform: Generic System\n");
+        printk(XENLOG_WARNING "WARNING: Unrecognized/unsupported device tree "
+              "compatible list\n");
+        dump_platform_table();
         platform = NULL;
     }
     else
@@ -97,7 +110,7 @@ int __init platform_specific_mapping(struct domain *d)
 #ifdef CONFIG_ARM_32
 int __init platform_cpu_up(int cpu)
 {
-    if ( psci_ver )
+    if ( psci_available )
         return call_psci_cpu_on(cpu);
 
     if ( platform && platform->cpu_up )
@@ -127,24 +140,45 @@ void platform_poweroff(void)
         platform->poweroff();
 }
 
-bool platform_has_quirk(uint32_t quirk)
+bool_t platform_has_quirk(uint32_t quirk)
 {
     uint32_t quirks = 0;
 
     if ( platform && platform->quirks )
         quirks = platform->quirks();
 
-    return (quirks & quirk);
+    return !!(quirks & quirk);
 }
 
-bool platform_device_is_blacklisted(const struct dt_device_node *node)
+bool_t platform_device_is_blacklisted(const struct dt_device_node *node)
 {
     const struct dt_device_match *blacklist = NULL;
 
     if ( platform && platform->blacklist_dev )
         blacklist = platform->blacklist_dev;
 
-    return (dt_match_node(blacklist, node) != NULL);
+    return dt_match_node(blacklist, node);
+}
+
+unsigned int platform_dom0_evtchn_ppi(void)
+{
+    if ( platform && platform->dom0_evtchn_ppi )
+        return platform->dom0_evtchn_ppi;
+    return GUEST_EVTCHN_PPI;
+}
+
+void platform_dom0_gnttab(paddr_t *start, paddr_t *size)
+{
+    if ( platform && platform->dom0_gnttab_size )
+    {
+        *start = platform->dom0_gnttab_start;
+        *size = platform->dom0_gnttab_size;
+    }
+    else
+    {
+        *start = 0xb0000000;
+        *size = 0x20000;
+    }
 }
 
 /*

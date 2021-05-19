@@ -2,6 +2,7 @@
 #define __ASM_SMP_H
 
 #ifndef __ASSEMBLY__
+#include <xen/config.h>
 #include <xen/cpumask.h>
 #include <xen/device_tree.h>
 #include <asm/current.h>
@@ -14,13 +15,7 @@ DECLARE_PER_CPU(cpumask_var_t, cpu_core_mask);
 
 #define raw_smp_processor_id() (get_processor_id())
 
-/*
- * Do we, for platform reasons, need to actually keep CPUs online when we
- * would otherwise prefer them to be off?
- */
-#define park_offline_cpus false
-
-extern void noreturn stop_cpu(void);
+extern void stop_cpu(void);
 
 extern int arch_smp_init(void);
 extern int arch_cpu_init(int cpu, struct dt_device_node *dn);

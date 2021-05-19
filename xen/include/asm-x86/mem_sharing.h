@@ -16,7 +16,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 #ifndef __MEM_SHARING_H__
 #define __MEM_SHARING_H__
@@ -56,6 +57,10 @@ struct page_sharing_info
 
 unsigned int mem_sharing_get_nr_saved_mfns(void);
 unsigned int mem_sharing_get_nr_shared_mfns(void);
+int mem_sharing_nominate_page(struct domain *d, 
+                              unsigned long gfn,
+                              int expected_refcnt,
+                              shr_handle_t *phandle);
 
 #define MEM_SHARING_DESTROY_GFN       (1<<1)
 /* Only fails with -ENOMEM. Enforce it with a BUG_ON wrapper. */
@@ -85,9 +90,12 @@ static inline int mem_sharing_unshare_page(struct domain *d,
  */
 int mem_sharing_notify_enomem(struct domain *d, unsigned long gfn,
                                 bool_t allow_sleep);
-int mem_sharing_memop(XEN_GUEST_HANDLE_PARAM(xen_mem_sharing_op_t) arg);
+int mem_sharing_sharing_resume(struct domain *d);
+int mem_sharing_memop(struct domain *d, 
+                       xen_mem_sharing_op_t *mec);
 int mem_sharing_domctl(struct domain *d, 
-                       struct xen_domctl_mem_sharing_op *mec);
+                       xen_domctl_mem_sharing_op_t *mec);
+int mem_sharing_audit(void);
 void mem_sharing_init(void);
 
 /* Scans the p2m and relinquishes any shared pages, destroying 

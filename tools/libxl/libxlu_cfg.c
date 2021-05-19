@@ -131,35 +131,20 @@ int xlu_cfg_readdata(XLU_Config *cfg, const char *data, int length) {
     return ctx.err;
 }
 
-void xlu__cfg_value_free(XLU_ConfigValue *value)
-{
+void xlu__cfg_set_free(XLU_ConfigSetting *set) {
     int i;
 
-    if (!value) return;
-
-    switch (value->type) {
-    case XLU_STRING:
-        free(value->u.string);
-        break;
-    case XLU_LIST:
-        for (i = 0; i < value->u.list.nvalues; i++)
-            xlu__cfg_value_free(value->u.list.values[i]);
-        free(value->u.list.values);
-    }
-    free(value);
-}
-
-void xlu__cfg_set_free(XLU_ConfigSetting *set) {
     if (!set) return;
     free(set->name);
-    xlu__cfg_value_free(set->value);
+    for (i=0; i<set->nvalues; i++)
+        free(set->values[i]);
+    free(set->values);
     free(set);
 }
 
 void xlu_cfg_destroy(XLU_Config *cfg) {
     XLU_ConfigSetting *set, *set_next;
 
-    if (!cfg) return;
     for (set= cfg->settings;
          set;
          set= set_next) {
@@ -188,7 +173,7 @@ static int find_atom(const XLU_Config *cfg, const char *n,
     set= find(cfg,n);
     if (!set) return ESRCH;
 
-    if (set->value->type!=XLU_STRING) {
+    if (set->avalues!=1) {
         if (!dont_warn)
             fprintf(cfg->report,
                     "%s:%d: warning: parameter `%s' is"
@@ -200,60 +185,13 @@ static int find_atom(const XLU_Config *cfg, const char *n,
     return 0;
 }
 
-
-enum XLU_ConfigValueType xlu_cfg_value_type(const XLU_ConfigValue *value)
-{
-    return value->type;
-}
-
-int xlu_cfg_value_get_string(const XLU_Config *cfg, XLU_ConfigValue *value,
-                             char **value_r, int dont_warn)
-{
-    if (value->type != XLU_STRING) {
-        if (!dont_warn)
-            fprintf(cfg->report,
-                    "%s:%d:%d: warning: value is not a string\n",
-                    cfg->config_source, value->loc.first_line,
-                    value->loc.first_column);
-        *value_r = NULL;
-        return EINVAL;
-    }
-
-    *value_r = value->u.string;
-    return 0;
-}
-
-int xlu_cfg_value_get_list(const XLU_Config *cfg, XLU_ConfigValue *value,
-                           XLU_ConfigList **value_r, int dont_warn)
-{
-    if (value->type != XLU_LIST) {
-        if (!dont_warn)
-            fprintf(cfg->report,
-                    "%s:%d:%d: warning: value is not a list\n",
-                    cfg->config_source, value->loc.first_line,
-                    value->loc.first_column);
-        *value_r = NULL;
-        return EINVAL;
-    }
-
-    *value_r = &value->u.list;
-    return 0;
-}
-
-XLU_ConfigValue *xlu_cfg_get_listitem2(const XLU_ConfigList *list,
-                                       int entry)
-{
-    if (entry < 0 || entry >= list->nvalues) return NULL;
-    return list->values[entry];
-}
-
 int xlu_cfg_get_string(const XLU_Config *cfg, const char *n,
                        const char **value_r, int dont_warn) {
     XLU_ConfigSetting *set;
     int e;
 
     e= find_atom(cfg,n,&set,dont_warn);  if (e) return e;
-    *value_r= set->value->u.string;
+    *value_r= set->values[0];
     return 0;
 }
 
@@ -264,7 +202,7 @@ int xlu_cfg_replace_string(const XLU_Config *cfg, const char *n,
 
     e= find_atom(cfg,n,&set,dont_warn);  if (e) return e;
     free(*value_r);
-    *value_r= strdup(set->value->u.string);
+    *value_r= strdup(set->values[0]);
     return 0;
 }
 
@@ -276,7 +214,7 @@ int xlu_cfg_get_long(const XLU_Config *cfg, const char *n,
     char *ep;
 
     e= find_atom(cfg,n,&set,dont_warn);  if (e) return e;
-    errno= 0; l= strtol(set->value->u.string, &ep, 0);
+    errno= 0; l= strtol(set->values[0], &ep, 0);
     e= errno;
     if (errno) {
         e= errno;
@@ -288,7 +226,7 @@ int xlu_cfg_get_long(const XLU_Config *cfg, const char *n,
                     cfg->config_source, set->lineno, n, strerror(e));
         return e;
     }
-    if (*ep || ep==set->value->u.string) {
+    if (*ep || ep==set->values[0]) {
         if (!dont_warn)
             fprintf(cfg->report,
                     "%s:%d: warning: parameter `%s' is not a valid number\n",
@@ -315,7 +253,7 @@ int xlu_cfg_get_list(const XLU_Config *cfg, const char *n,
                      XLU_ConfigList **list_r, int *entries_r, int dont_warn) {
     XLU_ConfigSetting *set;
     set= find(cfg,n);  if (!set) return ESRCH;
-    if (set->value->type!=XLU_LIST) {
+    if (set->avalues==1) {
         if (!dont_warn) {
             fprintf(cfg->report,
                     "%s:%d: warning: parameter `%s' is a single value"
@@ -324,8 +262,8 @@ int xlu_cfg_get_list(const XLU_Config *cfg, const char *n,
         }
         return EINVAL;
     }
-    if (list_r) *list_r= &set->value->u.list;
-    if (entries_r) *entries_r= set->value->u.list.nvalues;
+    if (list_r) *list_r= set;
+    if (entries_r) *entries_r= set->nvalues;
     return 0;
 }
 
@@ -352,118 +290,72 @@ int xlu_cfg_get_list_as_string_list(const XLU_Config *cfg, const char *n,
     return 0;
 }
 
-const char *xlu_cfg_get_listitem(const XLU_ConfigList *list, int entry) {
-    if (entry < 0 || entry >= list->nvalues) return 0;
-    if (list->values[entry]->type != XLU_STRING) return 0;
-    return list->values[entry]->u.string;
+const char *xlu_cfg_get_listitem(const XLU_ConfigList *set, int entry) {
+    if (entry < 0 || entry >= set->nvalues) return 0;
+    return set->values[entry];
 }
 
 
-XLU_ConfigValue *xlu__cfg_string_mk(CfgParseContext *ctx, char *atom,
-                                    YYLTYPE *loc)
-{
-    XLU_ConfigValue *value = NULL;
+XLU_ConfigSetting *xlu__cfg_set_mk(CfgParseContext *ctx,
+                                   int alloc, char *atom) {
+    XLU_ConfigSetting *set= 0;
 
     if (ctx->err) goto x;
+    assert(!!alloc == !!atom);
 
-    value = malloc(sizeof(*value));
-    if (!value) goto xe;
-    value->type = XLU_STRING;
-    value->u.string = atom;
-    memcpy(&value->loc, loc, sizeof(*loc));
+    set= malloc(sizeof(*set));
+    if (!set) goto xe;
 
-    return value;
+    set->name= 0; /* tbd */
+    set->avalues= alloc;
+
+    if (!alloc) {
+        set->nvalues= 0;
+        set->values= 0;
+    } else {
+        set->values= malloc(sizeof(*set->values) * alloc);
+        if (!set->values) goto xe;
+
+        set->nvalues= 1;
+        set->values[0]= atom;
+    }
+    return set;
 
  xe:
     ctx->err= errno;
  x:
-    free(value);
+    free(set);
     free(atom);
-    return NULL;
+    return 0;
 }
 
-XLU_ConfigValue *xlu__cfg_list_mk(CfgParseContext *ctx,
-                                  XLU_ConfigValue *val,
-                                  YYLTYPE *loc)
-{
-    XLU_ConfigValue *value = NULL;
-    XLU_ConfigValue **values = NULL;
-
-    if (ctx->err) goto x;
-
-    values = malloc(sizeof(*values));
-    if (!values) goto xe;
-    values[0] = val;
-
-    value = malloc(sizeof(*value));
-    if (!value) goto xe;
-    value->type = XLU_LIST;
-    value->u.list.nvalues = !!val;
-    value->u.list.avalues = 1;
-    value->u.list.values = values;
-    memcpy(&value->loc, loc, sizeof(*loc));
-
-    return value;
-
- xe:
-    ctx->err= errno;
- x:
-    free(value);
-    free(values);
-    xlu__cfg_value_free(val);
-    return NULL;
-}
-
-void xlu__cfg_list_append(CfgParseContext *ctx,
-                          XLU_ConfigValue *list,
-                          XLU_ConfigValue *val)
-{
+void xlu__cfg_set_add(CfgParseContext *ctx, XLU_ConfigSetting *set,
+                      char *atom) {
     if (ctx->err) return;
 
-    assert(val);
-    assert(list->type == XLU_LIST);
+    assert(atom);
 
-    if (list->u.list.nvalues >= list->u.list.avalues) {
+    if (set->nvalues >= set->avalues) {
         int new_avalues;
-        XLU_ConfigValue **new_values = NULL;
+        char **new_values;
 
-        if (list->u.list.avalues > INT_MAX / 100) {
-            ctx->err = ERANGE;
-            xlu__cfg_value_free(val);
-            return;
-        }
-
-        new_avalues = list->u.list.avalues * 4;
-        new_values  = realloc(list->u.list.values,
-                              sizeof(*new_values) * new_avalues);
-        if (!new_values) {
-            ctx->err = errno;
-            xlu__cfg_value_free(val);
-            return;
-        }
-
-        list->u.list.avalues = new_avalues;
-        list->u.list.values  = new_values;
+        if (set->avalues > INT_MAX / 100) { ctx->err= ERANGE; return; }
+        new_avalues= set->avalues * 4;
+        new_values= realloc(set->values,
+                            sizeof(*new_values) * new_avalues);
+        if (!new_values) { ctx->err= errno; free(atom); return; }
+        set->values= new_values;
+        set->avalues= new_avalues;
     }
-
-    list->u.list.values[list->u.list.nvalues] = val;
-    list->u.list.nvalues++;
+    set->values[set->nvalues++]= atom;
 }
 
 void xlu__cfg_set_store(CfgParseContext *ctx, char *name,
-                        XLU_ConfigValue *val, int lineno) {
-    XLU_ConfigSetting *set;
-
+                        XLU_ConfigSetting *set, int lineno) {
     if (ctx->err) return;
 
     assert(name);
-    set = malloc(sizeof(*set));
-    if (!set) {
-        ctx->err = errno;
-        return;
-    }
     set->name= name;
-    set->value = val;
     set->lineno= lineno;
     set->next= ctx->cfg->settings;
     ctx->cfg->settings= set;
@@ -533,11 +425,6 @@ char *xlu__cfgl_dequote(CfgParseContext *ctx, const char *src) {
                 NUMERIC_CHAR(2,2,16,"hex");
             } else if (nc>='0' && nc<='7') {
                 NUMERIC_CHAR(1,3,10,"octal");
-            } else {
-                xlu__cfgl_lexicalerror(ctx,
-                           "invalid character after backlash in quoted string");
-                ctx->err= EINVAL;
-                goto x;
             }
             assert(p <= src+len-1);
         } else {

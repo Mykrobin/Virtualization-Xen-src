@@ -17,7 +17,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #include <inttypes.h>
@@ -57,14 +58,12 @@ int xc_mark_page_online(xc_interface *xch, unsigned long start,
     int ret = -1;
 
     if ( !status || (end < start) )
-    {
-        errno = EINVAL;
-        return -1;
-    }
+        return -EINVAL;
+
     if ( xc_hypercall_bounce_pre(xch, status) )
     {
         ERROR("Could not bounce memory for xc_mark_page_online\n");
-        return -1;
+        return -EINVAL;
     }
 
     sysctl.cmd = XEN_SYSCTL_page_offline_op;
@@ -87,14 +86,12 @@ int xc_mark_page_offline(xc_interface *xch, unsigned long start,
     int ret = -1;
 
     if ( !status || (end < start) )
-    {
-        errno = EINVAL;
-        return -1;
-    }
+        return -EINVAL;
+
     if ( xc_hypercall_bounce_pre(xch, status) )
     {
         ERROR("Could not bounce memory for xc_mark_page_offline");
-        return -1;
+        return -EINVAL;
     }
 
     sysctl.cmd = XEN_SYSCTL_page_offline_op;
@@ -117,14 +114,12 @@ int xc_query_page_offline_status(xc_interface *xch, unsigned long start,
     int ret = -1;
 
     if ( !status || (end < start) )
-    {
-        errno = EINVAL;
-        return -1;
-    }
+        return -EINVAL;
+
     if ( xc_hypercall_bounce_pre(xch, status) )
     {
         ERROR("Could not bounce memory for xc_query_page_offline_status\n");
-        return -1;
+        return -EINVAL;
     }
 
     sysctl.cmd = XEN_SYSCTL_page_offline_op;
@@ -262,7 +257,7 @@ static int __update_pte(xc_interface *xch,
     return 0;
 }
 
-static int change_pte(xc_interface *xch, uint32_t domid,
+static int change_pte(xc_interface *xch, int domid,
                      struct xc_domain_meminfo *minfo,
                      struct pte_backup *backup,
                      struct xc_mmu *mmu,
@@ -277,12 +272,12 @@ static int change_pte(xc_interface *xch, uint32_t domid,
 
     for (i = 0; i < minfo->p2m_size; i++)
     {
-        xen_pfn_t table_mfn = xc_pfn_to_mfn(i, minfo->p2m_table,
-                                            minfo->guest_width);
+        xen_pfn_t table_mfn = pfn_to_mfn(i, minfo->p2m_table,
+                                         minfo->guest_width);
         uint64_t pte, new_pte;
         int j;
 
-        if ( (table_mfn == INVALID_PFN) ||
+        if ( (table_mfn == INVALID_P2M_ENTRY) ||
              ((minfo->pfn_type[i] & XEN_DOMCTL_PFINFO_LTAB_MASK) ==
               XEN_DOMCTL_PFINFO_XTAB) )
             continue;
@@ -340,7 +335,7 @@ failed:
     return -1;
 }
 
-static int update_pte(xc_interface *xch, uint32_t domid,
+static int update_pte(xc_interface *xch, int domid,
                      struct xc_domain_meminfo *minfo,
                      struct pte_backup *backup,
                      struct xc_mmu *mmu,
@@ -350,7 +345,7 @@ static int update_pte(xc_interface *xch, uint32_t domid,
                       __update_pte, new_mfn);
 }
 
-static int clear_pte(xc_interface *xch, uint32_t domid,
+static int clear_pte(xc_interface *xch, int domid,
                      struct xc_domain_meminfo *minfo,
                      struct pte_backup *backup,
                      struct xc_mmu *mmu,
@@ -364,7 +359,7 @@ static int clear_pte(xc_interface *xch, uint32_t domid,
  * Check if a page can be exchanged successfully
  */
 
-static int is_page_exchangable(xc_interface *xch, uint32_t domid, xen_pfn_t mfn,
+static int is_page_exchangable(xc_interface *xch, int domid, xen_pfn_t mfn,
                                xc_dominfo_t *info)
 {
     uint32_t status;
@@ -395,67 +390,8 @@ static int is_page_exchangable(xc_interface *xch, uint32_t domid, xen_pfn_t mfn,
     return 1;
 }
 
-xen_pfn_t *xc_map_m2p(xc_interface *xch,
-                      unsigned long max_mfn,
-                      int prot,
-                      unsigned long *mfn0)
-{
-    privcmd_mmap_entry_t *entries;
-    unsigned long m2p_chunks, m2p_size;
-    xen_pfn_t *m2p;
-    xen_pfn_t *extent_start;
-    int i;
-
-    m2p = NULL;
-    m2p_size   = M2P_SIZE(max_mfn);
-    m2p_chunks = M2P_CHUNKS(max_mfn);
-
-    extent_start = calloc(m2p_chunks, sizeof(xen_pfn_t));
-    if ( !extent_start )
-    {
-        ERROR("failed to allocate space for m2p mfns");
-        goto err0;
-    }
-
-    if ( xc_machphys_mfn_list(xch, m2p_chunks, extent_start) )
-    {
-        PERROR("xc_get_m2p_mfns");
-        goto err1;
-    }
-
-    entries = calloc(m2p_chunks, sizeof(privcmd_mmap_entry_t));
-    if (entries == NULL)
-    {
-        ERROR("failed to allocate space for mmap entries");
-        goto err1;
-    }
-
-    for ( i = 0; i < m2p_chunks; i++ )
-        entries[i].mfn = extent_start[i];
-
-    m2p = xc_map_foreign_ranges(xch, DOMID_XEN,
-			m2p_size, prot, M2P_CHUNK_SIZE,
-			entries, m2p_chunks);
-    if (m2p == NULL)
-    {
-        PERROR("xc_mmap_foreign_ranges failed");
-        goto err2;
-    }
-
-    if (mfn0)
-        *mfn0 = entries[0].mfn;
-
-err2:
-    free(entries);
-err1:
-    free(extent_start);
-
-err0:
-    return m2p;
-}
-
 /* The domain should be suspended when called here */
-int xc_exchange_page(xc_interface *xch, uint32_t domid, xen_pfn_t mfn)
+int xc_exchange_page(xc_interface *xch, int domid, xen_pfn_t mfn)
 {
     xc_dominfo_t info;
     struct xc_domain_meminfo minfo;
@@ -470,32 +406,32 @@ int xc_exchange_page(xc_interface *xch, uint32_t domid, xen_pfn_t mfn)
     uint32_t status;
     xen_pfn_t new_mfn, gpfn;
     xen_pfn_t *m2p_table;
-    unsigned long max_mfn;
+    int max_mfn;
 
     if ( xc_domain_getinfo(xch, domid, 1, &info) != 1 )
     {
         ERROR("Could not get domain info");
-        return -1;
+        return -EFAULT;
     }
 
     if (!info.shutdown || info.shutdown_reason != SHUTDOWN_suspend)
     {
-        errno = EINVAL;
         ERROR("Can't exchange page unless domain is suspended\n");
-        return -1;
+        return -EINVAL;
     }
+
     if (!is_page_exchangable(xch, domid, mfn, &info))
     {
         ERROR("Could not exchange page\n");
-        return -1;
+        return -EINVAL;
     }
 
     /* Map M2P and obtain gpfn */
-    rc = xc_maximum_ram_page(xch, &max_mfn);
-    if ( rc || !(m2p_table = xc_map_m2p(xch, max_mfn, PROT_READ, NULL)) )
+    max_mfn = xc_maximum_ram_page(xch);
+    if ( !(m2p_table = xc_map_m2p(xch, max_mfn, PROT_READ, NULL)) )
     {
         PERROR("Failed to map live M2P table");
-        return -1;
+        return -EFAULT;
     }
     gpfn = m2p_table[mfn];
 
@@ -504,7 +440,7 @@ int xc_exchange_page(xc_interface *xch, uint32_t domid, xen_pfn_t mfn)
     if ( xc_map_domain_meminfo(xch, domid, &minfo) )
     {
         PERROR("Could not map domain's memory information\n");
-        goto failed;
+        return -EFAULT;
     }
 
     /* For translation macros */

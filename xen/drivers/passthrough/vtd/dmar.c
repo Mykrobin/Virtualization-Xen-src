@@ -11,7 +11,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  * Copyright (C) Ashok Raj <ashok.raj@intel.com>
  * Copyright (C) Shaohua Li <shaohua.li@intel.com>
@@ -27,7 +28,6 @@
 #include <xen/xmalloc.h>
 #include <xen/pci.h>
 #include <xen/pci_regs.h>
-#include <asm/atomic.h>
 #include <asm/string.h>
 #include "dmar.h"
 #include "iommu.h"
@@ -100,7 +100,6 @@ static void __init disable_all_dmar_units(void)
     {
         list_del(&drhd->list);
         scope_devices_free(&drhd->scope);
-        iommu_free(drhd);
         xfree(drhd);
     }
     list_for_each_entry_safe ( rmrr, _rmrr, &acpi_rmrr_units, list )
@@ -212,15 +211,15 @@ struct acpi_drhd_unit *acpi_find_matched_drhd_unit(const struct pci_dev *pdev)
     if ( pdev == NULL )
         return NULL;
 
-    if ( pdev->info.is_virtfn )
-    {
-        bus = pdev->info.physfn.bus;
-        devfn = !pdev->info.is_extfn ? pdev->info.physfn.devfn : 0;
-    }
-    else if ( pdev->info.is_extfn )
+    if ( pdev->info.is_extfn )
     {
         bus = pdev->bus;
         devfn = 0;
+    }
+    else if ( pdev->info.is_virtfn )
+    {
+        bus = pdev->info.physfn.bus;
+        devfn = PCI_SLOT(pdev->info.physfn.devfn) ? 0 : pdev->info.physfn.devfn;
     }
     else
     {
@@ -299,7 +298,7 @@ static int __init scope_device_count(const void *start, const void *end)
         scope = start;
         if ( scope->length < MIN_SCOPE_LEN )
         {
-            printk(XENLOG_WARNING VTDPREFIX "Invalid device scope\n");
+            dprintk(XENLOG_WARNING VTDPREFIX, "Invalid device scope.\n");
             return -EINVAL;
         }
 
@@ -361,18 +360,18 @@ static int __init acpi_parse_dev_scope(
             sub_bus = pci_conf_read8(seg, bus, path->dev, path->fn,
                                      PCI_SUBORDINATE_BUS);
             if ( iommu_verbose )
-                printk(VTDPREFIX
-                       " bridge: %04x:%02x:%02x.%u start=%x sec=%x sub=%x\n",
-                       seg, bus, path->dev, path->fn,
-                       acpi_scope->bus, sec_bus, sub_bus);
+                dprintk(VTDPREFIX,
+                        " bridge: %04x:%02x:%02x.%u start=%x sec=%x sub=%x\n",
+                        seg, bus, path->dev, path->fn,
+                        acpi_scope->bus, sec_bus, sub_bus);
 
             dmar_scope_add_buses(scope, sec_bus, sub_bus);
             break;
 
         case ACPI_DMAR_SCOPE_TYPE_HPET:
             if ( iommu_verbose )
-                printk(VTDPREFIX " MSI HPET: %04x:%02x:%02x.%u\n",
-                       seg, bus, path->dev, path->fn);
+                dprintk(VTDPREFIX, " MSI HPET: %04x:%02x:%02x.%u\n",
+                        seg, bus, path->dev, path->fn);
 
             if ( drhd )
             {
@@ -393,8 +392,8 @@ static int __init acpi_parse_dev_scope(
 
         case ACPI_DMAR_SCOPE_TYPE_ENDPOINT:
             if ( iommu_verbose )
-                printk(VTDPREFIX " endpoint: %04x:%02x:%02x.%u\n",
-                       seg, bus, path->dev, path->fn);
+                dprintk(VTDPREFIX, " endpoint: %04x:%02x:%02x.%u\n",
+                        seg, bus, path->dev, path->fn);
 
             if ( drhd )
             {
@@ -407,8 +406,8 @@ static int __init acpi_parse_dev_scope(
 
         case ACPI_DMAR_SCOPE_TYPE_IOAPIC:
             if ( iommu_verbose )
-                printk(VTDPREFIX " IOAPIC: %04x:%02x:%02x.%u\n",
-                       seg, bus, path->dev, path->fn);
+                dprintk(VTDPREFIX, " IOAPIC: %04x:%02x:%02x.%u\n",
+                        seg, bus, path->dev, path->fn);
 
             if ( drhd )
             {
@@ -450,8 +449,9 @@ static int __init acpi_dmar_check_length(
 {
     if ( h->length >= min_len )
         return 0;
-    printk(XENLOG_ERR VTDPREFIX "Invalid ACPI DMAR entry length: %#x\n",
-           h->length);
+    dprintk(XENLOG_ERR VTDPREFIX,
+            "Invalid ACPI DMAR entry length: %#x\n",
+            h->length);
     return -EINVAL;
 }
 
@@ -481,7 +481,8 @@ acpi_parse_one_drhd(struct acpi_dmar_header *header)
     INIT_LIST_HEAD(&dmaru->ioapic_list);
     INIT_LIST_HEAD(&dmaru->hpet_list);
     if ( iommu_verbose )
-        printk(VTDPREFIX "  dmaru->address = %"PRIx64"\n", dmaru->address);
+        dprintk(VTDPREFIX, "  dmaru->address = %"PRIx64"\n",
+                dmaru->address);
 
     ret = iommu_alloc(dmaru);
     if ( ret )
@@ -495,12 +496,12 @@ acpi_parse_one_drhd(struct acpi_dmar_header *header)
     if ( dmaru->include_all )
     {
         if ( iommu_verbose )
-            printk(VTDPREFIX "  flags: INCLUDE_ALL\n");
+            dprintk(VTDPREFIX, "  flags: INCLUDE_ALL\n");
         /* Only allow one INCLUDE_ALL */
         if ( drhd->segment == 0 && include_all )
         {
-            printk(XENLOG_WARNING VTDPREFIX
-                   "Only one INCLUDE_ALL device scope is allowed\n");
+            dprintk(XENLOG_WARNING VTDPREFIX,
+                    "Only one INCLUDE_ALL device scope is allowed\n");
             ret = -EINVAL;
         }
         if ( drhd->segment == 0 )
@@ -535,11 +536,11 @@ acpi_parse_one_drhd(struct acpi_dmar_header *header)
             d = PCI_SLOT(dmaru->scope.devices[i]);
             f = PCI_FUNC(dmaru->scope.devices[i]);
 
-            if ( !pci_device_detect(drhd->segment, b, d, f) )
+            if ( pci_device_detect(drhd->segment, b, d, f) == 0 )
             {
-                printk(XENLOG_WARNING VTDPREFIX
-                       " Non-existent device (%04x:%02x:%02x.%u) in this DRHD's scope!\n",
-                       drhd->segment, b, d, f);
+                dprintk(XENLOG_WARNING VTDPREFIX,
+                        " Non-existent device (%04x:%02x:%02x.%u) is reported"
+                        " in this DRHD's scope!\n", drhd->segment, b, d, f);
                 invalid_cnt++;
             }
         }
@@ -549,8 +550,9 @@ acpi_parse_one_drhd(struct acpi_dmar_header *header)
             if ( iommu_workaround_bios_bug &&
                  invalid_cnt == dmaru->scope.devices_cnt )
             {
-                printk(XENLOG_WARNING VTDPREFIX
-                       "  Workaround BIOS bug: ignoring DRHD (no devices in its scope are PCI discoverable)\n");
+                dprintk(XENLOG_WARNING VTDPREFIX,
+                    "  Workaround BIOS bug: ignore the DRHD due to all "
+                    "devices under its scope are not PCI discoverable!\n");
 
                 scope_devices_free(&dmaru->scope);
                 iommu_free(dmaru);
@@ -558,10 +560,11 @@ acpi_parse_one_drhd(struct acpi_dmar_header *header)
             }
             else
             {
-                printk(XENLOG_WARNING VTDPREFIX
-                       "  DRHD is invalid (some devices in its scope are not PCI discoverable)\n");
-                printk(XENLOG_WARNING VTDPREFIX
-                       "  Try \"iommu=force\" or \"iommu=workaround_bios_bug\" if you really want VT-d\n");
+                dprintk(XENLOG_WARNING VTDPREFIX,
+                    "  The DRHD is invalid due to there are devices under "
+                    "its scope are not PCI discoverable! Pls try option "
+                    "iommu=force or iommu=workaround_bios_bug if you "
+                    "really want VT-d\n");
                 ret = -EINVAL;
             }
         }
@@ -575,69 +578,6 @@ out:
         scope_devices_free(&dmaru->scope);
         iommu_free(dmaru);
         xfree(dmaru);
-    }
-
-    return ret;
-}
-
-static int register_one_rmrr(struct acpi_rmrr_unit *rmrru)
-{
-    bool ignore = false;
-    unsigned int i = 0;
-    int ret = 0;
-
-    /* Skip checking if segment is not accessible yet. */
-    if ( !pci_known_segment(rmrru->segment) )
-        i = UINT_MAX;
-
-    for ( ; i < rmrru->scope.devices_cnt; i++ )
-    {
-        u8 b = PCI_BUS(rmrru->scope.devices[i]);
-        u8 d = PCI_SLOT(rmrru->scope.devices[i]);
-        u8 f = PCI_FUNC(rmrru->scope.devices[i]);
-
-        if ( pci_device_detect(rmrru->segment, b, d, f) == 0 )
-        {
-            dprintk(XENLOG_WARNING VTDPREFIX,
-                    " Non-existent device (%04x:%02x:%02x.%u) is reported"
-                    " in RMRR (%"PRIx64", %"PRIx64")'s scope!\n",
-                    rmrru->segment, b, d, f,
-                    rmrru->base_address, rmrru->end_address);
-            ignore = true;
-        }
-        else
-        {
-            ignore = false;
-            break;
-        }
-    }
-
-    if ( ignore )
-    {
-        dprintk(XENLOG_WARNING VTDPREFIX,
-                "  Ignore the RMRR (%"PRIx64", %"PRIx64") due to "
-                "devices under its scope are not PCI discoverable!\n",
-                rmrru->base_address, rmrru->end_address);
-        scope_devices_free(&rmrru->scope);
-        xfree(rmrru);
-        return 1;
-    }
-    else if ( rmrru->base_address > rmrru->end_address )
-    {
-        dprintk(XENLOG_WARNING VTDPREFIX,
-                "  The RMRR (%"PRIx64", %"PRIx64") is incorrect!\n",
-                rmrru->base_address, rmrru->end_address);
-        scope_devices_free(&rmrru->scope);
-        xfree(rmrru);
-        ret = -EFAULT;
-    }
-    else
-    {
-        if ( iommu_verbose )
-            dprintk(VTDPREFIX,
-                    "  RMRR region: base_addr %"PRIx64" end_addr %"PRIx64"\n",
-                    rmrru->base_address, rmrru->end_address);
-        acpi_register_rmrr_unit(rmrru);
     }
 
     return ret;
@@ -673,9 +613,10 @@ acpi_parse_one_rmrr(struct acpi_dmar_header *header)
     if ( (!page_is_ram_type(paddr_to_pfn(base_addr), RAM_TYPE_RESERVED)) ||
          (!page_is_ram_type(paddr_to_pfn(end_addr), RAM_TYPE_RESERVED)) )
     {
-        printk(XENLOG_WARNING VTDPREFIX
-               "  RMRR address range %"PRIx64"..%"PRIx64" not in reserved memory;"
-               " need \"iommu_inclusive_mapping=1\"?\n",
+        dprintk(XENLOG_WARNING VTDPREFIX,
+                "  RMRR address range not in reserved memory "
+                "base = %"PRIx64" end = %"PRIx64"; "
+                "iommu_inclusive_mapping=1 parameter may be needed.\n",
                 base_addr, end_addr);
     }
 
@@ -692,20 +633,68 @@ acpi_parse_one_rmrr(struct acpi_dmar_header *header)
     ret = acpi_parse_dev_scope(dev_scope_start, dev_scope_end,
                                &rmrru->scope, RMRR_TYPE, rmrr->segment);
 
-    if ( !ret && (rmrru->scope.devices_cnt != 0) )
-    {
-        ret = register_one_rmrr(rmrru);
-        /*
-         * register_one_rmrr() returns greater than 0 when a specified
-         * PCIe device cannot be detected. To prevent VT-d from being
-         * disabled in such cases, reset the return value to 0 here.
-         */
-        if ( ret > 0 )
-            ret = 0;
-
-    }
-    else
+    if ( ret || (rmrru->scope.devices_cnt == 0) )
         xfree(rmrru);
+    else
+    {
+        u8 b, d, f;
+        bool_t ignore = 0;
+        unsigned int i = 0;
+
+        /* Skip checking if segment is not accessible yet. */
+        if ( !pci_known_segment(rmrr->segment) )
+            i = UINT_MAX;
+
+        for ( ; i < rmrru->scope.devices_cnt; i++ )
+        {
+            b = PCI_BUS(rmrru->scope.devices[i]);
+            d = PCI_SLOT(rmrru->scope.devices[i]);
+            f = PCI_FUNC(rmrru->scope.devices[i]);
+
+            if ( pci_device_detect(rmrr->segment, b, d, f) == 0 )
+            {
+                dprintk(XENLOG_WARNING VTDPREFIX,
+                        " Non-existent device (%04x:%02x:%02x.%u) is reported"
+                        " in RMRR (%"PRIx64", %"PRIx64")'s scope!\n",
+                        rmrr->segment, b, d, f,
+                        rmrru->base_address, rmrru->end_address);
+                ignore = 1;
+            }
+            else
+            {
+                ignore = 0;
+                break;
+            }
+        }
+
+        if ( ignore )
+        {
+            dprintk(XENLOG_WARNING VTDPREFIX,
+                "  Ignore the RMRR (%"PRIx64", %"PRIx64") due to "
+                "devices under its scope are not PCI discoverable!\n",
+                rmrru->base_address, rmrru->end_address);
+            scope_devices_free(&rmrru->scope);
+            xfree(rmrru);
+        }
+        else if ( base_addr > end_addr )
+        {
+            dprintk(XENLOG_WARNING VTDPREFIX,
+                "  The RMRR (%"PRIx64", %"PRIx64") is incorrect!\n",
+                rmrru->base_address, rmrru->end_address);
+            scope_devices_free(&rmrru->scope);
+            xfree(rmrru);
+            ret = -EFAULT;
+        }
+        else
+        {
+            if ( iommu_verbose )
+                dprintk(VTDPREFIX,
+                        "  RMRR region: base_addr %"PRIx64
+                        " end_address %"PRIx64"\n",
+                        rmrru->base_address, rmrru->end_address);
+            acpi_register_rmrr_unit(rmrru);
+        }
+    }
 
     return ret;
 }
@@ -730,7 +719,8 @@ acpi_parse_one_atsr(struct acpi_dmar_header *header)
     atsru->segment = atsr->segment;
     atsru->all_ports = atsr->flags & ACPI_DMAR_ALL_PORTS;
     if ( iommu_verbose )
-        printk(VTDPREFIX "  atsru->all_ports: %x\n", atsru->all_ports);
+        dprintk(VTDPREFIX,
+                "  atsru->all_ports: %x\n", atsru->all_ports);
     if ( !atsru->all_ports )
     {
         dev_scope_start = (void *)(atsr + 1);
@@ -741,12 +731,12 @@ acpi_parse_one_atsr(struct acpi_dmar_header *header)
     else
     {
         if ( iommu_verbose )
-            printk(VTDPREFIX "  flags: ALL_PORTS\n");
+            dprintk(VTDPREFIX, "  flags: ALL_PORTS\n");
         /* Only allow one ALL_PORTS */
         if ( atsr->segment == 0 && all_ports )
         {
-            printk(XENLOG_WARNING VTDPREFIX
-                   "Only one ALL_PORTS device scope is allowed\n");
+            dprintk(XENLOG_WARNING VTDPREFIX,
+                    "Only one ALL_PORTS device scope is allowed\n");
             ret = -EINVAL;
         }
         if ( atsr->segment == 0 )
@@ -782,9 +772,10 @@ acpi_parse_one_rhsa(struct acpi_dmar_header *header)
     rhsau->proximity_domain = rhsa->proximity_domain;
     list_add_tail(&rhsau->list, &acpi_rhsa_units);
     if ( iommu_verbose )
-        printk(VTDPREFIX
-               "  rhsau->address: %"PRIx64" rhsau->proximity_domain: %"PRIx32"\n",
-               rhsau->address, rhsau->proximity_domain);
+        dprintk(VTDPREFIX,
+                "  rhsau->address: %"PRIx64
+                " rhsau->proximity_domain: %"PRIx32"\n",
+                rhsau->address, rhsau->proximity_domain);
 
     return ret;
 }
@@ -807,14 +798,15 @@ static int __init acpi_parse_dmar(struct acpi_table_header *table)
 
     if ( !dmar->width )
     {
-        printk(XENLOG_WARNING VTDPREFIX "Zero: Invalid DMAR width\n");
+        dprintk(XENLOG_WARNING VTDPREFIX, "Zero: Invalid DMAR width\n");
         ret = -EINVAL;
         goto out;
     }
 
     dmar_host_address_width = dmar->width + 1;
     if ( iommu_verbose )
-        printk(VTDPREFIX "Host address width %d\n", dmar_host_address_width);
+        dprintk(VTDPREFIX, "Host address width %d\n",
+                dmar_host_address_width);
 
     entry_header = (void *)(dmar + 1);
     while ( ((unsigned long)entry_header) <
@@ -828,22 +820,22 @@ static int __init acpi_parse_dmar(struct acpi_table_header *table)
         {
         case ACPI_DMAR_TYPE_HARDWARE_UNIT:
             if ( iommu_verbose )
-                printk(VTDPREFIX "found ACPI_DMAR_DRHD:\n");
+                dprintk(VTDPREFIX, "found ACPI_DMAR_DRHD:\n");
             ret = acpi_parse_one_drhd(entry_header);
             break;
         case ACPI_DMAR_TYPE_RESERVED_MEMORY:
             if ( iommu_verbose )
-                printk(VTDPREFIX "found ACPI_DMAR_RMRR:\n");
+                dprintk(VTDPREFIX, "found ACPI_DMAR_RMRR:\n");
             ret = acpi_parse_one_rmrr(entry_header);
             break;
         case ACPI_DMAR_TYPE_ATSR:
             if ( iommu_verbose )
-                printk(VTDPREFIX "found ACPI_DMAR_ATSR:\n");
+                dprintk(VTDPREFIX, "found ACPI_DMAR_ATSR:\n");
             ret = acpi_parse_one_atsr(entry_header);
             break;
         case ACPI_DMAR_HARDWARE_AFFINITY:
             if ( iommu_verbose )
-                printk(VTDPREFIX "found ACPI_DMAR_RHSA:\n");
+                dprintk(VTDPREFIX, "found ACPI_DMAR_RHSA:\n");
             ret = acpi_parse_one_rhsa(entry_header);
             break;
         default:
@@ -867,132 +859,9 @@ static int __init acpi_parse_dmar(struct acpi_table_header *table)
 
 out:
     /* Zap ACPI DMAR signature to prevent dom0 using vt-d HW. */
-    acpi_dmar_zap();
+    dmar->header.signature[0] = 'X';
+    dmar->header.checksum -= 'X'-'D';
     return ret;
-}
-
-#define MAX_USER_RMRR_PAGES 16
-#define MAX_USER_RMRR 10
-
-/* RMRR units derived from command line rmrr option. */
-#define MAX_USER_RMRR_DEV 20
-struct user_rmrr {
-    struct list_head list;
-    unsigned long base_pfn, end_pfn;
-    unsigned int dev_count;
-    u32 sbdf[MAX_USER_RMRR_DEV];
-};
-
-static unsigned int __initdata nr_rmrr;
-static struct user_rmrr __initdata user_rmrrs[MAX_USER_RMRR];
-
-/* Macro for RMRR inclusive range formatting. */
-#define ERMRRU_FMT "[%lx-%lx]"
-#define ERMRRU_ARG(eru) eru.base_pfn, eru.end_pfn
-
-static int __init add_user_rmrr(void)
-{
-    struct acpi_rmrr_unit *rmrr, *rmrru;
-    unsigned int idx, seg, i;
-    unsigned long base, end;
-    bool overlap;
-
-    for ( i = 0; i < nr_rmrr; i++ )
-    {
-        base = user_rmrrs[i].base_pfn;
-        end = user_rmrrs[i].end_pfn;
-
-        if ( base > end )
-        {
-            printk(XENLOG_ERR VTDPREFIX
-                   "Invalid RMRR Range "ERMRRU_FMT"\n",
-                   ERMRRU_ARG(user_rmrrs[i]));
-            continue;
-        }
-
-        if ( (end - base) >= MAX_USER_RMRR_PAGES )
-        {
-            printk(XENLOG_ERR VTDPREFIX
-                   "RMRR range "ERMRRU_FMT" exceeds "\
-                   __stringify(MAX_USER_RMRR_PAGES)" pages\n",
-                   ERMRRU_ARG(user_rmrrs[i]));
-            continue;
-        }
-
-        overlap = false;
-        list_for_each_entry(rmrru, &acpi_rmrr_units, list)
-        {
-            if ( pfn_to_paddr(base) <= rmrru->end_address &&
-                 rmrru->base_address <= pfn_to_paddr(end) )
-            {
-                printk(XENLOG_ERR VTDPREFIX
-                       "Overlapping RMRRs: "ERMRRU_FMT" and [%lx-%lx]\n",
-                       ERMRRU_ARG(user_rmrrs[i]),
-                       paddr_to_pfn(rmrru->base_address),
-                       paddr_to_pfn(rmrru->end_address));
-                overlap = true;
-                break;
-            }
-        }
-        /* Don't add overlapping RMRR. */
-        if ( overlap )
-            continue;
-
-        do
-        {
-            if ( !mfn_valid(_mfn(base)) )
-            {
-                printk(XENLOG_ERR VTDPREFIX
-                       "Invalid pfn in RMRR range "ERMRRU_FMT"\n",
-                       ERMRRU_ARG(user_rmrrs[i]));
-                break;
-            }
-        } while ( base++ < end );
-
-        /* Invalid pfn in range as the loop ended before end_pfn was reached. */
-        if ( base <= end )
-            continue;
-
-        rmrr = xzalloc(struct acpi_rmrr_unit);
-        if ( !rmrr )
-            return -ENOMEM;
-
-        rmrr->scope.devices = xmalloc_array(u16, user_rmrrs[i].dev_count);
-        if ( !rmrr->scope.devices )
-        {
-            xfree(rmrr);
-            return -ENOMEM;
-        }
-
-        seg = 0;
-        for ( idx = 0; idx < user_rmrrs[i].dev_count; idx++ )
-        {
-            rmrr->scope.devices[idx] = user_rmrrs[i].sbdf[idx];
-            seg |= PCI_SEG(user_rmrrs[i].sbdf[idx]);
-        }
-        if ( seg != PCI_SEG(user_rmrrs[i].sbdf[0]) )
-        {
-            printk(XENLOG_ERR VTDPREFIX
-                   "Segments are not equal for RMRR range "ERMRRU_FMT"\n",
-                   ERMRRU_ARG(user_rmrrs[i]));
-            scope_devices_free(&rmrr->scope);
-            xfree(rmrr);
-            continue;
-        }
-
-        rmrr->segment = seg;
-        rmrr->base_address = pfn_to_paddr(user_rmrrs[i].base_pfn);
-        /* Align the end_address to the end of the page */
-        rmrr->end_address = pfn_to_paddr(user_rmrrs[i].end_pfn) | ~PAGE_MASK;
-        rmrr->scope.devices_cnt = user_rmrrs[i].dev_count;
-
-        if ( register_one_rmrr(rmrr) )
-            printk(XENLOG_ERR VTDPREFIX
-                   "Could not register RMMR range "ERMRRU_FMT"\n",
-                   ERMRRU_ARG(user_rmrrs[i]));
-    }
-
-    return 0;
 }
 
 #include <asm/tboot.h>
@@ -1004,150 +873,44 @@ int __init acpi_dmar_init(void)
 {
     acpi_physical_address dmar_addr;
     acpi_native_uint dmar_len;
-    int ret;
 
     if ( ACPI_SUCCESS(acpi_get_table_phys(ACPI_SIG_DMAR, 0,
                                           &dmar_addr, &dmar_len)) )
     {
-        map_pages_to_xen((unsigned long)__va(dmar_addr), maddr_to_mfn(dmar_addr),
+        map_pages_to_xen((unsigned long)__va(dmar_addr), PFN_DOWN(dmar_addr),
                          PFN_UP(dmar_addr + dmar_len) - PFN_DOWN(dmar_addr),
                          PAGE_HYPERVISOR);
         dmar_table = __va(dmar_addr);
     }
 
-    ret = parse_dmar_table(acpi_parse_dmar);
-
-    if ( !ret )
-        return add_user_rmrr();
-
-    return ret;
+    return parse_dmar_table(acpi_parse_dmar);
 }
 
 void acpi_dmar_reinstate(void)
 {
-    uint32_t sig = 0x52414d44; /* "DMAR" */
-
-    if ( dmar_table )
-        write_atomic((uint32_t*)&dmar_table->signature[0], sig);
+    if ( dmar_table == NULL )
+        return;
+    dmar_table->signature[0] = 'D';
+    dmar_table->checksum += 'X'-'D';
 }
 
 void acpi_dmar_zap(void)
 {
-    uint32_t sig = 0x44414d52; /* "RMAD" - doesn't alter table checksum */
-
-    if ( dmar_table )
-        write_atomic((uint32_t*)&dmar_table->signature[0], sig);
+    if ( dmar_table == NULL )
+        return;
+    dmar_table->signature[0] = 'X';
+    dmar_table->checksum -= 'X'-'D';
 }
 
-bool_t platform_supports_intremap(void)
+int platform_supports_intremap(void)
 {
-    const unsigned int mask = ACPI_DMAR_INTR_REMAP;
+    unsigned int mask = ACPI_DMAR_INTR_REMAP;
 
     return (dmar_flags & mask) == ACPI_DMAR_INTR_REMAP;
 }
 
-bool_t __init platform_supports_x2apic(void)
+int platform_supports_x2apic(void)
 {
-    const unsigned int mask = ACPI_DMAR_INTR_REMAP | ACPI_DMAR_X2APIC_OPT_OUT;
-
+    unsigned int mask = ACPI_DMAR_INTR_REMAP | ACPI_DMAR_X2APIC_OPT_OUT;
     return cpu_has_x2apic && ((dmar_flags & mask) == ACPI_DMAR_INTR_REMAP);
 }
-
-int intel_iommu_get_reserved_device_memory(iommu_grdm_t *func, void *ctxt)
-{
-    struct acpi_rmrr_unit *rmrr, *rmrr_cur = NULL;
-    unsigned int i;
-    u16 bdf;
-
-    for_each_rmrr_device ( rmrr, bdf, i )
-    {
-        int rc;
-
-        if ( rmrr == rmrr_cur )
-            continue;
-
-        rc = func(PFN_DOWN(rmrr->base_address),
-                  PFN_UP(rmrr->end_address) - PFN_DOWN(rmrr->base_address),
-                  PCI_SBDF2(rmrr->segment, bdf), ctxt);
-
-        if ( unlikely(rc < 0) )
-            return rc;
-
-        if ( rc )
-            rmrr_cur = rmrr;
-    }
-
-    return 0;
-}
-
-/*
- * Parse rmrr Xen command line options and add parsed devices and regions into
- * acpi_rmrr_unit list to mapped as RMRRs parsed from ACPI.
- * Format:
- * rmrr=start<-end>=[s1]bdf1[,[s1]bdf2[,...]];start<-end>=[s2]bdf1[,[s2]bdf2[,...]]
- * If the segment of the first device is not specified,
- * segment zero will be used.
- * If other segments are not specified, first device segment will be used.
- * If a segment is specified for other than the first device, and it does not
- * match the one specified for the first one, an error will be reported.
- */
-static int __init parse_rmrr_param(const char *str)
-{
-    const char *s = str, *cur, *stmp;
-    unsigned int seg, bus, dev, func, dev_count;
-    unsigned long start, end;
-
-    do {
-        if ( nr_rmrr >= MAX_USER_RMRR )
-            return -E2BIG;
-
-        start = simple_strtoul(cur = s, &s, 16);
-        if ( cur == s )
-            return -EINVAL;
-
-        if ( *s == '-' )
-        {
-            end = simple_strtoul(cur = s + 1, &s, 16);
-            if ( cur == s )
-                return -EINVAL;
-        }
-        else
-            end = start;
-
-        user_rmrrs[nr_rmrr].base_pfn = start;
-        user_rmrrs[nr_rmrr].end_pfn = end;
-
-        if ( *s != '=' )
-            continue;
-
-        do {
-            bool def_seg = false;
-
-            stmp = parse_pci_seg(s + 1, &seg, &bus, &dev, &func, &def_seg);
-            if ( !stmp )
-                return -EINVAL;
-
-            /*
-             * Not specified.
-             * Segment will be replaced with one from first device.
-             */
-            if ( user_rmrrs[nr_rmrr].dev_count && def_seg )
-                seg = PCI_SEG(user_rmrrs[nr_rmrr].sbdf[0]);
-
-            /* Keep sbdf's even if they differ and later report an error. */
-            dev_count = user_rmrrs[nr_rmrr].dev_count;
-            user_rmrrs[nr_rmrr].sbdf[dev_count] = PCI_SBDF(seg, bus, dev, func);
-
-            user_rmrrs[nr_rmrr].dev_count++;
-            s = stmp;
-        } while ( *s == ',' &&
-                  user_rmrrs[nr_rmrr].dev_count < MAX_USER_RMRR_DEV );
-
-        if ( user_rmrrs[nr_rmrr].dev_count )
-            nr_rmrr++;
-
-    } while ( *s++ == ';' );
-
-    return s[-1] ? -EINVAL : 0;
-}
-custom_param("rmrr", parse_rmrr_param);

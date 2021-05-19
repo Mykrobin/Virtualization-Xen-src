@@ -17,15 +17,11 @@
 
 #include "libxl_internal.h"
 
-char **libxl__xs_kvs_of_flexarray(libxl__gc *gc, flexarray_t *array)
+char **libxl__xs_kvs_of_flexarray(libxl__gc *gc, flexarray_t *array, int length)
 {
     char **kvs;
-    int i, length;
+    int i;
 
-    if (!array)
-        return NULL;
-
-    length = array->count;
     if (!length)
         return NULL;
 
@@ -58,7 +54,7 @@ int libxl__xs_writev_perms(libxl__gc *gc, xs_transaction_t t,
         return 0;
 
     for (i = 0; kvs[i] != NULL; i += 2) {
-        path = GCSPRINTF("%s/%s", dir, kvs[i]);
+        path = libxl__sprintf(gc, "%s/%s", dir, kvs[i]);
         if (path && kvs[i + 1]) {
             int length = strlen(kvs[i + 1]);
             xs_write(ctx->xsh, t, path, kvs[i + 1], length);
@@ -100,35 +96,23 @@ out:
 
 }
 
-int libxl__xs_vprintf(libxl__gc *gc, xs_transaction_t t,
-                      const char *path, const char *fmt, va_list ap)
+int libxl__xs_write(libxl__gc *gc, xs_transaction_t t,
+                    const char *path, const char *fmt, ...)
 {
     libxl_ctx *ctx = libxl__gc_owner(gc);
     char *s;
-    bool ok;
-
-    s = libxl__vsprintf(gc, fmt, ap);
-
-    ok = xs_write(ctx->xsh, t, path, s, strlen(s));
-    if (!ok) {
-        LOGE(ERROR, "xenstore write failed: `%s' = `%s'", path, s);
-        return ERROR_FAIL;
-    }
-
-    return 0;
-}
-
-int libxl__xs_printf(libxl__gc *gc, xs_transaction_t t,
-                     const char *path, const char *fmt, ...)
-{
     va_list ap;
-    int rc;
-
+    int ret;
     va_start(ap, fmt);
-    rc = libxl__xs_vprintf(gc, t, path, fmt, ap);
+    ret = vasprintf(&s, fmt, ap);
     va_end(ap);
 
-    return rc;
+    if (ret == -1) {
+        return -1;
+    }
+    xs_write(ctx->xsh, t, path, s, ret);
+    free(s);
+    return 0;
 }
 
 char * libxl__xs_read(libxl__gc *gc, xs_transaction_t t, const char *path)
@@ -146,7 +130,8 @@ char *libxl__xs_get_dompath(libxl__gc *gc, uint32_t domid)
     libxl_ctx *ctx = libxl__gc_owner(gc);
     char *s = xs_get_domain_path(ctx->xsh, domid);
     if (!s) {
-        LOGED(ERROR, domid, "Failed to get dompath");
+        LIBXL__LOG_ERRNO(ctx, LIBXL__LOG_ERROR, "failed to get dompath for %" PRIu32,
+                     domid);
         return NULL;
     }
     libxl__ptr_add(gc, s);
@@ -163,46 +148,23 @@ char **libxl__xs_directory(libxl__gc *gc, xs_transaction_t t,
     return ret;
 }
 
-int libxl__xs_mknod(libxl__gc *gc, xs_transaction_t t,
-                    const char *path, struct xs_permissions *perms,
-                    unsigned int num_perms)
+bool libxl__xs_mkdir(libxl__gc *gc, xs_transaction_t t,
+                     const char *path, struct xs_permissions *perms,
+			         unsigned int num_perms)
 {
     libxl_ctx *ctx = libxl__gc_owner(gc);
-    bool ok;
-
-    ok = xs_write(ctx->xsh, t, path, "", 0);
-    if (!ok) {
-        LOGE(ERROR, "xenstore write failed: `%s' = ''", path);
-        return ERROR_FAIL;
-    }
-
-    ok = xs_set_permissions(ctx->xsh, t, path, perms, num_perms);
-    if (!ok) {
-        LOGE(ERROR, "xenstore set permissions failed on `%s'", path);
-        return ERROR_FAIL;
-    }
-
-    return 0;
+    if (!xs_mkdir(ctx->xsh, t, path))
+        return false;
+    return xs_set_permissions(ctx->xsh, t, path, perms, num_perms);
 }
 
 char *libxl__xs_libxl_path(libxl__gc *gc, uint32_t domid)
 {
-    char *s = GCSPRINTF("/libxl/%i", domid);
+    libxl_ctx *ctx = libxl__gc_owner(gc);
+    char *s = libxl__sprintf(gc, "/libxl/%i", domid);
     if (!s)
-        LOGD(ERROR, domid, "cannot allocate create paths");
+        LIBXL__LOG(ctx, LIBXL__LOG_ERROR, "cannot allocate create paths");
     return s;
-}
-
-int libxl__xs_read_mandatory(libxl__gc *gc, xs_transaction_t t,
-                             const char *path, const char **result_out)
-{
-    char *result = libxl__xs_read(gc, t, path);
-    if (!result) {
-        LOGE(ERROR, "xenstore read failed: `%s'", path);
-        return ERROR_FAIL;
-    }
-    *result_out = result;
-    return 0;
 }
 
 int libxl__xs_read_checked(libxl__gc *gc, xs_transaction_t t,

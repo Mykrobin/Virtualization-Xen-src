@@ -14,7 +14,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 /*
@@ -496,7 +497,7 @@ xc_domain_dumpcore_via_callback(xc_interface *xch,
     ctxt = calloc(sizeof(*ctxt), info.max_vcpu_id + 1);
     if ( !ctxt )
     {
-        PERROR("Could not allocate vcpu context array");
+        PERROR("Could not allocate vcpu context array", domid);
         goto out;
     }
 
@@ -808,13 +809,13 @@ xc_domain_dumpcore_via_callback(xc_interface *xch,
                         gmfn = p2m[i];
                     else
                         gmfn = ((uint64_t *)p2m)[i];
-                    if ( gmfn == INVALID_PFN )
+                    if ( gmfn == INVALID_P2M_ENTRY )
                         continue;
                 }
                 else
                 {
                     gmfn = ((uint32_t *)p2m)[i];
-                    if ( gmfn == (uint32_t)INVALID_PFN )
+                    if ( gmfn == (uint32_t)INVALID_P2M_ENTRY )
                        continue;
                 }
 
@@ -859,7 +860,7 @@ copy_done:
         /* When live dump-mode (-L option) is specified,
          * guest domain may reduce memory. pad with zero pages.
          */
-        DPRINTF("j (%ld) != nr_pages (%ld)", j, nr_pages);
+        IPRINTF("j (%ld) != nr_pages (%ld)", j, nr_pages);
         memset(dump_mem_start, 0, PAGE_SIZE);
         for (; j < nr_pages; j++) {
             sts = dump_rtn(xch, args, dump_mem_start, PAGE_SIZE);

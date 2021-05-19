@@ -3,6 +3,7 @@
  * 
  * Generic x86 APIC driver probe layer.
  */  
+#include <xen/config.h>
 #include <xen/cpumask.h>
 #include <xen/string.h>
 #include <xen/kernel.h>
@@ -44,24 +45,18 @@ void __init generic_bigsmp_probe(void)
 		}
 }
 
-static int __init genapic_apic_force(const char *str)
+static void __init genapic_apic_force(char *str)
 {
-	int i, rc = -EINVAL;
-
+	int i;
 	for (i = 0; apic_probe[i]; i++)
-		if (!strcmp(apic_probe[i]->name, str)) {
+		if (!strcmp(apic_probe[i]->name, str))
 			genapic = apic_probe[i];
-			rc = 0;
-		}
-
-	return rc;
 }
 custom_param("apic", genapic_apic_force);
 
 void __init generic_apic_probe(void) 
 { 
-	bool changed;
-	int i;
+	int i, changed;
 
 	record_boot_APIC_mode();
 

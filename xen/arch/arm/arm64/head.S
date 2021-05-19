@@ -20,26 +20,17 @@
  * GNU General Public License for more details.
  */
 
+#include <asm/config.h>
 #include <asm/page.h>
 #include <asm/asm_defns.h>
 #include <asm/early_printk.h>
-#include <efi/efierr.h>
-#include <asm/arm64/efibind.h>
 
-#define PT_PT     0xf7f /* nG=1 AF=1 SH=11 AP=01 NS=1 ATTR=111 T=1 P=1 */
-#define PT_MEM    0xf7d /* nG=1 AF=1 SH=11 AP=01 NS=1 ATTR=111 T=0 P=1 */
-#define PT_MEM_L3 0xf7f /* nG=1 AF=1 SH=11 AP=01 NS=1 ATTR=111 T=1 P=1 */
+#define PT_PT     0xe7f /* nG=1 AF=1 SH=10 AP=01 NS=1 ATTR=111 T=1 P=1 */
+#define PT_MEM    0xe7d /* nG=1 AF=1 SH=10 AP=01 NS=1 ATTR=111 T=0 P=1 */
 #define PT_DEV    0xe71 /* nG=1 AF=1 SH=10 AP=01 NS=1 ATTR=100 T=0 P=1 */
 #define PT_DEV_L3 0xe73 /* nG=1 AF=1 SH=10 AP=01 NS=1 ATTR=100 T=1 P=1 */
 
-#define __HEAD_FLAG_PAGE_SIZE   ((PAGE_SHIFT - 10) / 2)
-
-#define __HEAD_FLAG_PHYS_BASE   1
-
-#define __HEAD_FLAGS            ((__HEAD_FLAG_PAGE_SIZE << 1) | \
-                                 (__HEAD_FLAG_PHYS_BASE << 3))
-
-#if (defined (CONFIG_EARLY_PRINTK)) && (defined (EARLY_PRINTK_INC))
+#if (defined (EARLY_PRINTK)) && (defined (EARLY_PRINTK_INC))
 #include EARLY_PRINTK_INC
 #endif
 
@@ -70,8 +61,8 @@
  *  x22 - is_secondary_cpu
  *  x23 - UART address
  *  x24 - cpuid
- *  x25 - identity map in place
- *  x26 - skip_zero_bss
+ *  x25 -
+ *  x26 -
  *  x27 -
  *  x28 -
  *  x29 -
@@ -80,7 +71,7 @@
 
 /* Macro to print a string to the UART, if there is one.
  * Clobbers x0-x3. */
-#ifdef CONFIG_EARLY_PRINTK
+#ifdef EARLY_PRINTK
 #define PRINT(_s)       \
         adr   x0, 98f ; \
         bl    puts    ; \
@@ -88,15 +79,9 @@
 98:     .asciz _s     ; \
         .align 2      ; \
 99:
-#else /* CONFIG_EARLY_PRINTK */
+#else /* EARLY_PRINTK */
 #define PRINT(s)
-#endif /* !CONFIG_EARLY_PRINTK */
-
-/* Load the physical address of a symbol into xb */
-.macro load_paddr xb, sym
-        ldr \xb, =\sym
-        add \xb, \xb, x20
-.endm
+#endif /* !EARLY_PRINTK */
 
         /*.aarch64*/
 
@@ -110,25 +95,20 @@
          *
          * This must be the very first address in the loaded image.
          * It should be linked at XEN_VIRT_START, and loaded at any
-         * 4K-aligned address.  All of text+data+bss must fit in 2MB,
+         * 2MB-aligned address.  All of text+data+bss must fit in 2MB,
          * or the initial pagetable code below will need adjustment.
          */
 
-GLOBAL(start)
+        .global start
+start:
         /*
          * DO NOT MODIFY. Image header expected by Linux boot-loaders.
          */
-efi_head:
-        /*
-         * This add instruction has no meaningful effect except that
-         * its opcode forms the magic "MZ" signature of a PE/COFF file
-         * that is required for UEFI applications.
-         */
-        add     x13, x18, #0x16
-        b       real_start           /* branch to kernel start */
+        b       real_start           /* branch to kernel start, magic */
+        .long   0                    /* reserved */
         .quad   0                    /* Image load offset from start of RAM */
-        .quad   _end - start         /* Effective size of kernel image, little-endian */
-        .quad   __HEAD_FLAGS         /* Informative flags, little-endian */
+        .quad   0                    /* reserved */
+        .quad   0                    /* reserved */
         .quad   0                    /* reserved */
         .quad   0                    /* reserved */
         .quad   0                    /* reserved */
@@ -136,118 +116,9 @@ efi_head:
         .byte   0x52
         .byte   0x4d
         .byte   0x64
-        .long   pe_header - efi_head        /* Offset to the PE header. */
+        .word   0                    /* reserved */
 
-        /*
-         * Add the PE/COFF header to the file.  The address of this header
-         * is at offset 0x3c in the file, and is part of Linux "Image"
-         * header.  The arm64 Linux Image format is designed to support
-         * being both an 'Image' format binary and a PE/COFF binary.
-         * The PE/COFF format is defined by Microsoft, and is available
-         * from: http://msdn.microsoft.com/en-us/gg463119.aspx
-         * Version 8.3 adds support for arm64 and UEFI usage.
-         */
-
-        .align  3
-pe_header:
-        .ascii  "PE"
-        .short  0
-coff_header:
-        .short  0xaa64                          /* AArch64 */
-        .short  2                               /* nr_sections */
-        .long   0                               /* TimeDateStamp */
-        .long   0                               /* PointerToSymbolTable */
-        .long   1                               /* NumberOfSymbols */
-        .short  section_table - optional_header /* SizeOfOptionalHeader */
-        .short  0x206                           /* Characteristics. */
-                                                /* IMAGE_FILE_DEBUG_STRIPPED | */
-                                                /* IMAGE_FILE_EXECUTABLE_IMAGE | */
-                                                /* IMAGE_FILE_LINE_NUMS_STRIPPED */
-optional_header:
-        .short  0x20b                           /* PE32+ format */
-        .byte   0x02                            /* MajorLinkerVersion */
-        .byte   0x14                            /* MinorLinkerVersion */
-        .long   _end - real_start               /* SizeOfCode */
-        .long   0                               /* SizeOfInitializedData */
-        .long   0                               /* SizeOfUninitializedData */
-        .long   efi_start - efi_head            /* AddressOfEntryPoint */
-        .long   real_start - efi_head           /* BaseOfCode */
-
-extra_header_fields:
-        .quad   0                               /* ImageBase */
-        .long   0x1000                          /* SectionAlignment (4 KByte) */
-        .long   0x8                             /* FileAlignment */
-        .short  0                               /* MajorOperatingSystemVersion */
-        .short  0                               /* MinorOperatingSystemVersion */
-        .short  0                               /* MajorImageVersion */
-        .short  0                               /* MinorImageVersion */
-        .short  0                               /* MajorSubsystemVersion */
-        .short  0                               /* MinorSubsystemVersion */
-        .long   0                               /* Win32VersionValue */
-
-        .long   _end - efi_head                 /* SizeOfImage */
-
-        /* Everything before the kernel image is considered part of the header */
-        .long   real_start - efi_head           /* SizeOfHeaders */
-        .long   0                               /* CheckSum */
-        .short  0xa                             /* Subsystem (EFI application) */
-        .short  0                               /* DllCharacteristics */
-        .quad   0                               /* SizeOfStackReserve */
-        .quad   0                               /* SizeOfStackCommit */
-        .quad   0                               /* SizeOfHeapReserve */
-        .quad   0                               /* SizeOfHeapCommit */
-        .long   0                               /* LoaderFlags */
-        .long   0x6                             /* NumberOfRvaAndSizes */
-
-        .quad   0                               /* ExportTable */
-        .quad   0                               /* ImportTable */
-        .quad   0                               /* ResourceTable */
-        .quad   0                               /* ExceptionTable */
-        .quad   0                               /* CertificationTable */
-        .quad   0                               /* BaseRelocationTable */
-
-        /* Section table */
-section_table:
-
-        /*
-         * The EFI application loader requires a relocation section
-         * because EFI applications must be relocatable.  This is a
-         * dummy section as far as we are concerned.
-         */
-        .ascii  ".reloc"
-        .byte   0
-        .byte   0                               /* end of 0 padding of section name */
-        .long   0
-        .long   0
-        .long   0                               /* SizeOfRawData */
-        .long   0                               /* PointerToRawData */
-        .long   0                               /* PointerToRelocations */
-        .long   0                               /* PointerToLineNumbers */
-        .short  0                               /* NumberOfRelocations */
-        .short  0                               /* NumberOfLineNumbers */
-        .long   0x42100040                      /* Characteristics (section flags) */
-
-
-        .ascii  ".text"
-        .byte   0
-        .byte   0
-        .byte   0                               /* end of 0 padding of section name */
-        .long   _end - real_start               /* VirtualSize */
-        .long   real_start - efi_head           /* VirtualAddress */
-        .long   __init_end_efi - real_start     /* SizeOfRawData */
-        .long   real_start - efi_head           /* PointerToRawData */
-
-        .long   0                /* PointerToRelocations (0 for executables) */
-        .long   0                /* PointerToLineNumbers (0 for executables) */
-        .short  0                /* NumberOfRelocations  (0 for executables) */
-        .short  0                /* NumberOfLineNumbers  (0 for executables) */
-        .long   0xe0500020       /* Characteristics (section flags) */
-        .align  5
 real_start:
-        /* BSS should be zeroed when booting without EFI */
-        mov   x26, #0                /* x26 := skip_zero_bss */
-
-real_start_efi:
         msr   DAIFSet, 0xf           /* Disable all interrupts */
 
         /* Save the bootloader arguments in less-clobberable registers */
@@ -260,7 +131,8 @@ real_start_efi:
 
         /* Using the DTB in the .dtb section? */
 #ifdef CONFIG_DTB_FILE
-        load_paddr x21, _sdtb
+        ldr   x21, =_sdtb
+        add   x21, x21, x20          /* x21 := paddr(DTB) */
 #endif
 
         mov   x22, #0                /* x22 := is_secondary_cpu */
@@ -276,24 +148,24 @@ GLOBAL(init_secondary)
         sub   x20, x19, x0           /* x20 := phys-offset */
 
         mov   x22, #1                /* x22 := is_secondary_cpu */
-        /* Boot CPU already zero BSS so skip it on secondary CPUs. */
-        mov   x26, #1                /* X26 := skip_zero_bss */
 
 common_start:
         mov   x24, #0                /* x24 := CPU ID. Initialy zero until we
                                       * find that multiprocessor extensions are
                                       * present and the system is SMP  */
         mrs   x0, mpidr_el1
+        tbz   x0, _MPIDR_SMP, 1f     /* Multiprocessor extension not supported? */
         tbnz  x0, _MPIDR_UP, 1f      /* Uniprocessor system? */
 
-        ldr   x13, =(~MPIDR_HWID_MASK)
+        mov   x13, #(~MPIDR_HWID_MASK)
         bic   x24, x0, x13           /* Mask out flags to get CPU ID */
 1:
 
         /* Non-boot CPUs wait here until __cpu_up is ready for them */
         cbz   x22, 1f
 
-        load_paddr x0, smp_up_cpu
+        ldr   x0, =smp_up_cpu
+        add   x0, x0, x20            /* Apply physical offset */
         dsb   sy
 2:      ldr   x1, [x0]
         cmp   x1, x24
@@ -302,7 +174,7 @@ common_start:
         b     2b
 1:
 
-#ifdef CONFIG_EARLY_PRINTK
+#ifdef EARLY_PRINTK
         ldr   x23, =EARLY_UART_BASE_ADDRESS /* x23 := UART base address */
         cbnz  x22, 1f
         bl    init_uart                 /* Boot CPU sets up the UART too */
@@ -324,18 +196,20 @@ common_start:
         b.eq  el2 /* Yes */
 
         /* OK, we're boned. */
-        PRINT("- Xen must be entered in NS EL2 mode -\r\n")
-        PRINT("- Please update the bootloader -\r\n")
+        PRINT("- Xen must be entered in NS EL2 mode -\r\n" \
+              "- Please update the bootloader -\r\n")
         b fail
 
 el2:    PRINT("- Xen starting at EL2 -\r\n")
 
-        /* Zero BSS only when requested */
-        cbnz  x26, skip_bss
+        /* Zero BSS On the boot CPU to avoid nasty surprises */
+        cbnz  x22, skip_bss
 
         PRINT("- Zero BSS -\r\n")
-        load_paddr x0, __bss_start    /* Load paddr of start & end of bss */
-        load_paddr x1, __bss_end
+        ldr   x0, =__bss_start       /* Load start & end of bss */
+        ldr   x1, =__bss_end
+        add   x0, x0, x20            /* Apply physical offset */
+        add   x1, x1, x20
 
 1:      str   xzr, [x0], #8
         cmp   x0, x1
@@ -350,17 +224,13 @@ skip_bss:
         ldr   x0, =MAIRVAL
         msr   mair_el2, x0
 
-        /* Set up TCR_EL2:
-         * PS -- Based on ID_AA64MMFR0_EL1.PARange
+        /* Set up the HTCR:
+         * PASize -- 40 bits / 1TB
          * Top byte is used
-         * PT walks use Inner-Shareable accesses,
+         * PT walks use Outer-Shareable accesses,
          * PT walks are write-back, write-allocate in both cache levels,
-         * 48-bit virtual address space goes through this table. */
-        ldr   x0, =(TCR_RES1|TCR_SH0_IS|TCR_ORGN0_WBWA|TCR_IRGN0_WBWA|TCR_T0SZ(64-48))
-        /* ID_AA64MMFR0_EL1[3:0] (PARange) corresponds to TCR_EL2[18:16] (PS) */
-        mrs   x1, ID_AA64MMFR0_EL1
-        bfi   x0, x1, #16, #3
-
+         * Full 64-bit address space goes through this table. */
+        ldr   x0, =0x80822500
         msr   tcr_el2, x0
 
         /* Set up the SCTLR_EL2:
@@ -369,15 +239,10 @@ skip_bss:
          * Write-implies-XN disabled (for now),
          * D-cache disabled (for now),
          * I-cache enabled,
-         * Alignment checking disabled,
+         * Alignment checking enabled,
          * MMU translation disabled (for now). */
-        ldr   x0, =(HSCTLR_BASE)
+        ldr   x0, =(HSCTLR_BASE|SCTLR_A)
         msr   SCTLR_EL2, x0
-
-        /* Ensure that any exceptions encountered at EL2
-         * are handled using the EL2 stack pointer, rather
-         * than SP_EL0. */
-        msr spsel, #1
 
         /* Rebuild the boot pagetable's first-level entries. The structure
          * is described in mm.c.
@@ -387,134 +252,83 @@ skip_bss:
          * mapping. So each CPU must rebuild the page tables here with
          * the 1:1 in place. */
 
-        /* If Xen is loaded at exactly XEN_VIRT_START then we don't
-         * need an additional 1:1 mapping, the virtual mapping will
-         * suffice.
-         */
-        cmp   x19, #XEN_VIRT_START
-        cset  x25, eq                /* x25 := identity map in place, or not */
-
         /* Write Xen's PT's paddr into TTBR0_EL2 */
-        load_paddr x4, boot_pgtable
+        ldr   x4, =boot_pgtable
+        add   x4, x4, x20            /* x4 := paddr (boot_pagetable) */
         msr   TTBR0_EL2, x4
 
         /* Setup boot_pgtable: */
-        load_paddr x1, boot_first
+        ldr   x1, =boot_first
+        add   x1, x1, x20            /* x1 := paddr (boot_first) */
 
         /* ... map boot_first in boot_pgtable[0] */
         mov   x3, #PT_PT             /* x2 := table map of boot_first */
         orr   x2, x1, x3             /*       + rights for linear PT */
         str   x2, [x4, #0]           /* Map it in slot 0 */
 
-        /* ... map of paddr(start) in boot_pgtable+boot_first_id */
-        lsr   x1, x19, #ZEROETH_SHIFT/* Offset of base paddr in boot_pgtable */
+        /* ... map of paddr(start) in boot_pgtable */
+        lsr   x1, x19, #39           /* Offset of base paddr in boot_pgtable */
         cbz   x1, 1f                 /* It's in slot 0, map in boot_first
                                       * or boot_second later on */
 
-        /* Level zero does not support superpage mappings, so we have
-         * to use an extra first level page in which we create a 1GB mapping.
-         */
-        load_paddr x2, boot_first_id
-
-        mov   x3, #PT_PT             /* x2 := table map of boot_first_id */
-        orr   x2, x2, x3             /*       + rights for linear PT */
-        lsl   x1, x1, #3             /* x1 := Slot offset */
-        str   x2, [x4, x1]
-
-        load_paddr x4, boot_first_id
-
-        lsr   x1, x19, #FIRST_SHIFT  /* x1 := Offset of base paddr in boot_first_id */
-        lsl   x2, x1, #FIRST_SHIFT   /* x2 := Base address for 1GB mapping */
-        mov   x3, #PT_MEM            /* x2 := Section map */
+        lsl   x2, x1, #39            /* Base address for 512GB mapping */
+        mov   x3, #PT_MEM            /* x2 := Section mapping */
         orr   x2, x2, x3
-        and   x1, x1, #LPAE_ENTRY_MASK /* x1 := Slot offset */
-        lsl   x1, x1, #3
-        str   x2, [x4, x1]           /* Mapping of paddr(start) */
-        mov   x25, #1                /* x25 := identity map now in place */
+        lsl   x1, x1, #3             /* x1 := Slot offset */
+        str   x2, [x4, x1]           /* Mapping of paddr(start)*/
 
 1:      /* Setup boot_first: */
-        load_paddr x4, boot_first   /* Next level into boot_first */
+        ldr   x4, =boot_first        /* Next level into boot_first */
+        add   x4, x4, x20            /* x4 := paddr(boot_first) */
 
         /* ... map boot_second in boot_first[0] */
-        load_paddr x1, boot_second
-        mov   x3, #PT_PT             /* x2 := table map of boot_second */
+        ldr   x1, =boot_second
+        add   x1, x1, x20            /* x1 := paddr(boot_second) */
+        mov   x3, #PT_PT             /* x2 := table map of boot_first */
         orr   x2, x1, x3             /*       + rights for linear PT */
         str   x2, [x4, #0]           /* Map it in slot 0 */
 
         /* ... map of paddr(start) in boot_first */
-        cbnz  x25, 1f                /* x25 is set if already created */
-        lsr   x2, x19, #FIRST_SHIFT  /* x2 := Offset of base paddr in boot_first */
-        and   x1, x2, #LPAE_ENTRY_MASK /* x1 := Slot to use */
+        lsr   x2, x19, #30           /* x2 := Offset of base paddr in boot_first */
+        and   x1, x2, 0x1ff          /* x1 := Slot to use */
         cbz   x1, 1f                 /* It's in slot 0, map in boot_second */
 
-        lsl   x2, x2, #FIRST_SHIFT   /* Base address for 1GB mapping */
+        lsl   x2, x2, #30            /* Base address for 1GB mapping */
         mov   x3, #PT_MEM            /* x2 := Section map */
         orr   x2, x2, x3
         lsl   x1, x1, #3             /* x1 := Slot offset */
         str   x2, [x4, x1]           /* Create mapping of paddr(start)*/
-        mov   x25, #1                /* x25 := identity map now in place */
 
 1:      /* Setup boot_second: */
-        load_paddr x4, boot_second
+        ldr   x4, =boot_second
+        add   x4, x4, x20            /* x4 := paddr (boot_second) */
 
-        /* ... map boot_third in boot_second[1] */
-        load_paddr x1, boot_third
-        mov   x3, #PT_PT             /* x2 := table map of boot_third */
-        orr   x2, x1, x3             /*       + rights for linear PT */
-        str   x2, [x4, #8]           /* Map it in slot 1 */
-
-        /* ... map of paddr(start) in boot_second */
-        cbnz  x25, 1f                /* x25 is set if already created */
-        lsr   x2, x19, #SECOND_SHIFT /* x2 := Offset of base paddr in boot_second */
-        and   x1, x2, #LPAE_ENTRY_MASK /* x1 := Slot to use */
-        cmp   x1, #1
-        b.eq  virtphys_clash         /* It's in slot 1, which we cannot handle */
-
-        lsl   x2, x2, #SECOND_SHIFT  /* Base address for 2MB mapping */
+        lsr   x2, x19, #20           /* Base address for 2MB mapping */
+        lsl   x2, x2, #20
         mov   x3, #PT_MEM            /* x2 := Section map */
         orr   x2, x2, x3
-        lsl   x1, x1, #3             /* x1 := Slot offset */
-        str   x2, [x4, x1]           /* Create mapping of paddr(start)*/
-        mov   x25, #1                /* x25 := identity map now in place */
 
-1:      /* Setup boot_third: */
-        load_paddr x4, boot_third
+        /* ... map of vaddr(start) in boot_second */
+        ldr   x1, =start
+        lsr   x1, x1, #18            /* Slot for vaddr(start) */
+        str   x2, [x4, x1]           /* Map vaddr(start) */
 
-        lsr   x2, x19, #THIRD_SHIFT  /* Base address for 4K mapping */
-        lsl   x2, x2, #THIRD_SHIFT
-        mov   x3, #PT_MEM_L3         /* x2 := Section map */
-        orr   x2, x2, x3
+        /* ... map of paddr(start) in boot_second */
+        lsr   x1, x19, #30           /* Base paddr */
+        cbnz  x1, 1f                 /* If paddr(start) is not in slot 0
+                                      * then the mapping was done in
+                                      * boot_pgtable or boot_first above */
 
-        /* ... map of vaddr(start) in boot_third */
-        mov   x1, xzr
-1:      str   x2, [x4, x1]           /* Map vaddr(start) */
-        add   x2, x2, #PAGE_SIZE     /* Next page */
-        add   x1, x1, #8             /* Next slot */
-        cmp   x1, #(LPAE_ENTRIES<<3) /* 512 entries per page */
-        b.lt  1b
+        lsr   x1, x19, #18           /* Slot for paddr(start) */
+        str   x2, [x4, x1]           /* Map Xen there */
+1:
 
         /* Defer fixmap and dtb mapping until after paging enabled, to
          * avoid them clashing with the 1:1 mapping. */
 
         /* boot pagetable setup complete */
 
-        cbnz  x25, 1f                /* Did we manage to create an identity mapping ? */
-        PRINT("Unable to build boot page tables - Failed to identity map Xen.\r\n")
-        b     fail
-virtphys_clash:
-        /* Identity map clashes with boot_third, which we cannot handle yet */
-        PRINT("- Unable to build boot page tables - virt and phys addresses clash. -\r\n")
-        b     fail
-
-1:
         PRINT("- Turning on paging -\r\n")
-
-        /*
-         * The state of the TLBs is unknown before turning on the MMU.
-         * Flush them to avoid stale one.
-         */
-        tlbi  alle2                  /* Flush hypervisor TLBs */
-        dsb   nsh
 
         ldr   x1, =paging            /* Explicit vaddr, not RIP-relative */
         mrs   x0, SCTLR_EL2
@@ -529,15 +343,16 @@ paging:
         /* Now we can install the fixmap and dtb mappings, since we
          * don't need the 1:1 map any more */
         dsb   sy
-#if defined(CONFIG_EARLY_PRINTK) /* Fixmap is only used by early printk */
+#if defined(EARLY_PRINTK) /* Fixmap is only used by early printk */
         /* Non-boot CPUs don't need to rebuild the fixmap itself, just
-         * the mapping from boot_second to xen_fixmap */
+	 * the mapping from boot_second to xen_fixmap */
         cbnz  x22, 1f
 
         /* Add UART to the fixmap table */
-        ldr   x1, =xen_fixmap        /* x1 := vaddr (xen_fixmap) */
-        lsr   x2, x23, #THIRD_SHIFT
-        lsl   x2, x2, #THIRD_SHIFT   /* 4K aligned paddr of UART */
+        ldr   x1, =xen_fixmap
+        add   x1, x1, x20            /* x1 := paddr (xen_fixmap) */
+        lsr   x2, x23, #12
+        lsl   x2, x2, #12            /* 4K aligned paddr of UART */
         mov   x3, #PT_DEV_L3
         orr   x2, x2, x3             /* x2 := 4K dev map including UART */
         str   x2, [x1, #(FIXMAP_CONSOLE*8)] /* Map it in the first fixmap's slot */
@@ -545,16 +360,29 @@ paging:
 
         /* Map fixmap into boot_second */
         ldr   x4, =boot_second       /* x4 := vaddr (boot_second) */
-        load_paddr x2, xen_fixmap
+        ldr   x2, =xen_fixmap
+        add   x2, x2, x20            /* x2 := paddr (xen_fixmap) */
         mov   x3, #PT_PT
         orr   x2, x2, x3             /* x2 := table map of xen_fixmap */
         ldr   x1, =FIXMAP_ADDR(0)
-        lsr   x1, x1, #(SECOND_SHIFT - 3)   /* x1 := Slot for FIXMAP(0) */
+        lsr   x1, x1, #18            /* x1 := Slot for FIXMAP(0) */
         str   x2, [x4, x1]           /* Map it in the fixmap's slot */
 
         /* Use a virtual address to access the UART. */
         ldr   x23, =EARLY_UART_VIRTUAL_ADDRESS
 #endif
+
+        /* Map the DTB in the boot misc slot */
+        cbnz  x22, 1f                /* Only on boot CPU */
+
+        lsr   x2, x21, #21
+        lsl   x2, x2, #21            /* x2 := 2MB-aligned paddr of DTB */
+        mov   x3, #PT_MEM            /* x2 := 2MB RAM incl. DTB */
+        orr   x2, x2, x3
+        ldr   x1, =BOOT_FDT_VIRT_START
+        lsr   x1, x1, #18            /* x4 := Slot for BOOT_FDT_VIRT_START */
+        str   x2, [x4, x1]           /* Map it in the early fdt slot */
+1:
 
         /*
          * Flush the TLB in case the 1:1 mapping happens to clash with
@@ -597,17 +425,14 @@ launch:
         mov   x0, x20                /* Marshal args: - phys_offset */
         mov   x1, x21                /*               - FDT */
         mov   x2, x24                /*               - CPU ID */
-        cbnz  x22, 1f
-        b     start_xen              /* and disappear into the land of C */
-1:
+        cbz   x22, start_xen         /* and disappear into the land of C */
         b     start_secondary        /* (to the appropriate entry point) */
 
-/* Fail-stop */
+/* Fail-stop
+ * r0: string explaining why */
 fail:   PRINT("- Boot failed -\r\n")
 1:      wfe
         b     1b
-
-GLOBAL(_end_boot)
 
 /* Copy Xen to new location and switch TTBR
  * x0    ttbr
@@ -645,7 +470,7 @@ ENTRY(relocate_xen)
         dsb   sy        /* So the CPU issues all writes to the range */
 
         mov   x9, x3
-        ldr   x10, =dcache_line_bytes /* x10 := step */
+        ldr   x10, =cacheline_bytes /* x10 := step */
         ldr   x10, [x10]
         mov   x11, x2
 
@@ -675,7 +500,7 @@ ENTRY(relocate_xen)
 
         ret
 
-#ifdef CONFIG_EARLY_PRINTK
+#ifdef EARLY_PRINTK
 /* Bring up the UART.
  * x23: Early UART base address
  * Clobbers x0-x1 */
@@ -722,80 +547,15 @@ putn:
 hex:    .ascii "0123456789abcdef"
         .align 2
 
-#else  /* CONFIG_EARLY_PRINTK */
+#else  /* EARLY_PRINTK */
 
-ENTRY(early_puts)
 init_uart:
+.global early_puts
+early_puts:
 puts:
 putn:   ret
 
-#endif /* !CONFIG_EARLY_PRINTK */
-
-/* This provides a C-API version of __lookup_processor_type
- * TODO: For now, the implementation return NULL every time
- */
-ENTRY(lookup_processor_type)
-        mov  x0, #0
-        ret
-/*
- *  Function to transition from EFI loader in C, to Xen entry point.
- *  void noreturn efi_xen_start(void *fdt_ptr, uint32_t fdt_size);
- */
-ENTRY(efi_xen_start)
-        /*
-         * Preserve x0 (fdt pointer) across call to __flush_dcache_area,
-         * restore for entry into Xen.
-         */
-        mov   x20, x0
-
-        /* flush dcache covering the FDT updated by EFI boot code */
-        bl    __flush_dcache_area
-
-        /*
-         * Flush dcache covering current runtime addresses
-         * of xen text/data. Then flush all of icache.
-         */
-        adrp  x1, _start
-        add   x1, x1, #:lo12:_start
-        mov   x0, x1
-        adrp  x2, _end
-        add   x2, x2, #:lo12:_end
-        sub   x1, x2, x1
-
-        bl    __flush_dcache_area
-        ic    ialluis
-        tlbi  alle2
-
-        /*
-         * Turn off cache and MMU as Xen expects. EFI enables them, but also
-         * mandates a 1:1 (unity) VA->PA mapping, so we can turn off the
-         * MMU while executing EFI code before entering Xen.
-         * The EFI loader calls this to start Xen.
-         */
-
-        /* Turn off Dcache and MMU */
-        mrs   x0, sctlr_el2
-        bic   x0, x0, #1 << 0        /* clear SCTLR.M */
-        bic   x0, x0, #1 << 2        /* clear SCTLR.C */
-        msr   sctlr_el2, x0
-        isb
-
-        /* Jump to Xen entry point */
-        mov   x0, x20
-        mov   x1, xzr
-        mov   x2, xzr
-        mov   x3, xzr
-        /*
-         * The EFI stub and Xen may share some information living in
-         * BSS. Don't zero BSS to avoid loosing them.
-         *
-         * Note that the EFI firmware has already zeroed BSS for us
-         * before jump into the stub.
-         */
-        mov   x26, #1               /* x26 := skip_zero_bss */
-
-        b     real_start_efi
-ENDPROC(efi_xen_start)
+#endif /* EARLY_PRINTK */
 
 /*
  * Local variables:

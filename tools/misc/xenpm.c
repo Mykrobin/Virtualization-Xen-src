@@ -12,7 +12,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 #define MAX_NR_CPU 512
 
@@ -28,9 +29,6 @@
 #include <inttypes.h>
 #include <sys/time.h>
 
-#define MAX_PKG_RESIDENCIES 12
-#define MAX_CORE_RESIDENCIES 8
-
 #define ARRAY_SIZE(a) (sizeof (a) / sizeof ((a)[0]))
 
 static xc_interface *xc_handle;
@@ -45,8 +43,6 @@ void show_help(void)
             "xenpm command list:\n\n"
             " get-cpuidle-states    [cpuid]       list cpu idle info of CPU <cpuid> or all\n"
             " get-cpufreq-states    [cpuid]       list cpu freq info of CPU <cpuid> or all\n"
-            " get-cpufreq-average   [cpuid]       average cpu frequency since last invocation\n"
-            "                                     for CPU <cpuid> or all\n"
             " get-cpufreq-para      [cpuid]       list cpu freq parameter of CPU <cpuid> or all\n"
             " set-scaling-maxfreq   [cpuid] <HZ>  set max cpu frequency <HZ> on CPU <cpuid>\n"
             "                                     or all CPUs\n"
@@ -93,25 +89,20 @@ static void parse_cpuid(const char *arg, int *cpuid)
 static void parse_cpuid_and_int(int argc, char *argv[],
                                 int *cpuid, int *val, const char *what)
 {
-    if ( argc == 0 )
-    {
-         fprintf(stderr, "Missing %s\n", what);
-         exit(EINVAL);
-    }
-
     if ( argc > 1 )
         parse_cpuid(argv[0], cpuid);
 
-    if ( sscanf(argv[argc > 1], "%d", val) != 1 )
+    if ( argc == 0 || sscanf(argv[argc > 1], "%d", val) != 1 )
     {
-        fprintf(stderr, "Invalid %s '%s'\n", what, argv[argc > 1]);
+        fprintf(stderr, argc ? "Invalid %s '%s'\n" : "Missing %s\n",
+                what, argv[argc > 1]);
         exit(EINVAL);
     }
 }
 
 static void print_cxstat(int cpuid, struct xc_cx_stat *cxstat)
 {
-    unsigned int i;
+    int i;
 
     printf("cpu id               : %d\n", cpuid);
     printf("total C-states       : %d\n", cxstat->nr);
@@ -124,14 +115,17 @@ static void print_cxstat(int cpuid, struct xc_cx_stat *cxstat)
         printf("                       residency  [%20"PRIu64" ms]\n",
                cxstat->residencies[i]/1000000UL);
     }
-    for ( i = 0; i < MAX_PKG_RESIDENCIES && i < cxstat->nr_pc; ++i )
-        if ( cxstat->pc[i] )
-           printf("pc%d                  : [%20"PRIu64" ms]\n", i + 1,
-                  cxstat->pc[i] / 1000000UL);
-    for ( i = 0; i < MAX_CORE_RESIDENCIES && i < cxstat->nr_cc; ++i )
-        if ( cxstat->cc[i] )
-           printf("cc%d                  : [%20"PRIu64" ms]\n", i + 1,
-                  cxstat->cc[i] / 1000000UL);
+    printf("pc2                  : [%20"PRIu64" ms]\n"
+           "pc3                  : [%20"PRIu64" ms]\n"
+           "pc6                  : [%20"PRIu64" ms]\n"
+           "pc7                  : [%20"PRIu64" ms]\n",
+            cxstat->pc2/1000000UL, cxstat->pc3/1000000UL,
+            cxstat->pc6/1000000UL, cxstat->pc7/1000000UL);
+    printf("cc3                  : [%20"PRIu64" ms]\n"
+           "cc6                  : [%20"PRIu64" ms]\n"
+           "cc7                  : [%20"PRIu64" ms]\n",
+            cxstat->cc3/1000000UL, cxstat->cc6/1000000UL,
+            cxstat->cc7/1000000UL);
     printf("\n");
 }
 
@@ -151,23 +145,15 @@ static int get_cxstat_by_cpuid(xc_interface *xc_handle, int cpuid, struct xc_cx_
     if ( !max_cx_num )
         return -ENODEV;
 
-    cxstat->triggers = calloc(max_cx_num, sizeof(*cxstat->triggers));
-    cxstat->residencies = calloc(max_cx_num, sizeof(*cxstat->residencies));
-    cxstat->pc = calloc(MAX_PKG_RESIDENCIES, sizeof(*cxstat->pc));
-    cxstat->cc = calloc(MAX_CORE_RESIDENCIES, sizeof(*cxstat->cc));
-    if ( !cxstat->triggers || !cxstat->residencies ||
-         !cxstat->pc || !cxstat->cc )
+    cxstat->triggers = malloc(max_cx_num * sizeof(uint64_t));
+    if ( !cxstat->triggers )
+        return -ENOMEM;
+    cxstat->residencies = malloc(max_cx_num * sizeof(uint64_t));
+    if ( !cxstat->residencies )
     {
-        free(cxstat->cc);
-        free(cxstat->pc);
-        free(cxstat->residencies);
         free(cxstat->triggers);
         return -ENOMEM;
     }
-
-    cxstat->nr = max_cx_num;
-    cxstat->nr_pc = MAX_PKG_RESIDENCIES;
-    cxstat->nr_cc = MAX_CORE_RESIDENCIES;
 
     ret = xc_pm_get_cxstat(xc_handle, cpuid, cxstat);
     if( ret )
@@ -175,12 +161,8 @@ static int get_cxstat_by_cpuid(xc_interface *xc_handle, int cpuid, struct xc_cx_
         ret = -errno;
         free(cxstat->triggers);
         free(cxstat->residencies);
-        free(cxstat->pc);
-        free(cxstat->cc);
         cxstat->triggers = NULL;
         cxstat->residencies = NULL;
-        cxstat->pc = NULL;
-        cxstat->cc = NULL;
     }
 
     return ret;
@@ -216,8 +198,6 @@ static int show_cxstat_by_cpuid(xc_interface *xc_handle, int cpuid)
 
     free(cxstatinfo.triggers);
     free(cxstatinfo.residencies);
-    free(cxstatinfo.pc);
-    free(cxstatinfo.cc);
     return 0;
 }
 
@@ -350,40 +330,6 @@ void pxstat_func(int argc, char *argv[])
         show_pxstat_by_cpuid(xc_handle, cpuid);
 }
 
-static int show_cpufreq_by_cpuid(xc_interface *xc_handle, int cpuid)
-{
-    int ret = 0;
-    int average_cpufreq;
-
-    ret = get_avgfreq_by_cpuid(xc_handle, cpuid, &average_cpufreq);
-    if ( ret )
-        return ret;
-
-    printf("cpu id               : %d\n", cpuid);
-    printf("average cpu frequency: %d\n", average_cpufreq);
-    printf("\n");
-    return 0;
-}
-
-void cpufreq_func(int argc, char *argv[])
-{
-    int cpuid = -1;
-
-    if ( argc > 0 )
-        parse_cpuid(argv[0], &cpuid);
-
-    if ( cpuid < 0 )
-    {
-        /* show average frequency on all cpus */
-        int i;
-        for ( i = 0; i < max_cpu_nr; i++ )
-            if ( show_cpufreq_by_cpuid(xc_handle, i) == -ENODEV )
-                break;
-    }
-    else
-        show_cpufreq_by_cpuid(xc_handle, cpuid);
-}
-
 static uint64_t usec_start, usec_end;
 static struct xc_cx_stat *cxstat, *cxstat_start, *cxstat_end;
 static struct xc_px_stat *pxstat, *pxstat_start, *pxstat_end;
@@ -395,18 +341,16 @@ static void signal_int_handler(int signo)
     int i, j, k;
     struct timeval tv;
     int cx_cap = 0, px_cap = 0;
-    xc_cputopo_t *cputopo = NULL;
-    unsigned max_cpus = 0;
+    DECLARE_HYPERCALL_BUFFER(uint32_t, cpu_to_core);
+    DECLARE_HYPERCALL_BUFFER(uint32_t, cpu_to_socket);
+    DECLARE_HYPERCALL_BUFFER(uint32_t, cpu_to_node);
+    xc_topologyinfo_t info = { 0 };
 
-    if ( xc_cputopoinfo(xc_handle, &max_cpus, NULL) != 0 )
-    {
-        fprintf(stderr, "failed to discover number of CPUs: %s\n",
-                strerror(errno));
-        goto out;
-    }
+    cpu_to_core = xc_hypercall_buffer_alloc(xc_handle, cpu_to_core, sizeof(*cpu_to_core) * MAX_NR_CPU);
+    cpu_to_socket = xc_hypercall_buffer_alloc(xc_handle, cpu_to_socket, sizeof(*cpu_to_socket) * MAX_NR_CPU);
+    cpu_to_node = xc_hypercall_buffer_alloc(xc_handle, cpu_to_node, sizeof(*cpu_to_node) * MAX_NR_CPU);
 
-    cputopo = calloc(max_cpus, sizeof(*cputopo));
-    if ( cputopo == NULL )
+    if ( cpu_to_core == NULL || cpu_to_socket == NULL || cpu_to_node == NULL )
     {
 	fprintf(stderr, "failed to allocate hypercall buffers\n");
 	goto out;
@@ -490,42 +434,47 @@ static void signal_int_handler(int signo)
             printf("  Avg freq\t%d\tKHz\n", avgfreq[i]);
     }
 
-    if ( cx_cap && !xc_cputopoinfo(xc_handle, &max_cpus, cputopo) )
+    set_xen_guest_handle(info.cpu_to_core, cpu_to_core);
+    set_xen_guest_handle(info.cpu_to_socket, cpu_to_socket);
+    set_xen_guest_handle(info.cpu_to_node, cpu_to_node);
+    info.max_cpu_index = MAX_NR_CPU - 1;
+
+    if ( cx_cap && !xc_topologyinfo(xc_handle, &info) )
     {
         uint32_t socket_ids[MAX_NR_CPU];
         uint32_t core_ids[MAX_NR_CPU];
         uint32_t socket_nr = 0;
         uint32_t core_nr = 0;
 
-        if ( max_cpus > MAX_NR_CPU )
-            max_cpus = MAX_NR_CPU;
+        if ( info.max_cpu_index > MAX_NR_CPU - 1 )
+            info.max_cpu_index = MAX_NR_CPU - 1;
         /* check validity */
-        for ( i = 0; i < max_cpus; i++ )
+        for ( i = 0; i <= info.max_cpu_index; i++ )
         {
-            if ( cputopo[i].core == XEN_INVALID_CORE_ID ||
-                 cputopo[i].socket == XEN_INVALID_SOCKET_ID )
+            if ( cpu_to_core[i] == INVALID_TOPOLOGY_ID ||
+                 cpu_to_socket[i] == INVALID_TOPOLOGY_ID )
                 break;
         }
-        if ( i >= max_cpus )
+        if ( i > info.max_cpu_index )
         {
             /* find socket nr & core nr per socket */
-            for ( i = 0; i < max_cpus; i++ )
+            for ( i = 0; i <= info.max_cpu_index; i++ )
             {
                 for ( j = 0; j < socket_nr; j++ )
-                    if ( cputopo[i].socket == socket_ids[j] )
+                    if ( cpu_to_socket[i] == socket_ids[j] )
                         break;
                 if ( j == socket_nr )
                 {
-                    socket_ids[j] = cputopo[i].socket;
+                    socket_ids[j] = cpu_to_socket[i];
                     socket_nr++;
                 }
 
                 for ( j = 0; j < core_nr; j++ )
-                    if ( cputopo[i].core == core_ids[j] )
+                    if ( cpu_to_core[i] == core_ids[j] )
                         break;
                 if ( j == core_nr )
                 {
-                    core_ids[j] = cputopo[i].core;
+                    core_ids[j] = cpu_to_core[i];
                     core_nr++;
                 }
             }
@@ -533,46 +482,43 @@ static void signal_int_handler(int signo)
             /* print out CC? and PC? */
             for ( i = 0; i < socket_nr; i++ )
             {
-                unsigned int n;
                 uint64_t res;
-
-                for ( j = 0; j < max_cpus; j++ )
+                for ( j = 0; j <= info.max_cpu_index; j++ )
                 {
-                    if ( cputopo[j].socket == socket_ids[i] )
+                    if ( cpu_to_socket[j] == socket_ids[i] )
                         break;
                 }
                 printf("\nSocket %d\n", socket_ids[i]);
-                for ( n = 0; n < MAX_PKG_RESIDENCIES; ++n )
-                {
-                    if ( n >= cxstat_end[j].nr_pc )
-                        continue;
-                    res = cxstat_end[j].pc[n];
-                    if ( n < cxstat_start[j].nr_pc )
-                        res -= cxstat_start[j].pc[n];
-                    printf("\tPC%u\t%"PRIu64" ms\t%.2f%%\n",
-                           n + 1, res / 1000000UL,
-                           100UL * res / (double)sum_cx[j]);
-                }
+                res = cxstat_end[j].pc2 - cxstat_start[j].pc2;
+                printf("\tPC2\t%"PRIu64" ms\t%.2f%%\n",  res / 1000000UL,
+                       100UL * res / (double)sum_cx[j]);
+                res = cxstat_end[j].pc3 - cxstat_start[j].pc3;
+                printf("\tPC3\t%"PRIu64" ms\t%.2f%%\n",  res / 1000000UL, 
+                       100UL * res / (double)sum_cx[j]);
+                res = cxstat_end[j].pc6 - cxstat_start[j].pc6;
+                printf("\tPC6\t%"PRIu64" ms\t%.2f%%\n",  res / 1000000UL, 
+                       100UL * res / (double)sum_cx[j]);
+                res = cxstat_end[j].pc7 - cxstat_start[j].pc7;
+                printf("\tPC7\t%"PRIu64" ms\t%.2f%%\n",  res / 1000000UL, 
+                       100UL * res / (double)sum_cx[j]);
                 for ( k = 0; k < core_nr; k++ )
                 {
-                    for ( j = 0; j < max_cpus; j++ )
+                    for ( j = 0; j <= info.max_cpu_index; j++ )
                     {
-                        if ( cputopo[j].socket == socket_ids[i] &&
-                             cputopo[j].core == core_ids[k] )
+                        if ( cpu_to_socket[j] == socket_ids[i] &&
+                             cpu_to_core[j] == core_ids[k] )
                             break;
                     }
                     printf("\t Core %d CPU %d\n", core_ids[k], j);
-                    for ( n = 0; n < MAX_CORE_RESIDENCIES; ++n )
-                    {
-                        if ( n >= cxstat_end[j].nr_cc )
-                            continue;
-                        res = cxstat_end[j].cc[n];
-                        if ( n < cxstat_start[j].nr_cc )
-                            res -= cxstat_start[j].cc[n];
-                        printf("\t\tCC%u\t%"PRIu64" ms\t%.2f%%\n",
-                               n + 1, res / 1000000UL,
-                               100UL * res / (double)sum_cx[j]);
-                    }
+                    res = cxstat_end[j].cc3 - cxstat_start[j].cc3;
+                    printf("\t\tCC3\t%"PRIu64" ms\t%.2f%%\n",  res / 1000000UL, 
+                           100UL * res / (double)sum_cx[j]);
+                    res = cxstat_end[j].cc6 - cxstat_start[j].cc6;
+                    printf("\t\tCC6\t%"PRIu64" ms\t%.2f%%\n",  res / 1000000UL, 
+                           100UL * res / (double)sum_cx[j]);
+                    res = cxstat_end[j].cc7 - cxstat_start[j].cc7;
+                    printf("\t\tCC7\t%"PRIu64" ms\t%.2f%%\n",  res / 1000000UL,
+                           100UL * res / (double)sum_cx[j]);
                 }
             }
         }
@@ -583,8 +529,6 @@ static void signal_int_handler(int signo)
     {
         free(cxstat[i].triggers);
         free(cxstat[i].residencies);
-        free(cxstat[i].pc);
-        free(cxstat[i].cc);
         free(pxstat[i].trans_pt);
         free(pxstat[i].pt);
     }
@@ -593,7 +537,9 @@ static void signal_int_handler(int signo)
     free(sum);
     free(avgfreq);
 out:
-    free(cputopo);
+    xc_hypercall_buffer_free(xc_handle, cpu_to_core);
+    xc_hypercall_buffer_free(xc_handle, cpu_to_socket);
+    xc_hypercall_buffer_free(xc_handle, cpu_to_node);
     xc_interface_close(xc_handle);
     exit(0);
 }
@@ -1000,27 +946,28 @@ void scaling_governor_func(int argc, char *argv[])
 
 void cpu_topology_func(int argc, char *argv[])
 {
-    xc_cputopo_t *cputopo = NULL;
-    unsigned max_cpus = 0;
-    int i, rc;
+    DECLARE_HYPERCALL_BUFFER(uint32_t, cpu_to_core);
+    DECLARE_HYPERCALL_BUFFER(uint32_t, cpu_to_socket);
+    DECLARE_HYPERCALL_BUFFER(uint32_t, cpu_to_node);
+    xc_topologyinfo_t info = { 0 };
+    int i, rc = ENOMEM;
 
-    if ( xc_cputopoinfo(xc_handle, &max_cpus, NULL) != 0 )
-    {
-        rc = errno;
-        fprintf(stderr, "failed to discover number of CPUs (%d - %s)\n",
-                errno, strerror(errno));
-        goto out;
-    }
+    cpu_to_core = xc_hypercall_buffer_alloc(xc_handle, cpu_to_core, sizeof(*cpu_to_core) * MAX_NR_CPU);
+    cpu_to_socket = xc_hypercall_buffer_alloc(xc_handle, cpu_to_socket, sizeof(*cpu_to_socket) * MAX_NR_CPU);
+    cpu_to_node = xc_hypercall_buffer_alloc(xc_handle, cpu_to_node, sizeof(*cpu_to_node) * MAX_NR_CPU);
 
-    cputopo = calloc(max_cpus, sizeof(*cputopo));
-    if ( cputopo == NULL )
+    if ( cpu_to_core == NULL || cpu_to_socket == NULL || cpu_to_node == NULL )
     {
-	rc = ENOMEM;
 	fprintf(stderr, "failed to allocate hypercall buffers\n");
 	goto out;
     }
 
-    if ( xc_cputopoinfo(xc_handle, &max_cpus, cputopo) )
+    set_xen_guest_handle(info.cpu_to_core, cpu_to_core);
+    set_xen_guest_handle(info.cpu_to_socket, cpu_to_socket);
+    set_xen_guest_handle(info.cpu_to_node, cpu_to_node);
+    info.max_cpu_index = MAX_NR_CPU-1;
+
+    if ( xc_topologyinfo(xc_handle, &info) )
     {
         rc = errno;
         fprintf(stderr, "Cannot get Xen CPU topology (%d - %s)\n",
@@ -1028,17 +975,22 @@ void cpu_topology_func(int argc, char *argv[])
         goto out;
     }
 
+    if ( info.max_cpu_index > (MAX_NR_CPU-1) )
+        info.max_cpu_index = MAX_NR_CPU-1;
+
     printf("CPU\tcore\tsocket\tnode\n");
-    for ( i = 0; i < max_cpus; i++ )
+    for ( i = 0; i <= info.max_cpu_index; i++ )
     {
-        if ( cputopo[i].core == XEN_INVALID_CORE_ID )
+        if ( cpu_to_core[i] == INVALID_TOPOLOGY_ID )
             continue;
         printf("CPU%d\t %d\t %d\t %d\n",
-               i, cputopo[i].core, cputopo[i].socket, cputopo[i].node);
+               i, cpu_to_core[i], cpu_to_socket[i], cpu_to_node[i]);
     }
     rc = 0;
 out:
-    free(cputopo);
+    xc_hypercall_buffer_free(xc_handle, cpu_to_core);
+    xc_hypercall_buffer_free(xc_handle, cpu_to_socket);
+    xc_hypercall_buffer_free(xc_handle, cpu_to_node);
     if ( rc )
         exit(rc);
 }
@@ -1071,24 +1023,14 @@ void set_sched_smt_func(int argc, char *argv[])
 
 void set_vcpu_migration_delay_func(int argc, char *argv[])
 {
-    struct xen_sysctl_credit_schedule sparam;
     int value;
-
-    fprintf(stderr, "WARNING: using xenpm for this purpose is deprecated."
-           " Check out `xl sched-credit -s -m DELAY'\n");
 
     if ( argc != 1 || (value = atoi(argv[0])) < 0 ) {
         fprintf(stderr, "Missing or invalid argument(s)\n");
         exit(EINVAL);
     }
 
-    if ( xc_sched_credit_params_get(xc_handle, 0, &sparam) < 0 ) {
-        fprintf(stderr, "getting Credit scheduler parameters failed\n");
-        exit(EINVAL);
-    }
-    sparam.vcpu_migr_delay_us = value;
-
-    if ( !xc_sched_credit_params_set(xc_handle, 0, &sparam) )
+    if ( !xc_set_vcpu_migration_delay(xc_handle, value) )
         printf("set vcpu migration delay to %d us succeeded\n", value);
     else
         fprintf(stderr, "set vcpu migration delay failed (%d - %s)\n",
@@ -1097,17 +1039,13 @@ void set_vcpu_migration_delay_func(int argc, char *argv[])
 
 void get_vcpu_migration_delay_func(int argc, char *argv[])
 {
-    struct xen_sysctl_credit_schedule sparam;
-
-    fprintf(stderr, "WARNING: using xenpm for this purpose is deprecated."
-           " Check out `xl sched-credit -s'\n");
+    uint32_t value;
 
     if ( argc )
         fprintf(stderr, "Ignoring argument(s)\n");
 
-    if ( !xc_sched_credit_params_get(xc_handle, 0, &sparam) )
-        printf("Scheduler vcpu migration delay is %d us\n",
-               sparam.vcpu_migr_delay_us);
+    if ( !xc_get_vcpu_migration_delay(xc_handle, &value) )
+        printf("Scheduler vcpu migration delay is %d us\n", value);
     else
         fprintf(stderr,
                 "Failed to get scheduler vcpu migration delay (%d - %s)\n",
@@ -1184,7 +1122,6 @@ struct {
     { "help", help_func },
     { "get-cpuidle-states", cxstat_func },
     { "get-cpufreq-states", pxstat_func },
-    { "get-cpufreq-average", cpufreq_func },
     { "start", start_gather_func },
     { "get-cpufreq-para", cpufreq_para_func },
     { "set-scaling-maxfreq", scaling_max_freq_func },
@@ -1231,7 +1168,7 @@ int main(int argc, char *argv[])
         xc_interface_close(xc_handle);
         return ret;
     }
-    max_cpu_nr = physinfo.max_cpu_id + 1;
+    max_cpu_nr = physinfo.nr_cpus;
 
     /* calculate how many options match with user's input */
     for ( i = 0; i < ARRAY_SIZE(main_options); i++ )

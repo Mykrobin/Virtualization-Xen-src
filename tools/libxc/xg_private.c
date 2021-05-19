@@ -14,12 +14,14 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #include <stdlib.h>
 #include <unistd.h>
 #include <zlib.h>
+#include <malloc.h>
 
 #include "xg_private.h"
 
@@ -36,7 +38,7 @@ char *xc_read_image(xc_interface *xch,
 
     if ( (kernel_fd = open(filename, O_RDONLY)) < 0 )
     {
-        PERROR("Could not open kernel image '%s'", filename);
+        PERROR("Could not open kernel image");
         goto out;
     }
 
@@ -161,7 +163,7 @@ char *xc_inflate_buffer(xc_interface *xch,
 /*******************/
 
 int pin_table(
-    xc_interface *xch, unsigned int type, unsigned long mfn, uint32_t dom)
+    xc_interface *xch, unsigned int type, unsigned long mfn, domid_t dom)
 {
     struct mmuext_op op;
 
@@ -185,6 +187,15 @@ unsigned long csum_page(void *page)
         sum += p[i];
 
     return sum ^ (sum>>32);
+}
+
+__attribute__((weak)) 
+    int xc_hvm_build(xc_interface *xch,
+                     uint32_t domid,
+                     struct xc_hvm_build_args *hvm_args)
+{
+    errno = ENOSYS;
+    return -1;
 }
 
 /*

@@ -12,7 +12,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  */
 
@@ -68,26 +69,16 @@ int nestedsvm_vmcb_map(struct vcpu *v, uint64_t vmcbaddr)
     struct nestedvcpu *nv = &vcpu_nestedhvm(v);
 
     if (nv->nv_vvmcx != NULL && nv->nv_vvmcxaddr != vmcbaddr) {
-        ASSERT(nv->nv_vvmcxaddr != INVALID_PADDR);
+        ASSERT(nv->nv_vvmcxaddr != VMCX_EADDR);
         hvm_unmap_guest_frame(nv->nv_vvmcx, 1);
         nv->nv_vvmcx = NULL;
-        nv->nv_vvmcxaddr = INVALID_PADDR;
+        nv->nv_vvmcxaddr = VMCX_EADDR;
     }
 
-    if ( !nv->nv_vvmcx )
-    {
-        bool_t writable;
-        void *vvmcx = hvm_map_guest_frame_rw(paddr_to_pfn(vmcbaddr), 1,
-                                             &writable);
-
-        if ( !vvmcx )
+    if (nv->nv_vvmcx == NULL) {
+        nv->nv_vvmcx = hvm_map_guest_frame_rw(vmcbaddr >> PAGE_SHIFT, 1);
+        if (nv->nv_vvmcx == NULL)
             return 0;
-        if ( !writable )
-        {
-            hvm_unmap_guest_frame(vvmcx, 1);
-            return 0;
-        }
-        nv->nv_vvmcx = vvmcx;
         nv->nv_vvmcxaddr = vmcbaddr;
     }
 
@@ -154,7 +145,7 @@ void nsvm_vcpu_destroy(struct vcpu *v)
     if (nv->nv_n2vmcx) {
         free_vmcb(nv->nv_n2vmcx);
         nv->nv_n2vmcx = NULL;
-        nv->nv_n2vmcx_pa = INVALID_PADDR;
+        nv->nv_n2vmcx_pa = VMCX_EADDR;
     }
     if (svm->ns_iomap)
         svm->ns_iomap = NULL;
@@ -164,8 +155,8 @@ int nsvm_vcpu_reset(struct vcpu *v)
 {
     struct nestedsvm *svm = &vcpu_nestedsvm(v);
 
-    svm->ns_msr_hsavepa = INVALID_PADDR;
-    svm->ns_ovvmcb_pa = INVALID_PADDR;
+    svm->ns_msr_hsavepa = VMCX_EADDR;
+    svm->ns_ovvmcb_pa = VMCX_EADDR;
 
     svm->ns_tscratio = DEFAULT_TSC_RATIO;
 
@@ -174,7 +165,7 @@ int nsvm_vcpu_reset(struct vcpu *v)
     svm->ns_exception_intercepts = 0;
     svm->ns_general1_intercepts = 0;
     svm->ns_general2_intercepts = 0;
-    svm->ns_virt_ext.bytes = 0;
+    svm->ns_lbr_control.bytes = 0;
 
     svm->ns_hap_enabled = 0;
     svm->ns_vmcb_guestcr3 = 0;
@@ -255,7 +246,7 @@ static int nsvm_vcpu_hostsave(struct vcpu *v, unsigned int inst_len)
     return 0;
 }
 
-static int nsvm_vcpu_hostrestore(struct vcpu *v, struct cpu_user_regs *regs)
+int nsvm_vcpu_hostrestore(struct vcpu *v, struct cpu_user_regs *regs)
 {
     struct nestedvcpu *nv = &vcpu_nestedhvm(v);
     struct nestedsvm *svm = &vcpu_nestedsvm(v);
@@ -278,16 +269,12 @@ static int nsvm_vcpu_hostrestore(struct vcpu *v, struct cpu_user_regs *regs)
     /* EFER */
     v->arch.hvm_vcpu.guest_efer = n1vmcb->_efer;
     rc = hvm_set_efer(n1vmcb->_efer);
-    if ( rc == X86EMUL_EXCEPTION )
-        hvm_inject_hw_exception(TRAP_gp_fault, 0);
     if (rc != X86EMUL_OKAY)
         gdprintk(XENLOG_ERR, "hvm_set_efer failed, rc: %u\n", rc);
 
     /* CR4 */
     v->arch.hvm_vcpu.guest_cr[4] = n1vmcb->_cr4;
-    rc = hvm_set_cr4(n1vmcb->_cr4, 1);
-    if ( rc == X86EMUL_EXCEPTION )
-        hvm_inject_hw_exception(TRAP_gp_fault, 0);
+    rc = hvm_set_cr4(n1vmcb->_cr4);
     if (rc != X86EMUL_OKAY)
         gdprintk(XENLOG_ERR, "hvm_set_cr4 failed, rc: %u\n", rc);
 
@@ -296,9 +283,7 @@ static int nsvm_vcpu_hostrestore(struct vcpu *v, struct cpu_user_regs *regs)
         svm->ns_cr0, v->arch.hvm_vcpu.guest_cr[0]);
     v->arch.hvm_vcpu.guest_cr[0] = n1vmcb->_cr0 | X86_CR0_PE;
     n1vmcb->rflags &= ~X86_EFLAGS_VM;
-    rc = hvm_set_cr0(n1vmcb->_cr0 | X86_CR0_PE, 1);
-    if ( rc == X86EMUL_EXCEPTION )
-        hvm_inject_hw_exception(TRAP_gp_fault, 0);
+    rc = hvm_set_cr0(n1vmcb->_cr0 | X86_CR0_PE);
     if (rc != X86EMUL_OKAY)
         gdprintk(XENLOG_ERR, "hvm_set_cr0 failed, rc: %u\n", rc);
     svm->ns_cr0 = v->arch.hvm_vcpu.guest_cr[0];
@@ -324,16 +309,14 @@ static int nsvm_vcpu_hostrestore(struct vcpu *v, struct cpu_user_regs *regs)
         v->arch.guest_table = pagetable_null();
         /* hvm_set_cr3() below sets v->arch.hvm_vcpu.guest_cr[3] for us. */
     }
-    rc = hvm_set_cr3(n1vmcb->_cr3, 1);
-    if ( rc == X86EMUL_EXCEPTION )
-        hvm_inject_hw_exception(TRAP_gp_fault, 0);
+    rc = hvm_set_cr3(n1vmcb->_cr3);
     if (rc != X86EMUL_OKAY)
         gdprintk(XENLOG_ERR, "hvm_set_cr3 failed, rc: %u\n", rc);
 
-    regs->rax = n1vmcb->rax;
-    regs->rsp = n1vmcb->rsp;
-    regs->rip = n1vmcb->rip;
-    regs->rflags = n1vmcb->rflags;
+    regs->eax = n1vmcb->rax;
+    regs->esp = n1vmcb->rsp;
+    regs->eip = n1vmcb->rip;
+    regs->eflags = n1vmcb->rflags;
     n1vmcb->_dr7 = 0; /* disable all breakpoints */
     n1vmcb->_cpl = 0;
 
@@ -357,7 +340,7 @@ static int nsvm_vmrun_permissionmap(struct vcpu *v, bool_t viopm)
     struct vmcb_struct *host_vmcb = arch_svm->vmcb;
     unsigned long *ns_msrpm_ptr;
     unsigned int i;
-    enum hvm_translation_result ret;
+    enum hvm_copy_result ret;
     unsigned long *ns_viomap;
     bool_t ioport_80 = 1, ioport_ed = 1;
 
@@ -365,8 +348,7 @@ static int nsvm_vmrun_permissionmap(struct vcpu *v, bool_t viopm)
 
     ret = hvm_copy_from_guest_phys(svm->ns_cached_msrpm,
                                    ns_vmcb->_msrpm_base_pa, MSRPM_SIZE);
-    if ( ret != HVMTRANS_okay )
-    {
+    if (ret != HVMCOPY_okay) {
         gdprintk(XENLOG_ERR, "hvm_copy_from_guest_phys msrpm %u\n", ret);
         return 1;
     }
@@ -412,11 +394,7 @@ static void nestedsvm_vmcb_set_nestedp2m(struct vcpu *v,
     ASSERT(v != NULL);
     ASSERT(vvmcb != NULL);
     ASSERT(n2vmcb != NULL);
-
-    /* This will allow nsvm_vcpu_hostcr3() to return correct np2m_base */
-    vcpu_nestedsvm(v).ns_vmcb_hostcr3 = vvmcb->_h_cr3;
-
-    p2m = p2m_get_nestedp2m(v);
+    p2m = p2m_get_nestedp2m(v, vvmcb->_h_cr3);
     n2vmcb->_h_cr3 = pagetable_get_paddr(p2m_get_pagetable(p2m));
 }
 
@@ -438,7 +416,7 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
 
     /* Check if virtual VMCB cleanbits are valid */
     vcleanbits_valid = 1;
-    if ( svm->ns_ovvmcb_pa == INVALID_PADDR )
+    if (svm->ns_ovvmcb_pa == VMCX_EADDR)
         vcleanbits_valid = 0;
     if (svm->ns_ovvmcb_pa != nv->nv_vvmcxaddr)
         vcleanbits_valid = 0;
@@ -521,12 +499,12 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
     /* Pending Interrupts */
     n2vmcb->eventinj = ns_vmcb->eventinj;
 
-    /* LBR and other virtualization */
+    /* LBR virtualization */
     if (!vcleanbit_set(lbr)) {
-        svm->ns_virt_ext = ns_vmcb->virt_ext;
+        svm->ns_lbr_control = ns_vmcb->lbr_control;
     }
-    n2vmcb->virt_ext.bytes =
-        n1vmcb->virt_ext.bytes | ns_vmcb->virt_ext.bytes;
+    n2vmcb->lbr_control.bytes =
+        n1vmcb->lbr_control.bytes | ns_vmcb->lbr_control.bytes;
 
     /* NextRIP - only evaluated on #VMEXIT. */
 
@@ -551,16 +529,12 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
     /* EFER */
     v->arch.hvm_vcpu.guest_efer = ns_vmcb->_efer;
     rc = hvm_set_efer(ns_vmcb->_efer);
-    if ( rc == X86EMUL_EXCEPTION )
-        hvm_inject_hw_exception(TRAP_gp_fault, 0);
     if (rc != X86EMUL_OKAY)
         gdprintk(XENLOG_ERR, "hvm_set_efer failed, rc: %u\n", rc);
 
     /* CR4 */
     v->arch.hvm_vcpu.guest_cr[4] = ns_vmcb->_cr4;
-    rc = hvm_set_cr4(ns_vmcb->_cr4, 1);
-    if ( rc == X86EMUL_EXCEPTION )
-        hvm_inject_hw_exception(TRAP_gp_fault, 0);
+    rc = hvm_set_cr4(ns_vmcb->_cr4);
     if (rc != X86EMUL_OKAY)
         gdprintk(XENLOG_ERR, "hvm_set_cr4 failed, rc: %u\n", rc);
 
@@ -568,9 +542,7 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
     svm->ns_cr0 = v->arch.hvm_vcpu.guest_cr[0];
     cr0 = nestedsvm_fpu_vmentry(svm->ns_cr0, ns_vmcb, n1vmcb, n2vmcb);
     v->arch.hvm_vcpu.guest_cr[0] = ns_vmcb->_cr0;
-    rc = hvm_set_cr0(cr0, 1);
-    if ( rc == X86EMUL_EXCEPTION )
-        hvm_inject_hw_exception(TRAP_gp_fault, 0);
+    rc = hvm_set_cr0(cr0);
     if (rc != X86EMUL_OKAY)
         gdprintk(XENLOG_ERR, "hvm_set_cr0 failed, rc: %u\n", rc);
 
@@ -586,9 +558,7 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
         nestedsvm_vmcb_set_nestedp2m(v, ns_vmcb, n2vmcb);
 
         /* hvm_set_cr3() below sets v->arch.hvm_vcpu.guest_cr[3] for us. */
-        rc = hvm_set_cr3(ns_vmcb->_cr3, 1);
-        if ( rc == X86EMUL_EXCEPTION )
-            hvm_inject_hw_exception(TRAP_gp_fault, 0);
+        rc = hvm_set_cr3(ns_vmcb->_cr3);
         if (rc != X86EMUL_OKAY)
             gdprintk(XENLOG_ERR, "hvm_set_cr3 failed, rc: %u\n", rc);
     } else if (paging_mode_hap(v->domain)) {
@@ -600,9 +570,7 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
          * we assume it intercepts page faults.
          */
         /* hvm_set_cr3() below sets v->arch.hvm_vcpu.guest_cr[3] for us. */
-        rc = hvm_set_cr3(ns_vmcb->_cr3, 1);
-        if ( rc == X86EMUL_EXCEPTION )
-            hvm_inject_hw_exception(TRAP_gp_fault, 0);
+        rc = hvm_set_cr3(ns_vmcb->_cr3);
         if (rc != X86EMUL_OKAY)
             gdprintk(XENLOG_ERR, "hvm_set_cr3 failed, rc: %u\n", rc);
     } else {
@@ -663,23 +631,23 @@ static int nsvm_vmcb_prepare4vmrun(struct vcpu *v, struct cpu_user_regs *regs)
     /* Cleanbits */
     n2vmcb->cleanbits.bytes = 0;
 
-    rc = svm_vmcb_isvalid(__func__, ns_vmcb, v, true);
+    rc = svm_vmcb_isvalid(__func__, ns_vmcb, 1);
     if (rc) {
         gdprintk(XENLOG_ERR, "virtual vmcb invalid\n");
         return NSVM_ERROR_VVMCB;
     }
 
-    rc = svm_vmcb_isvalid(__func__, n2vmcb, v, true);
+    rc = svm_vmcb_isvalid(__func__, n2vmcb, 1);
     if (rc) {
         gdprintk(XENLOG_ERR, "n2vmcb invalid\n");
         return NSVM_ERROR_VMENTRY;
     }
 
     /* Switch guest registers to l2 guest */
-    regs->rax = ns_vmcb->rax;
-    regs->rip = ns_vmcb->rip;
-    regs->rsp = ns_vmcb->rsp;
-    regs->rflags = ns_vmcb->rflags;
+    regs->eax = ns_vmcb->rax;
+    regs->eip = ns_vmcb->rip;
+    regs->esp = ns_vmcb->rsp;
+    regs->eflags = ns_vmcb->rflags;
 
 #undef vcleanbit_set
     return 0;
@@ -697,7 +665,7 @@ nsvm_vcpu_vmentry(struct vcpu *v, struct cpu_user_regs *regs,
     ns_vmcb = nv->nv_vvmcx;
     ASSERT(ns_vmcb != NULL);
     ASSERT(nv->nv_n2vmcx != NULL);
-    ASSERT(nv->nv_n2vmcx_pa != INVALID_PADDR);
+    ASSERT(nv->nv_n2vmcx_pa != VMCX_EADDR);
 
     /* Save values for later use. Needed for Nested-on-Nested and
      * Shadow-on-Shadow paging.
@@ -779,7 +747,7 @@ nsvm_vcpu_vmrun(struct vcpu *v, struct cpu_user_regs *regs)
     default:
         gdprintk(XENLOG_ERR,
             "nsvm_vcpu_vmentry failed, injecting #UD\n");
-        hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
+        hvm_inject_hw_exception(TRAP_invalid_op, HVM_DELIVER_NO_ERROR_CODE);
         /* Must happen after hvm_inject_hw_exception or it doesn't work right. */
         nv->nv_vmswitch_in_progress = 0;
         return 1;
@@ -793,20 +761,15 @@ nsvm_vcpu_vmrun(struct vcpu *v, struct cpu_user_regs *regs)
     return 0;
 }
 
-static int
+int
 nsvm_vcpu_vmexit_inject(struct vcpu *v, struct cpu_user_regs *regs,
     uint64_t exitcode)
 {
     struct nestedvcpu *nv = &vcpu_nestedhvm(v);
     struct nestedsvm *svm = &vcpu_nestedsvm(v);
     struct vmcb_struct *ns_vmcb;
-    struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
 
-    if ( vmcb->_vintr.fields.vgif_enable )
-        ASSERT(vmcb->_vintr.fields.vgif == 0);
-    else
-        ASSERT(svm->ns_gif == 0);
-
+    ASSERT(svm->ns_gif == 0);
     ns_vmcb = nv->nv_vvmcx;
 
     if (nv->nv_vmexit_pending) {
@@ -849,7 +812,7 @@ nsvm_vcpu_vmexit_inject(struct vcpu *v, struct cpu_user_regs *regs,
 }
 
 int
-nsvm_vcpu_vmexit_event(struct vcpu *v, const struct x86_event *trap)
+nsvm_vcpu_vmexit_trap(struct vcpu *v, struct hvm_trap *trap)
 {
     ASSERT(vcpu_nestedhvm(v).nv_vvmcx != NULL);
 
@@ -858,9 +821,19 @@ nsvm_vcpu_vmexit_event(struct vcpu *v, const struct x86_event *trap)
     return NESTEDHVM_VMEXIT_DONE;
 }
 
+uint64_t nsvm_vcpu_guestcr3(struct vcpu *v)
+{
+    return vcpu_nestedsvm(v).ns_vmcb_guestcr3;
+}
+
 uint64_t nsvm_vcpu_hostcr3(struct vcpu *v)
 {
     return vcpu_nestedsvm(v).ns_vmcb_hostcr3;
+}
+
+uint32_t nsvm_vcpu_asid(struct vcpu *v)
+{
+    return vcpu_nestedsvm(v).ns_guest_asid;
 }
 
 static int
@@ -938,7 +911,7 @@ nsvm_vmcb_guest_intercepts_ioio(paddr_t iopm_pa, uint64_t exitinfo1)
     return NESTEDHVM_VMEXIT_INJECT;
 }
 
-static bool_t
+int
 nsvm_vmcb_guest_intercepts_exitcode(struct vcpu *v,
     struct cpu_user_regs *regs, uint64_t exitcode)
 {
@@ -1021,12 +994,11 @@ nsvm_vmcb_guest_intercepts_exitcode(struct vcpu *v,
     return 1;
 }
 
-bool_t
-nsvm_vmcb_guest_intercepts_event(
-    struct vcpu *v, unsigned int vector, int errcode)
+int
+nsvm_vmcb_guest_intercepts_trap(struct vcpu *v, unsigned int trapnr, int errcode)
 {
     return nsvm_vmcb_guest_intercepts_exitcode(v,
-        guest_cpu_user_regs(), VMEXIT_EXCEPTION_DE + vector);
+        guest_cpu_user_regs(), VMEXIT_EXCEPTION_DE + trapnr);
 }
 
 static int
@@ -1229,7 +1201,7 @@ nsvm_hap_walk_L1_p2m(struct vcpu *v, paddr_t L2_gpa, paddr_t *L1_gpa,
     /* Walk the guest-supplied NPT table, just as if it were a pagetable */
     gfn = paging_ga_to_gfn_cr3(v, nested_cr3, L2_gpa, &pfec, page_order);
 
-    if ( gfn == gfn_x(INVALID_GFN) )
+    if ( gfn == INVALID_GFN )
         return NESTEDHVM_PAGEFAULT_INJECT;
 
     *L1_gpa = (gfn << PAGE_SHIFT) + (L2_gpa & ~PAGE_MASK);
@@ -1259,7 +1231,7 @@ enum hvm_intblk nsvm_intr_blocked(struct vcpu *v)
          * Delay the injection because this would result in delivering
          * an interrupt *within* the execution of an instruction.
          */
-        if ( v->arch.hvm_vcpu.hvm_io.io_req.state != STATE_IOREQ_NONE )
+        if ( v->arch.hvm_vcpu.hvm_io.io_state != HVMIO_none )
             return hvm_intblk_shadow;
 
         if ( !nv->nv_vmexit_pending && n2vmcb->exitintinfo.bytes != 0 ) {
@@ -1348,13 +1320,8 @@ nestedsvm_vmexit_defer(struct vcpu *v,
     uint64_t exitcode, uint64_t exitinfo1, uint64_t exitinfo2)
 {
     struct nestedsvm *svm = &vcpu_nestedsvm(v);
-    struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
 
-    if ( vmcb->_vintr.fields.vgif_enable )
-        vmcb->_vintr.fields.vgif = 0;
-    else
-        nestedsvm_vcpu_clgi(v);
-
+    nestedsvm_vcpu_clgi(v);
     svm->ns_vmexit.exitcode = exitcode;
     svm->ns_vmexit.exitinfo1 = exitinfo1;
     svm->ns_vmexit.exitinfo2 = exitinfo2;
@@ -1421,8 +1388,6 @@ nestedsvm_check_intercepts(struct vcpu *v, struct cpu_user_regs *regs,
         /* Always let the guest handle VMMCALL/VMCALL */
         return NESTEDHVM_VMEXIT_INJECT;
     default:
-        gprintk(XENLOG_ERR, "Unexpected nested vmexit: reason %#"PRIx64"\n",
-                exitcode);
         break;
     }
 
@@ -1444,7 +1409,7 @@ nestedsvm_vmexit_n2n1(struct vcpu *v, struct cpu_user_regs *regs)
     if (rc)
         ret = NESTEDHVM_VMEXIT_ERROR;
 
-    rc = nsvm_vcpu_hostrestore(v, regs);
+    rc = nhvm_vcpu_hostrestore(v, regs);
     if (rc)
         ret = NESTEDHVM_VMEXIT_FATALERROR;
 
@@ -1496,7 +1461,7 @@ nestedsvm_vcpu_vmexit(struct vcpu *v, struct cpu_user_regs *regs,
     /* Prepare for running the l1 guest. Make the actual
      * modifications to the virtual VMCB/VMCS.
      */
-    rc = nsvm_vcpu_vmexit_inject(v, regs, exitcode);
+    rc = nhvm_vcpu_vmexit(v, regs, exitcode);
 
     /* If l1 guest uses shadow paging, update the paging mode. */
     if (!nestedhvm_paging_mode_hap(v))
@@ -1525,8 +1490,8 @@ void nsvm_vcpu_switch(struct cpu_user_regs *regs)
     ASSERT(v->arch.hvm_svm.vmcb != NULL);
     ASSERT(nv->nv_n1vmcx != NULL);
     ASSERT(nv->nv_n2vmcx != NULL);
-    ASSERT(nv->nv_n1vmcx_pa != INVALID_PADDR);
-    ASSERT(nv->nv_n2vmcx_pa != INVALID_PADDR);
+    ASSERT(nv->nv_n1vmcx_pa != VMCX_EADDR);
+    ASSERT(nv->nv_n2vmcx_pa != VMCX_EADDR);
 
     if (nv->nv_vmexit_pending) {
  vmexit:
@@ -1607,26 +1572,16 @@ bool_t
 nestedsvm_gif_isset(struct vcpu *v)
 {
     struct nestedsvm *svm = &vcpu_nestedsvm(v);
-    struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
 
-    /* get the vmcb gif value if using vgif */
-    if ( vmcb->_vintr.fields.vgif_enable )
-        return vmcb->_vintr.fields.vgif;
-    else
-        return svm->ns_gif;
+    return (!!svm->ns_gif);
 }
 
 void svm_vmexit_do_stgi(struct cpu_user_regs *regs, struct vcpu *v)
 {
     unsigned int inst_len;
 
-    /*
-     * STGI doesn't require SVME to be set to be used.  See AMD APM vol
-     * 2 section 15.4 for details.
-     */
-    if ( !nestedhvm_enabled(v->domain) )
-    {
-        hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
+    if ( !nestedhvm_enabled(v->domain) ) {
+        hvm_inject_hw_exception(TRAP_invalid_op, HVM_DELIVER_NO_ERROR_CODE);
         return;
     }
 
@@ -1645,9 +1600,8 @@ void svm_vmexit_do_clgi(struct cpu_user_regs *regs, struct vcpu *v)
     uint32_t general1_intercepts = vmcb_get_general1_intercepts(vmcb);
     vintr_t intr;
 
-    if ( !nsvm_efer_svm_enabled(v) )
-    {
-        hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
+    if ( !nestedhvm_enabled(v->domain) ) {
+        hvm_inject_hw_exception(TRAP_invalid_op, HVM_DELIVER_NO_ERROR_CODE);
         return;
     }
 
@@ -1664,70 +1618,4 @@ void svm_vmexit_do_clgi(struct cpu_user_regs *regs, struct vcpu *v)
     vmcb_set_general1_intercepts(vmcb, general1_intercepts);
 
     __update_guest_eip(regs, inst_len);
-}
-
-/*
- * This runs on EFER change to see if nested features need to either be
- * turned off or on.
- */
-void svm_nested_features_on_efer_update(struct vcpu *v)
-{
-    struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
-    struct nestedsvm *svm = &vcpu_nestedsvm(v);
-    u32 general2_intercepts;
-    vintr_t vintr;
-
-    /*
-     * Need state for transfering the nested gif status so only write on
-     * the hvm_vcpu EFER.SVME changing.
-     */
-    if ( v->arch.hvm_vcpu.guest_efer & EFER_SVME )
-    {
-        if ( !vmcb->virt_ext.fields.vloadsave_enable &&
-             paging_mode_hap(v->domain) &&
-             cpu_has_svm_vloadsave )
-        {
-            vmcb->virt_ext.fields.vloadsave_enable = 1;
-            general2_intercepts  = vmcb_get_general2_intercepts(vmcb);
-            general2_intercepts &= ~(GENERAL2_INTERCEPT_VMLOAD |
-                                     GENERAL2_INTERCEPT_VMSAVE);
-            vmcb_set_general2_intercepts(vmcb, general2_intercepts);
-        }
-
-        if ( !vmcb->_vintr.fields.vgif_enable &&
-             cpu_has_svm_vgif )
-        {
-            vintr = vmcb_get_vintr(vmcb);
-            vintr.fields.vgif = svm->ns_gif;
-            vintr.fields.vgif_enable = 1;
-            vmcb_set_vintr(vmcb, vintr);
-            general2_intercepts  = vmcb_get_general2_intercepts(vmcb);
-            general2_intercepts &= ~(GENERAL2_INTERCEPT_STGI |
-                                     GENERAL2_INTERCEPT_CLGI);
-            vmcb_set_general2_intercepts(vmcb, general2_intercepts);
-        }
-    }
-    else
-    {
-        if ( vmcb->virt_ext.fields.vloadsave_enable )
-        {
-            vmcb->virt_ext.fields.vloadsave_enable = 0;
-            general2_intercepts  = vmcb_get_general2_intercepts(vmcb);
-            general2_intercepts |= (GENERAL2_INTERCEPT_VMLOAD |
-                                    GENERAL2_INTERCEPT_VMSAVE);
-            vmcb_set_general2_intercepts(vmcb, general2_intercepts);
-        }
-
-        if ( vmcb->_vintr.fields.vgif_enable )
-        {
-            vintr = vmcb_get_vintr(vmcb);
-            svm->ns_gif = vintr.fields.vgif;
-            vintr.fields.vgif_enable = 0;
-            vmcb_set_vintr(vmcb, vintr);
-            general2_intercepts  = vmcb_get_general2_intercepts(vmcb);
-            general2_intercepts |= (GENERAL2_INTERCEPT_STGI |
-                                    GENERAL2_INTERCEPT_CLGI);
-            vmcb_set_general2_intercepts(vmcb, general2_intercepts);
-        }
-    }
 }

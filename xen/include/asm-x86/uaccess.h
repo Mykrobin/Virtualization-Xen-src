@@ -2,6 +2,7 @@
 #ifndef __X86_UACCESS_H__
 #define __X86_UACCESS_H__
 
+#include <xen/config.h>
 #include <xen/compiler.h>
 #include <xen/errno.h>
 #include <xen/prefetch.h>
@@ -10,12 +11,12 @@
 
 #include <asm/x86_64/uaccess.h>
 
-unsigned copy_to_user(void *to, const void *from, unsigned len);
-unsigned clear_user(void *to, unsigned len);
-unsigned copy_from_user(void *to, const void *from, unsigned len);
+unsigned long copy_to_user(void *to, const void *from, unsigned len);
+unsigned long clear_user(void *to, unsigned len);
+unsigned long copy_from_user(void *to, const void *from, unsigned len);
 /* Handles exceptions in both to and from, but doesn't do access_ok */
-unsigned __copy_to_user_ll(void __user*to, const void *from, unsigned n);
-unsigned __copy_from_user_ll(void *to, const void __user *from, unsigned n);
+unsigned long __copy_to_user_ll(void *to, const void *from, unsigned n);
+unsigned long __copy_from_user_ll(void *to, const void *from, unsigned n);
 
 extern long __get_user_bad(void);
 extern void __put_user_bad(void);
@@ -104,35 +105,37 @@ extern void __put_user_bad(void);
 #define __put_user(x,ptr) \
   __put_user_nocheck((__typeof__(*(ptr)))(x),(ptr),sizeof(*(ptr)))
 
-#define __put_user_nocheck(x, ptr, size)				\
-({									\
-	int err_; 							\
-	__put_user_size(x, ptr, size, err_, -EFAULT);			\
-	err_;								\
+#define __put_user_nocheck(x,ptr,size)				\
+({								\
+	long __pu_err;						\
+	__put_user_size((x),(ptr),(size),__pu_err,-EFAULT);	\
+	__pu_err;						\
 })
 
-#define __put_user_check(x, ptr, size)					\
+#define __put_user_check(x,ptr,size)					\
 ({									\
-	__typeof__(*(ptr)) __user *ptr_ = (ptr);			\
-	__typeof__(size) size_ = (size);				\
-	access_ok(ptr_, size_) ? __put_user_nocheck(x, ptr_, size_)	\
-			       : -EFAULT;				\
+	long __pu_err = -EFAULT;					\
+	__typeof__(*(ptr)) __user *__pu_addr = (ptr);			\
+	if (access_ok(__pu_addr,size))					\
+		__put_user_size((x),__pu_addr,(size),__pu_err,-EFAULT);	\
+	__pu_err;							\
+})							
+
+#define __get_user_nocheck(x,ptr,size)                          \
+({                                                              \
+	long __gu_err;                                          \
+	__get_user_size((x),(ptr),(size),__gu_err,-EFAULT);     \
+	__gu_err;                                               \
 })
 
-#define __get_user_nocheck(x, ptr, size)				\
-({									\
-	int err_; 							\
-	__get_user_size(x, ptr, size, err_, -EFAULT);			\
-	err_;								\
-})
-
-#define __get_user_check(x, ptr, size)					\
-({									\
-	__typeof__(*(ptr)) __user *ptr_ = (ptr);			\
-	__typeof__(size) size_ = (size);				\
-	access_ok(ptr_, size_) ? __get_user_nocheck(x, ptr_, size_)	\
-			       : -EFAULT;				\
-})
+#define __get_user_check(x,ptr,size)                            \
+({                                                              \
+	long __gu_err;                                          \
+	__typeof__(*(ptr)) __user *__gu_addr = (ptr);           \
+	__get_user_size((x),__gu_addr,(size),__gu_err,-EFAULT); \
+	if (!access_ok(__gu_addr,size)) __gu_err = -EFAULT;     \
+	__gu_err;                                               \
+})							
 
 struct __large_struct { unsigned long buf[100]; };
 #define __m(x) (*(const struct __large_struct *)(x))
@@ -143,7 +146,6 @@ struct __large_struct { unsigned long buf[100]; };
  * aliasing issues.
  */
 #define __put_user_asm(x, addr, err, itype, rtype, ltype, errret)	\
-	stac();								\
 	__asm__ __volatile__(						\
 		"1:	mov"itype" %"rtype"1,%2\n"			\
 		"2:\n"							\
@@ -153,11 +155,9 @@ struct __large_struct { unsigned long buf[100]; };
 		".previous\n"						\
 		_ASM_EXTABLE(1b, 3b)					\
 		: "=r"(err)						\
-		: ltype (x), "m"(__m(addr)), "i"(errret), "0"(err));	\
-	clac()
+		: ltype (x), "m"(__m(addr)), "i"(errret), "0"(err))
 
 #define __get_user_asm(x, addr, err, itype, rtype, ltype, errret)	\
-	stac();								\
 	__asm__ __volatile__(						\
 		"1:	mov"itype" %2,%"rtype"1\n"			\
 		"2:\n"							\
@@ -168,8 +168,7 @@ struct __large_struct { unsigned long buf[100]; };
 		".previous\n"						\
 		_ASM_EXTABLE(1b, 3b)					\
 		: "=r"(err), ltype (x)					\
-		: "m"(__m(addr)), "i"(errret), "0"(err));		\
-	clac()
+		: "m"(__m(addr)), "i"(errret), "0"(err))
 
 /**
  * __copy_to_user: - Copy a block of data into user space, with less checking
@@ -272,17 +271,7 @@ extern struct exception_table_entry __stop___ex_table[];
 extern struct exception_table_entry __start___pre_ex_table[];
 extern struct exception_table_entry __stop___pre_ex_table[];
 
-union stub_exception_token {
-    struct {
-        uint16_t ec;
-        uint8_t trapnr;
-    } fields;
-    unsigned long raw;
-};
-
-extern unsigned long search_exception_table(const struct cpu_user_regs *regs);
+extern unsigned long search_exception_table(unsigned long);
 extern void sort_exception_tables(void);
-extern void sort_exception_table(struct exception_table_entry *start,
-                                 const struct exception_table_entry *stop);
 
 #endif /* __X86_UACCESS_H__ */

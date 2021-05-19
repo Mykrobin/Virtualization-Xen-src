@@ -3,6 +3,8 @@
 
 #ifndef __ASSEMBLY__
 
+#include <xen/config.h>
+
 typedef __signed__ char __s8;
 typedef unsigned char __u8;
 
@@ -37,7 +39,10 @@ typedef __SIZE_TYPE__ size_t;
 #else
 typedef unsigned long size_t;
 #endif
-typedef signed long ssize_t;
+
+typedef char bool_t;
+#define test_and_set_bool(b)   xchg(&(b), 1)
+#define test_and_clear_bool(b) xchg(&(b), 0)
 
 #endif /* __ASSEMBLY__ */
 

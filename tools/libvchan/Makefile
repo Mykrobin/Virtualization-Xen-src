@@ -10,36 +10,17 @@ NODE_OBJS = node.o
 NODE2_OBJS = node-select.o
 
 LIBVCHAN_PIC_OBJS = $(patsubst %.o,%.opic,$(LIBVCHAN_OBJS))
-LIBVCHAN_LIBS = $(LDLIBS_libxenstore) $(LDLIBS_libxengnttab) $(LDLIBS_libxenevtchn)
-$(LIBVCHAN_OBJS) $(LIBVCHAN_PIC_OBJS): CFLAGS += $(CFLAGS_libxenstore) $(CFLAGS_libxengnttab) $(CFLAGS_libxenevtchn)
-$(NODE_OBJS) $(NODE2_OBJS): CFLAGS += $(CFLAGS_libxengnttab) $(CFLAGS_libxenevtchn)
+LIBVCHAN_LIBS = $(LDLIBS_libxenstore) $(LDLIBS_libxenctrl)
+$(LIBVCHAN_OBJS) $(LIBVCHAN_PIC_OBJS): CFLAGS += $(CFLAGS_libxenstore) $(CFLAGS_libxenctrl)
+$(NODE_OBJS) $(NODE2_OBJS): CFLAGS += $(CFLAGS_libxenctrl)
 
-MAJOR = 4.11
+MAJOR = 1.0
 MINOR = 0
 
 CFLAGS += -I../include -I.
 
-io.o io.opic: CFLAGS += $(CFLAGS_libxenctrl) # for xen_mb et al
-
-PKG_CONFIG := xenvchan.pc
-PKG_CONFIG_VERSION := $(MAJOR).$(MINOR)
-
-ifneq ($(CONFIG_LIBXC_MINIOS),y)
-PKG_CONFIG_INST := $(PKG_CONFIG)
-$(PKG_CONFIG_INST): PKG_CONFIG_PREFIX = $(prefix)
-$(PKG_CONFIG_INST): PKG_CONFIG_INCDIR = $(includedir)
-$(PKG_CONFIG_INST): PKG_CONFIG_LIBDIR = $(libdir)
-endif
-
-PKG_CONFIG_LOCAL := $(foreach pc,$(PKG_CONFIG),$(PKG_CONFIG_DIR)/$(pc))
-
-$(PKG_CONFIG_LOCAL): PKG_CONFIG_PREFIX = $(XEN_ROOT)
-$(PKG_CONFIG_LOCAL): PKG_CONFIG_INCDIR = $(XEN_LIBVCHAN)
-$(PKG_CONFIG_LOCAL): PKG_CONFIG_LIBDIR = $(CURDIR)
-$(PKG_CONFIG_LOCAL): PKG_CONFIG_CFLAGS_LOCAL = $(CFLAGS_xeninclude)
-
 .PHONY: all
-all: libxenvchan.so vchan-node1 vchan-node2 libxenvchan.a $(PKG_CONFIG_INST) $(PKG_CONFIG_LOCAL)
+all: libxenvchan.so vchan-node1 vchan-node2 libxenvchan.a
 
 libxenvchan.so: libxenvchan.so.$(MAJOR)
 	ln -sf $< $@
@@ -61,29 +42,18 @@ vchan-node2: $(NODE2_OBJS) libxenvchan.so
 
 .PHONY: install
 install: all
-	$(INSTALL_DIR) $(DESTDIR)$(libdir)
-	$(INSTALL_DIR) $(DESTDIR)$(includedir)
-	$(INSTALL_PROG) libxenvchan.so.$(MAJOR).$(MINOR) $(DESTDIR)$(libdir)
-	ln -sf libxenvchan.so.$(MAJOR).$(MINOR) $(DESTDIR)$(libdir)/libxenvchan.so.$(MAJOR)
-	ln -sf libxenvchan.so.$(MAJOR) $(DESTDIR)$(libdir)/libxenvchan.so
-	$(INSTALL_DATA) libxenvchan.h $(DESTDIR)$(includedir)
-	$(INSTALL_DATA) libxenvchan.a $(DESTDIR)$(libdir)
-	$(INSTALL_DATA) xenvchan.pc $(DESTDIR)$(PKG_INSTALLDIR)
-
-.PHONY: uninstall
-uninstall:
-	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xenvchan.pc
-	rm -f $(DESTDIR)$(libdir)/libxenvchan.a
-	rm -f $(DESTDIR)$(includedir)/libxenvchan.h
-	rm -f $(DESTDIR)$(libdir)/libxenvchan.so
-	rm -f $(DESTDIR)$(libdir)/libxenvchan.so.$(MAJOR)
-	rm -f $(DESTDIR)$(libdir)/libxenvchan.so.$(MAJOR).$(MINOR)
+	$(INSTALL_DIR) $(DESTDIR)$(LIBDIR)
+	$(INSTALL_DIR) $(DESTDIR)$(INCLUDEDIR)
+	$(INSTALL_PROG) libxenvchan.so.$(MAJOR).$(MINOR) $(DESTDIR)$(LIBDIR)
+	ln -sf libxenvchan.so.$(MAJOR).$(MINOR) $(DESTDIR)$(LIBDIR)/libxenvchan.so.$(MAJOR)
+	ln -sf libxenvchan.so.$(MAJOR) $(DESTDIR)$(LIBDIR)/libxenvchan.so
+	$(INSTALL_DATA) libxenvchan.h $(DESTDIR)$(INCLUDEDIR)
+	$(INSTALL_DATA) libxenvchan.a $(DESTDIR)$(LIBDIR)
 
 .PHONY: clean
 clean:
-	$(RM) -f *.o *.opic *.so* *.a vchan-node1 vchan-node2 $(DEPS_RM)
-	$(RM) -f xenvchan.pc
+	$(RM) -f *.o *.opic *.so* *.a vchan-node1 vchan-node2 $(DEPS)
 
 distclean: clean
 
--include $(DEPS_INCLUDE)
+-include $(DEPS)

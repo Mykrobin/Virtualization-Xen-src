@@ -21,7 +21,8 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License along
- *  with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #ifndef TPMRSA_H
 #define TPMRSA_H
@@ -50,9 +51,6 @@ void tpmrsa_set_pubkey(tpmrsa_context* ctx,
       const unsigned char* exponent,
       int explen);
 
-/* Check an RSA signature */
-TPM_RESULT tpmrsa_sigcheck(tpmrsa_context *ctx, const unsigned char *input, const unsigned char *sha1);
-
 /* Do rsa public crypto */
 TPM_RESULT tpmrsa_pub_encrypt_oaep( tpmrsa_context *ctx,
       int (*f_rng)(void *, unsigned char *, size_t),
@@ -62,7 +60,6 @@ TPM_RESULT tpmrsa_pub_encrypt_oaep( tpmrsa_context *ctx,
       unsigned char *output );
 
 /* free tpmrsa key */
-static
 inline void tpmrsa_free( tpmrsa_context *ctx ) {
    mpi_free( &ctx->RN ); mpi_free( &ctx->E  ); mpi_free( &ctx->N  );
 }

@@ -1,9 +1,7 @@
 #ifndef __ASM_ARM_ARM32_PROCESSOR_H
 #define __ASM_ARM_ARM32_PROCESSOR_H
 
-#include <asm/cpregs.h>
-
-#define ACTLR_CAXX_SMP      (1<<6)
+#define ACTLR_V7_SMP    (1<<6)
 
 #ifndef __ASSEMBLY__
 /* On stack VCPU state */
@@ -39,7 +37,7 @@ struct cpu_user_regs
         uint32_t pc, pc32;
     };
     uint32_t cpsr; /* Return mode */
-    uint32_t hsr;  /* Exception Syndrome */
+    uint32_t pad0; /* Doubleword-align the kernel half of the frame */
 
     /* Outer guest frame only from here on... */
 
@@ -57,7 +55,6 @@ struct cpu_user_regs
 
     uint32_t pad1; /* Doubleword-align the user half of the frame */
 };
-
 #endif
 
 /* Layout as used in assembly, with src/dest registers mixed in */
@@ -71,10 +68,6 @@ struct cpu_user_regs
 #define STORE_CP32(r, name...) "mcr " __stringify(CP32(%r, name)) ";"
 #define LOAD_CP64(r, name...)  "mrrc " __stringify(CP64(%r, %H##r, name)) ";"
 #define STORE_CP64(r, name...) "mcrr " __stringify(CP64(%r, %H##r, name)) ";"
-
-/* Issue a CP operation which takes no argument,
- * uses r0 as a placeholder register. */
-#define CMD_CP32(name...)      "mcr " __stringify(CP32(r0, name)) ";"
 
 #ifndef __ASSEMBLY__
 
@@ -117,6 +110,10 @@ struct cpu_user_regs
 
 #define READ_SYSREG(R...)       READ_SYSREG32(R)
 #define WRITE_SYSREG(V, R...)   WRITE_SYSREG32(V, R)
+
+/* Erratum 766422: only Cortex A15 r0p4 is affected */
+#define cpu_has_erratum_766422()                             \
+    (unlikely(current_cpu_data.midr.bits == 0x410fc0f4))
 
 #endif /* __ASSEMBLY__ */
 

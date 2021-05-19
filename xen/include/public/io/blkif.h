@@ -89,49 +89,13 @@
  *      Values:         string
  *
  *      A free formatted string providing sufficient information for the
- *      hotplug script to attach the device and provide a suitable
- *      handler (ie: a block device) for blkback to use.
- *
- * physical-device
- *      Values:         "MAJOR:MINOR"
- *      Notes: 11
- *
- *      MAJOR and MINOR are the major number and minor number of the
- *      backing device respectively.
- *
- * physical-device-path
- *      Values:         path string
- *
- *      A string that contains the absolute path to the disk image. On
- *      NetBSD and Linux this is always a block device, while on FreeBSD
- *      it can be either a block device or a regular file.
+ *      backend driver to open the backing device.  (e.g. the path to the
+ *      file or block device representing the backing store.)
  *
  * type
  *      Values:         "file", "phy", "tap"
  *
  *      The type of the backing device/object.
- *
- *
- * direct-io-safe
- *      Values:         0/1 (boolean)
- *      Default Value:  0
- *
- *      The underlying storage is not affected by the direct IO memory
- *      lifetime bug.  See:
- *        http://lists.xen.org/archives/html/xen-devel/2012-12/msg01154.html
- *
- *      Therefore this option gives the backend permission to use
- *      O_DIRECT, notwithstanding that bug.
- *
- *      That is, if this option is enabled, use of O_DIRECT is safe,
- *      in circumstances where we would normally have avoided it as a
- *      workaround for that bug.  This option is not relevant for all
- *      backends, and even not necessarily supported for those for
- *      which it is relevant.  A backend which knows that it is not
- *      affected by the bug can ignore this option.
- *
- *      This option doesn't require a backend to use O_DIRECT, so it
- *      should not be used to try to control the caching behaviour.
  *
  *--------------------------------- Features ---------------------------------
  *
@@ -210,15 +174,6 @@
  *      machine pages.  The value must be a power of 2.
  *
  *------------------------- Backend Device Properties -------------------------
- *
- * discard-enable
- *      Values:         0/1 (boolean)
- *      Default Value:  1
- *
- *      This optional property, set by the toolstack, instructs the backend
- *      to offer (or not to offer) discard to the frontend. If the property
- *      is missing the backend should offer discard if the backing storage
- *      actually supports it.
  *
  * discard-alignment
  *      Values:         <uint32_t>
@@ -398,55 +353,6 @@
  *     than RING_SIZE * BLKIF_MAX_SEGMENTS_PER_REQUEST.
  *(10) The discard-secure property may be present and will be set to 1 if the
  *     backing device supports secure discard.
- *(11) Only used by Linux and NetBSD.
- */
-
-/*
- * Multiple hardware queues/rings:
- * If supported, the backend will write the key "multi-queue-max-queues" to
- * the directory for that vbd, and set its value to the maximum supported
- * number of queues.
- * Frontends that are aware of this feature and wish to use it can write the
- * key "multi-queue-num-queues" with the number they wish to use, which must be
- * greater than zero, and no more than the value reported by the backend in
- * "multi-queue-max-queues".
- *
- * For frontends requesting just one queue, the usual event-channel and
- * ring-ref keys are written as before, simplifying the backend processing
- * to avoid distinguishing between a frontend that doesn't understand the
- * multi-queue feature, and one that does, but requested only one queue.
- *
- * Frontends requesting two or more queues must not write the toplevel
- * event-channel and ring-ref keys, instead writing those keys under sub-keys
- * having the name "queue-N" where N is the integer ID of the queue/ring for
- * which those keys belong. Queues are indexed from zero.
- * For example, a frontend with two queues must write the following set of
- * queue-related keys:
- *
- * /local/domain/1/device/vbd/0/multi-queue-num-queues = "2"
- * /local/domain/1/device/vbd/0/queue-0 = ""
- * /local/domain/1/device/vbd/0/queue-0/ring-ref = "<ring-ref#0>"
- * /local/domain/1/device/vbd/0/queue-0/event-channel = "<evtchn#0>"
- * /local/domain/1/device/vbd/0/queue-1 = ""
- * /local/domain/1/device/vbd/0/queue-1/ring-ref = "<ring-ref#1>"
- * /local/domain/1/device/vbd/0/queue-1/event-channel = "<evtchn#1>"
- *
- * It is also possible to use multiple queues/rings together with
- * feature multi-page ring buffer.
- * For example, a frontend requests two queues/rings and the size of each ring
- * buffer is two pages must write the following set of related keys:
- *
- * /local/domain/1/device/vbd/0/multi-queue-num-queues = "2"
- * /local/domain/1/device/vbd/0/ring-page-order = "1"
- * /local/domain/1/device/vbd/0/queue-0 = ""
- * /local/domain/1/device/vbd/0/queue-0/ring-ref0 = "<ring-ref#0>"
- * /local/domain/1/device/vbd/0/queue-0/ring-ref1 = "<ring-ref#1>"
- * /local/domain/1/device/vbd/0/queue-0/event-channel = "<evtchn#0>"
- * /local/domain/1/device/vbd/0/queue-1 = ""
- * /local/domain/1/device/vbd/0/queue-1/ring-ref0 = "<ring-ref#2>"
- * /local/domain/1/device/vbd/0/queue-1/ring-ref1 = "<ring-ref#3>"
- * /local/domain/1/device/vbd/0/queue-1/event-channel = "<evtchn#1>"
- *
  */
 
 /*

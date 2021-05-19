@@ -122,11 +122,6 @@ let of_string s =
 		| "" :: path when is_valid path -> path
 		| _ -> raise Define.Invalid_path
 
-let of_path_and_name path name =
-	match path, name with
-	| [], "" -> []
-	| _ -> path @ [name]
-
 let create path connection_path =
 	of_string (Utils.path_validate path connection_path)
 
@@ -262,8 +257,7 @@ let path_write store perm path value =
 		Node.check_perm store.root perm Perms.WRITE;
 		Node.set_value store.root value, false
 	) else
-		let root = Path.apply_modify store.root path do_write in
-		root, !node_created
+		Path.apply_modify store.root path do_write, !node_created
 
 let path_rm store perm path =
 	let do_rm node name =
@@ -349,8 +343,7 @@ let path_exists store path =
 let traversal root_node f =
 	let rec _traversal path node =
 		f path node;
-		let node_path = Path.of_path_and_name path (Symbol.to_string node.Node.name) in
-		List.iter (_traversal node_path) node.Node.children
+		List.iter (_traversal (path @ [ Symbol.to_string node.Node.name ])) node.Node.children
 		in
 	_traversal [] root_node
 

@@ -13,7 +13,8 @@
     GNU General Public License for more details.
 
     You should have received a copy of the GNU General Public License
-    along with this program; If not, see <http://www.gnu.org/licenses/>.
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #include <stdio.h>
@@ -21,6 +22,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <xenctrl.h>
 #include <time.h>
 #include <syslog.h>
 
@@ -31,15 +33,14 @@
 #include "xenstored_transaction.h"
 #include "xenstored_watch.h"
 
-#include <xenevtchn.h>
 #include <xenctrl.h>
 #include <xen/grant_table.h>
 
 static xc_interface **xc_handle;
-xengnttab_handle **xgt_handle;
+xc_gnttab **xcg_handle;
 static evtchn_port_t virq_port;
 
-xenevtchn_handle *xce_handle = NULL;
+xc_evtchn *xce_handle = NULL;
 
 struct domain
 {
@@ -136,7 +137,7 @@ static int writechn(struct connection *conn,
 	xen_mb();
 	intf->rsp_prod += len;
 
-	xenevtchn_notify(xce_handle, conn->domain->port);
+	xc_evtchn_notify(xce_handle, conn->domain->port);
 
 	return len;
 }
@@ -166,29 +167,29 @@ static int readchn(struct connection *conn, void *data, unsigned int len)
 	xen_mb();
 	intf->req_cons += len;
 
-	xenevtchn_notify(xce_handle, conn->domain->port);
+	xc_evtchn_notify(xce_handle, conn->domain->port);
 
 	return len;
 }
 
 static void *map_interface(domid_t domid, unsigned long mfn)
 {
-	if (*xgt_handle != NULL) {
+	if (*xcg_handle != NULL) {
 		/* this is the preferred method */
-		return xengnttab_map_grant_ref(*xgt_handle, domid,
+		return xc_gnttab_map_grant_ref(*xcg_handle, domid,
 			GNTTAB_RESERVED_XENSTORE, PROT_READ|PROT_WRITE);
 	} else {
 		return xc_map_foreign_range(*xc_handle, domid,
-			XC_PAGE_SIZE, PROT_READ|PROT_WRITE, mfn);
+			getpagesize(), PROT_READ|PROT_WRITE, mfn);
 	}
 }
 
 static void unmap_interface(void *interface)
 {
-	if (*xgt_handle != NULL)
-		xengnttab_unmap(*xgt_handle, interface, 1);
+	if (*xcg_handle != NULL)
+		xc_gnttab_munmap(*xcg_handle, interface, 1);
 	else
-		munmap(interface, XC_PAGE_SIZE);
+		munmap(interface, getpagesize());
 }
 
 static int destroy_domain(void *_domain)
@@ -198,7 +199,7 @@ static int destroy_domain(void *_domain)
 	list_del(&domain->list);
 
 	if (domain->port) {
-		if (xenevtchn_unbind(xce_handle, domain->port) == -1)
+		if (xc_evtchn_unbind(xce_handle, domain->port) == -1)
 			eprintf("> Unbinding port %i failed!\n", domain->port);
 	}
 
@@ -211,7 +212,7 @@ static int destroy_domain(void *_domain)
 			unmap_interface(domain->interface);
 	}
 
-	fire_watches(NULL, domain, "@releaseDomain", false);
+	fire_watches(NULL, "@releaseDomain", false);
 
 	wrl_domain_destroy(domain);
 
@@ -221,11 +222,10 @@ static int destroy_domain(void *_domain)
 static void domain_cleanup(void)
 {
 	xc_dominfo_t dominfo;
-	struct domain *domain;
+	struct domain *domain, *tmp;
 	int notify = 0;
 
- again:
-	list_for_each_entry(domain, &domains, list) {
+	list_for_each_entry_safe(domain, tmp, &domains, list) {
 		if (xc_domain_getinfo(*xc_handle, domain->domid, 1,
 				      &dominfo) == 1 &&
 		    dominfo.domid == domain->domid) {
@@ -237,16 +237,12 @@ static void domain_cleanup(void)
 			if (!dominfo.dying)
 				continue;
 		}
-		if (domain->conn) {
-			talloc_unlink(talloc_autofree_context(), domain->conn);
-			domain->conn = NULL;
-			notify = 0; /* destroy_domain() fires the watch */
-			goto again;
-		}
+		talloc_free(domain->conn);
+		notify = 0; /* destroy_domain() fires the watch */
 	}
 
 	if (notify)
-		fire_watches(NULL, NULL, "@releaseDomain", false);
+		fire_watches(NULL, "@releaseDomain", false);
 }
 
 /* We scan all domains rather than use the information given here. */
@@ -254,13 +250,13 @@ void handle_event(void)
 {
 	evtchn_port_t port;
 
-	if ((port = xenevtchn_pending(xce_handle)) == -1)
+	if ((port = xc_evtchn_pending(xce_handle)) == -1)
 		barf_perror("Failed to read from event fd");
 
 	if (port == virq_port)
 		domain_cleanup();
 
-	if (xenevtchn_unmask(xce_handle, port) == -1)
+	if (xc_evtchn_unmask(xce_handle, port) == -1)
 		barf_perror("Failed to write to event fd");
 }
 
@@ -273,15 +269,9 @@ bool domain_can_read(struct connection *conn)
 	return (intf->req_cons != intf->req_prod);
 }
 
-static bool domid_is_unprivileged(unsigned int domid)
-{
-	return domid != 0 && domid != priv_domid;
-}
-
 bool domain_is_unprivileged(struct connection *conn)
 {
-	return conn && conn->domain &&
-	       domid_is_unprivileged(conn->domain->domid);
+	return (conn && conn->domain && conn->domain->domid != 0 && conn->domain->domid != priv_domid);
 }
 
 bool domain_can_write(struct connection *conn)
@@ -302,15 +292,10 @@ static struct domain *new_domain(void *context, unsigned int domid,
 	int rc;
 
 	domain = talloc(context, struct domain);
-	if (!domain)
-		return NULL;
-
 	domain->port = 0;
 	domain->shutdown = 0;
 	domain->domid = domid;
 	domain->path = talloc_domain_path(domain, domid);
-	if (!domain->path)
-		return NULL;
 
 	wrl_domain_new(domain);
 
@@ -318,15 +303,12 @@ static struct domain *new_domain(void *context, unsigned int domid,
 	talloc_set_destructor(domain, destroy_domain);
 
 	/* Tell kernel we're interested in this event. */
-	rc = xenevtchn_bind_interdomain(xce_handle, domid, port);
+	rc = xc_evtchn_bind_interdomain(xce_handle, domid, port);
 	if (rc == -1)
 	    return NULL;
 	domain->port = rc;
 
 	domain->conn = new_connection(writechn, readchn);
-	if (!domain->conn)
-		return NULL;
-
 	domain->conn->domain = domain;
 	domain->conn->id = domid;
 
@@ -362,14 +344,16 @@ static void domain_conn_reset(struct domain *domain)
 		talloc_free(out);
 	}
 
-	talloc_free(conn->in);
+	talloc_free(conn->in->buffer);
+	memset(conn->in, 0, sizeof(*conn->in));
+	conn->in->inhdr = true;
 
 	domain->interface->req_cons = domain->interface->req_prod = 0;
 	domain->interface->rsp_cons = domain->interface->rsp_prod = 0;
 }
 
 /* domid, mfn, evtchn, path */
-int do_introduce(struct connection *conn, struct buffered_data *in)
+void do_introduce(struct connection *conn, struct buffered_data *in)
 {
 	struct domain *domain;
 	char *vec[3];
@@ -379,32 +363,40 @@ int do_introduce(struct connection *conn, struct buffered_data *in)
 	int rc;
 	struct xenstore_domain_interface *interface;
 
-	if (get_strings(in, vec, ARRAY_SIZE(vec)) < ARRAY_SIZE(vec))
-		return EINVAL;
+	if (get_strings(in, vec, ARRAY_SIZE(vec)) < ARRAY_SIZE(vec)) {
+		send_error(conn, EINVAL);
+		return;
+	}
 
-	if (domain_is_unprivileged(conn) || !conn->can_write)
-		return EACCES;
+	if (domain_is_unprivileged(conn) || !conn->can_write) {
+		send_error(conn, EACCES);
+		return;
+	}
 
 	domid = atoi(vec[0]);
 	mfn = atol(vec[1]);
 	port = atoi(vec[2]);
 
 	/* Sanity check args. */
-	if (port <= 0)
-		return EINVAL;
+	if (port <= 0) { 
+		send_error(conn, EINVAL);
+		return;
+	}
 
 	domain = find_domain_by_domid(domid);
 
 	if (domain == NULL) {
 		interface = map_interface(domid, mfn);
-		if (!interface)
-			return errno;
+		if (!interface) {
+			send_error(conn, errno);
+			return;
+		}
 		/* Hang domain off "in" until we're finished. */
 		domain = new_domain(in, domid, port);
 		if (!domain) {
-			rc = errno;
 			unmap_interface(interface);
-			return rc;
+			send_error(conn, errno);
+			return;
 		}
 		domain->interface = interface;
 		domain->mfn = mfn;
@@ -412,143 +404,169 @@ int do_introduce(struct connection *conn, struct buffered_data *in)
 		/* Now domain belongs to its connection. */
 		talloc_steal(domain->conn, domain);
 
-		fire_watches(NULL, in, "@introduceDomain", false);
+		fire_watches(NULL, "@introduceDomain", false);
 	} else if ((domain->mfn == mfn) && (domain->conn != conn)) {
 		/* Use XS_INTRODUCE for recreating the xenbus event-channel. */
 		if (domain->port)
-			xenevtchn_unbind(xce_handle, domain->port);
-		rc = xenevtchn_bind_interdomain(xce_handle, domid, port);
+			xc_evtchn_unbind(xce_handle, domain->port);
+		rc = xc_evtchn_bind_interdomain(xce_handle, domid, port);
 		domain->port = (rc == -1) ? 0 : rc;
 		domain->remote_port = port;
-	} else
-		return EINVAL;
+	} else {
+		send_error(conn, EINVAL);
+		return;
+	}
 
 	domain_conn_reset(domain);
 
 	send_ack(conn, XS_INTRODUCE);
-
-	return 0;
 }
 
-static struct domain *find_connected_domain(unsigned int domid)
-{
-	struct domain *domain;
-
-	domain = find_domain_by_domid(domid);
-	if (!domain)
-		return ERR_PTR(-ENOENT);
-	if (!domain->conn)
-		return ERR_PTR(-EINVAL);
-	return domain;
-}
-
-int do_set_target(struct connection *conn, struct buffered_data *in)
+void do_set_target(struct connection *conn, struct buffered_data *in)
 {
 	char *vec[2];
 	unsigned int domid, tdomid;
         struct domain *domain, *tdomain;
-	if (get_strings(in, vec, ARRAY_SIZE(vec)) < ARRAY_SIZE(vec))
-		return EINVAL;
+	if (get_strings(in, vec, ARRAY_SIZE(vec)) < ARRAY_SIZE(vec)) {
+		send_error(conn, EINVAL);
+		return;
+	}
 
-	if (domain_is_unprivileged(conn) || !conn->can_write)
-		return EACCES;
+	if (domain_is_unprivileged(conn) || !conn->can_write) {
+		send_error(conn, EACCES);
+		return;
+	}
 
 	domid = atoi(vec[0]);
 	tdomid = atoi(vec[1]);
 
-        domain = find_connected_domain(domid);
-	if (IS_ERR(domain))
-		return -PTR_ERR(domain);
+        domain = find_domain_by_domid(domid);
+	if (!domain) {
+		send_error(conn, ENOENT);
+		return;
+	}
+        if (!domain->conn) {
+		send_error(conn, EINVAL);
+		return;
+	}
 
-        tdomain = find_connected_domain(tdomid);
-	if (IS_ERR(tdomain))
-		return -PTR_ERR(tdomain);
+        tdomain = find_domain_by_domid(tdomid);
+	if (!tdomain) {
+		send_error(conn, ENOENT);
+		return;
+	}
+
+        if (!tdomain->conn) {
+		send_error(conn, EINVAL);
+		return;
+	}
 
         talloc_reference(domain->conn, tdomain->conn);
         domain->conn->target = tdomain->conn;
 
 	send_ack(conn, XS_SET_TARGET);
-
-	return 0;
-}
-
-static struct domain *onearg_domain(struct connection *conn,
-				    struct buffered_data *in)
-{
-	const char *domid_str = onearg(in);
-	unsigned int domid;
-
-	if (!domid_str)
-		return ERR_PTR(-EINVAL);
-
-	domid = atoi(domid_str);
-	if (!domid)
-		return ERR_PTR(-EINVAL);
-
-	if (domain_is_unprivileged(conn))
-		return ERR_PTR(-EACCES);
-
-	return find_connected_domain(domid);
 }
 
 /* domid */
-int do_release(struct connection *conn, struct buffered_data *in)
+void do_release(struct connection *conn, const char *domid_str)
 {
 	struct domain *domain;
+	unsigned int domid;
 
-	domain = onearg_domain(conn, in);
-	if (IS_ERR(domain))
-		return -PTR_ERR(domain);
+	if (!domid_str) {
+		send_error(conn, EINVAL);
+		return;
+	}
+
+	domid = atoi(domid_str);
+	if (!domid) {
+		send_error(conn, EINVAL);
+		return;
+	}
+
+	if (domain_is_unprivileged(conn)) {
+		send_error(conn, EACCES);
+		return;
+	}
+
+	domain = find_domain_by_domid(domid);
+	if (!domain) {
+		send_error(conn, ENOENT);
+		return;
+	}
+
+	if (!domain->conn) {
+		send_error(conn, EINVAL);
+		return;
+	}
 
 	talloc_free(domain->conn);
 
 	send_ack(conn, XS_RELEASE);
-
-	return 0;
 }
 
-int do_resume(struct connection *conn, struct buffered_data *in)
+void do_resume(struct connection *conn, const char *domid_str)
 {
 	struct domain *domain;
+	unsigned int domid;
 
-	domain = onearg_domain(conn, in);
-	if (IS_ERR(domain))
-		return -PTR_ERR(domain);
+	if (!domid_str) {
+		send_error(conn, EINVAL);
+		return;
+	}
+
+	domid = atoi(domid_str);
+	if (!domid) {
+		send_error(conn, EINVAL);
+		return;
+	}
+
+	if (domain_is_unprivileged(conn)) {
+		send_error(conn, EACCES);
+		return;
+	}
+
+	domain = find_domain_by_domid(domid);
+	if (!domain) {
+		send_error(conn, ENOENT);
+		return;
+	}
+
+	if (!domain->conn) {
+		send_error(conn, EINVAL);
+		return;
+	}
 
 	domain->shutdown = 0;
 	
 	send_ack(conn, XS_RESUME);
-
-	return 0;
 }
 
-int do_get_domain_path(struct connection *conn, struct buffered_data *in)
+void do_get_domain_path(struct connection *conn, const char *domid_str)
 {
 	char *path;
-	const char *domid_str = onearg(in);
 
-	if (!domid_str)
-		return EINVAL;
+	if (!domid_str) {
+		send_error(conn, EINVAL);
+		return;
+	}
 
 	path = talloc_domain_path(conn, atoi(domid_str));
-	if (!path)
-		return errno;
 
 	send_reply(conn, XS_GET_DOMAIN_PATH, path, strlen(path) + 1);
 
 	talloc_free(path);
-
-	return 0;
 }
 
-int do_is_domain_introduced(struct connection *conn, struct buffered_data *in)
+void do_is_domain_introduced(struct connection *conn, const char *domid_str)
 {
 	int result;
 	unsigned int domid;
-	const char *domid_str = onearg(in);
 
-	if (!domid_str)
-		return EINVAL;
+	if (!domid_str) {
+		send_error(conn, EINVAL);
+		return;
+	}
 
 	domid = atoi(domid_str);
 	if (domid == DOMID_SELF)
@@ -557,19 +575,15 @@ int do_is_domain_introduced(struct connection *conn, struct buffered_data *in)
 		result = (find_domain_by_domid(domid) != NULL);
 
 	send_reply(conn, XS_IS_DOMAIN_INTRODUCED, result ? "T" : "F", 2);
-
-	return 0;
 }
 
 /* Allow guest to reset all watches */
-int do_reset_watches(struct connection *conn, struct buffered_data *in)
+void do_reset_watches(struct connection *conn)
 {
 	conn_delete_all_watches(conn);
 	conn_delete_all_transactions(conn);
 
 	send_ack(conn, XS_RESET_WATCHES);
-
-	return 0;
 }
 
 static int close_xc_handle(void *_handle)
@@ -578,9 +592,9 @@ static int close_xc_handle(void *_handle)
 	return 0;
 }
 
-static int close_xgt_handle(void *_handle)
+static int close_xcg_handle(void *_handle)
 {
-	xengnttab_close(*(xengnttab_handle **)_handle);
+	xc_gnttab_close(*(xc_gnttab **)_handle);
 	return 0;
 }
 
@@ -606,7 +620,7 @@ static int dom0_init(void)
 	if (port == -1)
 		return -1;
 
-	dom0 = new_domain(NULL, xenbus_master_domid(), port);
+	dom0 = new_domain(NULL, 0, port); 
 	if (dom0 == NULL)
 		return -1;
 
@@ -616,7 +630,7 @@ static int dom0_init(void)
 
 	talloc_steal(dom0->conn, dom0); 
 
-	xenevtchn_notify(xce_handle, dom0->port);
+	xc_evtchn_notify(xce_handle, dom0->port); 
 
 	return 0; 
 }
@@ -635,17 +649,17 @@ void domain_init(void)
 
 	talloc_set_destructor(xc_handle, close_xc_handle);
 
-	xgt_handle = talloc(talloc_autofree_context(), xengnttab_handle*);
-	if (!xgt_handle)
+	xcg_handle = talloc(talloc_autofree_context(), xc_gnttab*);
+	if (!xcg_handle)
 		barf_perror("Failed to allocate domain gnttab handle");
 
-	*xgt_handle = xengnttab_open(NULL, 0);
-	if (*xgt_handle == NULL)
+	*xcg_handle = xc_gnttab_open(NULL, 0);
+	if (*xcg_handle == NULL)
 		xprintf("WARNING: Failed to open connection to gnttab\n");
 	else
-		talloc_set_destructor(xgt_handle, close_xgt_handle);
+		talloc_set_destructor(xcg_handle, close_xcg_handle);
 
-	xce_handle = xenevtchn_open(NULL, 0);
+	xce_handle = xc_evtchn_open(NULL, 0);
 
 	if (xce_handle == NULL)
 		barf_perror("Failed to open evtchn device");
@@ -653,7 +667,7 @@ void domain_init(void)
 	if (dom0_init() != 0) 
 		barf_perror("Failed to initialize dom0 state"); 
 
-	if ((rc = xenevtchn_bind_virq(xce_handle, VIRQ_DOM_EXC)) == -1)
+	if ((rc = xc_evtchn_bind_virq(xce_handle, VIRQ_DOM_EXC)) == -1)
 		barf_perror("Failed to bind to domain exception virq port");
 	virq_port = rc;
 }
@@ -710,23 +724,13 @@ void domain_entry_dec(struct connection *conn, struct node *node)
 	}
 }
 
-int domain_entry_fix(unsigned int domid, int num, bool update)
+void domain_entry_fix(unsigned int domid, int num)
 {
 	struct domain *d;
-	int cnt;
 
 	d = find_domain_by_domid(domid);
-	if (!d)
-		return 0;
-
-	cnt = d->nbentry + num;
-	if (cnt < 0)
-		cnt = 0;
-
-	if (update)
-		d->nbentry = cnt;
-
-	return domid_is_unprivileged(domid) ? cnt : 0;
+	if (d && ((d->nbentry += num) < 0))
+		d->nbentry = 0;
 }
 
 int domain_entry(struct connection *conn)
@@ -883,7 +887,7 @@ void wrl_credit_update(struct domain *domain, struct wrl_timestampt now)
 	      (long)domain->wrl_credit, (long)wrl_reserve,
 	      (long)surplus);
 }
-
+			
 void wrl_check_timeout(struct domain *domain,
 		       struct wrl_timestampt now,
 		       int *ptimeout)

@@ -1,5 +1,4 @@
-        .file __FILE__
-
+#include <xen/config.h>
 #include <asm/page.h>
 
 #define ptr_reg %rdi

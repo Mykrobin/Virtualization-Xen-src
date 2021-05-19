@@ -24,7 +24,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #include <stdint.h>
@@ -227,9 +228,9 @@ static void fill_mp_ioapic_entry(struct mp_ioapic_entry *mpie)
 {
     mpie->type = ENTRY_TYPE_IOAPIC;
     mpie->ioapic_id = IOAPIC_ID;
-    mpie->ioapic_version = ioapic_version;
+    mpie->ioapic_version = IOAPIC_VERSION;
     mpie->ioapic_flags = 1; /* enabled */
-    mpie->ioapic_addr = ioapic_base_address;
+    mpie->ioapic_addr = IOAPIC_BASE_ADDRESS;
 }
 
 

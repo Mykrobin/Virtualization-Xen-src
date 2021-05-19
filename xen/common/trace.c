@@ -16,6 +16,7 @@
  * it's possible to reconstruct a chronological record of trace events.
  */
 
+#include <xen/config.h>
 #include <asm/types.h>
 #include <asm/io.h>
 #include <xen/lib.h>
@@ -147,12 +148,8 @@ static int calculate_tbuf_size(unsigned int pages, uint16_t t_info_first_offset)
         pages = max_pages;
     }
 
-    /* 
-     * NB this calculation is correct, because t_info_first_offset is
-     * in words, not bytes, not bytes
-     */
-    t_info_words = num_online_cpus() * pages + t_info_first_offset;
-    t_info_pages = PFN_UP(t_info_words * sizeof(uint32_t));
+    t_info_words = num_online_cpus() * pages * sizeof(uint32_t);
+    t_info_pages = PFN_UP(t_info_first_offset + t_info_words);
     printk(XENLOG_INFO "xentrace: requesting %u t_info pages "
            "for %u trace pages on %u cpus\n",
            t_info_pages, pages, num_online_cpus());
@@ -227,6 +224,7 @@ static int alloc_trace_bufs(unsigned int pages)
     for_each_online_cpu(cpu)
     {
         struct t_buf *buf;
+        struct page_info *pg;
 
         spin_lock_init(&per_cpu(t_lock, cpu));
 
@@ -241,14 +239,16 @@ static int alloc_trace_bufs(unsigned int pages)
 
         /* Now share the trace pages */
         for ( i = 0; i < pages; i++ )
-            share_xen_page_with_privileged_guests(
-                mfn_to_page(_mfn(t_info_mfn_list[offset + i])), SHARE_rw);
+        {
+            pg = mfn_to_page(t_info_mfn_list[offset + i]);
+            share_xen_page_with_privileged_guests(pg, XENSHARE_writable);
+        }
     }
 
     /* Finally, share the t_info page */
     for(i = 0; i < t_info_pages; i++)
         share_xen_page_with_privileged_guests(
-            virt_to_page(t_info) + i, SHARE_ro);
+            virt_to_page(t_info) + i, XENSHARE_readonly);
 
     data_size  = (pages * PAGE_SIZE - sizeof(struct t_buf));
     t_buf_highwater = data_size >> 1; /* 50% high water */
@@ -271,7 +271,7 @@ out_dealloc:
             uint32_t mfn = t_info_mfn_list[offset + i];
             if ( !mfn )
                 break;
-            ASSERT(!(mfn_to_page(_mfn(mfn))->count_info & PGC_allocated));
+            ASSERT(!(mfn_to_page(mfn)->count_info & PGC_allocated));
             free_xenheap_pages(mfn_to_virt(mfn), 0);
         }
     }
@@ -364,9 +364,9 @@ void __init init_trace_bufs(void)
 
 /**
  * tb_control - sysctl operations on trace buffers.
- * @tbc: a pointer to a struct xen_sysctl_tbuf_op to be filled out
+ * @tbc: a pointer to a xen_sysctl_tbuf_op_t to be filled out
  */
-int tb_control(struct xen_sysctl_tbuf_op *tbc)
+int tb_control(xen_sysctl_tbuf_op_t *tbc)
 {
     static DEFINE_SPINLOCK(lock);
     int rc = 0;
@@ -641,11 +641,11 @@ static inline void insert_wrap_record(struct t_buf *buf,
 
 static inline void insert_lost_records(struct t_buf *buf)
 {
-    struct __packed {
+    struct {
         u32 lost_records;
-        u16 did, vid;
+        u32 did:16, vid:16;
         u64 first_tsc;
-    } ed;
+    } __attribute__((packed)) ed;
 
     ed.vid = current->vcpu_id;
     ed.did = current->domain->domain_id;
@@ -822,14 +822,8 @@ void __trace_hypercall(uint32_t event, unsigned long op,
     struct {
         uint32_t op;
         uint32_t args[6];
-    } d;
+    } __attribute__((packed)) d;
     uint32_t *a = d.args;
-
-    /*
-     * In lieu of using __packed above, which gcc9 legitimately doesn't
-     * like in combination with the address of d.args[] taken.
-     */
-    BUILD_BUG_ON(offsetof(typeof(d), args) != sizeof(d.op));
 
 #define APPEND_ARG32(i)                         \
     do {                                        \

@@ -11,7 +11,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  * Copyright (C) Ashok Raj <ashok.raj@intel.com>
  * Copyright (C) Shaohua Li <shaohua.li@intel.com>
@@ -117,11 +118,10 @@ do {                                                \
             break;                                  \
         if ( NOW() > start_time + DMAR_OPERATION_TIMEOUT ) {    \
             if ( !kexecing )                                    \
-            {                                                   \
-                dump_execution_state();                         \
-                panic("DMAR hardware malfunction");             \
-            }                                                   \
-            break;                                              \
+                panic("%s:%d:%s: DMAR hardware is malfunctional",\
+                      __FILE__, __LINE__, __func__);            \
+            else                                                \
+                break;                                          \
         }                                                       \
         cpu_relax();                                            \
     }                                                           \
@@ -129,6 +129,7 @@ do {                                                \
 
 int vtd_hw_check(void);
 void disable_pmr(struct iommu *iommu);
+int is_usb_device(u16 seg, u8 bus, u8 devfn);
 int is_igd_drhd(struct acpi_drhd_unit *drhd);
 
 #endif /* _DMAR_H_ */

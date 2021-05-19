@@ -19,15 +19,11 @@
 #include <asm/processor.h>
 #include <asm/regs.h>
 #include <asm/current.h>
-#include <asm/vpmu.h>
+#include <asm/hvm/vpmu.h>
+#include <asm/hvm/vmx/vpmu_core2.h>
 
 #include "op_x86_model.h"
 #include "op_counter.h"
-
-struct arch_msr_pair {
-    u64 counter;
-    u64 control;
-};
 
 /*
  * Intel "Architectural Performance Monitoring" CPUID
@@ -68,9 +64,9 @@ static void ppro_fill_in_addresses(struct op_msrs * const msrs)
 	int i;
 
 	for (i = 0; i < num_counters; i++)
-		msrs->counters[i].addr = MSR_P6_PERFCTR(i);
+		msrs->counters[i].addr = MSR_P6_PERFCTR0 + i;
 	for (i = 0; i < num_counters; i++)
-		msrs->controls[i].addr = MSR_P6_EVNTSEL(i);
+		msrs->controls[i].addr = MSR_P6_EVNTSEL0 + i;
 }
 
 
@@ -130,12 +126,12 @@ static void ppro_setup_ctrs(struct op_msrs const * const msrs)
 
 static int ppro_check_ctrs(unsigned int const cpu,
                            struct op_msrs const * const msrs,
-                           struct cpu_user_regs const * const regs)
+                           struct cpu_user_regs * const regs)
 {
 	u64 val;
 	int i;
 	int ovf = 0;
-	unsigned long eip = regs->rip;
+	unsigned long eip = regs->eip;
 	int mode = xenoprofile_get_mode(current, regs);
 	struct arch_msr_pair *msrs_content = vcpu_vpmu(current)->context;
 
@@ -215,11 +211,11 @@ static int ppro_is_arch_pmu_msr(u64 msr_index, int *type, int *index)
 		*index = msr_index - MSR_IA32_PERFCTR0;
 		return 1;
         }
-        if ( (msr_index >= MSR_P6_EVNTSEL(0)) &&
-            (msr_index < (MSR_P6_EVNTSEL(num_counters))) )
+        if ( (msr_index >= MSR_P6_EVNTSEL0) &&
+            (msr_index < (MSR_P6_EVNTSEL0 + num_counters)) )
         {
 		*type = MSR_TYPE_ARCH_CTRL;
-		*index = msr_index - MSR_P6_EVNTSEL(0);
+		*index = msr_index - MSR_P6_EVNTSEL0;
 		return 1;
         }
 

@@ -10,15 +10,13 @@
  *      compression (see tools/symbols.c for a more complete description)
  */
 
+#include <xen/config.h>
 #include <xen/symbols.h>
 #include <xen/kernel.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/string.h>
 #include <xen/spinlock.h>
-#include <xen/virtual_region.h>
-#include <public/platform.h>
-#include <xen/guest_access.h>
 
 #ifdef SYMBOLS_ORIGIN
 extern const unsigned int symbols_offsets[];
@@ -29,8 +27,6 @@ extern const unsigned long symbols_addresses[];
 #endif
 extern const unsigned int symbols_num_syms;
 extern const u8 symbols_names[];
-
-extern const struct symbol_offset symbols_sorted_offsets[];
 
 extern const u8 symbols_token_table[];
 extern const u16 symbols_token_index[];
@@ -99,7 +95,8 @@ static unsigned int get_symbol_offset(unsigned long pos)
 
 bool_t is_active_kernel_text(unsigned long addr)
 {
-    return !!find_text_region(addr);
+    return (is_kernel_text(addr) ||
+            (system_state == SYS_STATE_boot && is_kernel_inittext(addr)));
 }
 
 const char *symbols_lookup(unsigned long addr,
@@ -109,17 +106,12 @@ const char *symbols_lookup(unsigned long addr,
 {
     unsigned long i, low, high, mid;
     unsigned long symbol_end = 0;
-    const struct virtual_region *region;
 
     namebuf[KSYM_NAME_LEN] = 0;
     namebuf[0] = 0;
 
-    region = find_text_region(addr);
-    if (!region)
+    if (!is_active_kernel_text(addr))
         return NULL;
-
-    if (region->symbols_lookup)
-        return region->symbols_lookup(addr, symbolsize, offset, namebuf);
 
         /* do a binary search on the sorted symbols_addresses array */
     low = 0;
@@ -156,115 +148,3 @@ const char *symbols_lookup(unsigned long addr,
     *offset = addr - symbols_address(low);
     return namebuf;
 }
-
-/*
- * Get symbol type information. This is encoded as a single char at the
- * beginning of the symbol name.
- */
-static char symbols_get_symbol_type(unsigned int off)
-{
-    /*
-     * Get just the first code, look it up in the token table,
-     * and return the first char from this token.
-     */
-    return symbols_token_table[symbols_token_index[symbols_names[off + 1]]];
-}
-
-int xensyms_read(uint32_t *symnum, char *type,
-                 unsigned long *address, char *name)
-{
-    /*
-     * Symbols are most likely accessed sequentially so we remember position
-     * from previous read. This can help us avoid the extra call to
-     * get_symbol_offset().
-     */
-    static uint64_t next_symbol, next_offset;
-    static DEFINE_SPINLOCK(symbols_mutex);
-
-    if ( *symnum > symbols_num_syms )
-        return -ERANGE;
-    if ( *symnum == symbols_num_syms )
-    {
-        /* No more symbols */
-        name[0] = '\0';
-        return 0;
-    }
-
-    spin_lock(&symbols_mutex);
-
-    if ( *symnum == 0 )
-        next_offset = next_symbol = 0;
-    if ( next_symbol != *symnum )
-        /* Non-sequential access */
-        next_offset = get_symbol_offset(*symnum);
-
-    *type = symbols_get_symbol_type(next_offset);
-    next_offset = symbols_expand_symbol(next_offset, name);
-    *address = symbols_address(*symnum);
-
-    next_symbol = ++*symnum;
-
-    spin_unlock(&symbols_mutex);
-
-    return 0;
-}
-
-unsigned long symbols_lookup_by_name(const char *symname)
-{
-    char name[KSYM_NAME_LEN + 1];
-#ifdef CONFIG_FAST_SYMBOL_LOOKUP
-    unsigned long low, high;
-#else
-    uint32_t symnum = 0;
-    char type;
-    unsigned long addr;
-    int rc;
-#endif
-
-    if ( *symname == '\0' )
-        return 0;
-
-#ifdef CONFIG_FAST_SYMBOL_LOOKUP
-    low = 0;
-    high = symbols_num_syms;
-    while ( low < high )
-    {
-        unsigned long mid = low + ((high - low) / 2);
-        const struct symbol_offset *s;
-        int rc;
-
-        s = &symbols_sorted_offsets[mid];
-        (void)symbols_expand_symbol(s->stream, name);
-        /* Format is: [filename]#<symbol>. symbols_expand_symbol eats type.*/
-        rc = strcmp(symname, name);
-        if ( rc < 0 )
-            high = mid;
-        else if ( rc > 0 )
-            low = mid + 1;
-        else
-            return symbols_address(s->addr);
-    }
-#else
-    do {
-        rc = xensyms_read(&symnum, &type, &addr, name);
-        if ( rc )
-           break;
-
-        if ( !strcmp(name, symname) )
-            return addr;
-
-    } while ( name[0] != '\0' );
-
-#endif
-    return 0;
-}
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * tab-width: 4
- * indent-tabs-mode: nil
- * End:
- */

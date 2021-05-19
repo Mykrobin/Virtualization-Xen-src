@@ -19,8 +19,7 @@ type operation = Debug | Directory | Read | Getperms |
                  Transaction_end | Introduce | Release |
                  Getdomainpath | Write | Mkdir | Rm |
                  Setperms | Watchevent | Error | Isintroduced |
-                 Resume | Set_target | Reset_watches |
-                 Invalid
+                 Resume | Set_target | Restrict | Invalid
 
 let operation_c_mapping =
 	[| Debug; Directory; Read; Getperms;
@@ -28,7 +27,7 @@ let operation_c_mapping =
            Transaction_end; Introduce; Release;
            Getdomainpath; Write; Mkdir; Rm;
            Setperms; Watchevent; Error; Isintroduced;
-           Resume; Set_target; Reset_watches |]
+           Resume; Set_target; Restrict |]
 let size = Array.length operation_c_mapping
 
 let array_search el a =
@@ -68,5 +67,5 @@ let to_string ty =
 	| Isintroduced		-> "IS_INTRODUCED"
 	| Resume		-> "RESUME"
 	| Set_target		-> "SET_TARGET"
-	| Reset_watches         -> "RESET_WATCHES"
+	| Restrict		-> "RESTRICT"
 	| Invalid		-> "INVALID"

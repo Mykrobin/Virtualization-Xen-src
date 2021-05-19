@@ -45,20 +45,6 @@ let mark_as_bad con =
 	|None -> ()
 	| Some domain -> Domain.mark_as_bad domain
 
-let initial_next_tid = 1
-
-let reconnect con =
-	Xenbus.Xb.reconnect con.xb;
-	(* dom is the same *)
-	Hashtbl.clear con.transactions;
-	con.next_tid <- initial_next_tid;
-	Hashtbl.clear con.watches;
-	(* anonid is the same *)
-	con.nb_watches <- 0;
-	con.stat_nb_ops <- 0;
-	(* perm is the same *)
-	()
-
 let get_path con =
 Printf.sprintf "/local/domain/%i/" (match con.dom with None -> 0 | Some d -> Domain.get_id d)
 
@@ -103,7 +89,7 @@ let create xbcon dom =
 	xb = xbcon;
 	dom = dom;
 	transactions = Hashtbl.create 5;
-	next_tid = initial_next_tid;
+	next_tid = 1;
 	watches = Hashtbl.create 8;
 	nb_watches = 0;
 	anonid = id;
@@ -121,6 +107,9 @@ let close con =
 
 let get_perm con =
 	con.perm
+
+let restrict con domid =
+	con.perm <- Perms.Connection.restrict con.perm domid
 
 let set_target con target_domid =
 	con.perm <- Perms.Connection.set_target (get_perm con) ~perms:[Perms.READ; Perms.WRITE] target_domid
@@ -183,13 +172,6 @@ let del_watch con path token =
 	con.nb_watches <- con.nb_watches - 1;
 	apath, w
 
-let del_watches con =
-  Hashtbl.clear con.watches;
-  con.nb_watches <- 0
-
-let del_transactions con =
-  Hashtbl.clear con.transactions
-
 let list_watches con =
 	let ll = Hashtbl.fold 
 		(fun _ watches acc -> List.map (fun watch -> watch.path, watch.token) watches :: acc)
@@ -213,31 +195,14 @@ let fire_watch watch path =
 	let data = Utils.join_by_null [ new_path; watch.token; "" ] in
 	send_reply watch.con Transaction.none 0 Xenbus.Xb.Op.Watchevent data
 
-(* Search for a valid unused transaction id. *)
-let rec valid_transaction_id con proposed_id =
-	(*
-	 * Clip proposed_id to the range [1, 0x3ffffffe]
-	 *
-	 * The chosen id must not trucate when written into the uint32_t tx_id
-	 * field, and needs to fit within the positive range of a 31 bit ocaml
-	 * integer to function when compiled as 32bit.
-	 *
-	 * Oxenstored therefore supports only 1 billion open transactions.
-	 *)
-	let id = if proposed_id <= 0 || proposed_id >= 0x3fffffff then 1 else proposed_id in
-
-	if Hashtbl.mem con.transactions id then (
-		(* Outstanding transaction with this id.  Try the next. *)
-		valid_transaction_id con (id + 1)
-	) else
-		id
+let find_next_tid con =
+	let ret = con.next_tid in con.next_tid <- con.next_tid + 1; ret
 
 let start_transaction con store =
 	if !Define.maxtransaction > 0 && not (is_dom0 con)
 	&& Hashtbl.length con.transactions > !Define.maxtransaction then
 		raise Quota.Transaction_opened;
-	let id = valid_transaction_id con con.next_tid in
-	con.next_tid <- id + 1;
+	let id = find_next_tid con in
 	let ntrans = Transaction.make id store in
 	Hashtbl.add con.transactions id ntrans;
 	Logging.start_transaction ~tid:id ~con:(get_domstr con);

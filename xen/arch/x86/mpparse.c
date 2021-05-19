@@ -13,6 +13,7 @@
  *		Paul Diefenbaugh:	Added full ACPI support
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/irq.h>
 #include <xen/init.h>
@@ -34,7 +35,7 @@
 #include <bios_ebda.h>
 
 /* Have we found an MP table */
-bool __initdata smp_found_config;
+bool_t __initdata smp_found_config;
 
 /*
  * Various Linux-internal data structures created from the
@@ -52,15 +53,15 @@ struct mpc_config_intsrc __read_mostly mp_irqs[MAX_IRQ_SOURCES];
 /* MP IRQ source entries */
 int __read_mostly mp_irq_entries;
 
-bool __read_mostly pic_mode;
-bool __read_mostly def_to_bigsmp;
+bool_t __read_mostly pic_mode;
+bool_t __read_mostly def_to_bigsmp = 0;
 unsigned long __read_mostly mp_lapic_addr;
 
 /* Processor that is doing the boot up */
 unsigned int __read_mostly boot_cpu_physical_apicid = BAD_APICID;
 
 /* Internal processor count */
-static unsigned int num_processors;
+static unsigned int __devinitdata num_processors;
 static unsigned int __initdata disabled_cpus;
 
 /* Bitmask of physically existing CPUs */
@@ -68,41 +69,22 @@ physid_mask_t phys_cpu_present_map;
 
 void __init set_nr_cpu_ids(unsigned int max_cpus)
 {
-	unsigned int tot_cpus = num_processors + disabled_cpus;
-
 	if (!max_cpus)
-		max_cpus = tot_cpus;
+		max_cpus = num_processors + disabled_cpus;
 	if (max_cpus > NR_CPUS)
 		max_cpus = NR_CPUS;
 	else if (!max_cpus)
 		max_cpus = 1;
 	printk(XENLOG_INFO "SMP: Allowing %u CPUs (%d hotplug CPUs)\n",
 	       max_cpus, max_t(int, max_cpus - num_processors, 0));
-
-	if (!park_offline_cpus)
-		tot_cpus = max_cpus;
-	nr_cpu_ids = min(tot_cpus, NR_CPUS + 0u);
-	if (park_offline_cpus && nr_cpu_ids < num_processors)
-		printk(XENLOG_WARNING "SMP: Cannot bring up %u further CPUs\n",
-		       num_processors - nr_cpu_ids);
+	nr_cpu_ids = max_cpus;
 
 #ifndef nr_cpumask_bits
-	nr_cpumask_bits = ROUNDUP(nr_cpu_ids, BITS_PER_LONG);
+	nr_cpumask_bits = (max_cpus + (BITS_PER_LONG - 1)) &
+			  ~(BITS_PER_LONG - 1);
 	printk(XENLOG_DEBUG "NR_CPUS:%u nr_cpumask_bits:%u\n",
 	       NR_CPUS, nr_cpumask_bits);
 #endif
-}
-
-void __init set_nr_sockets(void)
-{
-	nr_sockets = last_physid(phys_cpu_present_map)
-		     / boot_cpu_data.x86_max_cores
-		     / boot_cpu_data.x86_num_siblings + 1;
-	if (disabled_cpus)
-		nr_sockets += (disabled_cpus - 1)
-			      / boot_cpu_data.x86_max_cores
-			      / boot_cpu_data.x86_num_siblings + 1;
-	printk(XENLOG_DEBUG "nr_sockets: %u\n", nr_sockets);
 }
 
 /*
@@ -125,16 +107,18 @@ static int __init mpf_checksum(unsigned char *mp, int len)
 }
 
 /* Return xen's logical cpu_id of the new added cpu or <0 if error */
-static int MP_processor_info_x(struct mpc_config_processor *m,
-			       u32 apicid, bool hotplug)
+static int __devinit MP_processor_info_x(struct mpc_config_processor *m,
+					 u32 apicidx, bool_t hotplug)
 {
- 	int ver, cpu = 0;
+ 	int ver, apicid, cpu = 0;
  	
 	if (!(m->mpc_cpuflag & CPU_ENABLED)) {
 		if (!hotplug)
 			++disabled_cpus;
 		return -EINVAL;
 	}
+
+	apicid = mpc_apic_id(m, apicidx);
 
 	if (m->mpc_cpuflag & CPU_BOOTPROCESSOR) {
 		Dprintk("    Bootup CPU\n");
@@ -185,13 +169,13 @@ static int MP_processor_info_x(struct mpc_config_processor *m,
 		 * No need for processor or APIC checks: physical delivery
 		 * (bigsmp) mode should always work.
 		 */
-		def_to_bigsmp = true;
+		def_to_bigsmp = 1;
 	}
 
 	return cpu;
 }
 
-static int MP_processor_info(struct mpc_config_processor *m)
+static int __devinit MP_processor_info(struct mpc_config_processor *m)
 {
 	return MP_processor_info_x(m, m->mpc_apicid, 0);
 }
@@ -339,24 +323,11 @@ static int __init smp_read_mpc(struct mp_config_table *mpc)
 			{
 				struct mpc_config_processor *m=
 					(struct mpc_config_processor *)mpt;
-
+				/* ACPI may have already provided this data */
+				if (!acpi_lapic)
+					MP_processor_info(m);
 				mpt += sizeof(*m);
 				count += sizeof(*m);
-
-				/* ACPI may have already provided this data. */
-				if (acpi_lapic)
-					break;
-
-				printk("Processor #%02x %u:%u APIC version %u%s\n",
-				       m->mpc_apicid,
-				       MASK_EXTR(m->mpc_cpufeature,
-						 CPU_FAMILY_MASK),
-				       MASK_EXTR(m->mpc_cpufeature,
-						 CPU_MODEL_MASK),
-				       m->mpc_apicver,
-				       m->mpc_cpuflag & CPU_ENABLED
-				       ? "" : " [disabled]");
-				MP_processor_info(m);
 				break;
 			}
 			case MP_BUS:
@@ -507,8 +478,7 @@ static inline void __init construct_default_ISA_mptable(int mpc_default_type)
 	processor.mpc_cpufeature = (boot_cpu_data.x86 << 8) |
 				   (boot_cpu_data.x86_model << 4) |
 				   boot_cpu_data.x86_mask;
-	processor.mpc_featureflag =
-            boot_cpu_data.x86_capability[cpufeat_word(X86_FEATURE_FPU)];
+	processor.mpc_featureflag = boot_cpu_data.x86_capability[0];
 	processor.mpc_reserved[0] = 0;
 	processor.mpc_reserved[1] = 0;
 	for (i = 0; i < 2; i++) {
@@ -570,8 +540,8 @@ static inline void __init construct_default_ISA_mptable(int mpc_default_type)
 
 static __init void efi_unmap_mpf(void)
 {
-	if (efi_enabled(EFI_BOOT))
-		clear_fixmap(FIX_EFI_MPF);
+	if (efi_enabled)
+		__set_fixmap(FIX_EFI_MPF, 0, 0);
 }
 
 static struct intel_mp_floating *__initdata mpf_found;
@@ -598,10 +568,10 @@ void __init get_smp_config (void)
 	printk(KERN_INFO "Intel MultiProcessor Specification v1.%d\n", mpf->mpf_specification);
 	if (mpf->mpf_feature2 & (1<<7)) {
 		printk(KERN_INFO "    IMCR and PIC compatibility mode.\n");
-		pic_mode = true;
+		pic_mode = 1;
 	} else {
 		printk(KERN_INFO "    Virtual Wire compatibility mode.\n");
-		pic_mode = false;
+		pic_mode = 0;
 	}
 
 	/*
@@ -620,7 +590,7 @@ void __init get_smp_config (void)
 		 */
 		if (!smp_read_mpc((void *)(unsigned long)mpf->mpf_physptr)) {
 			efi_unmap_mpf();
-			smp_found_config = false;
+			smp_found_config = 0;
 			printk(KERN_ERR "BIOS bug, MP table errors detected!...\n");
 			printk(KERN_ERR "... disabling SMP support. (tell your hw vendor)\n");
 			return;
@@ -671,7 +641,7 @@ static int __init smp_scan_config (unsigned long base, unsigned long length)
 			((mpf->mpf_specification == 1)
 				|| (mpf->mpf_specification == 4)) ) {
 
-			smp_found_config = true;
+			smp_found_config = 1;
 			printk(KERN_INFO "found SMP MP-table at %08lx\n",
 						virt_to_maddr(mpf));
 #if 0
@@ -710,13 +680,13 @@ static void __init efi_check_config(void)
 		return;
 
 	__set_fixmap(FIX_EFI_MPF, PFN_DOWN(efi.mps), __PAGE_HYPERVISOR);
-	mpf = fix_to_virt(FIX_EFI_MPF) + ((long)efi.mps & (PAGE_SIZE-1));
+	mpf = (void *)fix_to_virt(FIX_EFI_MPF) + ((long)efi.mps & (PAGE_SIZE-1));
 
 	if (memcmp(mpf->mpf_signature, "_MP_", 4) == 0 &&
 	    mpf->mpf_length == 1 &&
 	    mpf_checksum((void *)mpf, 16) &&
 	    (mpf->mpf_specification == 1 || mpf->mpf_specification == 4)) {
-		smp_found_config = true;
+		smp_found_config = 1;
 		printk(KERN_INFO "SMP MP-table at %08lx\n", efi.mps);
 		mpf_found = mpf;
 	}
@@ -728,7 +698,7 @@ void __init find_smp_config (void)
 {
 	unsigned int address;
 
-	if (efi_enabled(EFI_BOOT)) {
+	if (efi_enabled) {
 		efi_check_config();
 		return;
 	}
@@ -788,23 +758,33 @@ void __init mp_register_lapic_address (
 }
 
 
-int mp_register_lapic(u32 id, bool enabled, bool hotplug)
+int __devinit mp_register_lapic (
+	u32			id,
+	bool_t			enabled,
+	bool_t			hotplug)
 {
-	struct mpc_config_processor processor = {
-		.mpc_type = MP_PROCESSOR,
-		/* Note: We don't fill in fields not consumed anywhere. */
-		.mpc_apicid = id,
-		.mpc_apicver = GET_APIC_VERSION(apic_read(APIC_LVR)),
-		.mpc_cpuflag = (enabled ? CPU_ENABLED : 0) |
-			       (id == boot_cpu_physical_apicid ?
-				CPU_BOOTPROCESSOR : 0),
-	};
+	struct mpc_config_processor processor;
+	int			boot_cpu = 0;
 	
 	if (MAX_APICS <= id) {
 		printk(KERN_WARNING "Processor #%d invalid (max %d)\n",
 			id, MAX_APICS);
 		return -EINVAL;
 	}
+
+	if (id == boot_cpu_physical_apicid)
+		boot_cpu = 1;
+
+	processor.mpc_type = MP_PROCESSOR;
+	processor.mpc_apicid = id;
+	processor.mpc_apicver = GET_APIC_VERSION(apic_read(APIC_LVR));
+	processor.mpc_cpuflag = (enabled ? CPU_ENABLED : 0);
+	processor.mpc_cpuflag |= (boot_cpu ? CPU_BOOTPROCESSOR : 0);
+	processor.mpc_cpufeature = (boot_cpu_data.x86 << 8) | 
+		(boot_cpu_data.x86_model << 4) | boot_cpu_data.x86_mask;
+	processor.mpc_featureflag = boot_cpu_data.x86_capability[0];
+	processor.mpc_reserved[0] = 0;
+	processor.mpc_reserved[1] = 0;
 
 	return MP_processor_info_x(&processor, id, hotplug);
 }
@@ -822,6 +802,8 @@ void mp_unregister_lapic(uint32_t apic_id, uint32_t cpu)
 	x86_cpu_to_apicid[cpu] = BAD_APICID;
 	cpumask_clear_cpu(cpu, &cpu_present_map);
 }
+
+#ifdef	CONFIG_X86_IO_APIC
 
 #define MP_ISA_BUS		0
 #define MP_MAX_IOAPIC_PIN	127
@@ -915,7 +897,7 @@ unsigned __init highest_gsi(void)
 	return res;
 }
 
-unsigned int io_apic_gsi_base(unsigned int apic)
+unsigned apic_gsi_base(int apic)
 {
 	return mp_ioapic_routing[apic].gsi_base;
 }
@@ -1103,4 +1085,5 @@ int mp_register_gsi (u32 gsi, int triggering, int polarity)
 				       triggering, polarity);
 }
 
+#endif /* CONFIG_X86_IO_APIC */
 #endif /* CONFIG_ACPI */

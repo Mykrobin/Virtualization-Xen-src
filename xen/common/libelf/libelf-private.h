@@ -10,7 +10,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 #ifndef __LIBELF_PRIVATE_H__
 #define __LIBELF_PRIVATE_H__
@@ -43,7 +44,6 @@
 #include <string.h>
 #include <stddef.h>
 #include <inttypes.h>
-#include <limits.h>
 #ifdef __sun__
 #include <sys/byteorder.h>
 #define bswap_16(x) BSWAP_16(x)
@@ -59,11 +59,6 @@
 #define bswap_16(x) swap16(x)
 #define bswap_32(x) swap32(x)
 #define bswap_64(x) swap64(x)
-#elif defined(__FreeBSD__)
-#include <sys/endian.h>
-#define bswap_16(x) bswap16(x)
-#define bswap_32(x) bswap32(x)
-#define bswap_64(x) bswap64(x)
 #elif defined(__linux__) || defined(__Linux__) || defined(__MINIOS__)
 #include <byteswap.h>
 #else
@@ -72,10 +67,8 @@
 #include <xen/elfnote.h>
 #include <xen/libelf/libelf.h>
 
-#ifndef FUZZ_NO_LIBXC
 #include "xenctrl.h"
 #include "xc_private.h"
-#endif
 
 #define elf_msg(elf, fmt, args ... )                    \
     elf_call_log_callback(elf, 0, fmt , ## args );

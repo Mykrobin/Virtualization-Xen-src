@@ -4,18 +4,16 @@
  * Copyright (c) 2013, Citrix Systems
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/sched.h>
 #include <xen/hypercall.h>
 #include <public/domctl.h>
-#include <asm/cpufeature.h>
 
 static long switch_mode(struct domain *d, enum domain_type type)
 {
-    struct vcpu *v;
-
     if ( d == NULL )
         return -EINVAL;
     if ( d->tot_pages != 0 )
@@ -24,10 +22,6 @@ static long switch_mode(struct domain *d, enum domain_type type)
         return 0;
 
     d->arch.type = type;
-
-    if ( is_64bit_domain(d) )
-        for_each_vcpu(d, v)
-            vcpu_switch_to_aarch64_mode(v);
 
     return 0;
 }
@@ -41,11 +35,9 @@ long subarch_do_domctl(struct xen_domctl *domctl, struct domain *d,
         switch ( domctl->u.address_size.size )
         {
         case 32:
-            if ( !cpu_has_el1_32 )
-                return -EINVAL;
-            return switch_mode(d, DOMAIN_32BIT);
+            return switch_mode(d, DOMAIN_PV32);
         case 64:
-            return switch_mode(d, DOMAIN_64BIT);
+            return switch_mode(d, DOMAIN_PV64);
         default:
             return -EINVAL;
         }

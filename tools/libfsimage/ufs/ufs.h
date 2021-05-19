@@ -4,7 +4,7 @@
  */
 
 #ifndef _GRUB_UFS_H
-#define _GRUB_UFS_H
+#define _GRUB_UFS_H_
 
 /* ufs specific constants */
 #define UFS_SBLOCK	16

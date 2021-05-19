@@ -22,23 +22,14 @@ all: $(LIB)
 
 .PHONY: install
 install: all
-	$(INSTALL_DIR) $(DESTDIR)$(libdir)
-	$(INSTALL_DIR) $(DESTDIR)$(includedir)
-	$(INSTALL_PROG) libfsimage.so.$(MAJOR).$(MINOR) $(DESTDIR)$(libdir)
-	ln -sf libfsimage.so.$(MAJOR).$(MINOR) $(DESTDIR)$(libdir)/libfsimage.so.$(MAJOR)
-	ln -sf libfsimage.so.$(MAJOR) $(DESTDIR)$(libdir)/libfsimage.so
-	$(INSTALL_DATA) fsimage.h $(DESTDIR)$(includedir)
-	$(INSTALL_DATA) fsimage_plugin.h $(DESTDIR)$(includedir)
-	$(INSTALL_DATA) fsimage_grub.h $(DESTDIR)$(includedir)
-
-.PHONY: uninstall
-uninstall:
-	rm -f $(DESTDIR)$(includedir)/fsimage_grub.h
-	rm -f $(DESTDIR)$(includedir)/fsimage_plugin.h
-	rm -f $(DESTDIR)$(includedir)/fsimage.h
-	rm -f $(DESTDIR)$(libdir)/libfsimage.so
-	rm -f $(DESTDIR)$(libdir)/libfsimage.so.$(MAJOR)
-	rm -f $(DESTDIR)$(libdir)/libfsimage.so.$(MAJOR).$(MINOR)
+	$(INSTALL_DIR) $(DESTDIR)$(LIBDIR)
+	$(INSTALL_DIR) $(DESTDIR)$(INCLUDEDIR)
+	$(INSTALL_PROG) libfsimage.so.$(MAJOR).$(MINOR) $(DESTDIR)$(LIBDIR)
+	ln -sf libfsimage.so.$(MAJOR).$(MINOR) $(DESTDIR)$(LIBDIR)/libfsimage.so.$(MAJOR)
+	ln -sf libfsimage.so.$(MAJOR) $(DESTDIR)$(LIBDIR)/libfsimage.so
+	$(INSTALL_DATA) fsimage.h $(DESTDIR)$(INCLUDEDIR)
+	$(INSTALL_DATA) fsimage_plugin.h $(DESTDIR)$(INCLUDEDIR)
+	$(INSTALL_DATA) fsimage_grub.h $(DESTDIR)$(INCLUDEDIR)
 
 clean distclean::
 	rm -f $(LIB)
@@ -49,7 +40,7 @@ libfsimage.so.$(MAJOR): libfsimage.so.$(MAJOR).$(MINOR)
 	ln -sf $< $@
 
 libfsimage.so.$(MAJOR).$(MINOR): $(PIC_OBJS)
-	$(CC) $(LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libfsimage.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $^ $(PTHREAD_LIBS) $(APPEND_LDFLAGS)
+	$(CC) $(LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libfsimage.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $^ $(PTHREAD_LIBS)
 
--include $(DEPS_INCLUDE)
+-include $(DEPS)
 

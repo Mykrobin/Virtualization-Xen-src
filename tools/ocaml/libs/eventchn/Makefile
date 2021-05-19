@@ -2,13 +2,13 @@ TOPLEVEL=$(CURDIR)/../..
 XEN_ROOT=$(TOPLEVEL)/../..
 include $(TOPLEVEL)/common.make
 
-CFLAGS += $(CFLAGS_libxenevtchn) $(CFLAGS_xeninclude)
+CFLAGS += $(CFLAGS_libxenctrl) $(CFLAGS_xeninclude)
 
 OBJS = xeneventchn
 INTF = $(foreach obj, $(OBJS),$(obj).cmi)
 LIBS = xeneventchn.cma xeneventchn.cmxa
 
-LIBS_xeneventchn = $(LDLIBS_libxenevtchn)
+LIBS_xeneventchn = $(LDLIBS_libxenctrl)
 
 all: $(INTF) $(LIBS) $(PROGRAMS)
 

@@ -14,11 +14,20 @@
 #include <xen/cpu.h>
 #include <xen/init.h>
 
-bool __read_mostly opt_tmem;
+bool_t __read_mostly opt_tmem = 0;
 boolean_param("tmem", opt_tmem);
 
-bool __read_mostly opt_tmem_compress;
+bool_t __read_mostly opt_tmem_compress = 0;
 boolean_param("tmem_compress", opt_tmem_compress);
+
+bool_t __read_mostly opt_tmem_dedup = 0;
+boolean_param("tmem_dedup", opt_tmem_dedup);
+
+bool_t __read_mostly opt_tmem_tze = 0;
+boolean_param("tmem_tze", opt_tmem_tze);
+
+bool_t __read_mostly opt_tmem_shared_auth = 0;
+boolean_param("tmem_shared_auth", opt_tmem_shared_auth);
 
 atomic_t freeable_page_count = ATOMIC_INIT(0);
 
@@ -31,23 +40,23 @@ static DEFINE_PER_CPU_READ_MOSTLY(unsigned char *, dstmem);
 static DEFINE_PER_CPU_READ_MOSTLY(void *, scratch_page);
 
 #if defined(CONFIG_ARM)
-static inline void *cli_get_page(xen_pfn_t cmfn, mfn_t *pcli_mfn,
-                                 struct page_info **pcli_pfp, bool cli_write)
+static inline void *cli_get_page(xen_pfn_t cmfn, unsigned long *pcli_mfn,
+                                 struct page_info **pcli_pfp, bool_t cli_write)
 {
-    ASSERT_UNREACHABLE();
+    ASSERT(0);
     return NULL;
 }
 
 static inline void cli_put_page(void *cli_va, struct page_info *cli_pfp,
-                                mfn_t cli_mfn, bool mark_dirty)
+                                unsigned long cli_mfn, bool_t mark_dirty)
 {
-    ASSERT_UNREACHABLE();
+    ASSERT(0);
 }
 #else
 #include <asm/p2m.h>
 
-static inline void *cli_get_page(xen_pfn_t cmfn, mfn_t *pcli_mfn,
-                                 struct page_info **pcli_pfp, bool cli_write)
+static inline void *cli_get_page(xen_pfn_t cmfn, unsigned long *pcli_mfn,
+                                 struct page_info **pcli_pfp, bool_t cli_write)
 {
     p2m_type_t t;
     struct page_info *page;
@@ -68,17 +77,16 @@ static inline void *cli_get_page(xen_pfn_t cmfn, mfn_t *pcli_mfn,
 
     *pcli_mfn = page_to_mfn(page);
     *pcli_pfp = page;
-
     return map_domain_page(*pcli_mfn);
 }
 
 static inline void cli_put_page(void *cli_va, struct page_info *cli_pfp,
-                                mfn_t cli_mfn, bool mark_dirty)
+                                unsigned long cli_mfn, bool_t mark_dirty)
 {
     if ( mark_dirty )
     {
         put_page_and_type(cli_pfp);
-        paging_mark_dirty(current->domain, cli_mfn);
+        paging_mark_dirty(current->domain,cli_mfn);
     }
     else
         put_page(cli_pfp);
@@ -89,7 +97,7 @@ static inline void cli_put_page(void *cli_va, struct page_info *cli_pfp,
 int tmem_copy_from_client(struct page_info *pfp,
     xen_pfn_t cmfn, tmem_cli_va_param_t clibuf)
 {
-    mfn_t tmem_mfn, cli_mfn = INVALID_MFN;
+    unsigned long tmem_mfn, cli_mfn = 0;
     char *tmem_va, *cli_va = NULL;
     struct page_info *cli_pfp = NULL;
     int rc = 1;
@@ -126,7 +134,7 @@ int tmem_compress_from_client(xen_pfn_t cmfn,
     unsigned char *wmem = this_cpu(workmem);
     char *scratch = this_cpu(scratch_page);
     struct page_info *cli_pfp = NULL;
-    mfn_t cli_mfn = INVALID_MFN;
+    unsigned long cli_mfn = 0;
     void *cli_va = NULL;
 
     if ( dmem == NULL || wmem == NULL )
@@ -153,7 +161,7 @@ int tmem_compress_from_client(xen_pfn_t cmfn,
 int tmem_copy_to_client(xen_pfn_t cmfn, struct page_info *pfp,
     tmem_cli_va_param_t clibuf)
 {
-    mfn_t tmem_mfn, cli_mfn = INVALID_MFN;
+    unsigned long tmem_mfn, cli_mfn = 0;
     char *tmem_va, *cli_va = NULL;
     struct page_info *cli_pfp = NULL;
     int rc = 1;
@@ -167,7 +175,6 @@ int tmem_copy_to_client(xen_pfn_t cmfn, struct page_info *pfp,
     }
     tmem_mfn = page_to_mfn(pfp);
     tmem_va = map_domain_page(tmem_mfn);
-
     if ( cli_va )
     {
         memcpy(cli_va, tmem_va, PAGE_SIZE);
@@ -183,7 +190,7 @@ int tmem_copy_to_client(xen_pfn_t cmfn, struct page_info *pfp,
 int tmem_decompress_to_client(xen_pfn_t cmfn, void *tmem_va,
                                     size_t size, tmem_cli_va_param_t clibuf)
 {
-    mfn_t cli_mfn = INVALID_MFN;
+    unsigned long cli_mfn = 0;
     struct page_info *cli_pfp = NULL;
     void *cli_va = NULL;
     char *scratch = this_cpu(scratch_page);
@@ -205,6 +212,28 @@ int tmem_decompress_to_client(xen_pfn_t cmfn, void *tmem_va,
         cli_put_page(cli_va, cli_pfp, cli_mfn, 1);
     else if ( copy_to_guest(clibuf, scratch, PAGE_SIZE) )
         return -EFAULT;
+    smp_mb();
+    return 1;
+}
+
+int tmem_copy_tze_to_client(xen_pfn_t cmfn, void *tmem_va,
+                                    pagesize_t len)
+{
+    void *cli_va;
+    unsigned long cli_mfn;
+    struct page_info *cli_pfp = NULL;
+
+    ASSERT(!(len & (sizeof(uint64_t)-1)));
+    ASSERT(len <= PAGE_SIZE);
+    ASSERT(len > 0 || tmem_va == NULL);
+    cli_va = cli_get_page(cmfn, &cli_mfn, &cli_pfp, 1);
+    if ( cli_va == NULL )
+        return -EFAULT;
+    if ( len > 0 )
+        memcpy((char *)cli_va,(char *)tmem_va,len);
+    if ( len < PAGE_SIZE )
+        memset((char *)cli_va+len,0,PAGE_SIZE-len);
+    cli_put_page(cli_va, cli_pfp, cli_mfn, 1);
     smp_mb();
     return 1;
 }

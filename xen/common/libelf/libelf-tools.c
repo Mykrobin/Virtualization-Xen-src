@@ -12,7 +12,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #include "libelf-private.h"
@@ -59,7 +60,8 @@ bool elf_access_ok(struct elf_binary * elf,
         return 1;
     if ( elf_ptrval_in_range(ptrval, size, elf->dest_base, elf->dest_size) )
         return 1;
-    if ( elf_ptrval_in_range(ptrval, size, elf->xdest_base, elf->xdest_size) )
+    if ( elf_ptrval_in_range(ptrval, size,
+                             elf->caller_xdest_base, elf->caller_xdest_size) )
         return 1;
     elf_mark_broken(elf, "out of range access");
     return 0;
@@ -131,10 +133,9 @@ unsigned elf_shdr_count(struct elf_binary *elf)
 {
     unsigned count = elf_uval(elf, elf->ehdr, e_shnum);
     uint64_t max = elf->size / sizeof(Elf32_Shdr);
-
-    if ( max > UINT_MAX )
-        max = UINT_MAX;
-    if ( count > max )
+    if (max > ~(unsigned)0)
+        max = ~(unsigned)0; /* Xen doesn't have limits.h :-/ */
+    if (count > max)
     {
         elf_mark_broken(elf, "far too many section headers");
         count = max;
@@ -149,11 +150,12 @@ unsigned elf_phdr_count(struct elf_binary *elf)
 
 ELF_HANDLE_DECL(elf_shdr) elf_shdr_by_name(struct elf_binary *elf, const char *name)
 {
-    unsigned i, count = elf_shdr_count(elf);
+    uint64_t count = elf_shdr_count(elf);
     ELF_HANDLE_DECL(elf_shdr) shdr;
     const char *sname;
+    unsigned i;
 
-    for ( i = 1; i < count; i++ )
+    for ( i = 0; i < count; i++ )
     {
         shdr = elf_shdr_by_index(elf, i);
         if ( !elf_access_ok(elf, ELF_HANDLE_PTRVAL(shdr), 1) )
@@ -168,7 +170,7 @@ ELF_HANDLE_DECL(elf_shdr) elf_shdr_by_name(struct elf_binary *elf, const char *n
 
 ELF_HANDLE_DECL(elf_shdr) elf_shdr_by_index(struct elf_binary *elf, unsigned index)
 {
-    unsigned count = elf_shdr_count(elf);
+    uint64_t count = elf_shdr_count(elf);
     elf_ptrval ptr;
 
     if ( index >= count )
@@ -182,7 +184,7 @@ ELF_HANDLE_DECL(elf_shdr) elf_shdr_by_index(struct elf_binary *elf, unsigned ind
 
 ELF_HANDLE_DECL(elf_phdr) elf_phdr_by_index(struct elf_binary *elf, unsigned index)
 {
-    unsigned count = elf_phdr_count(elf);
+    uint64_t count = elf_uval(elf, elf->ehdr, e_phnum);
     elf_ptrval ptr;
 
     if ( index >= count )
@@ -370,14 +372,6 @@ bool elf_phdr_is_loadable(struct elf_binary *elf, ELF_HANDLE_DECL(elf_phdr) phdr
     uint64_t p_flags = elf_uval(elf, phdr, p_flags);
 
     return ((p_type == PT_LOAD) && (p_flags & (PF_R | PF_W | PF_X)) != 0);
-}
-
-void elf_set_xdest(struct elf_binary *elf, void *addr, uint64_t size)
-{
-    elf->xdest_base = addr;
-    elf->xdest_size = size;
-    if ( addr != NULL )
-        elf_memset_safe(elf, ELF_REALPTR2PTRVAL(addr), 0, size);
 }
 
 /*

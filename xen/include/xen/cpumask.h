@@ -103,19 +103,9 @@ static inline void cpumask_set_cpu(int cpu, volatile cpumask_t *dstp)
 	set_bit(cpumask_check(cpu), dstp->bits);
 }
 
-static inline void __cpumask_set_cpu(int cpu, cpumask_t *dstp)
-{
-	__set_bit(cpumask_check(cpu), dstp->bits);
-}
-
 static inline void cpumask_clear_cpu(int cpu, volatile cpumask_t *dstp)
 {
 	clear_bit(cpumask_check(cpu), dstp->bits);
-}
-
-static inline void __cpumask_clear_cpu(int cpu, cpumask_t *dstp)
-{
-	__clear_bit(cpumask_check(cpu), dstp->bits);
 }
 
 static inline void cpumask_setall(cpumask_t *dstp)
@@ -132,24 +122,14 @@ static inline void cpumask_clear(cpumask_t *dstp)
 #define cpumask_test_cpu(cpu, cpumask) \
 	test_bit(cpumask_check(cpu), (cpumask)->bits)
 
-static inline int cpumask_test_and_set_cpu(int cpu, volatile cpumask_t *addr)
+static inline int cpumask_test_and_set_cpu(int cpu, cpumask_t *addr)
 {
 	return test_and_set_bit(cpumask_check(cpu), addr->bits);
 }
 
-static inline int __cpumask_test_and_set_cpu(int cpu, cpumask_t *addr)
-{
-	return __test_and_set_bit(cpumask_check(cpu), addr->bits);
-}
-
-static inline int cpumask_test_and_clear_cpu(int cpu, volatile cpumask_t *addr)
+static inline int cpumask_test_and_clear_cpu(int cpu, cpumask_t *addr)
 {
 	return test_and_clear_bit(cpumask_check(cpu), addr->bits);
-}
-
-static inline int __cpumask_test_and_clear_cpu(int cpu, cpumask_t *addr)
-{
-	return __test_and_clear_bit(cpumask_check(cpu), addr->bits);
 }
 
 static inline void cpumask_and(cpumask_t *dstp, const cpumask_t *src1p,
@@ -266,14 +246,6 @@ static inline int cpumask_cycle(int n, const cpumask_t *srcp)
     return nxt;
 }
 
-static inline int cpumask_test_or_cycle(int n, const cpumask_t *srcp)
-{
-    if ( cpumask_test_cpu(n, srcp) )
-        return n;
-
-    return cpumask_cycle(n, srcp);
-}
-
 static inline unsigned int cpumask_any(const cpumask_t *srcp)
 {
     unsigned int cpu = cpumask_first(srcp);
@@ -304,9 +276,7 @@ extern const unsigned long
 
 static inline const cpumask_t *cpumask_of(unsigned int cpu)
 {
-	const unsigned long *p = cpu_bit_bitmap[1 + cpumask_check(cpu) %
-                                                   BITS_PER_LONG];
-
+	const unsigned long *p = cpu_bit_bitmap[1 + cpu % BITS_PER_LONG];
 	return (const cpumask_t *)(p - cpu / BITS_PER_LONG);
 }
 
@@ -351,25 +321,9 @@ static inline bool_t alloc_cpumask_var(cpumask_var_t *mask)
 	return *mask != NULL;
 }
 
-static inline bool cond_alloc_cpumask_var(cpumask_var_t *mask)
-{
-	if (*mask == NULL)
-		*mask = _xmalloc(nr_cpumask_bits / 8, sizeof(long));
-	return *mask != NULL;
-}
-
 static inline bool_t zalloc_cpumask_var(cpumask_var_t *mask)
 {
 	*(void **)mask = _xzalloc(nr_cpumask_bits / 8, sizeof(long));
-	return *mask != NULL;
-}
-
-static inline bool cond_zalloc_cpumask_var(cpumask_var_t *mask)
-{
-	if (*mask == NULL)
-		*mask = _xzalloc(nr_cpumask_bits / 8, sizeof(long));
-	else
-		cpumask_clear(*mask);
 	return *mask != NULL;
 }
 
@@ -377,9 +331,6 @@ static inline void free_cpumask_var(cpumask_var_t mask)
 {
 	xfree(mask);
 }
-
-/* Free an allocated mask, and zero the pointer to it. */
-#define FREE_CPUMASK_VAR(m) XFREE(m)
 #else
 typedef cpumask_t cpumask_var_t[1];
 
@@ -387,20 +338,16 @@ static inline bool_t alloc_cpumask_var(cpumask_var_t *mask)
 {
 	return 1;
 }
-#define cond_alloc_cpumask_var alloc_cpumask_var
 
 static inline bool_t zalloc_cpumask_var(cpumask_var_t *mask)
 {
 	cpumask_clear(*mask);
 	return 1;
 }
-#define cond_zalloc_cpumask_var zalloc_cpumask_var
 
 static inline void free_cpumask_var(cpumask_var_t mask)
 {
 }
-
-#define FREE_CPUMASK_VAR(m) free_cpumask_var(m)
 #endif
 
 #if NR_CPUS > 1

@@ -16,7 +16,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #include "config.h"
@@ -24,12 +25,12 @@
 #include "../rombios/config.h"
 
 #include "smbios_types.h"
+#include "acpi/acpi2_0.h"
 #include "pci_regs.h"
 #include "util.h"
 #include "hypercall.h"
 #include "option_rom.h"
 
-#include <libacpi.h>
 #include <xen/hvm/params.h>
 
 #define ROM_INCLUDE_ROMBIOS
@@ -41,6 +42,9 @@
 #define ROMBIOS_SIZE           0x00010000
 #define ROMBIOS_MAXOFFSET      0x0000FFFF
 #define ROMBIOS_END            (ROMBIOS_BEGIN + ROMBIOS_SIZE)
+
+extern unsigned char dsdt_anycpu[], dsdt_15cpu[];
+extern int dsdt_anycpu_len, dsdt_15cpu_len;
 
 static void rombios_setup_e820(void)
 {
@@ -118,8 +122,7 @@ static void rombios_load_roms(void)
                option_rom_phys_addr + option_rom_sz - 1);
 }
 
-static void rombios_load(const struct bios_config *config,
-                         void *unused_addr, uint32_t unused_size)
+static void rombios_load(const struct bios_config *config)
 {
     uint32_t bioshigh;
     struct rombios_info *info;
@@ -178,7 +181,7 @@ static void rombios_acpi_build_tables(void)
         .dsdt_15cpu_len = dsdt_15cpu_len,
     };
 
-    hvmloader_acpi_build_tables(&config, ACPI_PHYSICAL_ADDRESS);
+    acpi_build_tables(&config, ACPI_PHYSICAL_ADDRESS);
 }
 
 static void rombios_create_mp_tables(void)

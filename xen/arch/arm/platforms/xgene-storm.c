@@ -18,10 +18,12 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <asm/platform.h>
+#include <xen/stdbool.h>
 #include <xen/vmap.h>
-#include <xen/device_tree.h>
 #include <asm/io.h>
+#include <asm/gic.h>
 
 /* XGENE RESET Specific defines */
 #define XGENE_RESET_ADDR        0x17000014UL
@@ -33,41 +35,89 @@ static u64 reset_addr, reset_size;
 static u32 reset_mask;
 static bool reset_vals_valid = false;
 
-#define XGENE_SEC_GICV2_DIST_ADDR    0x78010000
-
-static void __init xgene_check_pirq_eoi(void)
-{
-    const struct dt_device_node *node;
-    int res;
-    paddr_t dbase;
-    const struct dt_device_match xgene_dt_int_ctrl_match[] =
-    {
-        DT_MATCH_COMPATIBLE("arm,cortex-a15-gic"),
-        { /*sentinel*/ },
-    };
-
-    node = dt_find_interrupt_controller(xgene_dt_int_ctrl_match);
-    if ( !node )
-        panic("%s: Can not find interrupt controller node", __func__);
-
-    res = dt_device_get_address(node, 0, &dbase, NULL);
-    if ( !dbase )
-        panic("%s: Cannot find a valid address for the distributor", __func__);
-
-    /*
-     * In old X-Gene Storm firmware and DT, secure mode addresses have
-     * been mentioned in GICv2 node. EOI HW won't work in this case.
-     * We check the GIC Distributor Base Address to deny Xen booting
-     * with older firmware.
-     */
-    if ( dbase == XGENE_SEC_GICV2_DIST_ADDR )
-        panic("OLD X-Gene Firmware is not supported by Xen.\n"
-              "Please upgrade your firmware to the latest version");
-}
-
 static uint32_t xgene_storm_quirks(void)
 {
     return PLATFORM_QUIRK_GIC_64K_STRIDE;
+}
+
+static int map_one_mmio(struct domain *d, const char *what,
+                         paddr_t start, paddr_t end)
+{
+    int ret;
+
+    printk("Additional MMIO %"PRIpaddr"-%"PRIpaddr" (%s)\n",
+           start, end, what);
+    ret = map_mmio_regions(d, start, end, start);
+    if ( ret )
+        printk("Failed to map %s @ %"PRIpaddr" to dom%d\n",
+               what, start, d->domain_id);
+    return ret;
+}
+
+static int map_one_spi(struct domain *d, const char *what,
+                       unsigned int spi, unsigned int type)
+{
+    struct dt_irq irq;
+    int ret;
+
+    irq.type = type;
+
+    irq.irq = spi + 32; /* SPIs start at IRQ 32 */
+
+    printk("Additional IRQ %u (%s)\n", irq.irq, what);
+
+    ret = gic_route_irq_to_guest(d, &irq, what);
+    if ( ret )
+        printk("Failed to route %s to dom%d\n", what, d->domain_id);
+
+    return ret;
+}
+
+/*
+ * Xen does not currently support mapping MMIO regions and interrupt
+ * for bus child devices (referenced via the "ranges" and
+ * "interrupt-map" properties to domain 0). Instead for now map the
+ * necessary resources manually.
+ */
+static int xgene_storm_specific_mapping(struct domain *d)
+{
+    int ret;
+
+    /* Map the PCIe bus resources */
+    ret = map_one_mmio(d, "PCI MEM REGION", 0xe000000000UL, 0xe010000000UL);
+    if ( ret )
+        goto err;
+
+    ret = map_one_mmio(d, "PCI IO REGION", 0xe080000000UL, 0xe080010000UL);
+    if ( ret )
+        goto err;
+
+    ret = map_one_mmio(d, "PCI CFG REGION", 0xe0d0000000UL, 0xe0d0200000UL);
+    if ( ret )
+        goto err;
+    ret = map_one_mmio(d, "PCI MSI REGION", 0xe010000000UL, 0xe010800000UL);
+    if ( ret )
+        goto err;
+
+    ret = map_one_spi(d, "PCI#INTA", 0xc2, DT_IRQ_TYPE_LEVEL_HIGH);
+    if ( ret )
+        goto err;
+
+    ret = map_one_spi(d, "PCI#INTB", 0xc3, DT_IRQ_TYPE_LEVEL_HIGH);
+    if ( ret )
+        goto err;
+
+    ret = map_one_spi(d, "PCI#INTC", 0xc4, DT_IRQ_TYPE_LEVEL_HIGH);
+    if ( ret )
+        goto err;
+
+    ret = map_one_spi(d, "PCI#INTD", 0xc5, DT_IRQ_TYPE_LEVEL_HIGH);
+    if ( ret )
+        goto err;
+
+    ret = 0;
+err:
+    return ret;
 }
 
 static void xgene_storm_reset(void)
@@ -104,8 +154,6 @@ static int xgene_storm_init(void)
     reset_mask = XGENE_RESET_MASK;
 
     reset_vals_valid = true;
-    xgene_check_pirq_eoi();
-
     return 0;
 }
 
@@ -120,6 +168,11 @@ PLATFORM_START(xgene_storm, "APM X-GENE STORM")
     .init = xgene_storm_init,
     .reset = xgene_storm_reset,
     .quirks = xgene_storm_quirks,
+    .specific_mapping = xgene_storm_specific_mapping,
+
+    .dom0_evtchn_ppi = 24,
+    .dom0_gnttab_start = 0x1f800000,
+    .dom0_gnttab_size = 0x20000,
 PLATFORM_END
 
 /*

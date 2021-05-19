@@ -6,13 +6,14 @@
  * Copyright (c) 2012, Citrix Systems
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/hypercall.h>
 #include <public/sysctl.h>
 
-void arch_do_physinfo(struct xen_sysctl_physinfo *pi) { }
+void arch_do_physinfo(xen_sysctl_physinfo_t *pi) { }
 
 long arch_do_sysctl(struct xen_sysctl *sysctl,
                     XEN_GUEST_HANDLE_PARAM(xen_sysctl_t) u_sysctl)

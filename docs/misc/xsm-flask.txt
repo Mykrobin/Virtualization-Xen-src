@@ -59,18 +59,101 @@ http://www.xenproject.org/security-policy.html.
 
 __HYPERVISOR_domctl (xen/include/public/domctl.h)
 
- All subops except the following are covered by this statement.  (That
- is, only the subops below are considered safe for disaggregation.)
+ The following subops are covered by this statement. subops not listed
+ here are considered safe for disaggregation.
 
- * XEN_DOMCTL_ioport_mapping
- * XEN_DOMCTL_memory_mapping
- * XEN_DOMCTL_bind_pt_irq
- * XEN_DOMCTL_unbind_pt_irq
+ * XEN_DOMCTL_createdomain
+ * XEN_DOMCTL_destroydomain
+ * XEN_DOMCTL_pausedomain
+ * XEN_DOMCTL_unpausedomain
+ * XEN_DOMCTL_getdomaininfo
+ * XEN_DOMCTL_getmemlist
+ * XEN_DOMCTL_getpageframeinfo
+ * XEN_DOMCTL_getpageframeinfo2
+ * XEN_DOMCTL_setvcpuaffinity
+ * XEN_DOMCTL_shadow_op
+ * XEN_DOMCTL_max_mem
+ * XEN_DOMCTL_setvcpucontext
+ * XEN_DOMCTL_getvcpucontext
+ * XEN_DOMCTL_getvcpuinfo
+ * XEN_DOMCTL_max_vcpus
+ * XEN_DOMCTL_scheduler_op
+ * XEN_DOMCTL_setdomainhandle
+ * XEN_DOMCTL_setdebugging
+ * XEN_DOMCTL_irq_permission
+ * XEN_DOMCTL_iomem_permission
+ * XEN_DOMCTL_ioport_permission
+ * XEN_DOMCTL_hypercall_init
+ * XEN_DOMCTL_arch_setup
+ * XEN_DOMCTL_settimeoffset
+ * XEN_DOMCTL_getvcpuaffinity
+ * XEN_DOMCTL_real_mode_area
+ * XEN_DOMCTL_resumedomain
+ * XEN_DOMCTL_sendtrigger
+ * XEN_DOMCTL_subscribe
+ * XEN_DOMCTL_gethvmcontext
+ * XEN_DOMCTL_sethvmcontext
+ * XEN_DOMCTL_set_address_size
+ * XEN_DOMCTL_get_address_size
+ * XEN_DOMCTL_assign_device
+ * XEN_DOMCTL_pin_mem_cacheattr
+ * XEN_DOMCTL_set_ext_vcpucontext
+ * XEN_DOMCTL_get_ext_vcpucontext
+ * XEN_DOMCTL_set_opt_feature
+ * XEN_DOMCTL_test_assign_device
+ * XEN_DOMCTL_set_target
+ * XEN_DOMCTL_deassign_device
+ * XEN_DOMCTL_set_cpuid
+ * XEN_DOMCTL_get_device_group
+ * XEN_DOMCTL_set_machine_address_size
+ * XEN_DOMCTL_get_machine_address_size
+ * XEN_DOMCTL_suppress_spurious_page_faults
+ * XEN_DOMCTL_debug_op
+ * XEN_DOMCTL_gethvmcontext_partial
+ * XEN_DOMCTL_mem_event_op
+ * XEN_DOMCTL_mem_sharing_op
+ * XEN_DOMCTL_disable_migrate
+ * XEN_DOMCTL_gettscinfo
+ * XEN_DOMCTL_settscinfo
+ * XEN_DOMCTL_getpageframeinfo3
+ * XEN_DOMCTL_setvcpuextstate
+ * XEN_DOMCTL_getvcpuextstate
+ * XEN_DOMCTL_set_access_required
+ * XEN_DOMCTL_audit_p2m
+ * XEN_DOMCTL_set_virq_handler
+ * XEN_DOMCTL_set_broken_page_p2m
+ * XEN_DOMCTL_setnodeaffinity
+ * XEN_DOMCTL_getnodeaffinity
+ * XEN_DOMCTL_set_max_evtchn
+ * XEN_DOMCTL_gdbsx_guestmemio
+ * XEN_DOMCTL_gdbsx_pausevcpu
+ * XEN_DOMCTL_gdbsx_unpausevcpu
+ * XEN_DOMCTL_gdbsx_domstatus
 
 __HYPERVISOR_sysctl (xen/include/public/sysctl.h)
 
- All subops are covered by this statement.  (That is, no subops are
- considered safe for disaggregation.)
+ The following subops are covered by this statement. subops not listed
+ here are considered safe for disaggregation.
+
+ * XEN_SYSCTL_readconsole
+ * XEN_SYSCTL_tbuf_op
+ * XEN_SYSCTL_physinfo
+ * XEN_SYSCTL_sched_id
+ * XEN_SYSCTL_perfc_op
+ * XEN_SYSCTL_getdomaininfolist
+ * XEN_SYSCTL_debug_keys
+ * XEN_SYSCTL_getcpuinfo
+ * XEN_SYSCTL_availheap
+ * XEN_SYSCTL_get_pmstat
+ * XEN_SYSCTL_cpu_hotplug
+ * XEN_SYSCTL_pm_op
+ * XEN_SYSCTL_page_offline_op
+ * XEN_SYSCTL_lockprof_op
+ * XEN_SYSCTL_topologyinfo
+ * XEN_SYSCTL_numainfo
+ * XEN_SYSCTL_cpupool_op
+ * XEN_SYSCTL_scheduler_op
+ * XEN_SYSCTL_coverage_op
 
 __HYPERVISOR_memory_op (xen/include/public/memory.h)
 
@@ -122,9 +205,8 @@ Setting up FLASK
 ----------------
 
 Xen must be compiled with XSM and FLASK enabled; by default, the security
-framework is disabled. Running 'make -C xen menuconfig' and enabling XSM
-and FLASK inside 'Common Features'; this change requires a make clean and
-rebuild.
+framework is disabled. Edit Config.mk or the .config file to set XSM_ENABLE and
+FLASK_ENABLE to "y"; this change requires a make clean and rebuild.
 
 FLASK uses only one domain configuration parameter (seclabel) defining the
 full security label of the newly created domain. If using the example policy,
@@ -141,21 +223,19 @@ only type enforcement is used and the user and role are set to system_u and
 system_r for all domains.
 
 The FLASK security framework is mostly configured using a security policy file.
-It relies on the SELinux compiler "checkpolicy"; if this is available, the
-policy will be compiled as part of the tools build.  If hypervisor support for a
-built-in policy is enabled ("Compile Xen with a built-in security policy"), the
-policy will be built during the hypervisor build.
+This policy file is not normally generated during the Xen build process because
+it relies on the SELinux compiler "checkpolicy"; run
 
-The policy is generated from definition files in tools/flask/policy.  Most
-changes to security policy will involve creating or modifying modules found in
-tools/flask/policy/modules/.  The modules.conf file there defines what modules
-are enabled and has short descriptions of each module.
+	make -C tools/flask/policy
 
-If not using the built-in policy, the XSM policy file needs to be copied to
-/boot and loaded as a module by grub.  The exact position and filename of the
-module does not matter as long as it is after the Xen kernel; it is normally
-placed either just above the dom0 kernel or at the end.  Once dom0 is running,
-the policy can be reloaded using "xl loadpolicy".
+to compile the example policy included with Xen. The policy is generated from
+definition files under this directory. When creating or modifying security
+policy, most modifications will be made to the xen type enforcement (.te) file
+tools/flask/policy/policy/modules/xen/xen.te or the macro definitions in xen.if.
+The XSM policy file needs to be copied to /boot and loaded as a module by grub.
+The exact position of the module does not matter as long as it is after the Xen
+kernel; it is normally placed either just above the dom0 kernel or at the end.
+Once dom0 is running, the policy can be reloaded using "xl loadpolicy".
 
 The example policy included with Xen demonstrates most of the features of FLASK
 that can be used without dom0 disaggregation. The main types for domUs are:
@@ -166,9 +246,9 @@ that can be used without dom0 disaggregation. The main types for domUs are:
  - nomigrate_t is a domain that must be created via the nomigrate_t_building
    type, and whose memory cannot be read by dom0 once created
 
-HVM domains with stubdomain device models also need a type for the stub domain.
-The example policy defines dm_dom_t for the device model of a domU_t domain;
-there are no device model types defined for the other domU types.
+HVM domains with stubdomain device models use two types (one per domain):
+ - domHVM_t is an HVM domain that uses a stubdomain device model
+ - dm_dom_t is the device model for a domain with type domHVM_t
 
 One disadvantage of using type enforcement to enforce isolation is that a new
 type is needed for each group of domains. The user field can be used to address
@@ -212,16 +292,17 @@ Type transitions are also used to compute the labels of event channels.
 Users and roles
 ---------------
 
-The default user and role used for domains is system_u and system_r.  Users are
-visible in the labels of domains and associated objects (event channels); when
-the vm_role module is enabled, "user_1:vm_r:domU_t" is a valid label for a
-domain created by the user_1 user.
+Users are defined in tools/flask/policy/policy/users. The example policy defines
+two users (customer_1 and customer_2) in addition to the system user system_u.
+Users are visible in the labels of domains and associated objects (event
+channels); in the example policy, "customer_1:vm_r:domU_t" is a valid label for
+the customer_1 user.
 
-Access control rules involving users and roles are defined in a module's
-constraints file (for example, vm_rule.cons). The vm_role module defines one
-role (vm_r) and three users (user_1 .. user_3), along with constraints that
-prevent different users from communicating using grants or event channels, while
-still allowing communication with the system_u user where dom0 resides.
+Access control rules involving users and roles are defined in the policy
+constraints file (tools/flask/policy/policy/constraints). The example policy
+provides constraints that prevent different users from communicating using
+grants or event channels, while still allowing communication with the system_u
+user where dom0 resides.
 
 Resource Policy
 ---------------
@@ -234,12 +315,12 @@ for passthrough, run:
 
 This command must be rerun on each boot or after any policy reload.
 
-When first loading or writing a policy, you should run FLASK in permissive mode
-(flask=permissive on the command line) and check the Xen logs (xl dmesg) for AVC
-denials before using it in enforcing mode (the default value of the boot
-parameter, which can also be changed using xl setenforce).  When using the
-default types for domains (domU_t), the example policy shipped with Xen should
-allow the same operations on or between domains as when not using FLASK.
+The example policy was only tested with simple domain creation and may be
+missing rules allowing accesses by dom0 or domU when a number of hypervisor
+features are used. When first loading or writing a policy, you should run FLASK
+in permissive mode (the default) and check the Xen logs (xl dmesg) for AVC
+denials before using it in enforcing mode (flask_enforcing=1 on the command
+line, or xl setenforce).
 
 
 MLS/MCS policy
@@ -269,9 +350,10 @@ declare_domain and create_domain interfaces:
 Existing SELinux tools such as audit2allow can be applied to these denials, e.g.
 xl dmesg | audit2allow
 
-The generated allow rules can then be fed back into the policy by adding them to
-a module, although manual review is advised and will often lead to adding
-parameterized rules to the interfaces in xen.if to address the general case.
+The generated allow rules can then be fed back into the policy by
+adding them to xen.te, although manual review is advised and will
+often lead to adding parameterized rules to the interfaces in xen.if
+to address the general case.
 
 
 Device Labeling in Policy
@@ -286,8 +368,33 @@ memory, or even changing certain BIOS settings). Dynamic labeling requires that
 the domain performing the labeling be trusted to label all the devices in the
 system properly.
 
-IRQs, PCI devices, I/O memory and x86 IO ports can all have labels defined.
-There are examples commented out in tools/flask/policy/policy/device_contexts.
+To enable static device labeling, a checkpolicy >= 2.0.20 and libsepol >=2.0.39
+are required. The policy Makefile (tools/flask/policy/Makefile) must also be
+changed as follows:
+
+########################################
+#
+# Build a binary policy locally
+#
+$(POLVER): policy.conf
+        @echo "Compiling $(NAME) $(POLVER)"
+       $(QUIET) $(CHECKPOLICY) $^ -o $@            (Comment out this line)
+# Uncomment line below to enable policies for devices
+#        $(QUIET) $(CHECKPOLICY) -t Xen $^ -o $@   (Uncomment this line)
+
+########################################
+#
+# Install a binary policy
+#
+$(LOADPATH): policy.conf
+        @echo "Compiling and installing $(NAME) $(LOADPATH)"
+       $(QUIET) $(CHECKPOLICY) $^ -o $@            (Comment out this line)
+# Uncomment line below to enable policies for devices
+#        $(QUIET) $(CHECKPOLICY) -t Xen $^ -o $@   (Uncomment this line)
+
+
+IRQs, PCI devices, I/O memory and ports can all be labeled.  There are
+commented out lines in xen.te policy for examples on how to label devices.
 
 Device Labeling
 ---------------
@@ -304,7 +411,7 @@ lspci output is..
         Region 2: I/O ports at ecc0 [size=32]
         Kernel modules: e1000e
 
-The labeling can be done with these lines in device_contexts:
+The labeling can be done with these commands
 
 pirqcon 33 system_u:object_r:nicP_t
 iomemcon 0xfebe0-0xfebff system_u:object_r:nicP_t
@@ -322,3 +429,32 @@ the ranges being denied to more easily determine what resources are required.
 When running in permissive mode, only the first denial of a given
 source/destination is printed to the log, so labeling devices using this method
 may require multiple passes to find all required ranges.
+
+Additional notes on XSM:FLASK
+-----------------------------
+
+1) xen command line parameters
+
+	a) flask_enforcing
+	
+	The default value for flask_enforcing is '0'.  This parameter causes the 
+	platform to boot in permissive mode which means that the policy is loaded 
+	but not enforced.  This mode is often helpful for developing new systems 
+	and policies as the policy violations are reported on the xen console and 
+	may be viewed in dom0 through 'xl dmesg'.
+	
+	To boot the platform into enforcing mode, which means that the policy is
+	loaded and enforced, append 'flask_enforcing=1' on the grub line.
+	
+	This parameter may also be changed through the flask hypercall.
+	
+	b) flask_enabled
+	
+	The default value for flask_enabled is '1'.  This parameter causes the
+	platform to enable the FLASK security module under the XSM framework.
+	The parameter may be enabled/disabled only once per boot.  If the parameter
+	is set to '0', only a reboot can re-enable flask.  When flask_enabled is '0'
+	the DUMMY module is enforced.
+
+	This parameter may also be changed through the flask hypercall.  But may
+	only be performed once per boot.

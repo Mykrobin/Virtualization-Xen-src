@@ -63,12 +63,10 @@
  */
 #define ACPI_SIG_ASF            "ASF!"	/* Alert Standard Format table */
 #define ACPI_SIG_BOOT           "BOOT"	/* Simple Boot Flag Table */
-#define ACPI_SIG_DBG2           "DBG2"	/* Debug Port table type 2 */
 #define ACPI_SIG_DBGP           "DBGP"	/* Debug Port table */
 #define ACPI_SIG_DMAR           "DMAR"	/* DMA Remapping table */
 #define ACPI_SIG_HPET           "HPET"	/* High Precision Event Timer table */
 #define ACPI_SIG_IBFT           "IBFT"	/* i_sCSI Boot Firmware Table */
-#define ACPI_SIG_IORT           "IORT"	/* IO Remapping Table */
 #define ACPI_SIG_IVRS           "IVRS"	/* I/O Virtualization Reporting Structure */
 #define ACPI_SIG_MCFG           "MCFG"	/* PCI Memory Mapped Configuration table */
 #define ACPI_SIG_MCHI           "MCHI"	/* Management Controller Host Interface table */
@@ -231,67 +229,6 @@ struct acpi_table_boot {
 	u8 cmos_index;		/* Index in CMOS RAM for the boot register */
 	u8 reserved[3];
 };
-
-/*******************************************************************************
- *
- * DBG2 - Debug Port Table 2
- *        Version 0 (Both main table and subtables)
- *
- * Conforms to "Microsoft Debug Port Table 2 (DBG2)", May 22 2012.
- *
- ******************************************************************************/
-
-struct acpi_table_dbg2 {
-	struct acpi_table_header header;	/* Common ACPI table header */
-	u32 info_offset;
-	u32 info_count;
-};
-
-/* Debug Device Information Subtable */
-
-struct acpi_dbg2_device {
-	u8 revision;
-	u16 length;
-	u8 register_count;	/* Number of base_address registers */
-	u16 namepath_length;
-	u16 namepath_offset;
-	u16 oem_data_length;
-	u16 oem_data_offset;
-	u16 port_type;
-	u16 port_subtype;
-	u16 reserved;
-	u16 base_address_offset;
-	u16 address_size_offset;
-	/*
-	 * Data that follows:
-	 *    base_address (required) - Each in 12-byte Generic Address Structure format.
-	 *    address_size (required) - Array of u32 sizes corresponding to each base_address register.
-	 *    Namepath    (required) - Null terminated string. Single dot if not supported.
-	 *    oem_data    (optional) - Length is oem_data_length.
-	 */
-};
-
-/* Types for port_type field above */
-
-#define ACPI_DBG2_SERIAL_PORT       0x8000
-#define ACPI_DBG2_1394_PORT         0x8001
-#define ACPI_DBG2_USB_PORT          0x8002
-#define ACPI_DBG2_NET_PORT          0x8003
-
-/* Subtypes for port_subtype field above */
-
-#define ACPI_DBG2_16550_COMPATIBLE  0x0000
-#define ACPI_DBG2_16550_SUBSET      0x0001
-#define ACPI_DBG2_PL011             0x0003
-#define ACPI_DBG2_SBSA_32           0x000d
-#define ACPI_DBG2_SBSA              0x000e
-#define ACPI_DBG2_DCC               0x000f
-#define ACPI_DBG2_BCM2835           0x0010
-
-#define ACPI_DBG2_1394_STANDARD     0x0000
-
-#define ACPI_DBG2_USB_XHCI          0x0000
-#define ACPI_DBG2_USB_EHCI          0x0001
 
 /*******************************************************************************
  *
@@ -557,149 +494,6 @@ struct acpi_ibft_target {
 
 /*******************************************************************************
  *
- * IORT - IO Remapping Table
- *
- * Conforms to "IO Remapping Table System Software on ARM Platforms",
- * Document number: ARM DEN 0049B, October 2015
- *
- ******************************************************************************/
-
-struct acpi_table_iort {
-	struct acpi_table_header header;
-	u32 node_count;
-	u32 node_offset;
-	u32 reserved;
-};
-
-/*
- * IORT subtables
- */
-struct acpi_iort_node {
-	u8 type;
-	u16 length;
-	u8 revision;
-	u32 reserved;
-	u32 mapping_count;
-	u32 mapping_offset;
-	char node_data[1];
-};
-
-/* Values for subtable Type above */
-
-enum acpi_iort_node_type {
-	ACPI_IORT_NODE_ITS_GROUP = 0x00,
-	ACPI_IORT_NODE_NAMED_COMPONENT = 0x01,
-	ACPI_IORT_NODE_PCI_ROOT_COMPLEX = 0x02,
-	ACPI_IORT_NODE_SMMU = 0x03,
-	ACPI_IORT_NODE_SMMU_V3 = 0x04
-};
-
-struct acpi_iort_id_mapping {
-	u32 input_base;		/* Lowest value in input range */
-	u32 id_count;		/* Number of IDs */
-	u32 output_base;	/* Lowest value in output range */
-	u32 output_reference;	/* A reference to the output node */
-	u32 flags;
-};
-
-/* Masks for Flags field above for IORT subtable */
-
-#define ACPI_IORT_ID_SINGLE_MAPPING (1)
-
-struct acpi_iort_memory_access {
-	u32 cache_coherency;
-	u8 hints;
-	u16 reserved;
-	u8 memory_flags;
-};
-
-/* Values for cache_coherency field above */
-
-#define ACPI_IORT_NODE_COHERENT         0x00000001	/* The device node is fully coherent */
-#define ACPI_IORT_NODE_NOT_COHERENT     0x00000000	/* The device node is not coherent */
-
-/* Masks for Hints field above */
-
-#define ACPI_IORT_HT_TRANSIENT          (1)
-#define ACPI_IORT_HT_WRITE              (1<<1)
-#define ACPI_IORT_HT_READ               (1<<2)
-#define ACPI_IORT_HT_OVERRIDE           (1<<3)
-
-/* Masks for memory_flags field above */
-
-#define ACPI_IORT_MF_COHERENCY          (1)
-#define ACPI_IORT_MF_ATTRIBUTES         (1<<1)
-
-/*
- * IORT node specific subtables
- */
-struct acpi_iort_its_group {
-	u32 its_count;
-	u32 identifiers[1];	/* GIC ITS identifier arrary */
-};
-
-struct acpi_iort_named_component {
-	u32 node_flags;
-	u64 memory_properties;	/* Memory access properties */
-	u8 memory_address_limit;	/* Memory address size limit */
-	char device_name[1];	/* Path of namespace object */
-};
-
-struct acpi_iort_root_complex {
-	u64 memory_properties;	/* Memory access properties */
-	u32 ats_attribute;
-	u32 pci_segment_number;
-};
-
-/* Values for ats_attribute field above */
-
-#define ACPI_IORT_ATS_SUPPORTED         0x00000001	/* The root complex supports ATS */
-#define ACPI_IORT_ATS_UNSUPPORTED       0x00000000	/* The root complex doesn't support ATS */
-
-struct acpi_iort_smmu {
-	u64 base_address;	/* SMMU base address */
-	u64 span;		/* Length of memory range */
-	u32 model;
-	u32 flags;
-	u32 global_interrupt_offset;
-	u32 context_interrupt_count;
-	u32 context_interrupt_offset;
-	u32 pmu_interrupt_count;
-	u32 pmu_interrupt_offset;
-	u64 interrupts[1];	/* Interrupt array */
-};
-
-/* Values for Model field above */
-
-#define ACPI_IORT_SMMU_V1               0x00000000	/* Generic SMMUv1 */
-#define ACPI_IORT_SMMU_V2               0x00000001	/* Generic SMMUv2 */
-#define ACPI_IORT_SMMU_CORELINK_MMU400  0x00000002	/* ARM Corelink MMU-400 */
-#define ACPI_IORT_SMMU_CORELINK_MMU500  0x00000003	/* ARM Corelink MMU-500 */
-
-/* Masks for Flags field above */
-
-#define ACPI_IORT_SMMU_DVM_SUPPORTED    (1)
-#define ACPI_IORT_SMMU_COHERENT_WALK    (1<<1)
-
-struct acpi_iort_smmu_v3 {
-	u64 base_address;	/* SMMUv3 base address */
-	u32 flags;
-	u32 reserved;
-	u64 vatos_address;
-	u32 model;		/* O: generic SMMUv3 */
-	u32 event_gsiv;
-	u32 pri_gsiv;
-	u32 gerr_gsiv;
-	u32 sync_gsiv;
-};
-
-/* Masks for Flags field above */
-
-#define ACPI_IORT_SMMU_V3_COHACC_OVERRIDE   (1)
-#define ACPI_IORT_SMMU_V3_HTTU_OVERRIDE     (1<<1)
-
-/*******************************************************************************
- *
  * IVRS - I/O Virtualization Reporting Structure
  *        Version 1
  *
@@ -733,7 +527,6 @@ struct acpi_ivrs_header {
 
 enum acpi_ivrs_type {
 	ACPI_IVRS_TYPE_HARDWARE = 0x10,
-	ACPI_IVRS_TYPE_HARDWARE_11H = 0x11,
 	ACPI_IVRS_TYPE_MEMORY_ALL /* _MEMORY1 */ = 0x20,
 	ACPI_IVRS_TYPE_MEMORY_ONE /* _MEMORY2 */ = 0x21,
 	ACPI_IVRS_TYPE_MEMORY_RANGE /* _MEMORY3 */ = 0x22,
@@ -767,9 +560,7 @@ struct acpi_ivrs_hardware {
 	u64 base_address;	/* IOMMU control registers */
 	u16 pci_segment_group;
 	u16 info;		/* MSI number and unit ID */
-	u32 iommu_attr;
-	u64 efr_image;		/* Extd feature register */
-	u64 reserved;
+	u32 reserved;
 };
 
 /* Masks for Info field above */

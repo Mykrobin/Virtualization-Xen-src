@@ -27,14 +27,10 @@
 #include <xen/smp.h>
 #include <xen/softirq.h>
 #include <xen/timer.h>
-#include <xen/warning.h>
 #include <xen/irq.h>
 #include <xen/console.h>
-#include <asm/cpuerrata.h>
 #include <asm/gic.h>
-#include <asm/procinfo.h>
 #include <asm/psci.h>
-#include <asm/acpi.h>
 
 cpumask_t cpu_online_map;
 cpumask_t cpu_present_map;
@@ -43,7 +39,7 @@ cpumask_t cpu_possible_map;
 struct cpuinfo_arm cpu_data[NR_CPUS];
 
 /* CPU logical map: map xen cpuid to an MPIDR */
-register_t __cpu_logical_map[NR_CPUS] = { [0 ... NR_CPUS-1] = MPIDR_INVALID };
+u32 __cpu_logical_map[NR_CPUS] = { [0 ... NR_CPUS-1] = MPIDR_INVALID };
 
 /* Fake one node for now. See also include/asm-arm/numa.h */
 nodemask_t __read_mostly node_online_map = { { [0] = 1UL } };
@@ -61,7 +57,7 @@ struct init_info __initdata init_data =
 /* Shared state for coordinating CPU bringup */
 unsigned long smp_up_cpu = MPIDR_INVALID;
 /* Shared state for coordinating CPU teardown */
-static bool cpu_is_dead;
+static bool_t cpu_is_dead = 0;
 
 /* ID of the PCPU we're running on */
 DEFINE_PER_CPU(unsigned int, cpu_id);
@@ -70,13 +66,6 @@ DEFINE_PER_CPU(unsigned int, cpu_id);
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_sibling_mask);
 /* representing HT and core siblings of each logical CPU */
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_core_mask);
-
-/*
- * By default non-boot CPUs not identical to the boot CPU will be
- * parked.
- */
-static bool __read_mostly opt_hmp_unsafe = false;
-boolean_param("hmp-unsafe", opt_hmp_unsafe);
 
 static void setup_cpu_sibling_map(int cpu)
 {
@@ -103,19 +92,29 @@ smp_clear_cpu_maps (void)
  * MPIDR values related to logical cpus
  * Code base on Linux arch/arm/kernel/devtree.c
  */
-static void __init dt_smp_init_cpus(void)
+void __init smp_init_cpus(void)
 {
     register_t mpidr;
     struct dt_device_node *cpus = dt_find_node_by_path("/cpus");
     struct dt_device_node *cpu;
     unsigned int i, j;
     unsigned int cpuidx = 1;
-    static register_t tmp_map[NR_CPUS] __initdata =
+    static u32 tmp_map[NR_CPUS] __initdata =
     {
         [0 ... NR_CPUS - 1] = MPIDR_INVALID
     };
-    bool bootcpu_valid = false;
+    bool_t bootcpu_valid = 0;
     int rc;
+
+    /* scan the DTB for a PSCI node and set a global variable */
+    psci_init();
+
+    if ( (rc = arch_smp_init()) < 0 )
+    {
+        printk(XENLOG_WARNING "SMP init failed (%d)\n"
+               "Using only 1 CPU\n", rc);
+        return;
+    }
 
     mpidr = boot_cpu_data.mpidr.bits & MPIDR_HWID_MASK;
 
@@ -130,8 +129,7 @@ static void __init dt_smp_init_cpus(void)
     {
         const __be32 *prop;
         u64 addr;
-        u32 reg_len;
-        register_t hwid;
+        u32 reg_len, hwid;
 
         if ( !dt_device_type_is_equal(cpu, "cpu") )
             continue;
@@ -171,7 +169,7 @@ static void __init dt_smp_init_cpus(void)
          */
         if ( hwid & ~MPIDR_HWID_MASK )
         {
-            printk(XENLOG_WARNING "cpu node `%s`: invalid hwid value (0x%"PRIregister")\n",
+            printk(XENLOG_WARNING "cpu node `%s`: invalid hwid value (0x%x)\n",
                    dt_node_full_name(cpu), hwid);
             continue;
         }
@@ -187,7 +185,7 @@ static void __init dt_smp_init_cpus(void)
             if ( tmp_map[j] == hwid )
             {
                 printk(XENLOG_WARNING
-                       "cpu node `%s`: duplicate /cpu reg properties %"PRIregister" in the DT\n",
+                       "cpu node `%s`: duplicate /cpu reg properties %"PRIx32" in the DT\n",
                        dt_node_full_name(cpu), hwid);
                 break;
             }
@@ -206,7 +204,7 @@ static void __init dt_smp_init_cpus(void)
         if ( hwid == mpidr )
         {
             i = 0;
-            bootcpu_valid = true;
+            bootcpu_valid = 1;
         }
         else
             i = cpuidx++;
@@ -222,7 +220,7 @@ static void __init dt_smp_init_cpus(void)
 
         if ( (rc = arch_cpu_init(i, cpu)) < 0 )
         {
-            printk("cpu%d init failed (hwid %"PRIregister"): %d\n", i, hwid, rc);
+            printk("cpu%d init failed (hwid %x): %d\n", i, hwid, rc);
             tmp_map[i] = MPIDR_INVALID;
         }
         else
@@ -245,31 +243,6 @@ static void __init dt_smp_init_cpus(void)
     }
 }
 
-void __init smp_init_cpus(void)
-{
-    int rc;
-
-    /* initialize PSCI and set a global variable */
-    psci_init();
-
-    if ( (rc = arch_smp_init()) < 0 )
-    {
-        printk(XENLOG_WARNING "SMP init failed (%d)\n"
-               "Using only 1 CPU\n", rc);
-        return;
-    }
-
-    if ( acpi_disabled )
-        dt_smp_init_cpus();
-    else
-        acpi_smp_init_cpus();
-
-    if ( opt_hmp_unsafe )
-        warning_add("WARNING: HMP COMPUTING HAS BEEN ENABLED.\n"
-                    "It has implications on the security and stability of the system,\n"
-                    "unless the cpu affinity of all domains is specified.\n");
-}
-
 int __init
 smp_get_max_cpus (void)
 {
@@ -283,7 +256,7 @@ smp_get_max_cpus (void)
 }
 
 void __init
-smp_prepare_cpus(void)
+smp_prepare_cpus (unsigned int max_cpus)
 {
     cpumask_copy(&cpu_present_map, &cpu_possible_map);
 
@@ -291,9 +264,9 @@ smp_prepare_cpus(void)
 }
 
 /* Boot the current CPU */
-void start_secondary(unsigned long boot_phys_offset,
-                     unsigned long fdt_paddr,
-                     unsigned long hwid)
+void __cpuinit start_secondary(unsigned long boot_phys_offset,
+                               unsigned long fdt_paddr,
+                               unsigned long hwid)
 {
     unsigned int cpuid = init_data.cpuid;
 
@@ -301,41 +274,20 @@ void start_secondary(unsigned long boot_phys_offset,
 
     set_processor_id(cpuid);
 
+    current_cpu_data = boot_cpu_data;
     identify_cpu(&current_cpu_data);
-    processor_setup();
 
     init_traps();
 
-    /*
-     * Currently Xen assumes the platform has only one kind of CPUs.
-     * This assumption does not hold on big.LITTLE platform and may
-     * result to instability and insecure platform (unless cpu affinity
-     * is manually specified for all domains). Better to park them for
-     * now.
-     */
-    if ( !opt_hmp_unsafe &&
-         current_cpu_data.midr.bits != boot_cpu_data.midr.bits )
-    {
-        printk(XENLOG_ERR "CPU%u MIDR (0x%x) does not match boot CPU MIDR (0x%x),\n"
-               "disable cpu (see big.LITTLE.txt under docs/).\n",
-               smp_processor_id(), current_cpu_data.midr.bits,
-               boot_cpu_data.midr.bits);
-        stop_cpu();
-    }
-
-    if ( dcache_line_bytes != read_dcache_line_bytes() )
-    {
-        printk(XENLOG_ERR "CPU%u dcache line size (%zu) does not match the boot CPU (%zu)\n",
-               smp_processor_id(), read_dcache_line_bytes(),
-               dcache_line_bytes);
-        stop_cpu();
-    }
+    setup_virt_paging();
 
     mmu_init_secondary_cpu();
 
     gic_init_secondary_cpu();
 
     init_secondary_IRQ();
+
+    gic_route_ppis();
 
     init_maintenance_interrupt();
     init_timer_interrupt();
@@ -346,19 +298,15 @@ void start_secondary(unsigned long boot_phys_offset,
 
     /* Run local notifiers */
     notify_cpu_starting(cpuid);
-    /*
-     * Ensure that previous writes are visible before marking the cpu as
-     * online.
-     */
-    smp_wmb();
+    wmb();
 
     /* Now report this CPU is up */
+    smp_up_cpu = MPIDR_INVALID;
     cpumask_set_cpu(cpuid, &cpu_online_map);
+    wmb();
 
     local_irq_enable();
     local_abort_enable();
-
-    check_local_cpu_errata();
 
     printk(XENLOG_DEBUG "CPU %u booted.\n", smp_processor_id());
 
@@ -382,7 +330,7 @@ void __cpu_disable(void)
 
     if ( cpu_disable_scheduler(cpu) )
         BUG();
-    smp_mb();
+    mb();
 
     /* Return to caller; eventually the IPI mechanism will unwind and the 
      * scheduler will drop to the idle loop, which will call stop_cpu(). */
@@ -391,9 +339,9 @@ void __cpu_disable(void)
 void stop_cpu(void)
 {
     local_irq_disable();
-    cpu_is_dead = true;
+    cpu_is_dead = 1;
     /* Make sure the write happens before we sleep forever */
-    dsb(sy);
+    dsb();
     isb();
     while ( 1 )
         wfi();
@@ -413,7 +361,6 @@ int __init cpu_up_send_sgi(int cpu)
 int __cpu_up(unsigned int cpu)
 {
     int rc;
-    s_time_t deadline;
 
     printk("Bringing up CPU%d\n", cpu);
 
@@ -426,12 +373,12 @@ int __cpu_up(unsigned int cpu)
     /* Tell the remote CPU which stack to boot on. */
     init_data.stack = idle_vcpu[cpu]->arch.stack;
 
-    /* Tell the remote CPU what its logical CPU ID is. */
+    /* Tell the remote CPU what is it's logical CPU ID */
     init_data.cpuid = cpu;
 
     /* Open the gate for this CPU */
     smp_up_cpu = cpu_logical_map(cpu);
-    clean_dcache(smp_up_cpu);
+    clean_xen_dcache(smp_up_cpu);
 
     rc = arch_cpu_up(cpu);
 
@@ -443,37 +390,10 @@ int __cpu_up(unsigned int cpu)
         return rc;
     }
 
-    deadline = NOW() + MILLISECS(1000);
-
-    while ( !cpu_online(cpu) && NOW() < deadline )
+    while ( !cpu_online(cpu) )
     {
         cpu_relax();
         process_pending_softirqs();
-    }
-    /*
-     * Ensure that other cpus' initializations are visible before
-     * proceeding. Corresponds to smp_wmb() in start_secondary.
-     */
-    smp_rmb();
-
-    /*
-     * Nuke start of day info before checking one last time if the CPU
-     * actually came online. If it is not online it may still be
-     * trying to come up and may show up later unexpectedly.
-     *
-     * This doesn't completely avoid the possibility of the supposedly
-     * failed CPU trying to progress with another CPUs stack settings
-     * etc, but better than nothing, hopefully.
-     */
-    init_data.stack = NULL;
-    init_data.cpuid = ~0;
-    smp_up_cpu = MPIDR_INVALID;
-    clean_dcache(smp_up_cpu);
-
-    if ( !cpu_online(cpu) )
-    {
-        printk("CPU%d never came online\n", cpu);
-        return -EIO;
     }
 
     return 0;
@@ -491,10 +411,10 @@ void __cpu_die(unsigned int cpu)
         process_pending_softirqs();
         if ( (++i % 10) == 0 )
             printk(KERN_ERR "CPU %u still not dead...\n", cpu);
-        smp_mb();
+        mb();
     }
-    cpu_is_dead = false;
-    smp_mb();
+    cpu_is_dead = 0;
+    mb();
 }
 
 /*

@@ -715,9 +715,11 @@ Ocfs2 has only very limited security; it is assumed that anyone who can
 access the filesystem bits on the shared disk can mount the filesystem and use
 it.  But in a virtualized data center,
 higher isolation requirements may apply.
-As a result, management tools must explicitly authenticate (or may
+As a result, a Xen boot option -- &quot;tmem_shared_auth&quot; -- was
+added.  The option defaults to disabled,
+but when it is enabled, management tools must explicitly authenticate (or may
 explicitly deny) shared pool access to any client.
-On Xen, this is done with the &quot;xl
+On Xen, this is done with the &quot;xm
 tmem-shared-auth&quot; command.
 <P>
 <b><i>32-bit implementation</i>.</b>
@@ -726,6 +728,13 @@ However, the Xen heap is limited in size on
 32-bit Xen so tmem did not work very well.
 There are still 32-bit ifdefs in some places in the code, but things may
 have bit-rotted so using tmem on a 32-bit Xen is not recommended.
+<P>
+<b><i>IA-64 implementation. </i></b>
+The vast majority of the tmem
+implementation is architecture-independent.
+For tmem to run on Xen/ia64, it is believed that only one or two
+routines needs to be written.(See the
+#ifdef __ia64__ at <i>cli_mfn_to_va()</i>.)
 
 <h2>Known Issues</h2>
 

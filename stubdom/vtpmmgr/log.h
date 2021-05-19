@@ -64,20 +64,18 @@ extern char *module_names[];
 #define SETBIT(num,idx)   (num) |= BITMASK(idx)
 #define CLEARBIT(num,idx) (num) &= ( ~ BITMASK(idx) )
 
-void printk(const char *fmt, ...);
-
 #define vtpmloginfo(module, fmt, args...) \
   if (GETBIT (LOGGING_MODULES, module) == 1) {				\
-    printk("INFO[%s]: " fmt, module_names[module], ##args); \
+    fprintf (stdout, "INFO[%s]: " fmt, module_names[module], ##args); \
   }
 
 #define vtpmloginfomore(module, fmt, args...) \
   if (GETBIT (LOGGING_MODULES, module) == 1) {			      \
-    printk(fmt,##args);				      \
+    fprintf (stdout, fmt,##args);				      \
   }
 
 #define vtpmlogerror(module, fmt, args...) \
-  printk("ERROR[%s]: " fmt, module_names[module], ##args);
+  fprintf (stderr, "ERROR[%s]: " fmt, module_names[module], ##args);
 
 //typedef UINT32 tpm_size_t;
 

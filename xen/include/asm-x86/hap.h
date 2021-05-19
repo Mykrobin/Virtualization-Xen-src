@@ -19,7 +19,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #ifndef _XEN_HAP_H
@@ -31,22 +32,37 @@
     printk("hap error: %s(): " _f, __func__, ##_a)
 
 /************************************************/
+/*          hap domain page mapping             */
+/************************************************/
+static inline void *
+hap_map_domain_page(mfn_t mfn)
+{
+    return map_domain_page(mfn_x(mfn));
+}
+
+static inline void
+hap_unmap_domain_page(void *p)
+{
+    unmap_domain_page(p);
+}
+
+/************************************************/
 /*        hap domain level functions            */
 /************************************************/
 void  hap_domain_init(struct domain *d);
-int   hap_domctl(struct domain *d, struct xen_domctl_shadow_op *sc,
-                 XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl);
+int   hap_domctl(struct domain *d, xen_domctl_shadow_op_t *sc,
+                 XEN_GUEST_HANDLE_PARAM(void) u_domctl);
 int   hap_enable(struct domain *d, u32 mode);
 void  hap_final_teardown(struct domain *d);
-void  hap_teardown(struct domain *d, bool *preempted);
+void  hap_teardown(struct domain *d, int *preempted);
 void  hap_vcpu_init(struct vcpu *v);
+void  hap_logdirty_init(struct domain *d);
 int   hap_track_dirty_vram(struct domain *d,
                            unsigned long begin_pfn,
                            unsigned long nr,
-                           XEN_GUEST_HANDLE_PARAM(void) dirty_bitmap);
+                           XEN_GUEST_HANDLE_64(uint8) dirty_bitmap);
 
 extern const struct paging_mode *hap_paging_get_mode(struct vcpu *);
-int hap_set_allocation(struct domain *d, unsigned int pages, bool *preempted);
 
 #endif /* XEN_HAP_H */
 

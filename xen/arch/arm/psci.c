@@ -22,54 +22,51 @@
 #include <xen/mm.h>
 #include <xen/smp.h>
 #include <asm/psci.h>
-#include <asm/acpi.h>
 
-/*
- * While a 64-bit OS can make calls with SMC32 calling conventions, for
- * some calls it is necessary to use SMC64 to pass or return 64-bit values.
- * For such calls PSCI_0_2_FN_NATIVE(x) will choose the appropriate
- * (native-width) function ID.
- */
-#ifdef CONFIG_ARM_64
-#define PSCI_0_2_FN_NATIVE(name)    PSCI_0_2_FN64_##name
+bool_t psci_available;
+
+#ifdef CONFIG_ARM_32
+#define REG_PREFIX "r"
 #else
-#define PSCI_0_2_FN_NATIVE(name)    PSCI_0_2_FN32_##name
+#define REG_PREFIX "x"
 #endif
 
-uint32_t psci_ver;
-uint32_t smccc_ver;
+static noinline int __invoke_psci_fn_smc(register_t function_id,
+                                         register_t arg0,
+                                         register_t arg1,
+                                         register_t arg2)
+{
+    asm volatile(
+        __asmeq("%0", REG_PREFIX"0")
+        __asmeq("%1", REG_PREFIX"1")
+        __asmeq("%2", REG_PREFIX"2")
+        __asmeq("%3", REG_PREFIX"3")
+        "smc #0"
+        : "+r" (function_id)
+        : "r" (arg0), "r" (arg1), "r" (arg2));
+
+    return function_id;
+}
+
+#undef REG_PREFIX
 
 static uint32_t psci_cpu_on_nr;
 
 int call_psci_cpu_on(int cpu)
 {
-    return call_smc(psci_cpu_on_nr, cpu_logical_map(cpu), __pa(init_secondary), 0);
+    return __invoke_psci_fn_smc(psci_cpu_on_nr,
+                                cpu_logical_map(cpu), __pa(init_secondary), 0);
 }
 
-void call_psci_system_off(void)
+int __init psci_init(void)
 {
-    if ( psci_ver > PSCI_VERSION(0, 1) )
-        call_smc(PSCI_0_2_FN32_SYSTEM_OFF, 0, 0, 0);
-}
-
-void call_psci_system_reset(void)
-{
-    if ( psci_ver > PSCI_VERSION(0, 1) )
-        call_smc(PSCI_0_2_FN32_SYSTEM_RESET, 0, 0, 0);
-}
-
-static int __init psci_features(uint32_t psci_func_id)
-{
-    if ( psci_ver < PSCI_VERSION(1, 0) )
-        return PSCI_NOT_SUPPORTED;
-
-    return call_smc(PSCI_1_0_FN32_PSCI_FEATURES, psci_func_id, 0, 0);
-}
-
-static int __init psci_is_smc_method(const struct dt_device_node *psci)
-{
+    const struct dt_device_node *psci;
     int ret;
     const char *prop_str;
+
+    psci = dt_find_compatible_node(NULL, NULL, "arm,psci");
+    if ( !psci )
+        return -ENODEV;
 
     ret = dt_property_read_string(psci, "method", &prop_str);
     if ( ret )
@@ -88,120 +85,15 @@ static int __init psci_is_smc_method(const struct dt_device_node *psci)
         return -EINVAL;
     }
 
-    return 0;
-}
-
-static void __init psci_init_smccc(void)
-{
-    /* PSCI is using at least SMCCC 1.0 calling convention. */
-    smccc_ver = ARM_SMCCC_VERSION_1_0;
-
-    if ( psci_features(ARM_SMCCC_VERSION_FID) != PSCI_NOT_SUPPORTED )
-    {
-        uint32_t ret;
-
-        ret = call_smc(ARM_SMCCC_VERSION_FID, 0, 0, 0);
-        if ( ret != ARM_SMCCC_NOT_SUPPORTED )
-            smccc_ver = ret;
-    }
-
-    printk(XENLOG_INFO "Using SMC Calling Convention v%u.%u\n",
-           SMCCC_VERSION_MAJOR(smccc_ver), SMCCC_VERSION_MINOR(smccc_ver));
-}
-
-static int __init psci_init_0_1(void)
-{
-    int ret;
-    const struct dt_device_node *psci;
-
-    if ( !acpi_disabled )
-    {
-        printk("PSCI 0.1 is not supported when using ACPI\n");
-        return -EINVAL;
-    }
-
-    psci = dt_find_compatible_node(NULL, NULL, "arm,psci");
-    if ( !psci )
-        return -EOPNOTSUPP;
-
-    ret = psci_is_smc_method(psci);
-    if ( ret )
-        return -EINVAL;
-
     if ( !dt_property_read_u32(psci, "cpu_on", &psci_cpu_on_nr) )
     {
         printk("/psci node is missing the \"cpu_on\" property\n");
         return -ENOENT;
     }
 
-    psci_ver = PSCI_VERSION(0, 1);
+    psci_available = 1;
 
-    return 0;
-}
-
-static int __init psci_init_0_2(void)
-{
-    static const struct dt_device_match psci_ids[] __initconst =
-    {
-        DT_MATCH_COMPATIBLE("arm,psci-0.2"),
-        DT_MATCH_COMPATIBLE("arm,psci-1.0"),
-        { /* sentinel */ },
-    };
-    int ret;
-
-    if ( acpi_disabled )
-    {
-        const struct dt_device_node *psci;
-
-        psci = dt_find_matching_node(NULL, psci_ids);
-        if ( !psci )
-            return -EOPNOTSUPP;
-
-        ret = psci_is_smc_method(psci);
-        if ( ret )
-            return -EINVAL;
-    }
-    else
-    {
-        if ( acpi_psci_hvc_present() ) {
-            printk("PSCI conduit must be SMC, but is HVC\n");
-            return -EINVAL;
-        }
-    }
-
-    psci_ver = call_smc(PSCI_0_2_FN32_PSCI_VERSION, 0, 0, 0);
-
-    /* For the moment, we only support PSCI 0.2 and PSCI 1.x */
-    if ( psci_ver != PSCI_VERSION(0, 2) && PSCI_VERSION_MAJOR(psci_ver) != 1 )
-    {
-        printk("Error: Unrecognized PSCI version %u.%u\n",
-               PSCI_VERSION_MAJOR(psci_ver), PSCI_VERSION_MINOR(psci_ver));
-        return -EOPNOTSUPP;
-    }
-
-    psci_cpu_on_nr = PSCI_0_2_FN_NATIVE(CPU_ON);
-
-    return 0;
-}
-
-int __init psci_init(void)
-{
-    int ret;
-
-    if ( !acpi_disabled && !acpi_psci_present() )
-        return -EOPNOTSUPP;
-
-    ret = psci_init_0_2();
-    if ( ret )
-        ret = psci_init_0_1();
-
-    if ( ret )
-        return ret;
-
-    psci_init_smccc();
-
-    printk(XENLOG_INFO "Using PSCI v%u.%u\n",
-           PSCI_VERSION_MAJOR(psci_ver), PSCI_VERSION_MINOR(psci_ver));
+    printk(XENLOG_INFO "Using PSCI for SMP bringup\n");
 
     return 0;
 }

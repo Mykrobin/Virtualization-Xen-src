@@ -22,16 +22,13 @@ enum {
 
 typedef void (*softirq_handler)(void);
 
-void do_softirq(void);
+asmlinkage void do_softirq(void);
 void open_softirq(int nr, softirq_handler handler);
 void softirq_init(void);
 
 void cpumask_raise_softirq(const cpumask_t *, unsigned int nr);
 void cpu_raise_softirq(unsigned int cpu, unsigned int nr);
 void raise_softirq(unsigned int nr);
-
-void cpu_raise_softirq_batch_begin(void);
-void cpu_raise_softirq_batch_finish(void);
 
 /*
  * Process pending softirqs on this CPU. This should be called periodically

@@ -13,7 +13,8 @@
     GNU General Public License for more details.
 
     You should have received a copy of the GNU General Public License
-    along with this program; If not, see <http://www.gnu.org/licenses/>.
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #include <sys/types.h>
@@ -25,7 +26,6 @@
 
 #include "utils.h"
 #include "xenstored_core.h"
-#include "xenstored_osdep.h"
 
 void write_pidfile(const char *pidfile)
 {
@@ -99,56 +99,3 @@ void unmap_xenbus(void *interface)
 {
 	munmap(interface, getpagesize());
 }
-
-#ifndef __sun__
-evtchn_port_t xenbus_evtchn(void)
-{
-	int fd;
-	int rc;
-	evtchn_port_t port;
-	char str[20];
-
-	fd = open(XENSTORED_PORT_DEV, O_RDONLY);
-	if (fd == -1)
-		return -1;
-
-	rc = read(fd, str, sizeof(str) - 1);
-	if (rc == -1)
-	{
-		int err = errno;
-		close(fd);
-		errno = err;
-		return -1;
-	}
-
-	str[rc] = '\0';
-	port = strtoul(str, NULL, 0);
-
-	close(fd);
-	return port;
-}
-
-void *xenbus_map(void)
-{
-	int fd;
-	void *addr;
-
-	fd = open(XENSTORED_KVA_DEV, O_RDWR);
-	if (fd == -1)
-		return NULL;
-
-	addr = mmap(NULL, getpagesize(), PROT_READ|PROT_WRITE,
-		MAP_SHARED, fd, 0);
-
-	if (addr == MAP_FAILED)
-		addr = NULL;
-
-	close(fd);
-
-	return addr;
-}
-
-void xenbus_notify_running(void)
-{
-}
-#endif /* !__sun__ */

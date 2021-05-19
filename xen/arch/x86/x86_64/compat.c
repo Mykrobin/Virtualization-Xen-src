@@ -2,12 +2,12 @@
  * compat.c
  */
 
-asm(".file \"" __FILE__ "\"");
-
+#include <xen/config.h>
 #include <xen/hypercall.h>
 #include <compat/xen.h>
 #include <compat/physdev.h>
 
+DEFINE_XEN_GUEST_HANDLE(physdev_op_compat_t);
 #define physdev_op                    compat_physdev_op
 #define physdev_op_t                  physdev_op_compat_t
 #define do_physdev_op                 compat_physdev_op

@@ -16,9 +16,11 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/sched.h>
 #include <xen/spinlock.h>
@@ -94,7 +96,6 @@ int stop_machine_run(int (*fn)(void *), void *data, unsigned int cpu)
     stopmachine_data.fn_data = data;
     stopmachine_data.nr_cpus = nr_cpus;
     stopmachine_data.fn_cpu = cpu;
-    stopmachine_data.fn_result = 0;
     atomic_set(&stopmachine_data.done, 0);
     stopmachine_data.state = STOPMACHINE_START;
 
@@ -113,11 +114,7 @@ int stop_machine_run(int (*fn)(void *), void *data, unsigned int cpu)
 
     stopmachine_set_state(STOPMACHINE_INVOKE);
     if ( (cpu == smp_processor_id()) || (cpu == NR_CPUS) )
-    {
-        ret = (*fn)(data);
-        if ( ret )
-            write_atomic(&stopmachine_data.fn_result, ret);
-    }
+        stopmachine_data.fn_result = (*fn)(data);
     stopmachine_wait_state();
     ret = stopmachine_data.fn_result;
 
@@ -155,12 +152,8 @@ static void stopmachine_action(unsigned long cpu)
         case STOPMACHINE_INVOKE:
             if ( (stopmachine_data.fn_cpu == smp_processor_id()) ||
                  (stopmachine_data.fn_cpu == NR_CPUS) )
-            {
-                int ret = stopmachine_data.fn(stopmachine_data.fn_data);
-
-                if ( ret )
-                    write_atomic(&stopmachine_data.fn_result, ret);
-            }
+                stopmachine_data.fn_result =
+                    stopmachine_data.fn(stopmachine_data.fn_data);
             break;
         default:
             break;

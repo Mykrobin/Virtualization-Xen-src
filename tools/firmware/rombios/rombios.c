@@ -21,7 +21,8 @@
 //  Lesser General Public License for more details.
 //
 //  You should have received a copy of the GNU Lesser General Public
-//  License along with this library; If not, see <http://www.gnu.org/licenses/>.
+//  License along with this library; if not, write to the Free Software
+//  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA
 
 // ROM BIOS for use with Bochs/Plex86/QEMU emulation environment
 
@@ -3226,7 +3227,7 @@ ASM_END
     current++;
     write_word(ebda_seg, &EbdaData->ata.trsfsectors,current);
     count--;
-    status = await_ide(NOT_BSY, iobase1, IDE_TIMEOUT);
+    status = inb(iobase1 + ATA_CB_STAT);
     if (count == 0) {
       if ( (status & (ATA_CB_STAT_BSY | ATA_CB_STAT_RDY | ATA_CB_STAT_DF | ATA_CB_STAT_DRQ | ATA_CB_STAT_ERR) )
           != ATA_CB_STAT_RDY ) {

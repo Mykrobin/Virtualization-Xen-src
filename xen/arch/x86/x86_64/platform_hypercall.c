@@ -2,8 +2,7 @@
  * platform_hypercall.c
  */
 
-asm(".file \"" __FILE__ "\"");
-
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <compat/platform.h>
 
@@ -32,10 +31,6 @@ CHECK_pf_pcpu_version;
 #define xen_pf_enter_acpi_sleep xenpf_enter_acpi_sleep
 CHECK_pf_enter_acpi_sleep;
 #undef xen_pf_enter_acpi_sleep
-
-#define xen_pf_resource_entry xenpf_resource_entry
-CHECK_pf_resource_entry;
-#undef xen_pf_resource_entry
 
 #define COMPAT
 #define _XEN_GUEST_HANDLE(t) XEN_GUEST_HANDLE(t)

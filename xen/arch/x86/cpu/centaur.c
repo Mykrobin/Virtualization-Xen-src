@@ -1,3 +1,4 @@
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/bitops.h>
@@ -14,7 +15,7 @@
 #define RNG_ENABLED	(1 << 3)
 #define RNG_ENABLE	(1 << 6)	/* MSR_VIA_RNG */
 
-static void init_c3(struct cpuinfo_x86 *c)
+static void __init init_c3(struct cpuinfo_x86 *c)
 {
 	uint64_t msr_content;
 
@@ -37,24 +38,29 @@ static void init_c3(struct cpuinfo_x86 *c)
 			wrmsrl(MSR_VIA_RNG, msr_content | RNG_ENABLE);
 			printk(KERN_INFO "CPU: Enabled h/w RNG\n");
 		}
+
+		/* store Centaur Extended Feature Flags as
+		 * word 5 of the CPU capability bit array
+		 */
+		c->x86_capability[5] = cpuid_edx(0xC0000001);
 	}
 
 	if (c->x86 == 0x6 && c->x86_model >= 0xf) {
 		c->x86_cache_alignment = c->x86_clflush_size * 2;
-		__set_bit(X86_FEATURE_CONSTANT_TSC, c->x86_capability);
+		set_bit(X86_FEATURE_CONSTANT_TSC, c->x86_capability);
 	}
 
 	get_model_name(c);
 	display_cacheinfo(c);
 }
 
-static void init_centaur(struct cpuinfo_x86 *c)
+static void __init init_centaur(struct cpuinfo_x86 *c)
 {
 	if (c->x86 == 6)
 		init_c3(c);
 }
 
-static const struct cpu_dev centaur_cpu_dev = {
+static struct cpu_dev centaur_cpu_dev __cpuinitdata = {
 	.c_vendor	= "Centaur",
 	.c_ident	= { "CentaurHauls" },
 	.c_init		= init_centaur,

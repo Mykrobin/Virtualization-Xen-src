@@ -1,9 +1,10 @@
 /******************************************************************************
  * Arch-specific domctl.c
- *
+ * 
  * Copyright (c) 2002-2006, K A Fraser
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
@@ -23,380 +24,48 @@
 #include <asm/irq.h>
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/support.h>
+#include <asm/hvm/cacheattr.h>
 #include <asm/processor.h>
 #include <asm/acpi.h> /* for hvm_acpi_power_button */
 #include <xen/hypercall.h> /* for arch_do_domctl */
 #include <xsm/xsm.h>
 #include <xen/iommu.h>
-#include <xen/vm_event.h>
-#include <public/vm_event.h>
+#include <asm/mem_event.h>
+#include <public/mem_event.h>
 #include <asm/mem_sharing.h>
 #include <asm/xstate.h>
 #include <asm/debugger.h>
-#include <asm/psr.h>
-#include <asm/cpuid.h>
 
-static int gdbsx_guest_mem_io(domid_t domid, struct xen_domctl_gdbsx_memio *iop)
-{
-    void * __user gva = (void *)iop->gva, * __user uva = (void *)iop->uva;
-
-    iop->remain = dbg_rw_mem(gva, uva, iop->len, domid,
-                             !!iop->gwr, iop->pgd3val);
-
-    return iop->remain ? -EFAULT : 0;
+static int gdbsx_guest_mem_io(
+    domid_t domid, struct xen_domctl_gdbsx_memio *iop)
+{   
+    ulong l_uva = (ulong)iop->uva;
+    iop->remain = dbg_rw_mem(
+        (dbgva_t)iop->gva, (dbgbyte_t *)l_uva, iop->len, domid,
+        iop->gwr, iop->pgd3val);
+    return (iop->remain ? -EFAULT : 0);
 }
-
-static int update_domain_cpuid_info(struct domain *d,
-                                    const struct xen_domctl_cpuid *ctl)
-{
-    struct cpuid_policy *p = d->arch.cpuid;
-    const struct cpuid_leaf leaf = { ctl->eax, ctl->ebx, ctl->ecx, ctl->edx };
-    int old_vendor = p->x86_vendor;
-    unsigned int old_7d0 = p->feat.raw[0].d, old_e8b = p->extd.raw[8].b;
-    bool call_policy_changed = false; /* Avoid for_each_vcpu() unnecessarily */
-
-    /*
-     * Skip update for leaves we don't care about.  This avoids the overhead
-     * of recalculate_cpuid_policy() and making d->arch.cpuids[] needlessly
-     * longer to search.
-     */
-    switch ( ctl->input[0] )
-    {
-    case 0x00000000 ... ARRAY_SIZE(p->basic.raw) - 1:
-        if ( ctl->input[0] == 4 &&
-             ctl->input[1] >= ARRAY_SIZE(p->cache.raw) )
-            return 0;
-
-        if ( ctl->input[0] == 7 &&
-             ctl->input[1] >= ARRAY_SIZE(p->feat.raw) )
-            return 0;
-
-        BUILD_BUG_ON(ARRAY_SIZE(p->xstate.raw) < 2);
-        if ( ctl->input[0] == XSTATE_CPUID &&
-             ctl->input[1] != 1 ) /* Everything else automatically calculated. */
-            return 0;
-        break;
-
-    case 0x40000000: case 0x40000100:
-        /* Only care about the max_leaf limit. */
-
-    case 0x80000000 ... 0x80000000 + ARRAY_SIZE(p->extd.raw) - 1:
-        break;
-
-    default:
-        return 0;
-    }
-
-    /* Insert ctl data into cpuid_policy. */
-    switch ( ctl->input[0] )
-    {
-    case 0x00000000 ... ARRAY_SIZE(p->basic.raw) - 1:
-        switch ( ctl->input[0] )
-        {
-        case 4:
-            p->cache.raw[ctl->input[1]] = leaf;
-            break;
-
-        case 7:
-            p->feat.raw[ctl->input[1]] = leaf;
-            break;
-
-        case XSTATE_CPUID:
-            p->xstate.raw[ctl->input[1]] = leaf;
-            break;
-
-        default:
-            p->basic.raw[ctl->input[0]] = leaf;
-            break;
-        }
-        break;
-
-    case 0x40000000:
-        p->hv_limit = ctl->eax;
-        break;
-
-    case 0x40000100:
-        p->hv2_limit = ctl->eax;
-        break;
-
-    case 0x80000000 ... 0x80000000 + ARRAY_SIZE(p->extd.raw) - 1:
-        p->extd.raw[ctl->input[0] - 0x80000000] = leaf;
-        break;
-    }
-
-    recalculate_cpuid_policy(d);
-
-    switch ( ctl->input[0] )
-    {
-    case 0:
-        call_policy_changed = (p->x86_vendor != old_vendor);
-        break;
-
-    case 1:
-        if ( is_pv_domain(d) && ((levelling_caps & LCAP_1cd) == LCAP_1cd) )
-        {
-            uint64_t mask = cpuidmask_defaults._1cd;
-            uint32_t ecx = p->basic._1c;
-            uint32_t edx = p->basic._1d;
-
-            /*
-             * Must expose hosts HTT and X2APIC value so a guest using native
-             * CPUID can correctly interpret other leaves which cannot be
-             * masked.
-             */
-            if ( cpu_has_x2apic )
-                ecx |= cpufeat_mask(X86_FEATURE_X2APIC);
-            if ( cpu_has_htt )
-                edx |= cpufeat_mask(X86_FEATURE_HTT);
-
-            switch ( boot_cpu_data.x86_vendor )
-            {
-            case X86_VENDOR_INTEL:
-                /*
-                 * Intel masking MSRs are documented as AND masks.
-                 * Experimentally, they are applied after OSXSAVE and APIC
-                 * are fast-forwarded from real hardware state.
-                 */
-                mask &= ((uint64_t)edx << 32) | ecx;
-
-                if ( ecx & cpufeat_mask(X86_FEATURE_XSAVE) )
-                    ecx = cpufeat_mask(X86_FEATURE_OSXSAVE);
-                else
-                    ecx = 0;
-                edx = cpufeat_mask(X86_FEATURE_APIC);
-
-                mask |= ((uint64_t)edx << 32) | ecx;
-                break;
-
-            case X86_VENDOR_AMD:
-                mask &= ((uint64_t)ecx << 32) | edx;
-
-                /*
-                 * AMD masking MSRs are documented as overrides.
-                 * Experimentally, fast-forwarding of the OSXSAVE and APIC
-                 * bits from real hardware state only occurs if the MSR has
-                 * the respective bits set.
-                 */
-                if ( ecx & cpufeat_mask(X86_FEATURE_XSAVE) )
-                    ecx = cpufeat_mask(X86_FEATURE_OSXSAVE);
-                else
-                    ecx = 0;
-                edx = cpufeat_mask(X86_FEATURE_APIC);
-
-                mask |= ((uint64_t)ecx << 32) | edx;
-                break;
-            }
-
-            d->arch.pv_domain.cpuidmasks->_1cd = mask;
-        }
-        break;
-
-    case 6:
-        if ( is_pv_domain(d) && ((levelling_caps & LCAP_6c) == LCAP_6c) )
-        {
-            uint64_t mask = cpuidmask_defaults._6c;
-
-            if ( boot_cpu_data.x86_vendor == X86_VENDOR_AMD )
-                mask &= (~0ULL << 32) | ctl->ecx;
-
-            d->arch.pv_domain.cpuidmasks->_6c = mask;
-        }
-        break;
-
-    case 7:
-        if ( ctl->input[1] != 0 )
-            break;
-
-        if ( is_pv_domain(d) && ((levelling_caps & LCAP_7ab0) == LCAP_7ab0) )
-        {
-            uint64_t mask = cpuidmask_defaults._7ab0;
-
-            /*
-             * Leaf 7[0].eax is max_subleaf, not a feature mask.  Take it
-             * wholesale from the policy, but clamp the features in 7[0].ebx
-             * per usual.
-             */
-            if ( boot_cpu_data.x86_vendor == X86_VENDOR_AMD )
-                mask = (((uint64_t)p->feat.max_subleaf << 32) |
-                        ((uint32_t)mask & p->feat._7b0));
-
-            d->arch.pv_domain.cpuidmasks->_7ab0 = mask;
-        }
-
-        /*
-         * If the IBRS/IBPB policy has changed, we need to recalculate the MSR
-         * interception bitmaps.
-         */
-        call_policy_changed = (is_hvm_domain(d) &&
-                               ((old_7d0 ^ p->feat.raw[0].d) &
-                                (cpufeat_mask(X86_FEATURE_IBRSB) |
-                                 cpufeat_mask(X86_FEATURE_L1D_FLUSH))));
-        break;
-
-    case 0xa:
-        if ( boot_cpu_data.x86_vendor != X86_VENDOR_INTEL )
-            break;
-
-        /* If PMU version is zero then the guest doesn't have VPMU */
-        if ( p->basic.pmu_version == 0 )
-        {
-            struct vcpu *v;
-
-            for_each_vcpu ( d, v )
-                vpmu_destroy(v);
-        }
-        break;
-
-    case 0xd:
-        if ( ctl->input[1] != 1 )
-            break;
-
-        if ( is_pv_domain(d) && ((levelling_caps & LCAP_Da1) == LCAP_Da1) )
-        {
-            uint64_t mask = cpuidmask_defaults.Da1;
-            uint32_t eax = p->xstate.Da1;
-
-            if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL )
-                mask &= (~0ULL << 32) | eax;
-
-            d->arch.pv_domain.cpuidmasks->Da1 = mask;
-        }
-        break;
-
-    case 0x80000001:
-        if ( is_pv_domain(d) && ((levelling_caps & LCAP_e1cd) == LCAP_e1cd) )
-        {
-            uint64_t mask = cpuidmask_defaults.e1cd;
-            uint32_t ecx = p->extd.e1c;
-            uint32_t edx = p->extd.e1d;
-
-            /*
-             * Must expose hosts CMP_LEGACY value so a guest using native
-             * CPUID can correctly interpret other leaves which cannot be
-             * masked.
-             */
-            if ( cpu_has_cmp_legacy )
-                ecx |= cpufeat_mask(X86_FEATURE_CMP_LEGACY);
-
-            /* If not emulating AMD, clear the duplicated features in e1d. */
-            if ( p->x86_vendor != X86_VENDOR_AMD )
-                edx &= ~CPUID_COMMON_1D_FEATURES;
-
-            switch ( boot_cpu_data.x86_vendor )
-            {
-            case X86_VENDOR_INTEL:
-                mask &= ((uint64_t)edx << 32) | ecx;
-                break;
-
-            case X86_VENDOR_AMD:
-                mask &= ((uint64_t)ecx << 32) | edx;
-
-                /*
-                 * Fast-forward bits - Must be set in the masking MSR for
-                 * fast-forwarding to occur in hardware.
-                 */
-                ecx = 0;
-                edx = cpufeat_mask(X86_FEATURE_APIC);
-
-                mask |= ((uint64_t)ecx << 32) | edx;
-                break;
-            }
-
-            d->arch.pv_domain.cpuidmasks->e1cd = mask;
-        }
-        break;
-
-    case 0x80000008:
-        /*
-         * If the IBPB policy has changed, we need to recalculate the MSR
-         * interception bitmaps.
-         */
-        call_policy_changed = (is_hvm_domain(d) &&
-                               ((old_e8b ^ p->extd.raw[8].b) &
-                                cpufeat_mask(X86_FEATURE_IBPB)));
-        break;
-    }
-
-    if ( call_policy_changed )
-    {
-        struct vcpu *v;
-
-        for_each_vcpu( d, v )
-            cpuid_policy_updated(v);
-    }
-
-    return 0;
-}
-
-static int vcpu_set_vmce(struct vcpu *v,
-                         const struct xen_domctl_ext_vcpucontext *evc)
-{
-    /*
-     * Sizes of vMCE parameters used by the current and past versions
-     * of Xen in descending order. If vMCE parameters are extended,
-     * remember to add the old size to this array by VMCE_SIZE().
-     */
-#define VMCE_SIZE(field) \
-    (offsetof(typeof(evc->vmce), field) + sizeof(evc->vmce.field))
-
-    static const unsigned int valid_sizes[] = {
-        sizeof(evc->vmce),
-        VMCE_SIZE(mci_ctl2_bank1),
-        VMCE_SIZE(caps),
-    };
-#undef VMCE_SIZE
-
-    struct hvm_vmce_vcpu vmce = { };
-    unsigned int evc_vmce_size =
-        min(evc->size - offsetof(typeof(*evc), vmce), sizeof(evc->vmce));
-    unsigned int i = 0;
-
-    BUILD_BUG_ON(offsetof(typeof(*evc), mcg_cap) !=
-                 offsetof(typeof(*evc), vmce.caps));
-    BUILD_BUG_ON(sizeof(evc->mcg_cap) != sizeof(evc->vmce.caps));
-
-    while ( i < ARRAY_SIZE(valid_sizes) && evc_vmce_size < valid_sizes[i] )
-        ++i;
-
-    if ( i == ARRAY_SIZE(valid_sizes) )
-        return 0;
-
-    memcpy(&vmce, &evc->vmce, valid_sizes[i]);
-
-    return vmce_restore_vcpu(v, &vmce);
-}
-
-void arch_get_domain_info(const struct domain *d,
-                          struct xen_domctl_getdomaininfo *info)
-{
-    if ( paging_mode_hap(d) )
-        info->flags |= XEN_DOMINF_hap;
-
-    info->arch_config.emulation_flags = d->arch.emulation_flags;
-}
-
-#define MAX_IOPORTS 0x10000
 
 long arch_do_domctl(
     struct xen_domctl *domctl, struct domain *d,
     XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
 {
-    struct vcpu *curr = current;
-    struct domain *currd = curr->domain;
     long ret = 0;
-    bool copyback = false;
-    unsigned long i;
+    bool_t copyback = 0;
 
     switch ( domctl->cmd )
     {
 
     case XEN_DOMCTL_shadow_op:
-        ret = paging_domctl(d, &domctl->u.shadow_op, u_domctl, 0);
-        if ( ret == -ERESTART )
+    {
+        ret = paging_domctl(d, &domctl->u.shadow_op,
+                            guest_handle_cast(u_domctl, void), 0);
+        if ( ret == -EAGAIN )
             return hypercall_create_continuation(__HYPERVISOR_arch_1,
                                                  "h", u_domctl);
-        copyback = true;
-        break;
+        copyback = 1;
+    }
+    break;
 
     case XEN_DOMCTL_ioport_permission:
     {
@@ -404,114 +73,307 @@ long arch_do_domctl(
         unsigned int np = domctl->u.ioport_permission.nr_ports;
         int allow = domctl->u.ioport_permission.allow_access;
 
-        if ( (fp + np) <= fp || (fp + np) > MAX_IOPORTS )
-            ret = -EINVAL;
-        else if ( !ioports_access_permitted(currd, fp, fp + np - 1) ||
-                  xsm_ioport_permission(XSM_HOOK, d, fp, fp + np - 1, allow) )
+        ret = -EINVAL;
+        if ( (fp + np) > 65536 )
+            break;
+
+        if ( np == 0 )
+            ret = 0;
+        else if ( xsm_ioport_permission(XSM_HOOK, d, fp, fp + np - 1, allow) )
             ret = -EPERM;
         else if ( allow )
             ret = ioports_permit_access(d, fp, fp + np - 1);
         else
             ret = ioports_deny_access(d, fp, fp + np - 1);
-        if ( !ret )
-            memory_type_changed(d);
-        break;
     }
+    break;
+
+    case XEN_DOMCTL_getpageframeinfo:
+    {
+        struct page_info *page;
+        unsigned long mfn = domctl->u.getpageframeinfo.gmfn;
+
+        ret = -EINVAL;
+        if ( unlikely(!mfn_valid(mfn)) )
+            break;
+
+        page = mfn_to_page(mfn);
+
+        if ( likely(get_page(page, d)) )
+        {
+            ret = 0;
+
+            domctl->u.getpageframeinfo.type = XEN_DOMCTL_PFINFO_NOTAB;
+
+            if ( (page->u.inuse.type_info & PGT_count_mask) != 0 )
+            {
+                switch ( page->u.inuse.type_info & PGT_type_mask )
+                {
+                case PGT_l1_page_table:
+                    domctl->u.getpageframeinfo.type = XEN_DOMCTL_PFINFO_L1TAB;
+                    break;
+                case PGT_l2_page_table:
+                    domctl->u.getpageframeinfo.type = XEN_DOMCTL_PFINFO_L2TAB;
+                    break;
+                case PGT_l3_page_table:
+                    domctl->u.getpageframeinfo.type = XEN_DOMCTL_PFINFO_L3TAB;
+                    break;
+                case PGT_l4_page_table:
+                    domctl->u.getpageframeinfo.type = XEN_DOMCTL_PFINFO_L4TAB;
+                    break;
+                }
+            }
+            
+            put_page(page);
+        }
+
+        copyback = 1;
+    }
+    break;
 
     case XEN_DOMCTL_getpageframeinfo3:
+        if (!has_32bit_shinfo(current->domain))
+        {
+            unsigned int n, j;
+            unsigned int num = domctl->u.getpageframeinfo3.num;
+            struct page_info *page;
+            xen_pfn_t *arr;
+
+            if ( unlikely(num > 1024) ||
+                 unlikely(num != domctl->u.getpageframeinfo3.num) )
+            {
+                ret = -E2BIG;
+                break;
+            }
+
+            page = alloc_domheap_page(NULL, 0);
+            if ( !page )
+            {
+                ret = -ENOMEM;
+                break;
+            }
+            arr = __map_domain_page(page);
+
+            for ( n = ret = 0; n < num; )
+            {
+                unsigned int k = min_t(unsigned int, num - n,
+                                       PAGE_SIZE / sizeof(*arr));
+
+                if ( copy_from_guest_offset(arr,
+                                            domctl->u.getpageframeinfo3.array,
+                                            n, k) )
+                {
+                    ret = -EFAULT;
+                    break;
+                }
+
+                for ( j = 0; j < k; j++ )
+                {
+                    unsigned long type = 0;
+                    p2m_type_t t;
+
+                    page = get_page_from_gfn(d, arr[j], &t, P2M_ALLOC);
+
+                    if ( unlikely(!page) ||
+                         unlikely(is_xen_heap_page(page)) )
+                    {
+                        if ( p2m_is_broken(t) )
+                            type = XEN_DOMCTL_PFINFO_BROKEN;
+                        else
+                            type = XEN_DOMCTL_PFINFO_XTAB;
+                    }
+                    else
+                    {
+                        switch( page->u.inuse.type_info & PGT_type_mask )
+                        {
+                        case PGT_l1_page_table:
+                            type = XEN_DOMCTL_PFINFO_L1TAB;
+                            break;
+                        case PGT_l2_page_table:
+                            type = XEN_DOMCTL_PFINFO_L2TAB;
+                            break;
+                        case PGT_l3_page_table:
+                            type = XEN_DOMCTL_PFINFO_L3TAB;
+                            break;
+                        case PGT_l4_page_table:
+                            type = XEN_DOMCTL_PFINFO_L4TAB;
+                            break;
+                        }
+
+                        if ( page->u.inuse.type_info & PGT_pinned )
+                            type |= XEN_DOMCTL_PFINFO_LPINTAB;
+
+                        if ( page->count_info & PGC_broken )
+                            type = XEN_DOMCTL_PFINFO_BROKEN;
+                    }
+
+                    if ( page )
+                        put_page(page);
+                    arr[j] = type;
+                }
+
+                if ( copy_to_guest_offset(domctl->u.getpageframeinfo3.array,
+                                          n, arr, k) )
+                {
+                    ret = -EFAULT;
+                    break;
+                }
+
+                n += k;
+            }
+
+            page = mfn_to_page(domain_page_map_to_mfn(arr));
+            unmap_domain_page(arr);
+            free_domheap_page(page);
+
+            break;
+        }
+        /* fall thru */
+    case XEN_DOMCTL_getpageframeinfo2:
     {
-        unsigned int num = domctl->u.getpageframeinfo3.num;
-        unsigned int width = has_32bit_shinfo(currd) ? 4 : 8;
+        int n,j;
+        int num = domctl->u.getpageframeinfo2.num;
+        uint32_t *arr32;
 
-        /* Games to allow this code block to handle a compat guest. */
-        void __user *guest_handle = domctl->u.getpageframeinfo3.array.p;
-
-        if ( unlikely(num > 1024) ||
-             unlikely(num != domctl->u.getpageframeinfo3.num) )
+        if ( unlikely(num > 1024) )
         {
             ret = -E2BIG;
             break;
         }
 
-        for ( i = 0; i < num; ++i )
+        arr32 = alloc_xenheap_page();
+        if ( !arr32 )
         {
-            unsigned long gfn = 0, type = 0;
-            struct page_info *page;
-            p2m_type_t t;
+            ret = -ENOMEM;
+            break;
+        }
+ 
+        ret = 0;
+        for ( n = 0; n < num; )
+        {
+            int k = PAGE_SIZE / 4;
+            if ( (num - n) < k )
+                k = num - n;
 
-            if ( raw_copy_from_guest(&gfn, guest_handle + (i * width), width) )
+            if ( copy_from_guest_offset(arr32,
+                                        domctl->u.getpageframeinfo2.array,
+                                        n, k) )
             {
                 ret = -EFAULT;
                 break;
             }
+     
+            for ( j = 0; j < k; j++ )
+            {      
+                struct page_info *page;
+                unsigned long gfn = arr32[j];
 
-            page = get_page_from_gfn(d, gfn, &t, P2M_ALLOC);
+                page = get_page_from_gfn(d, gfn, NULL, P2M_ALLOC);
 
-            if ( unlikely(!page) ||
-                 unlikely(is_xen_heap_page(page)) )
-            {
-                if ( unlikely(p2m_is_broken(t)) )
-                    type = XEN_DOMCTL_PFINFO_BROKEN;
+                if ( domctl->cmd == XEN_DOMCTL_getpageframeinfo3)
+                    arr32[j] = 0;
+
+                if ( unlikely(!page) ||
+                     unlikely(is_xen_heap_page(page)) )
+                    arr32[j] |= XEN_DOMCTL_PFINFO_XTAB;
                 else
-                    type = XEN_DOMCTL_PFINFO_XTAB;
-            }
-            else
-            {
-                switch( page->u.inuse.type_info & PGT_type_mask )
                 {
-                case PGT_l1_page_table:
-                    type = XEN_DOMCTL_PFINFO_L1TAB;
-                    break;
-                case PGT_l2_page_table:
-                    type = XEN_DOMCTL_PFINFO_L2TAB;
-                    break;
-                case PGT_l3_page_table:
-                    type = XEN_DOMCTL_PFINFO_L3TAB;
-                    break;
-                case PGT_l4_page_table:
-                    type = XEN_DOMCTL_PFINFO_L4TAB;
-                    break;
+                    unsigned long type = 0;
+
+                    switch( page->u.inuse.type_info & PGT_type_mask )
+                    {
+                    case PGT_l1_page_table:
+                        type = XEN_DOMCTL_PFINFO_L1TAB;
+                        break;
+                    case PGT_l2_page_table:
+                        type = XEN_DOMCTL_PFINFO_L2TAB;
+                        break;
+                    case PGT_l3_page_table:
+                        type = XEN_DOMCTL_PFINFO_L3TAB;
+                        break;
+                    case PGT_l4_page_table:
+                        type = XEN_DOMCTL_PFINFO_L4TAB;
+                        break;
+                    }
+
+                    if ( page->u.inuse.type_info & PGT_pinned )
+                        type |= XEN_DOMCTL_PFINFO_LPINTAB;
+                    arr32[j] |= type;
                 }
 
-                if ( page->u.inuse.type_info & PGT_pinned )
-                    type |= XEN_DOMCTL_PFINFO_LPINTAB;
-
-                if ( page->count_info & PGC_broken )
-                    type = XEN_DOMCTL_PFINFO_BROKEN;
+                if ( page )
+                    put_page(page);
             }
 
-            if ( page )
-                put_page(page);
-
-            if ( __raw_copy_to_guest(guest_handle + (i * width), &type, width) )
+            if ( copy_to_guest_offset(domctl->u.getpageframeinfo2.array,
+                                      n, arr32, k) )
             {
                 ret = -EFAULT;
                 break;
             }
 
-            /*
-             * Avoid checking for preemption when the `hostp2m' lock isn't
-             * involve, i.e. non-translated guest, and avoid preemption on
-             * the last iteration.
-             */
-            if ( paging_mode_translate(d) &&
-                 likely((i + 1) < num) && hypercall_preempt_check() )
-            {
-                domctl->u.getpageframeinfo3.num = num - i - 1;
-                domctl->u.getpageframeinfo3.array.p =
-                    guest_handle + ((i + 1) * width);
-                if ( __copy_to_guest(u_domctl, domctl, 1) )
-                {
-                    ret = -EFAULT;
-                    break;
-                }
-                return hypercall_create_continuation(__HYPERVISOR_domctl,
-                                                     "h", u_domctl);
-            }
+            n += k;
         }
 
-        break;
+        free_xenheap_page(arr32);
     }
+    break;
+
+    case XEN_DOMCTL_getmemlist:
+    {
+        int i;
+        unsigned long max_pfns = domctl->u.getmemlist.max_pfns;
+        uint64_t mfn;
+        struct page_info *page;
+
+        if ( unlikely(d->is_dying) ) {
+            ret = -EINVAL;
+            break;
+        }
+
+        /*
+         * XSA-74: This sub-hypercall is broken in several ways:
+         * - lock order inversion (p2m locks inside page_alloc_lock)
+         * - no preemption on huge max_pfns input
+         * - not (re-)checking d->is_dying with page_alloc_lock held
+         * - not honoring start_pfn input (which libxc also doesn't set)
+         * Additionally it is rather useless, as the result is stale by the
+         * time the caller gets to look at it.
+         * As it only has a single, non-production consumer (xen-mceinj),
+         * rather than trying to fix it we restrict it for the time being.
+         */
+        if ( /* No nested locks inside copy_to_guest_offset(). */
+             paging_mode_external(current->domain) ||
+             /* Arbitrary limit capping processing time. */
+             max_pfns > GB(4) / PAGE_SIZE )
+        {
+            ret = -EOPNOTSUPP;
+            break;
+        }
+
+        spin_lock(&d->page_alloc_lock);
+
+        ret = i = 0;
+        page_list_for_each(page, &d->page_list)
+        {
+            if ( i >= max_pfns )
+                break;
+            mfn = page_to_mfn(page);
+            if ( copy_to_guest_offset(domctl->u.getmemlist.buffer,
+                                      i, &mfn, 1) )
+            {
+                ret = -EFAULT;
+                break;
+            }
+			++i;
+		}
+
+        spin_unlock(&d->page_alloc_lock);
+
+        domctl->u.getmemlist.num_pfns = i;
+        copyback = 1;
+    }
+    break;
 
     case XEN_DOMCTL_hypercall_init:
     {
@@ -521,33 +383,30 @@ long arch_do_domctl(
 
         page = get_page_from_gfn(d, gmfn, NULL, P2M_ALLOC);
 
+        ret = -EACCES;
         if ( !page || !get_page_type(page, PGT_writable_page) )
         {
             if ( page )
-            {
-                ret = -EPERM;
                 put_page(page);
-            }
-            else
-                ret = -EINVAL;
             break;
         }
+
+        ret = 0;
 
         hypercall_page = __map_domain_page(page);
         hypercall_page_initialise(d, hypercall_page);
         unmap_domain_page(hypercall_page);
 
         put_page_and_type(page);
-        break;
     }
+    break;
 
     case XEN_DOMCTL_sethvmcontext:
-    {
+    { 
         struct hvm_domain_context c = { .size = domctl->u.hvmcontext.size };
 
         ret = -EINVAL;
-        if ( (d == currd) || /* no domain_pause() */
-             !is_hvm_domain(d) )
+        if ( !is_hvm_domain(d) ) 
             goto sethvmcontext_out;
 
         ret = -ENOMEM;
@@ -555,7 +414,7 @@ long arch_do_domctl(
             goto sethvmcontext_out;
 
         ret = -EFAULT;
-        if ( copy_from_guest(c.data, domctl->u.hvmcontext.buffer, c.size) != 0 )
+        if ( copy_from_guest(c.data, domctl->u.hvmcontext.buffer, c.size) != 0)
             goto sethvmcontext_out;
 
         domain_pause(d);
@@ -563,17 +422,17 @@ long arch_do_domctl(
         domain_unpause(d);
 
     sethvmcontext_out:
-        xfree(c.data);
-        break;
+        if ( c.data != NULL )
+            xfree(c.data);
     }
+    break;
 
     case XEN_DOMCTL_gethvmcontext:
-    {
+    { 
         struct hvm_domain_context c = { 0 };
 
         ret = -EINVAL;
-        if ( (d == currd) || /* no domain_pause() */
-             !is_hvm_domain(d) )
+        if ( !is_hvm_domain(d) ) 
             goto gethvmcontext_out;
 
         c.size = hvm_save_size(d);
@@ -583,12 +442,12 @@ long arch_do_domctl(
             /* Client is querying for the correct buffer size */
             domctl->u.hvmcontext.size = c.size;
             ret = 0;
-            goto gethvmcontext_out;
+            goto gethvmcontext_out;            
         }
 
         /* Check that the client has a big enough buffer */
         ret = -ENOSPC;
-        if ( domctl->u.hvmcontext.size < c.size )
+        if ( domctl->u.hvmcontext.size < c.size ) 
             goto gethvmcontext_out;
 
         /* Allocate our own marshalling buffer */
@@ -605,59 +464,83 @@ long arch_do_domctl(
             ret = -EFAULT;
 
     gethvmcontext_out:
-        copyback = true;
-        xfree(c.data);
-        break;
+        copyback = 1;
+
+        if ( c.data != NULL )
+            xfree(c.data);
     }
+    break;
 
     case XEN_DOMCTL_gethvmcontext_partial:
+    { 
         ret = -EINVAL;
-        if ( (d == currd) || /* no domain_pause() */
-             !is_hvm_domain(d) )
+        if ( !is_hvm_domain(d) ) 
             break;
 
         domain_pause(d);
         ret = hvm_save_one(d, domctl->u.hvmcontext_partial.type,
                            domctl->u.hvmcontext_partial.instance,
-                           domctl->u.hvmcontext_partial.buffer,
-                           &domctl->u.hvmcontext_partial.bufsz);
+                           domctl->u.hvmcontext_partial.buffer);
         domain_unpause(d);
+    }
+    break;
 
-        if ( !ret )
-            copyback = true;
-        break;
 
     case XEN_DOMCTL_set_address_size:
-        if ( ((domctl->u.address_size.size == 64) && !d->arch.is_32bit_pv) ||
-             ((domctl->u.address_size.size == 32) && d->arch.is_32bit_pv) )
-            ret = 0;
-        else if ( domctl->u.address_size.size == 32 )
+    {
+        switch ( domctl->u.address_size.size )
+        {
+        case 32:
             ret = switch_compat(d);
-        else
-            ret = -EINVAL;
-        break;
+            break;
+        case 64:
+            ret = switch_native(d);
+            break;
+        default:
+            ret = (domctl->u.address_size.size == BITS_PER_LONG) ? 0 : -EINVAL;
+            break;
+        }
+    }
+    break;
 
     case XEN_DOMCTL_get_address_size:
-        domctl->u.address_size.size = is_pv_32bit_domain(d) ? 32 :
-                                                              BITS_PER_LONG;
-        copyback = true;
-        break;
+    {
+        domctl->u.address_size.size =
+            is_pv_32on64_domain(d) ? 32 : BITS_PER_LONG;
+
+        ret = 0;
+        copyback = 1;
+    }
+    break;
 
     case XEN_DOMCTL_set_machine_address_size:
+    {
+        ret = -EBUSY;
         if ( d->tot_pages > 0 )
-            ret = -EBUSY;
-        else
-            d->arch.physaddr_bitsize = domctl->u.address_size.size;
-        break;
+            break;
+
+        d->arch.physaddr_bitsize = domctl->u.address_size.size;
+
+        ret = 0;
+    }
+    break;
 
     case XEN_DOMCTL_get_machine_address_size:
+    {
         domctl->u.address_size.size = d->arch.physaddr_bitsize;
-        copyback = true;
-        break;
+
+        ret = 0;
+        copyback = 1;
+    }
+    break;
 
     case XEN_DOMCTL_sendtrigger:
     {
         struct vcpu *v;
+
+        ret = -EINVAL;
+        if ( domctl->u.sendtrigger.vcpu >= MAX_VIRT_CPUS )
+            break;
 
         ret = -ESRCH;
         if ( domctl->u.sendtrigger.vcpu >= d->max_vcpus ||
@@ -667,38 +550,44 @@ long arch_do_domctl(
         switch ( domctl->u.sendtrigger.trigger )
         {
         case XEN_DOMCTL_SENDTRIGGER_NMI:
+        {
             ret = 0;
             if ( !test_and_set_bool(v->nmi_pending) )
                 vcpu_kick(v);
-            break;
+        }
+        break;
 
         case XEN_DOMCTL_SENDTRIGGER_POWER:
+        {
             ret = -EINVAL;
-            if ( is_hvm_domain(d) )
+            if ( is_hvm_domain(d) ) 
             {
                 ret = 0;
                 hvm_acpi_power_button(d);
             }
-            break;
+        }
+        break;
 
         case XEN_DOMCTL_SENDTRIGGER_SLEEP:
+        {
             ret = -EINVAL;
-            if ( is_hvm_domain(d) )
+            if ( is_hvm_domain(d) ) 
             {
                 ret = 0;
                 hvm_acpi_sleep_button(d);
             }
-            break;
+        }
+        break;
 
         default:
             ret = -ENOSYS;
         }
-        break;
     }
+    break;
 
     case XEN_DOMCTL_bind_pt_irq:
     {
-        struct xen_domctl_bind_pt_irq *bind = &domctl->u.bind_pt_irq;
+        xen_domctl_bind_pt_irq_t *bind = &domctl->u.bind_pt_irq;
         int irq;
 
         ret = -EINVAL;
@@ -711,29 +600,29 @@ long arch_do_domctl(
 
         irq = domain_pirq_to_irq(d, bind->machine_irq);
         ret = -EPERM;
-        if ( irq <= 0 || !irq_access_permitted(currd, irq) )
+        if ( irq <= 0 || !irq_access_permitted(current->domain, irq) )
             break;
 
         ret = -ESRCH;
         if ( iommu_enabled )
         {
-            pcidevs_lock();
+            spin_lock(&pcidevs_lock);
             ret = pt_irq_create_bind(d, bind);
-            pcidevs_unlock();
+            spin_unlock(&pcidevs_lock);
         }
         if ( ret < 0 )
             printk(XENLOG_G_ERR "pt_irq_create_bind failed (%ld) for dom%d\n",
                    ret, d->domain_id);
-        break;
     }
+    break;    
 
     case XEN_DOMCTL_unbind_pt_irq:
     {
-        struct xen_domctl_bind_pt_irq *bind = &domctl->u.bind_pt_irq;
+        xen_domctl_bind_pt_irq_t *bind = &domctl->u.bind_pt_irq;
         int irq = domain_pirq_to_irq(d, bind->machine_irq);
 
         ret = -EPERM;
-        if ( irq <= 0 || !irq_access_permitted(currd, irq) )
+        if ( irq <= 0 || !irq_access_permitted(current->domain, irq) )
             break;
 
         ret = xsm_unbind_pt_irq(XSM_HOOK, d, bind);
@@ -742,32 +631,101 @@ long arch_do_domctl(
 
         if ( iommu_enabled )
         {
-            pcidevs_lock();
+            spin_lock(&pcidevs_lock);
             ret = pt_irq_destroy_bind(d, bind);
-            pcidevs_unlock();
+            spin_unlock(&pcidevs_lock);
         }
         if ( ret < 0 )
             printk(XENLOG_G_ERR "pt_irq_destroy_bind failed (%ld) for dom%d\n",
                    ret, d->domain_id);
-        break;
     }
+    break;
+
+    case XEN_DOMCTL_memory_mapping:
+    {
+        unsigned long gfn = domctl->u.memory_mapping.first_gfn;
+        unsigned long mfn = domctl->u.memory_mapping.first_mfn;
+        unsigned long nr_mfns = domctl->u.memory_mapping.nr_mfns;
+        int add = domctl->u.memory_mapping.add_mapping;
+        unsigned long i;
+
+        ret = -EINVAL;
+        if ( (mfn + nr_mfns - 1) < mfn || /* wrap? */
+             ((mfn | (mfn + nr_mfns - 1)) >> (paddr_bits - PAGE_SHIFT)) ||
+             (gfn + nr_mfns - 1) < gfn ) /* wrap? */
+            break;
+
+        ret = -E2BIG;
+        /* Must break hypercall up as this could take a while. */
+        if ( nr_mfns > 64 )
+            break;
+
+        ret = -EPERM;
+        if ( !iomem_access_permitted(current->domain, mfn, mfn + nr_mfns - 1) )
+            break;
+
+        ret = xsm_iomem_mapping(XSM_HOOK, d, mfn, mfn + nr_mfns - 1, add);
+        if ( ret )
+            break;
+
+        if ( add )
+        {
+            printk(XENLOG_G_INFO
+                   "memory_map:add: dom%d gfn=%lx mfn=%lx nr=%lx\n",
+                   d->domain_id, gfn, mfn, nr_mfns);
+
+            ret = iomem_permit_access(d, mfn, mfn + nr_mfns - 1);
+            if ( !ret && paging_mode_translate(d) )
+            {
+                for ( i = 0; !ret && i < nr_mfns; i++ )
+                    if ( !set_mmio_p2m_entry(d, gfn + i, _mfn(mfn + i)) )
+                        ret = -EIO;
+                if ( ret )
+                {
+                    printk(XENLOG_G_WARNING
+                           "memory_map:fail: dom%d gfn=%lx mfn=%lx\n",
+                           d->domain_id, gfn + i, mfn + i);
+                    while ( i-- )
+                        clear_mmio_p2m_entry(d, gfn + i);
+                    if ( iomem_deny_access(d, mfn, mfn + nr_mfns - 1) &&
+                         is_hardware_domain(current->domain) )
+                        printk(XENLOG_ERR
+                               "memory_map: failed to deny dom%d access to [%lx,%lx]\n",
+                               d->domain_id, mfn, mfn + nr_mfns - 1);
+                }
+            }
+        }
+        else
+        {
+            printk(XENLOG_G_INFO
+                   "memory_map:remove: dom%d gfn=%lx mfn=%lx nr=%lx\n",
+                   d->domain_id, gfn, mfn, nr_mfns);
+
+            if ( paging_mode_translate(d) )
+                for ( i = 0; i < nr_mfns; i++ )
+                    add |= !clear_mmio_p2m_entry(d, gfn + i);
+            ret = iomem_deny_access(d, mfn, mfn + nr_mfns - 1);
+            if ( !ret && add )
+                ret = -EIO;
+            if ( ret && is_hardware_domain(current->domain) )
+                printk(XENLOG_ERR
+                       "memory_map: error %ld %s dom%d access to [%lx,%lx]\n",
+                       ret, add ? "removing" : "denying", d->domain_id,
+                       mfn, mfn + nr_mfns - 1);
+        }
+    }
+    break;
 
     case XEN_DOMCTL_ioport_mapping:
     {
+#define MAX_IOPORTS    0x10000
+        struct hvm_iommu *hd;
         unsigned int fgp = domctl->u.ioport_mapping.first_gport;
         unsigned int fmp = domctl->u.ioport_mapping.first_mport;
         unsigned int np = domctl->u.ioport_mapping.nr_ports;
         unsigned int add = domctl->u.ioport_mapping.add_mapping;
-        struct hvm_domain *hvm_domain;
         struct g2m_ioport *g2m_ioport;
         int found = 0;
-
-        ret = -EOPNOTSUPP;
-        if ( !is_hvm_domain(d) )
-        {
-            printk(XENLOG_G_ERR "ioport_map against non-HVM domain\n");
-            break;
-        }
 
         ret = -EINVAL;
         if ( ((fgp | fmp | (np - 1)) >= MAX_IOPORTS) ||
@@ -780,21 +738,21 @@ long arch_do_domctl(
         }
 
         ret = -EPERM;
-        if ( !ioports_access_permitted(currd, fmp, fmp + np - 1) )
+        if ( !ioports_access_permitted(current->domain, fmp, fmp + np - 1) )
             break;
 
         ret = xsm_ioport_mapping(XSM_HOOK, d, fmp, fmp + np - 1, add);
         if ( ret )
             break;
 
-        hvm_domain = &d->arch.hvm_domain;
+        hd = domain_hvm_iommu(d);
         if ( add )
         {
             printk(XENLOG_G_INFO
                    "ioport_map:add: dom%d gport=%x mport=%x nr=%x\n",
                    d->domain_id, fgp, fmp, np);
 
-            list_for_each_entry(g2m_ioport, &hvm_domain->g2m_ioport_list, list)
+            list_for_each_entry(g2m_ioport, &hd->g2m_ioport_list, list)
                 if (g2m_ioport->mport == fmp )
                 {
                     g2m_ioport->gport = fgp;
@@ -813,7 +771,7 @@ long arch_do_domctl(
                 g2m_ioport->gport = fgp;
                 g2m_ioport->mport = fmp;
                 g2m_ioport->np = np;
-                list_add_tail(&g2m_ioport->list, &hvm_domain->g2m_ioport_list);
+                list_add_tail(&g2m_ioport->list, &hd->g2m_ioport_list);
             }
             if ( !ret )
                 ret = ioports_permit_access(d, fmp, fmp + np - 1);
@@ -828,7 +786,7 @@ long arch_do_domctl(
             printk(XENLOG_G_INFO
                    "ioport_map:remove: dom%d gport=%x mport=%x nr=%x\n",
                    d->domain_id, fgp, fmp, np);
-            list_for_each_entry(g2m_ioport, &hvm_domain->g2m_ioport_list, list)
+            list_for_each_entry(g2m_ioport, &hd->g2m_ioport_list, list)
                 if ( g2m_ioport->mport == fmp )
                 {
                     list_del(&g2m_ioport->list);
@@ -836,21 +794,30 @@ long arch_do_domctl(
                     break;
                 }
             ret = ioports_deny_access(d, fmp, fmp + np - 1);
-            if ( ret && is_hardware_domain(currd) )
+            if ( ret && is_hardware_domain(current->domain) )
                 printk(XENLOG_ERR
                        "ioport_map: error %ld denying dom%d access to [%x,%x]\n",
                        ret, d->domain_id, fmp, fmp + np - 1);
         }
-        if ( !ret )
-            memory_type_changed(d);
-        break;
     }
+    break;
+
+    case XEN_DOMCTL_pin_mem_cacheattr:
+    {
+        ret = hvm_set_mem_pinned_cacheattr(
+            d, domctl->u.pin_mem_cacheattr.start,
+            domctl->u.pin_mem_cacheattr.end,
+            domctl->u.pin_mem_cacheattr.type);
+    }
+    break;
 
     case XEN_DOMCTL_set_ext_vcpucontext:
     case XEN_DOMCTL_get_ext_vcpucontext:
     {
-        struct xen_domctl_ext_vcpucontext *evc = &domctl->u.ext_vcpucontext;
+        struct xen_domctl_ext_vcpucontext *evc;
         struct vcpu *v;
+
+        evc = &domctl->u.ext_vcpucontext;
 
         ret = -ESRCH;
         if ( (evc->vcpu >= d->max_vcpus) ||
@@ -859,7 +826,7 @@ long arch_do_domctl(
 
         if ( domctl->cmd == XEN_DOMCTL_get_ext_vcpucontext )
         {
-            if ( v == curr ) /* no vcpu_pause() */
+            if ( v == current ) /* no vcpu_pause() */
                 break;
 
             evc->size = sizeof(*evc);
@@ -893,15 +860,14 @@ long arch_do_domctl(
             evc->vmce.caps = v->arch.vmce.mcg_cap;
             evc->vmce.mci_ctl2_bank0 = v->arch.vmce.bank[0].mci_ctl2;
             evc->vmce.mci_ctl2_bank1 = v->arch.vmce.bank[1].mci_ctl2;
-            evc->vmce.mcg_ext_ctl = v->arch.vmce.mcg_ext_ctl;
 
             ret = 0;
             vcpu_unpause(v);
-            copyback = true;
+            copyback = 1;
         }
         else
         {
-            if ( d == currd ) /* no domain_pause() */
+            if ( d == current->domain ) /* no domain_pause() */
                 break;
             ret = -EINVAL;
             if ( evc->size < offsetof(typeof(*evc), vmce) )
@@ -935,58 +901,105 @@ long arch_do_domctl(
             else
                 domain_pause(d);
 
-            ret = vcpu_set_vmce(v, evc);
+            BUILD_BUG_ON(offsetof(struct xen_domctl_ext_vcpucontext,
+                                  mcg_cap) !=
+                         offsetof(struct xen_domctl_ext_vcpucontext,
+                                  vmce.caps));
+            BUILD_BUG_ON(sizeof(evc->mcg_cap) != sizeof(evc->vmce.caps));
+            if ( evc->size >= offsetof(typeof(*evc), vmce) +
+                              sizeof(evc->vmce) )
+                ret = vmce_restore_vcpu(v, &evc->vmce);
+            else if ( evc->size >= offsetof(typeof(*evc), mcg_cap) +
+                                   sizeof(evc->mcg_cap) )
+            {
+                struct hvm_vmce_vcpu vmce = { .caps = evc->mcg_cap };
+
+                ret = vmce_restore_vcpu(v, &vmce);
+            }
+            else
+                ret = 0;
 
             domain_unpause(d);
         }
-        break;
     }
+    break;
 
     case XEN_DOMCTL_set_cpuid:
-        if ( d == currd ) /* no domain_pause() */
-            ret = -EINVAL;
-        else if ( d->creation_finished )
-            ret = -EEXIST; /* No changing once the domain is running. */
-        else
+    {
+        xen_domctl_cpuid_t *ctl = &domctl->u.cpuid;
+        cpuid_input_t *cpuid, *unused = NULL;
+        int i;
+
+        for ( i = 0; i < MAX_CPUID_INPUT; i++ )
         {
-            domain_pause(d);
-            ret = update_domain_cpuid_info(d, &domctl->u.cpuid);
-            domain_unpause(d);
+            cpuid = &d->arch.cpuids[i];
+
+            if ( cpuid->input[0] == XEN_CPUID_INPUT_UNUSED )
+            {
+                if ( !unused )
+                    unused = cpuid;
+                continue;
+            }
+
+            if ( (cpuid->input[0] == ctl->input[0]) &&
+                 ((cpuid->input[1] == XEN_CPUID_INPUT_UNUSED) ||
+                  (cpuid->input[1] == ctl->input[1])) )
+                break;
         }
-        break;
+        
+        if ( i < MAX_CPUID_INPUT )
+            *cpuid = *ctl;
+        else if ( unused )
+            *unused = *ctl;
+        else
+            ret = -ENOENT;
+    }
+    break;
 
     case XEN_DOMCTL_gettscinfo:
-        if ( d == currd ) /* no domain_pause() */
-            ret = -EINVAL;
+    {
+        xen_guest_tsc_info_t info = { 0 };
+
+        ret = -EINVAL;
+        if ( d == current->domain ) /* no domain_pause() */
+            break;
+
+        domain_pause(d);
+        tsc_get_info(d, &info.tsc_mode,
+                        &info.elapsed_nsec,
+                        &info.gtsc_khz,
+                        &info.incarnation);
+        if ( copy_to_guest(domctl->u.tsc_info.out_info, &info, 1) )
+            ret = -EFAULT;
         else
-        {
-            domain_pause(d);
-            tsc_get_info(d, &domctl->u.tsc_info.tsc_mode,
-                         &domctl->u.tsc_info.elapsed_nsec,
-                         &domctl->u.tsc_info.gtsc_khz,
-                         &domctl->u.tsc_info.incarnation);
-            domain_unpause(d);
-            copyback = true;
-        }
-        break;
+            ret = 0;
+        domain_unpause(d);
+    }
+    break;
 
     case XEN_DOMCTL_settscinfo:
-        if ( d == currd ) /* no domain_pause() */
-            ret = -EINVAL;
-        else
-        {
-            domain_pause(d);
-            tsc_set_info(d, domctl->u.tsc_info.tsc_mode,
-                         domctl->u.tsc_info.elapsed_nsec,
-                         domctl->u.tsc_info.gtsc_khz,
-                         domctl->u.tsc_info.incarnation);
-            domain_unpause(d);
-        }
-        break;
+    {
+        ret = -EINVAL;
+        if ( d == current->domain ) /* no domain_pause() */
+            break;
+
+        domain_pause(d);
+        tsc_set_info(d, domctl->u.tsc_info.info.tsc_mode,
+                     domctl->u.tsc_info.info.elapsed_nsec,
+                     domctl->u.tsc_info.info.gtsc_khz,
+                     domctl->u.tsc_info.info.incarnation);
+        domain_unpause(d);
+
+        ret = 0;
+    }
+    break;
 
     case XEN_DOMCTL_suppress_spurious_page_faults:
+    {
         d->arch.suppress_spurious_page_faults = 1;
-        break;
+        ret = 0;
+    }
+    break;
 
     case XEN_DOMCTL_debug_op:
     {
@@ -998,20 +1011,23 @@ long arch_do_domctl(
             break;
 
         ret = -EINVAL;
-        if ( (v == curr) || /* no vcpu_pause() */
-             !is_hvm_domain(d) )
+        if ( !is_hvm_domain(d))
             break;
 
         ret = hvm_debug_op(v, domctl->u.debug_op.op);
-        break;
     }
+    break;
 
     case XEN_DOMCTL_gdbsx_guestmemio:
-        domctl->u.gdbsx_guest_memio.remain = domctl->u.gdbsx_guest_memio.len;
+    {
+        domctl->u.gdbsx_guest_memio.remain =
+            domctl->u.gdbsx_guest_memio.len;
+
         ret = gdbsx_guest_mem_io(domctl->domain, &domctl->u.gdbsx_guest_memio);
         if ( !ret )
-           copyback = true;
-        break;
+           copyback = 1;
+    }
+    break;
 
     case XEN_DOMCTL_gdbsx_pausevcpu:
     {
@@ -1021,12 +1037,13 @@ long arch_do_domctl(
         if ( !d->controller_pause_count )
             break;
         ret = -EINVAL;
-        if ( domctl->u.gdbsx_pauseunp_vcpu.vcpu >= d->max_vcpus ||
+        if ( domctl->u.gdbsx_pauseunp_vcpu.vcpu >= MAX_VIRT_CPUS ||
              (v = d->vcpu[domctl->u.gdbsx_pauseunp_vcpu.vcpu]) == NULL )
             break;
-        ret = vcpu_pause_by_systemcontroller(v);
-        break;
+        vcpu_pause(v);
+        ret = 0;
     }
+    break;
 
     case XEN_DOMCTL_gdbsx_unpausevcpu:
     {
@@ -1036,16 +1053,15 @@ long arch_do_domctl(
         if ( !d->controller_pause_count )
             break;
         ret = -EINVAL;
-        if ( domctl->u.gdbsx_pauseunp_vcpu.vcpu >= d->max_vcpus ||
+        if ( domctl->u.gdbsx_pauseunp_vcpu.vcpu >= MAX_VIRT_CPUS ||
              (v = d->vcpu[domctl->u.gdbsx_pauseunp_vcpu.vcpu]) == NULL )
             break;
-        ret = vcpu_unpause_by_systemcontroller(v);
-        if ( ret == -EINVAL )
-            printk(XENLOG_G_WARNING
-                   "WARN: d%d attempting to unpause %pv which is not paused\n",
-                   currd->domain_id, v);
-        break;
+        if ( !atomic_read(&v->pause_count) )
+            printk("WARN: Unpausing vcpu:%d which is not paused\n", v->vcpu_id);
+        vcpu_unpause(v);
+        ret = 0;
     }
+    break;
 
     case XEN_DOMCTL_gdbsx_domstatus:
     {
@@ -1067,19 +1083,21 @@ long arch_do_domctl(
                 }
             }
         }
-        copyback = true;
-        break;
+        ret = 0;
+        copyback = 1;
     }
+    break;
 
     case XEN_DOMCTL_setvcpuextstate:
     case XEN_DOMCTL_getvcpuextstate:
     {
-        struct xen_domctl_vcpuextstate *evc = &domctl->u.vcpuextstate;
+        struct xen_domctl_vcpuextstate *evc;
         struct vcpu *v;
         uint32_t offset = 0;
 
-#define PV_XSAVE_HDR_SIZE (2 * sizeof(uint64_t))
-#define PV_XSAVE_SIZE(xcr0) (PV_XSAVE_HDR_SIZE + xstate_ctxt_size(xcr0))
+#define PV_XSAVE_SIZE(xcr0) (2 * sizeof(uint64_t) + xstate_ctxt_size(xcr0))
+
+        evc = &domctl->u.vcpuextstate;
 
         ret = -ESRCH;
         if ( (evc->vcpu >= d->max_vcpus) ||
@@ -1087,7 +1105,7 @@ long arch_do_domctl(
             goto vcpuextstate_out;
 
         ret = -EINVAL;
-        if ( v == curr ) /* no vcpu_pause() */
+        if ( v == current ) /* no vcpu_pause() */
             goto vcpuextstate_out;
 
         if ( domctl->cmd == XEN_DOMCTL_getvcpuextstate )
@@ -1095,25 +1113,19 @@ long arch_do_domctl(
             unsigned int size;
 
             ret = 0;
+            vcpu_pause(v);
 
+            size = PV_XSAVE_SIZE(v->arch.xcr0_accum);
             if ( (!evc->size && !evc->xfeature_mask) ||
                  guest_handle_is_null(evc->buffer) )
             {
-                /*
-                 * A query for the size of buffer to use.  Must return the
-                 * maximum size we ever might hand back to userspace, bearing
-                 * in mind that the vcpu might increase its xcr0_accum between
-                 * this query for size, and the following query for data.
-                 */
                 evc->xfeature_mask = xfeature_mask;
-                evc->size = PV_XSAVE_SIZE(xfeature_mask);
+                evc->size = size;
+                vcpu_unpause(v);
                 goto vcpuextstate_out;
             }
 
-            vcpu_pause(v);
-            size = PV_XSAVE_SIZE(v->arch.xcr0_accum);
-
-            if ( evc->size < size || evc->xfeature_mask != xfeature_mask )
+            if ( evc->size != size || evc->xfeature_mask != xfeature_mask )
                 ret = -EINVAL;
 
             if ( !ret && copy_to_guest_offset(evc->buffer, offset,
@@ -1128,33 +1140,12 @@ long arch_do_domctl(
                 ret = -EFAULT;
 
             offset += sizeof(v->arch.xcr0_accum);
-
-            /* Serialise xsave state, if there is any. */
-            if ( !ret && size > PV_XSAVE_HDR_SIZE )
-            {
-                unsigned int xsave_size = size - PV_XSAVE_HDR_SIZE;
-                void *xsave_area = xmalloc_bytes(xsave_size);
-
-                if ( !xsave_area )
-                {
-                    ret = -ENOMEM;
-                    vcpu_unpause(v);
-                    goto vcpuextstate_out;
-                }
-
-                expand_xsave_states(v, xsave_area, xsave_size);
-
-                if ( copy_to_guest_offset(evc->buffer, offset, xsave_area,
-                                          xsave_size) )
-                     ret = -EFAULT;
-                xfree(xsave_area);
-           }
+            if ( !ret && copy_to_guest_offset(evc->buffer, offset,
+                                              (void *)v->arch.xsave_area,
+                                              size - 2 * sizeof(uint64_t)) )
+                ret = -EFAULT;
 
             vcpu_unpause(v);
-
-            /* Specify how much data we actually wrote into the buffer. */
-            if ( !ret )
-                evc->size = size;
         }
         else
         {
@@ -1163,8 +1154,9 @@ long arch_do_domctl(
             const struct xsave_struct *_xsave_area;
 
             ret = -EINVAL;
-            if ( evc->size < PV_XSAVE_HDR_SIZE ||
-                 evc->size > PV_XSAVE_SIZE(xfeature_mask) )
+            if ( evc->size < 2 * sizeof(uint64_t) ||
+                 evc->size > 2 * sizeof(uint64_t) +
+                             xstate_ctxt_size(xfeature_mask) )
                 goto vcpuextstate_out;
 
             receive_buf = xmalloc_bytes(evc->size);
@@ -1183,13 +1175,14 @@ long arch_do_domctl(
 
             _xcr0 = *(uint64_t *)receive_buf;
             _xcr0_accum = *(uint64_t *)(receive_buf + sizeof(uint64_t));
-            _xsave_area = receive_buf + PV_XSAVE_HDR_SIZE;
+            _xsave_area = receive_buf + 2 * sizeof(uint64_t);
 
             if ( _xcr0_accum )
             {
-                if ( evc->size >= PV_XSAVE_HDR_SIZE + XSTATE_AREA_MIN_SIZE )
-                    ret = validate_xstate(d, _xcr0, _xcr0_accum,
-                                          &_xsave_area->xsave_hdr);
+                if ( evc->size >= 2 * sizeof(uint64_t) + XSTATE_AREA_MIN_SIZE )
+                    ret = validate_xstate(_xcr0, _xcr0_accum,
+                                          _xsave_area->xsave_hdr.xstate_bv,
+                                          evc->xfeature_mask);
             }
             else if ( !_xcr0 )
                 ret = 0;
@@ -1199,55 +1192,74 @@ long arch_do_domctl(
                 goto vcpuextstate_out;
             }
 
-            if ( evc->size == PV_XSAVE_HDR_SIZE )
-                ; /* Nothing to restore. */
-            else if ( evc->size < PV_XSAVE_HDR_SIZE + XSTATE_AREA_MIN_SIZE )
-                ret = -EINVAL; /* Can't be legitimate data. */
-            else if ( xsave_area_compressed(_xsave_area) )
-                ret = -EOPNOTSUPP; /* Don't support compressed data. */
-            else if ( evc->size != PV_XSAVE_SIZE(_xcr0_accum) )
-                ret = -EINVAL; /* Not legitimate data. */
-            else
+            if ( evc->size <= PV_XSAVE_SIZE(_xcr0_accum) )
             {
                 vcpu_pause(v);
                 v->arch.xcr0 = _xcr0;
                 v->arch.xcr0_accum = _xcr0_accum;
-                v->arch.nonlazy_xstate_used = _xcr0_accum & XSTATE_NONLAZY;
-                compress_xsave_states(v, _xsave_area,
-                                      evc->size - PV_XSAVE_HDR_SIZE);
+                if ( _xcr0_accum & XSTATE_NONLAZY )
+                    v->arch.nonlazy_xstate_used = 1;
+                memcpy(v->arch.xsave_area, _xsave_area,
+                       evc->size - 2 * sizeof(uint64_t));
                 vcpu_unpause(v);
             }
+            else
+                ret = -EINVAL;
 
             xfree(receive_buf);
         }
 
-#undef PV_XSAVE_HDR_SIZE
-#undef PV_XSAVE_SIZE
-
     vcpuextstate_out:
         if ( domctl->cmd == XEN_DOMCTL_getvcpuextstate )
-            copyback = true;
-        break;
+            copyback = 1;
     }
+    break;
+
+    case XEN_DOMCTL_mem_event_op:
+    {
+        ret = mem_event_domctl(d, &domctl->u.mem_event_op,
+                              guest_handle_cast(u_domctl, void));
+        copyback = 1;
+    }
+    break;
 
     case XEN_DOMCTL_mem_sharing_op:
+    {
         ret = mem_sharing_domctl(d, &domctl->u.mem_sharing_op);
-        break;
+    }
+    break;
 
 #if P2M_AUDIT
     case XEN_DOMCTL_audit_p2m:
-        if ( d == currd )
-            ret = -EPERM;
-        else
+    {
+        if ( d == current->domain )
         {
-            audit_p2m(d,
-                      &domctl->u.audit_p2m.orphans,
-                      &domctl->u.audit_p2m.m2p_bad,
-                      &domctl->u.audit_p2m.p2m_bad);
-            copyback = true;
+            ret = -EPERM;
+            break;
         }
-        break;
+
+        audit_p2m(d,
+                  &domctl->u.audit_p2m.orphans,
+                  &domctl->u.audit_p2m.m2p_bad,
+                  &domctl->u.audit_p2m.p2m_bad);
+        copyback = 1;
+    }
+    break;
 #endif /* P2M_AUDIT */
+
+    case XEN_DOMCTL_set_access_required:
+    {
+        struct p2m_domain* p2m;
+        
+        ret = -EPERM;
+        if ( current->domain == d )
+            break;
+
+        ret = 0;
+        p2m = p2m_get_hostp2m(d);
+        p2m->access_required = domctl->u.access_required.access_required;
+    }
+    break;
 
     case XEN_DOMCTL_set_broken_page_p2m:
     {
@@ -1255,291 +1267,13 @@ long arch_do_domctl(
         unsigned long pfn = domctl->u.set_broken_page_p2m.pfn;
         mfn_t mfn = get_gfn_query(d, pfn, &pt);
 
-        if ( unlikely(!mfn_valid(mfn)) || unlikely(!p2m_is_ram(pt)) )
+        if ( unlikely(!mfn_valid(mfn_x(mfn)) || !p2m_is_ram(pt) ||
+                     (p2m_change_type(d, pfn, pt, p2m_ram_broken) != pt)) )
             ret = -EINVAL;
-        else
-            ret = p2m_change_type_one(d, pfn, pt, p2m_ram_broken);
 
         put_gfn(d, pfn);
-        break;
     }
-
-    case XEN_DOMCTL_get_vcpu_msrs:
-    case XEN_DOMCTL_set_vcpu_msrs:
-    {
-        struct xen_domctl_vcpu_msrs *vmsrs = &domctl->u.vcpu_msrs;
-        struct xen_domctl_vcpu_msr msr = {};
-        struct vcpu *v;
-        static const uint32_t msrs_to_send[] = {
-            MSR_SPEC_CTRL,
-            MSR_INTEL_MISC_FEATURES_ENABLES,
-        };
-        uint32_t nr_msrs = ARRAY_SIZE(msrs_to_send);
-
-        ret = -ESRCH;
-        if ( (vmsrs->vcpu >= d->max_vcpus) ||
-             ((v = d->vcpu[vmsrs->vcpu]) == NULL) )
-            break;
-
-        ret = -EINVAL;
-        if ( (v == curr) || /* no vcpu_pause() */
-             !is_pv_domain(d) )
-            break;
-
-        /* Count maximum number of optional msrs. */
-        if ( boot_cpu_has(X86_FEATURE_DBEXT) )
-            nr_msrs += 4;
-
-        if ( domctl->cmd == XEN_DOMCTL_get_vcpu_msrs )
-        {
-            ret = 0; copyback = true;
-
-            /* NULL guest handle is a request for max size. */
-            if ( guest_handle_is_null(vmsrs->msrs) )
-                vmsrs->msr_count = nr_msrs;
-            else
-            {
-                unsigned int j;
-
-                i = 0;
-
-                vcpu_pause(v);
-
-                for ( j = 0; j < ARRAY_SIZE(msrs_to_send); ++j )
-                {
-                    uint64_t val;
-                    int rc = guest_rdmsr(v, msrs_to_send[j], &val);
-
-                    /*
-                     * It is the programmers responsibility to ensure that
-                     * msrs_to_send[] contain generally-read/write MSRs.
-                     * X86EMUL_EXCEPTION here implies a missing feature, and
-                     * that the guest doesn't have access to the MSR.
-                     */
-                    if ( rc == X86EMUL_EXCEPTION )
-                        continue;
-
-                    if ( rc != X86EMUL_OKAY )
-                    {
-                        ASSERT_UNREACHABLE();
-                        ret = -ENXIO;
-                        break;
-                    }
-
-                    if ( !val )
-                        continue; /* Skip empty MSRs. */
-
-                    if ( i < vmsrs->msr_count && !ret )
-                    {
-                        msr.index = msrs_to_send[j];
-                        msr.value = val;
-                        if ( copy_to_guest_offset(vmsrs->msrs, i, &msr, 1) )
-                            ret = -EFAULT;
-                    }
-                    ++i;
-                }
-
-                if ( boot_cpu_has(X86_FEATURE_DBEXT) )
-                {
-                    if ( v->arch.pv_vcpu.dr_mask[0] )
-                    {
-                        if ( i < vmsrs->msr_count && !ret )
-                        {
-                            msr.index = MSR_AMD64_DR0_ADDRESS_MASK;
-                            msr.value = v->arch.pv_vcpu.dr_mask[0];
-                            if ( copy_to_guest_offset(vmsrs->msrs, i, &msr, 1) )
-                                ret = -EFAULT;
-                        }
-                        ++i;
-                    }
-
-                    for ( j = 0; j < 3; ++j )
-                    {
-                        if ( !v->arch.pv_vcpu.dr_mask[1 + j] )
-                            continue;
-                        if ( i < vmsrs->msr_count && !ret )
-                        {
-                            msr.index = MSR_AMD64_DR1_ADDRESS_MASK + j;
-                            msr.value = v->arch.pv_vcpu.dr_mask[1 + j];
-                            if ( copy_to_guest_offset(vmsrs->msrs, i, &msr, 1) )
-                                ret = -EFAULT;
-                        }
-                        ++i;
-                    }
-                }
-
-                vcpu_unpause(v);
-
-                if ( i > vmsrs->msr_count && !ret )
-                    ret = -ENOBUFS;
-                vmsrs->msr_count = i;
-            }
-        }
-        else
-        {
-            ret = -EINVAL;
-            if ( vmsrs->msr_count > nr_msrs )
-                break;
-
-            vcpu_pause(v);
-
-            for ( i = 0; i < vmsrs->msr_count; ++i )
-            {
-                ret = -EFAULT;
-                if ( copy_from_guest_offset(&msr, vmsrs->msrs, i, 1) )
-                    break;
-
-                ret = -EINVAL;
-                if ( msr.reserved )
-                    break;
-
-                switch ( msr.index )
-                {
-                case MSR_SPEC_CTRL:
-                case MSR_INTEL_MISC_FEATURES_ENABLES:
-                    if ( guest_wrmsr(v, msr.index, msr.value) != X86EMUL_OKAY )
-                        break;
-                    continue;
-
-                case MSR_AMD64_DR0_ADDRESS_MASK:
-                    if ( !boot_cpu_has(X86_FEATURE_DBEXT) ||
-                         (msr.value >> 32) )
-                        break;
-                    v->arch.pv_vcpu.dr_mask[0] = msr.value;
-                    continue;
-
-                case MSR_AMD64_DR1_ADDRESS_MASK ...
-                    MSR_AMD64_DR3_ADDRESS_MASK:
-                    if ( !boot_cpu_has(X86_FEATURE_DBEXT) ||
-                         (msr.value >> 32) )
-                        break;
-                    msr.index -= MSR_AMD64_DR1_ADDRESS_MASK - 1;
-                    v->arch.pv_vcpu.dr_mask[msr.index] = msr.value;
-                    continue;
-                }
-                break;
-            }
-
-            vcpu_unpause(v);
-
-            if ( i == vmsrs->msr_count )
-                ret = 0;
-            else
-            {
-                vmsrs->msr_count = i;
-                copyback = true;
-            }
-        }
-        break;
-    }
-
-    case XEN_DOMCTL_psr_cmt_op:
-        if ( !psr_cmt_enabled() )
-        {
-            ret = -ENODEV;
-            break;
-        }
-
-        switch ( domctl->u.psr_cmt_op.cmd )
-        {
-        case XEN_DOMCTL_PSR_CMT_OP_ATTACH:
-            ret = psr_alloc_rmid(d);
-            break;
-
-        case XEN_DOMCTL_PSR_CMT_OP_DETACH:
-            if ( d->arch.psr_rmid > 0 )
-                psr_free_rmid(d);
-            else
-                ret = -ENOENT;
-            break;
-
-        case XEN_DOMCTL_PSR_CMT_OP_QUERY_RMID:
-            domctl->u.psr_cmt_op.data = d->arch.psr_rmid;
-            copyback = true;
-            break;
-
-        default:
-            ret = -ENOSYS;
-            break;
-        }
-        break;
-
-    case XEN_DOMCTL_psr_alloc:
-        switch ( domctl->u.psr_alloc.cmd )
-        {
-        case XEN_DOMCTL_PSR_SET_L3_CBM:
-            ret = psr_set_val(d, domctl->u.psr_alloc.target,
-                              domctl->u.psr_alloc.data,
-                              PSR_TYPE_L3_CBM);
-            break;
-
-        case XEN_DOMCTL_PSR_SET_L3_CODE:
-            ret = psr_set_val(d, domctl->u.psr_alloc.target,
-                              domctl->u.psr_alloc.data,
-                              PSR_TYPE_L3_CODE);
-            break;
-
-        case XEN_DOMCTL_PSR_SET_L3_DATA:
-            ret = psr_set_val(d, domctl->u.psr_alloc.target,
-                              domctl->u.psr_alloc.data,
-                              PSR_TYPE_L3_DATA);
-            break;
-
-        case XEN_DOMCTL_PSR_SET_L2_CBM:
-            ret = psr_set_val(d, domctl->u.psr_alloc.target,
-                              domctl->u.psr_alloc.data,
-                              PSR_TYPE_L2_CBM);
-            break;
-
-        case XEN_DOMCTL_PSR_SET_MBA_THRTL:
-            ret = psr_set_val(d, domctl->u.psr_alloc.target,
-                              domctl->u.psr_alloc.data,
-                              PSR_TYPE_MBA_THRTL);
-            break;
-
-#define domctl_psr_get_val(d, domctl, type, copyback) ({    \
-    uint32_t v_;                                            \
-    int r_ = psr_get_val((d), (domctl)->u.psr_alloc.target, \
-                         &v_, (type));                      \
-                                                            \
-    (domctl)->u.psr_alloc.data = v_;                        \
-    (copyback) = true;                                      \
-    r_;                                                     \
-})
-
-        case XEN_DOMCTL_PSR_GET_L3_CBM:
-            ret = domctl_psr_get_val(d, domctl, PSR_TYPE_L3_CBM, copyback);
-            break;
-
-        case XEN_DOMCTL_PSR_GET_L3_CODE:
-            ret = domctl_psr_get_val(d, domctl, PSR_TYPE_L3_CODE, copyback);
-            break;
-
-        case XEN_DOMCTL_PSR_GET_L3_DATA:
-            ret = domctl_psr_get_val(d, domctl, PSR_TYPE_L3_DATA, copyback);
-            break;
-
-        case XEN_DOMCTL_PSR_GET_L2_CBM:
-            ret = domctl_psr_get_val(d, domctl, PSR_TYPE_L2_CBM, copyback);
-            break;
-
-        case XEN_DOMCTL_PSR_GET_MBA_THRTL:
-            ret = domctl_psr_get_val(d, domctl, PSR_TYPE_MBA_THRTL, copyback);
-            break;
-
-#undef domctl_psr_get_val
-
-        default:
-            ret = -EOPNOTSUPP;
-            break;
-        }
-
-        break;
-
-    case XEN_DOMCTL_disable_migrate:
-        d->disable_migrate = domctl->u.disable_migrate.disable;
-        recalculate_cpuid_policy(d);
-        break;
+    break;
 
     default:
         ret = iommu_do_domctl(domctl, d, u_domctl);
@@ -1561,38 +1295,36 @@ CHECK_FIELD_(struct, vcpu_guest_context, fpu_ctxt);
 void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
 {
     unsigned int i;
-    const struct domain *d = v->domain;
-    bool compat = is_pv_32bit_domain(d);
+    bool_t compat = is_pv_32on64_domain(v->domain);
 #define c(fld) (!compat ? (c.nat->fld) : (c.cmp->fld))
 
+    if ( !is_pv_vcpu(v) )
+        memset(c.nat, 0, sizeof(*c.nat));
     memcpy(&c.nat->fpu_ctxt, v->arch.fpu_ctxt, sizeof(c.nat->fpu_ctxt));
     c(flags = v->arch.vgc_flags & ~(VGCF_i387_valid|VGCF_in_kernel));
     if ( v->fpu_initialised )
         c(flags |= VGCF_i387_valid);
-    if ( !(v->pause_flags & VPF_down) )
+    if ( !test_bit(_VPF_down, &v->pause_flags) )
         c(flags |= VGCF_online);
     if ( !compat )
     {
         memcpy(&c.nat->user_regs, &v->arch.user_regs, sizeof(c.nat->user_regs));
-        if ( is_pv_domain(d) )
+        if ( is_pv_vcpu(v) )
             memcpy(c.nat->trap_ctxt, v->arch.pv_vcpu.trap_ctxt,
                    sizeof(c.nat->trap_ctxt));
     }
     else
     {
         XLAT_cpu_user_regs(&c.cmp->user_regs, &v->arch.user_regs);
-        if ( is_pv_domain(d) )
-        {
-            for ( i = 0; i < ARRAY_SIZE(c.cmp->trap_ctxt); ++i )
-                XLAT_trap_info(c.cmp->trap_ctxt + i,
-                               v->arch.pv_vcpu.trap_ctxt + i);
-        }
+        for ( i = 0; i < ARRAY_SIZE(c.cmp->trap_ctxt); ++i )
+            XLAT_trap_info(c.cmp->trap_ctxt + i,
+                           v->arch.pv_vcpu.trap_ctxt + i);
     }
 
     for ( i = 0; i < ARRAY_SIZE(v->arch.debugreg); ++i )
         c(debugreg[i] = v->arch.debugreg[i]);
 
-    if ( is_hvm_domain(d) )
+    if ( has_hvm_container_vcpu(v) )
     {
         struct segment_register sreg;
 
@@ -1653,12 +1385,13 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
             c(event_callback_cs = v->arch.pv_vcpu.event_callback_cs);
             c(failsafe_callback_cs = v->arch.pv_vcpu.failsafe_callback_cs);
         }
+        c(vm_assist = v->arch.pv_vcpu.vm_assist);
 
         /* IOPL privileges are virtualised: merge back into returned eflags. */
         BUG_ON((c(user_regs.eflags) & X86_EFLAGS_IOPL) != 0);
-        c(user_regs.eflags |= v->arch.pv_vcpu.iopl);
+        c(user_regs.eflags |= v->arch.pv_vcpu.iopl << 12);
 
-        if ( !compat )
+        if ( !is_pv_32on64_domain(v->domain) )
         {
             c.nat->ctrlreg[3] = xen_pfn_to_cr3(
                 pagetable_get_pfn(v->arch.guest_table));
@@ -1673,7 +1406,7 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
         else
         {
             const l4_pgentry_t *l4e =
-                map_domain_page(pagetable_get_mfn(v->arch.guest_table));
+                map_domain_page(pagetable_get_pfn(v->arch.guest_table));
 
             c.cmp->ctrlreg[3] = compat_pfn_to_cr3(l4e_get_pfn(*l4e));
             unmap_domain_page(l4e);
@@ -1687,7 +1420,7 @@ void arch_get_info_guest(struct vcpu *v, vcpu_guest_context_u c)
             c(flags |= VGCF_in_kernel);
     }
 
-    c(vm_assist = d->vm_assist);
+    c(vm_assist = v->domain->vm_assist);
 #undef c
 }
 

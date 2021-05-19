@@ -12,7 +12,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  * Copyright (C) IBM Corporation, 2006
  *
@@ -239,14 +240,15 @@ get_memsize(void)
 
     sz = (uint64_t)hvm_info->low_mem_pgend << PAGE_SHIFT;
     if ( hvm_info->high_mem_pgend )
-        sz += (((uint64_t)hvm_info->high_mem_pgend << PAGE_SHIFT) - GB(4));
+        sz += (((uint64_t)hvm_info->high_mem_pgend << PAGE_SHIFT)
+               - (1ull << 32));
 
     /*
      * Round up to the nearest MB.  The user specifies domU pseudo-physical 
      * memory in megabytes, so not doing this could easily lead to reporting 
      * one less MB than the user specified.
      */
-    return (sz + MB(1) - 1) >> 20;
+    return (sz + (1ul << 20) - 1) >> 20;
 }
 
 void
@@ -530,7 +532,6 @@ smbios_type_3_init(void *start)
     const char *s;
     void *pts;
     uint32_t length;
-    uint32_t counter = 0;
 
     pts = get_smbios_pt_struct(3, &length);
     if ( (pts != NULL)&&(length > 0) )
@@ -546,7 +547,7 @@ smbios_type_3_init(void *start)
     p->header.length = sizeof(struct smbios_type_3);
     p->header.handle = SMBIOS_HANDLE_TYPE3;
 
-    p->manufacturer_str = ++counter;
+    p->manufacturer_str = 1;
     p->type = 0x01; /* other */
     p->version_str = 0;
     p->serial_number_str = 0;
@@ -562,20 +563,13 @@ smbios_type_3_init(void *start)
     strcpy((char *)start, s);
     start += strlen(s) + 1;
 
-    /* No internal defaults for following ones if the value is not set */
+    /* No internal defaults for this if the value is not set */
     s = xenstore_read(HVM_XS_ENCLOSURE_SERIAL_NUMBER, NULL);
     if ( (s != NULL)&&(*s != '\0') )
     {
         strcpy((char *)start, s);
         start += strlen(s) + 1;
-        p->serial_number_str = ++counter;
-    }
-    s = xenstore_read(HVM_XS_ENCLOSURE_ASSET_TAG, NULL);
-    if ( (s != NULL) && (*s != '\0') )
-    {
-        strcpy(start, s);
-        start += strlen(s) + 1;
-        p->asset_tag_str = ++counter;
+        p->serial_number_str = 2;
     }
 
     *((uint8_t *)start) = 0;
@@ -615,9 +609,6 @@ smbios_type_4_init(
 
     p->status = 0x41; /* socket populated, CPU enabled */
     p->upgrade = 0x01; /* other */
-    p->l1_cache_handle = 0xffff; /* No cache information structure provided. */
-    p->l2_cache_handle = 0xffff; /* No cache information structure provided. */
-    p->l3_cache_handle = 0xffff; /* No cache information structure provided. */
 
     start += sizeof(struct smbios_type_4);
 

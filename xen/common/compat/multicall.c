@@ -2,8 +2,7 @@
  * multicall.c
  */
 
-asm(".file \"" __FILE__ "\"");
-
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/multicall.h>
 #include <xen/trace.h>

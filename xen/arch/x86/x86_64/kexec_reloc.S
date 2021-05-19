@@ -10,9 +10,7 @@
  * This source code is licensed under the GNU General Public License,
  * Version 2.  See the file COPYING for more details.
  */
-
-        .file __FILE__
-
+#include <xen/config.h>
 #include <xen/kimage.h>
 
 #include <asm/asm_defns.h>
@@ -20,7 +18,7 @@
 #include <asm/page.h>
 #include <asm/machine_kexec.h>
 
-        .section .text.kexec, "ax", @progbits
+        .text
         .align PAGE_SIZE
         .code64
 

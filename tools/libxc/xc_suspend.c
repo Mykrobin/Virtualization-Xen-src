@@ -10,128 +10,77 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
-
-#include <unistd.h>
-#include <fcntl.h>
-
-#include <xenevtchn.h>
 
 #include "xc_private.h"
 #include "xenguest.h"
 
-#define SUSPEND_LOCK_FILE    XEN_RUN_DIR "/suspend-evtchn-%d.lock"
-
-/*
- * locking
- */
-
-#define ERR(x) do{                                                      \
-    ERROR("Can't " #x " lock file for suspend event channel %s: %s\n",  \
-          suspend_file, strerror(errno));                               \
-    goto err;                                                           \
-}while(0)
-
-#define SUSPEND_FILE_BUFLEN (sizeof(SUSPEND_LOCK_FILE) + 10)
-
-static void get_suspend_file(char buf[], uint32_t domid)
+#define SUSPEND_LOCK_FILE "/var/lib/xen/suspend_evtchn"
+static int lock_suspend_event(xc_interface *xch, int domid)
 {
-    snprintf(buf, SUSPEND_FILE_BUFLEN, SUSPEND_LOCK_FILE, domid);
+    int fd, rc;
+    mode_t mask;
+    char buf[128];
+    char suspend_file[256];
+
+    snprintf(suspend_file, sizeof(suspend_file), "%s_%d_lock.d",
+	    SUSPEND_LOCK_FILE, domid);
+    mask = umask(022);
+    fd = open(suspend_file, O_CREAT | O_EXCL | O_RDWR, 0666);
+    if (fd < 0)
+    {
+        ERROR("Can't create lock file for suspend event channel %s\n",
+		suspend_file);
+        return -EINVAL;
+    }
+    umask(mask);
+    snprintf(buf, sizeof(buf), "%10ld", (long)getpid());
+
+    rc = write_exact(fd, buf, strlen(buf));
+    close(fd);
+
+    return rc;
 }
 
-static int lock_suspend_event(xc_interface *xch, uint32_t domid, int *lockfd)
+static int unlock_suspend_event(xc_interface *xch, int domid)
 {
-    int fd = -1, r;
-    char suspend_file[SUSPEND_FILE_BUFLEN];
-    struct stat ours, theirs;
-    struct flock fl;
+    int fd, pid, n;
+    char buf[128];
+    char suspend_file[256];
 
-    get_suspend_file(suspend_file, domid);
+    snprintf(suspend_file, sizeof(suspend_file), "%s_%d_lock.d",
+	    SUSPEND_LOCK_FILE, domid);
+    fd = open(suspend_file, O_RDWR);
 
-    *lockfd = -1;
+    if (fd < 0)
+        return -EINVAL;
 
-    for (;;) {
-        if (fd >= 0)
-            close (fd);
+    n = read(fd, buf, 127);
 
-        fd = open(suspend_file, O_CREAT | O_RDWR, 0600);
-        if (fd < 0)
-            ERR("create");
+    close(fd);
 
-        r = fcntl(fd, F_SETFD, FD_CLOEXEC);
-        if (r)
-            ERR("fcntl F_SETFD FD_CLOEXEC");
-
-        memset(&fl, 0, sizeof(fl));
-        fl.l_type = F_WRLCK;
-        fl.l_whence = SEEK_SET;
-        fl.l_len = 1;
-        r = fcntl(fd, F_SETLK, &fl);
-        if (r)
-            ERR("fcntl F_SETLK");
-
-        r = fstat(fd, &ours);
-        if (r)
-            ERR("fstat");
-
-        r = stat(suspend_file, &theirs);
-        if (r) {
-            if (errno == ENOENT)
-                /* try again */
-                continue;
-            ERR("stat");
+    if (n > 0)
+    {
+        sscanf(buf, "%d", &pid);
+        /* We are the owner, so we can simply delete the file */
+        if (pid == getpid())
+        {
+            unlink(suspend_file);
+            return 0;
         }
-
-        if (ours.st_ino != theirs.st_ino)
-            /* someone else must have removed it while we were locking it */
-            continue;
-
-        break;
     }
 
-    *lockfd = fd;
-    return 0;
-
- err:
-    if (fd >= 0)
-        close(fd);
-
-    return -1;
+    return -EPERM;
 }
 
-static int unlock_suspend_event(xc_interface *xch, uint32_t domid, int *lockfd)
-{
-    int r;
-    char suspend_file[SUSPEND_FILE_BUFLEN];
-
-    if (*lockfd < 0)
-        return 0;
-
-    get_suspend_file(suspend_file, domid);
-
-    r = unlink(suspend_file);
-    if (r)
-        ERR("unlink");
-
-    r = close(*lockfd);
-    *lockfd = -1;
-    if (r)
-        ERR("close");
-
- err:
-    if (*lockfd >= 0)
-        close(*lockfd);
-
-    return -1;
-}
-
-int xc_await_suspend(xc_interface *xch, xenevtchn_handle *xce, int suspend_evtchn)
+int xc_await_suspend(xc_interface *xch, xc_evtchn *xce, int suspend_evtchn)
 {
     int rc;
 
     do {
-        rc = xenevtchn_pending(xce);
+        rc = xc_evtchn_pending(xce);
         if (rc < 0) {
             ERROR("error polling suspend notification channel: %d", rc);
             return -1;
@@ -139,34 +88,28 @@ int xc_await_suspend(xc_interface *xch, xenevtchn_handle *xce, int suspend_evtch
     } while (rc != suspend_evtchn);
 
     /* harmless for one-off suspend */
-    if (xenevtchn_unmask(xce, suspend_evtchn) < 0)
+    if (xc_evtchn_unmask(xce, suspend_evtchn) < 0)
         ERROR("failed to unmask suspend notification channel: %d", rc);
 
     return 0;
 }
 
-/* Internal callers are allowed to call this with suspend_evtchn<0
- * but *lockfd>0. */
-int xc_suspend_evtchn_release(xc_interface *xch, xenevtchn_handle *xce,
-                              uint32_t domid, int suspend_evtchn, int *lockfd)
+int xc_suspend_evtchn_release(xc_interface *xch, xc_evtchn *xce, int domid, int suspend_evtchn)
 {
     if (suspend_evtchn >= 0)
-        xenevtchn_unbind(xce, suspend_evtchn);
+        xc_evtchn_unbind(xce, suspend_evtchn);
 
-    return unlock_suspend_event(xch, domid, lockfd);
+    return unlock_suspend_event(xch, domid);
 }
 
-int xc_suspend_evtchn_init_sane(xc_interface *xch, xenevtchn_handle *xce,
-                                uint32_t domid, int port, int *lockfd)
+int xc_suspend_evtchn_init(xc_interface *xch, xc_evtchn *xce, int domid, int port)
 {
     int rc, suspend_evtchn = -1;
 
-    if (lock_suspend_event(xch, domid, lockfd)) {
-        errno = EINVAL;
-        goto cleanup;
-    }
+    if (lock_suspend_event(xch, domid))
+        return -EINVAL;
 
-    suspend_evtchn = xenevtchn_bind_interdomain(xce, domid, port);
+    suspend_evtchn = xc_evtchn_bind_interdomain(xce, domid, port);
     if (suspend_evtchn < 0) {
         ERROR("failed to bind suspend event channel: %d", suspend_evtchn);
         goto cleanup;
@@ -178,25 +121,14 @@ int xc_suspend_evtchn_init_sane(xc_interface *xch, xenevtchn_handle *xce,
         goto cleanup;
     }
 
-    return suspend_evtchn;
-
-cleanup:
-    xc_suspend_evtchn_release(xch, xce, domid, suspend_evtchn, lockfd);
-
-    return -1;
-}
-
-int xc_suspend_evtchn_init_exclusive(xc_interface *xch, xenevtchn_handle *xce,
-                                     uint32_t domid, int port, int *lockfd)
-{
-    int suspend_evtchn;
-
-    suspend_evtchn = xc_suspend_evtchn_init_sane(xch, xce, domid, port, lockfd);
-    if (suspend_evtchn < 0)
-        return suspend_evtchn;
-
     /* event channel is pending immediately after binding */
     xc_await_suspend(xch, xce, suspend_evtchn);
 
     return suspend_evtchn;
+
+cleanup:
+    if (suspend_evtchn != -1)
+        xc_suspend_evtchn_release(xch, xce, domid, suspend_evtchn);
+
+    return -1;
 }

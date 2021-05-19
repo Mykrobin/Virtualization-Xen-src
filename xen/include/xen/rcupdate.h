@@ -12,7 +12,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  * Copyright (C) IBM Corporation, 2001
  *
@@ -145,11 +146,5 @@ void call_rcu(struct rcu_head *head,
               void (*func)(struct rcu_head *head));
 
 int rcu_barrier(void);
-
-void rcu_idle_enter(unsigned int cpu);
-void rcu_idle_exit(unsigned int cpu);
-
-void rcu_idle_timer_start(void);
-void rcu_idle_timer_stop(void);
 
 #endif /* __XEN_RCUPDATE_H */

@@ -8,6 +8,7 @@
  *  Gareth Hughes <gareth@valinux.com>, May 2000
  */
 
+#include <xen/config.h>
 #include <xen/sched.h>
 #include <asm/current.h>
 #include <asm/processor.h>
@@ -15,7 +16,6 @@
 #include <asm/i387.h>
 #include <asm/xstate.h>
 #include <asm/asm_defns.h>
-#include <asm/spec_ctrl.h>
 
 /*******************************/
 /*     FPU Restore Functions   */
@@ -23,7 +23,7 @@
 /* Restore x87 extended state */
 static inline void fpu_xrstor(struct vcpu *v, uint64_t mask)
 {
-    bool ok;
+    bool_t ok;
 
     ASSERT(v->arch.xsave_area);
     /*
@@ -109,6 +109,14 @@ static inline void fpu_fxrstor(struct vcpu *v)
     }
 }
 
+/* Restore x87 extended state */
+static inline void fpu_frstor(struct vcpu *v)
+{
+    const char *fpu_ctxt = v->arch.fpu_ctxt;
+
+    asm volatile ( "frstor %0" : : "m" (*fpu_ctxt) );
+}
+
 /*******************************/
 /*      FPU Save Functions     */
 /*******************************/
@@ -118,25 +126,13 @@ static inline uint64_t vcpu_xsave_mask(const struct vcpu *v)
     if ( v->fpu_dirtied )
         return v->arch.nonlazy_xstate_used ? XSTATE_ALL : XSTATE_LAZY;
 
-    ASSERT(v->arch.nonlazy_xstate_used);
-
-    /*
-     * The offsets of components which live in the extended region of
-     * compact xsave area are not fixed. Xsave area may be overwritten
-     * when a xsave with v->fpu_dirtied set is followed by one with
-     * v->fpu_dirtied clear.
-     * In such case, if hypervisor uses compact xsave area and guest
-     * has ever used lazy states (checking xcr0_accum excluding
-     * XSTATE_FP_SSE), vcpu_xsave_mask will return XSTATE_ALL. Otherwise
-     * return XSTATE_NONLAZY.
-     */
-    return xstate_all(v) ? XSTATE_ALL : XSTATE_NONLAZY;
+    return v->arch.nonlazy_xstate_used ? XSTATE_NONLAZY : 0;
 }
 
 /* Save x87 extended state */
 static inline void fpu_xsave(struct vcpu *v)
 {
-    bool ok;
+    bool_t ok;
     uint64_t mask = vcpu_xsave_mask(v);
 
     ASSERT(mask);
@@ -156,9 +152,9 @@ static inline void fpu_xsave(struct vcpu *v)
 static inline void fpu_fxsave(struct vcpu *v)
 {
     typeof(v->arch.xsave_area->fpu_sse) *fpu_ctxt = v->arch.fpu_ctxt;
-    unsigned int fip_width = v->domain->arch.x87_fip_width;
+    int word_size = cpu_has_fpu_sel ? 8 : 0;
 
-    if ( fip_width != 4 )
+    if ( !is_pv_32bit_vcpu(v) )
     {
         /*
          * The only way to force fxsaveq on a wide range of gas versions.
@@ -176,11 +172,7 @@ static inline void fpu_fxsave(struct vcpu *v)
              boot_cpu_data.x86_vendor == X86_VENDOR_AMD )
             return;
 
-        /*
-         * If the FIP/FDP[63:32] are both zero, it is safe to use the
-         * 32-bit restore to also restore the selectors.
-         */
-        if ( !fip_width &&
+        if ( word_size > 0 &&
              !((fpu_ctxt->fip.addr | fpu_ctxt->fdp.addr) >> 32) )
         {
             struct ix87_env fpu_env;
@@ -188,62 +180,44 @@ static inline void fpu_fxsave(struct vcpu *v)
             asm volatile ( "fnstenv %0" : "=m" (fpu_env) );
             fpu_ctxt->fip.sel = fpu_env.fcs;
             fpu_ctxt->fdp.sel = fpu_env.fds;
-            fip_width = 4;
+            word_size = 4;
         }
-        else
-            fip_width = 8;
     }
     else
     {
         asm volatile ( "fxsave %0" : "=m" (*fpu_ctxt) );
-        fip_width = 4;
+        word_size = 4;
     }
 
-    fpu_ctxt->x[FPU_WORD_SIZE_OFFSET] = fip_width;
+    if ( word_size >= 0 )
+        fpu_ctxt->x[FPU_WORD_SIZE_OFFSET] = word_size;
+}
+
+/* Save x87 FPU state */
+static inline void fpu_fsave(struct vcpu *v)
+{
+    char *fpu_ctxt = v->arch.fpu_ctxt;
+
+    /* FWAIT is required to make FNSAVE synchronous. */
+    asm volatile ( "fnsave %0 ; fwait" : "=m" (*fpu_ctxt) );
 }
 
 /*******************************/
 /*       VCPU FPU Functions    */
 /*******************************/
 /* Restore FPU state whenever VCPU is schduled in. */
-void vcpu_restore_fpu_nonlazy(struct vcpu *v, bool need_stts)
+void vcpu_restore_fpu_eager(struct vcpu *v)
 {
-    /* Restore nonlazy extended state (i.e. parts not tracked by CR0.TS). */
-    if ( !v->arch.fully_eager_fpu && !v->arch.nonlazy_xstate_used )
-        goto maybe_stts;
-
     ASSERT(!is_idle_vcpu(v));
-
-    /* Avoid recursion */
-    clts();
-
-    /*
-     * When saving full state even with !v->fpu_dirtied (see vcpu_xsave_mask()
-     * above) we also need to restore full state, to prevent subsequently
-     * saving state belonging to another vCPU.
-     */
-    if ( v->arch.fully_eager_fpu || (v->arch.xsave_area && xstate_all(v)) )
+    
+    /* save the nonlazy extended state which is not tracked by CR0.TS bit */
+    if ( v->arch.nonlazy_xstate_used )
     {
-        if ( cpu_has_xsave )
-            fpu_xrstor(v, XSTATE_ALL);
-        else
-            fpu_fxrstor(v);
-
-        v->fpu_initialised = 1;
-        v->fpu_dirtied = 1;
-
-        /* Xen doesn't need TS set, but the guest might. */
-        need_stts = is_pv_vcpu(v) && (v->arch.pv_vcpu.ctrlreg[0] & X86_CR0_TS);
-    }
-    else
-    {
+        /* Avoid recursion */
+        clts();        
         fpu_xrstor(v, XSTATE_NONLAZY);
-        need_stts = true;
-    }
-
- maybe_stts:
-    if ( need_stts )
         stts();
+    }
 }
 
 /* 
@@ -259,8 +233,6 @@ void vcpu_restore_fpu_lazy(struct vcpu *v)
     if ( v->fpu_dirtied )
         return;
 
-    ASSERT(!v->arch.fully_eager_fpu);
-
     if ( cpu_has_xsave )
         fpu_xrstor(v, XSTATE_LAZY);
     else
@@ -274,10 +246,10 @@ void vcpu_restore_fpu_lazy(struct vcpu *v)
  * On each context switch, save the necessary FPU info of VCPU being switch 
  * out. It dispatches saving operation based on CPU's capability.
  */
-static bool _vcpu_save_fpu(struct vcpu *v)
+static bool_t _vcpu_save_fpu(struct vcpu *v)
 {
     if ( !v->fpu_dirtied && !v->arch.nonlazy_xstate_used )
-        return false;
+        return 0;
 
     ASSERT(!is_idle_vcpu(v));
 
@@ -286,12 +258,14 @@ static bool _vcpu_save_fpu(struct vcpu *v)
 
     if ( cpu_has_xsave )
         fpu_xsave(v);
-    else
+    else if ( cpu_has_fxsr )
         fpu_fxsave(v);
+    else
+        fpu_fsave(v);
 
     v->fpu_dirtied = 0;
 
-    return true;
+    return 1;
 }
 
 void vcpu_save_fpu(struct vcpu *v)
@@ -309,9 +283,11 @@ void save_fpu_enable(void)
 /* Initialize FPU's context save area */
 int vcpu_init_fpu(struct vcpu *v)
 {
-    int rc;
+    int rc = 0;
     
-    v->arch.fully_eager_fpu = opt_eager_fpu;
+    /* Idle domain doesn't have FPU state allocated */
+    if ( is_idle_vcpu(v) )
+        goto done;
 
     if ( (rc = xstate_alloc_save_area(v)) != 0 )
         return rc;
@@ -320,9 +296,7 @@ int vcpu_init_fpu(struct vcpu *v)
         v->arch.fpu_ctxt = &v->arch.xsave_area->fpu_sse;
     else
     {
-        BUILD_BUG_ON(__alignof(v->arch.xsave_area->fpu_sse) < 16);
-        v->arch.fpu_ctxt = _xzalloc(sizeof(v->arch.xsave_area->fpu_sse),
-                                    __alignof(v->arch.xsave_area->fpu_sse));
+        v->arch.fpu_ctxt = _xzalloc(sizeof(v->arch.xsave_area->fpu_sse), 16);
         if ( v->arch.fpu_ctxt )
         {
             typeof(v->arch.xsave_area->fpu_sse) *fpu_sse = v->arch.fpu_ctxt;
@@ -331,9 +305,13 @@ int vcpu_init_fpu(struct vcpu *v)
             fpu_sse->mxcsr = MXCSR_DEFAULT;
         }
         else
+        {
             rc = -ENOMEM;
+            goto done;
+        }
     }
 
+done:
     return rc;
 }
 

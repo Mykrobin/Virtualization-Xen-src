@@ -11,7 +11,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  * Copyright (C) Allen Kay <allen.m.kay@intel.com>
  * Copyright (C) Xiaohui Xin <xiaohui.xin@intel.com>
@@ -20,6 +21,7 @@
 #include <xen/irq.h>
 #include <xen/sched.h>
 #include <xen/iommu.h>
+#include <asm/hvm/iommu.h>
 #include <xen/time.h>
 #include <xen/list.h>
 #include <xen/pci.h>
@@ -121,9 +123,9 @@ static u16 hpetid_to_bdf(unsigned int hpet_id)
 static void set_ire_sid(struct iremap_entry *ire,
                         unsigned int svt, unsigned int sq, unsigned int sid)
 {
-    ire->remap.svt = svt;
-    ire->remap.sq = sq;
-    ire->remap.sid = sid;
+    ire->hi.svt = svt;
+    ire->hi.sq = sq;
+    ire->hi.sid = sid;
 }
 
 static void set_ioapic_source_id(int apic_id, struct iremap_entry *ire)
@@ -142,10 +144,10 @@ static void set_hpet_source_id(unsigned int id, struct iremap_entry *ire)
     set_ire_sid(ire, SVT_VERIFY_SID_SQ, SQ_13_IGNORE_3, hpetid_to_bdf(id));
 }
 
-bool_t __init iommu_supports_eim(void)
+int iommu_supports_eim(void)
 {
     struct acpi_drhd_unit *drhd;
-    unsigned int apic;
+    int apic;
 
     if ( !iommu_qinval || !iommu_intremap || list_empty(&acpi_drhd_units) )
         return 0;
@@ -153,12 +155,12 @@ bool_t __init iommu_supports_eim(void)
     /* We MUST have a DRHD unit for each IOAPIC. */
     for ( apic = 0; apic < nr_ioapics; apic++ )
         if ( !ioapic_to_drhd(IO_APIC_ID(apic)) )
-        {
+    {
             dprintk(XENLOG_WARNING VTDPREFIX,
                     "There is not a DRHD for IOAPIC %#x (id: %#x)!\n",
                     apic, IO_APIC_ID(apic));
             return 0;
-        }
+    }
 
     for_each_drhd_unit ( drhd )
         if ( !ecap_queued_inval(drhd->iommu->ecap) ||
@@ -169,57 +171,10 @@ bool_t __init iommu_supports_eim(void)
     return 1;
 }
 
-/*
- * Assume iremap_lock has been acquired. It is to make sure software will not
- * change the same IRTE behind us. With this assumption, if only high qword or
- * low qword in IRTE is to be updated, this function's atomic variant can
- * present an atomic update to VT-d hardware even when cmpxchg16b
- * instruction is not supported.
- */
-static void update_irte(struct iommu *iommu, struct iremap_entry *entry,
-                        const struct iremap_entry *new_ire, bool atomic)
-{
-    ASSERT(spin_is_locked(&iommu_ir_ctrl(iommu)->iremap_lock));
-
-    if ( cpu_has_cx16 )
-    {
-        __uint128_t ret;
-        struct iremap_entry old_ire;
-
-        old_ire = *entry;
-        ret = cmpxchg16b(entry, &old_ire, new_ire);
-
-        /*
-         * In the above, we use cmpxchg16 to atomically update the 128-bit
-         * IRTE, and the hardware cannot update the IRTE behind us, so
-         * the return value of cmpxchg16 should be the same as old_ire.
-         * This ASSERT validate it.
-         */
-        ASSERT(ret == old_ire.val);
-    }
-    else
-    {
-        /*
-         * VT-d hardware doesn't update IRTEs behind us, nor the software
-         * since we hold iremap_lock. If the caller wants VT-d hardware to
-         * always see a consistent entry, but we can't meet it, a bug will
-         * be raised.
-         */
-        if ( entry->lo == new_ire->lo )
-            write_atomic(&entry->hi, new_ire->hi);
-        else if ( entry->hi == new_ire->hi )
-            write_atomic(&entry->lo, new_ire->lo);
-        else if ( !atomic )
-            *entry = *new_ire;
-        else
-            BUG();
-    }
-}
-
 /* Mark specified intr remap entry as free */
 static void free_remap_entry(struct iommu *iommu, int index)
 {
-    struct iremap_entry *iremap_entry = NULL, *iremap_entries, new_ire = { };
+    struct iremap_entry *iremap_entry = NULL, *iremap_entries;
     struct ir_ctrl *ir_ctrl = iommu_ir_ctrl(iommu);
 
     if ( index < 0 || index > IREMAP_ENTRY_NR - 1 )
@@ -230,8 +185,8 @@ static void free_remap_entry(struct iommu *iommu, int index)
     GET_IREMAP_ENTRY(ir_ctrl->iremap_maddr, index,
                      iremap_entries, iremap_entry);
 
-    update_irte(iommu, iremap_entry, &new_ire, false);
-    iommu_flush_cache_entry(iremap_entry, sizeof(*iremap_entry));
+    memset(iremap_entry, 0, sizeof(struct iremap_entry));
+    iommu_flush_cache_entry(iremap_entry, sizeof(struct iremap_entry));
     iommu_flush_iec_index(iommu, 0, index);
 
     unmap_vtd_domain_page(iremap_entries);
@@ -265,7 +220,7 @@ static unsigned int alloc_remap_entry(struct iommu *iommu, unsigned int nr)
         else
             p = &iremap_entries[i % (1 << IREMAP_ENTRY_ORDER)];
 
-        if ( p->val ) /* not a free entry */
+        if ( p->lo_val || p->hi_val ) /* not a free entry */
             found = 0;
         else if ( ++found == nr )
             break;
@@ -289,8 +244,8 @@ static int remap_entry_to_ioapic_rte(
     if ( index < 0 || index > IREMAP_ENTRY_NR - 1 )
     {
         dprintk(XENLOG_ERR VTDPREFIX,
-                "IO-APIC index (%d) for remap table is invalid\n",
-                index);
+                "%s: index (%d) for remap table is invalid !\n",
+                __func__, index);
         return -EFAULT;
     }
 
@@ -299,23 +254,23 @@ static int remap_entry_to_ioapic_rte(
     GET_IREMAP_ENTRY(ir_ctrl->iremap_maddr, index,
                      iremap_entries, iremap_entry);
 
-    if ( iremap_entry->val == 0 )
+    if ( iremap_entry->hi_val == 0 && iremap_entry->lo_val == 0 )
     {
         dprintk(XENLOG_ERR VTDPREFIX,
-                "IO-APIC index (%d) has an empty entry\n",
-                index);
+                "%s: index (%d) get an empty entry!\n",
+                __func__, index);
         unmap_vtd_domain_page(iremap_entries);
         spin_unlock_irqrestore(&ir_ctrl->iremap_lock, flags);
         return -EFAULT;
     }
 
-    old_rte->vector = iremap_entry->remap.vector;
-    old_rte->delivery_mode = iremap_entry->remap.dlm;
-    old_rte->dest_mode = iremap_entry->remap.dm;
-    old_rte->trigger = iremap_entry->remap.tm;
+    old_rte->vector = iremap_entry->lo.vector;
+    old_rte->delivery_mode = iremap_entry->lo.dlm;
+    old_rte->dest_mode = iremap_entry->lo.dm;
+    old_rte->trigger = iremap_entry->lo.tm;
     old_rte->__reserved_2 = 0;
     old_rte->dest.logical.__reserved_1 = 0;
-    old_rte->dest.logical.logical_dest = iremap_entry->remap.dst >> 8;
+    old_rte->dest.logical.logical_dest = iremap_entry->lo.dst >> 8;
 
     unmap_vtd_domain_page(iremap_entries);
     spin_unlock_irqrestore(&ir_ctrl->iremap_lock, flags);
@@ -333,7 +288,6 @@ static int ioapic_rte_to_remap_entry(struct iommu *iommu,
     int index;
     unsigned long flags;
     struct ir_ctrl *ir_ctrl = iommu_ir_ctrl(iommu);
-    bool init = false;
 
     remap_rte = (struct IO_APIC_route_remap_entry *) old_rte;
     spin_lock_irqsave(&ir_ctrl->iremap_lock, flags);
@@ -344,14 +298,14 @@ static int ioapic_rte_to_remap_entry(struct iommu *iommu,
         index = alloc_remap_entry(iommu, 1);
         if ( index < IREMAP_ENTRY_NR )
             apic_pin_2_ir_idx[apic][ioapic_pin] = index;
-        init = true;
     }
 
     if ( index > IREMAP_ENTRY_NR - 1 )
     {
         dprintk(XENLOG_ERR VTDPREFIX,
-                "IO-APIC intremap index (%d) larger than maximum index (%d)\n",
-                index, IREMAP_ENTRY_NR - 1);
+                "%s: intremap index (%d) is larger than"
+                " the maximum index (%d)!\n",
+                __func__, index, IREMAP_ENTRY_NR - 1);
         spin_unlock_irqrestore(&ir_ctrl->iremap_lock, flags);
         return -EFAULT;
     }
@@ -359,33 +313,32 @@ static int ioapic_rte_to_remap_entry(struct iommu *iommu,
     GET_IREMAP_ENTRY(ir_ctrl->iremap_maddr, index,
                      iremap_entries, iremap_entry);
 
-    new_ire = *iremap_entry;
+    memcpy(&new_ire, iremap_entry, sizeof(struct iremap_entry));
 
     if ( rte_upper )
     {
         if ( x2apic_enabled )
-            new_ire.remap.dst = value;
+            new_ire.lo.dst = value;
         else
-            new_ire.remap.dst = (value >> 24) << 8;
+            new_ire.lo.dst = (value >> 24) << 8;
     }
     else
     {
         *(((u32 *)&new_rte) + 0) = value;
-        new_ire.remap.fpd = 0;
-        new_ire.remap.dm = new_rte.dest_mode;
-        new_ire.remap.tm = new_rte.trigger;
-        new_ire.remap.dlm = new_rte.delivery_mode;
+        new_ire.lo.fpd = 0;
+        new_ire.lo.dm = new_rte.dest_mode;
+        new_ire.lo.tm = new_rte.trigger;
+        new_ire.lo.dlm = new_rte.delivery_mode;
         /* Hardware require RH = 1 for LPR delivery mode */
-        new_ire.remap.rh = (new_ire.remap.dlm == dest_LowestPrio);
-        new_ire.remap.avail = 0;
-        new_ire.remap.res_1 = 0;
-        new_ire.remap.vector = new_rte.vector;
-        new_ire.remap.res_2 = 0;
+        new_ire.lo.rh = (new_ire.lo.dlm == dest_LowestPrio);
+        new_ire.lo.avail = 0;
+        new_ire.lo.res_1 = 0;
+        new_ire.lo.vector = new_rte.vector;
+        new_ire.lo.res_2 = 0;
 
         set_ioapic_source_id(IO_APIC_ID(apic), &new_ire);
-        new_ire.remap.res_3 = 0;
-        new_ire.remap.res_4 = 0;
-        new_ire.remap.p = 1;     /* finally, set present bit */
+        new_ire.hi.res_1 = 0;
+        new_ire.lo.p = 1;     /* finally, set present bit */
 
         /* now construct new ioapic rte entry */
         remap_rte->vector = new_rte.vector;
@@ -402,9 +355,10 @@ static int ioapic_rte_to_remap_entry(struct iommu *iommu,
         remap_rte->format = 1;    /* indicate remap format */
     }
 
-    update_irte(iommu, iremap_entry, &new_ire, !init);
-    iommu_flush_cache_entry(iremap_entry, sizeof(*iremap_entry));
+    memcpy(iremap_entry, &new_ire, sizeof(struct iremap_entry));
+    iommu_flush_cache_entry(iremap_entry, sizeof(struct iremap_entry));
     iommu_flush_iec_index(iommu, 0, index);
+    invalidate_sync(iommu);
 
     unmap_vtd_domain_page(iremap_entries);
     spin_unlock_irqrestore(&ir_ctrl->iremap_lock, flags);
@@ -548,8 +502,8 @@ static int remap_entry_to_msi_msg(
     if ( index >= IREMAP_ENTRY_NR )
     {
         dprintk(XENLOG_ERR VTDPREFIX,
-                "MSI index (%d) for remap table is invalid\n",
-                index);
+                "%s: index (%d) for remap table is invalid !\n",
+                __func__, index);
         return -EFAULT;
     }
 
@@ -558,11 +512,11 @@ static int remap_entry_to_msi_msg(
     GET_IREMAP_ENTRY(ir_ctrl->iremap_maddr, index,
                      iremap_entries, iremap_entry);
 
-    if ( iremap_entry->val == 0 )
+    if ( iremap_entry->hi_val == 0 && iremap_entry->lo_val == 0 )
     {
         dprintk(XENLOG_ERR VTDPREFIX,
-                "MSI index (%d) has an empty entry\n",
-                index);
+                "%s: index (%d) get an empty entry!\n",
+                __func__, index);
         unmap_vtd_domain_page(iremap_entries);
         spin_unlock_irqrestore(&ir_ctrl->iremap_lock, flags);
         return -EFAULT;
@@ -571,25 +525,25 @@ static int remap_entry_to_msi_msg(
     msg->address_hi = MSI_ADDR_BASE_HI;
     msg->address_lo =
         MSI_ADDR_BASE_LO |
-        ((iremap_entry->remap.dm == 0) ?
+        ((iremap_entry->lo.dm == 0) ?
             MSI_ADDR_DESTMODE_PHYS:
             MSI_ADDR_DESTMODE_LOGIC) |
-        ((iremap_entry->remap.dlm != dest_LowestPrio) ?
+        ((iremap_entry->lo.dlm != dest_LowestPrio) ?
             MSI_ADDR_REDIRECTION_CPU:
             MSI_ADDR_REDIRECTION_LOWPRI);
     if ( x2apic_enabled )
-        msg->dest32 = iremap_entry->remap.dst;
+        msg->dest32 = iremap_entry->lo.dst;
     else
-        msg->dest32 = (iremap_entry->remap.dst >> 8) & 0xff;
-    msg->address_lo |= MSI_ADDR_DEST_ID(msg->dest32);
+        msg->dest32 = (iremap_entry->lo.dst >> 8) & 0xff;
+    msg->address_lo |= (msg->dest32 & 0xff) << MSI_ADDR_DEST_ID_SHIFT;
 
     msg->data =
         MSI_DATA_TRIGGER_EDGE |
         MSI_DATA_LEVEL_ASSERT |
-        ((iremap_entry->remap.dlm != dest_LowestPrio) ?
+        ((iremap_entry->lo.dlm != dest_LowestPrio) ?
             MSI_DATA_DELIVERY_FIXED:
             MSI_DATA_DELIVERY_LOWPRI) |
-        iremap_entry->remap.vector;
+        iremap_entry->lo.vector;
 
     unmap_vtd_domain_page(iremap_entries);
     spin_unlock_irqrestore(&ir_ctrl->iremap_lock, flags);
@@ -600,12 +554,12 @@ static int msi_msg_to_remap_entry(
     struct iommu *iommu, struct pci_dev *pdev,
     struct msi_desc *msi_desc, struct msi_msg *msg)
 {
-    struct iremap_entry *iremap_entry = NULL, *iremap_entries, new_ire = { };
+    struct iremap_entry *iremap_entry = NULL, *iremap_entries;
+    struct iremap_entry new_ire;
     struct msi_msg_remap_entry *remap_rte;
     unsigned int index, i, nr = 1;
     unsigned long flags;
     struct ir_ctrl *ir_ctrl = iommu_ir_ctrl(iommu);
-    const struct pi_desc *pi_desc = msi_desc->pi_desc;
 
     if ( msi_desc->msi_attrib.type == PCI_CAP_ID_MSI )
         nr = msi_desc->msi.nvec;
@@ -616,10 +570,7 @@ static int msi_msg_to_remap_entry(
     {
         /* Free specified unused IRTEs */
         for ( i = 0; i < nr; ++i )
-        {
             free_remap_entry(iommu, msi_desc->remap_index + i);
-            msi_desc[i].irte_initialized = false;
-        }
         spin_unlock_irqrestore(&ir_ctrl->iremap_lock, flags);
         return 0;
     }
@@ -636,8 +587,9 @@ static int msi_msg_to_remap_entry(
     if ( index > IREMAP_ENTRY_NR - 1 )
     {
         dprintk(XENLOG_ERR VTDPREFIX,
-                "MSI intremap index (%d) larger than maximum index (%d)!\n",
-                index, IREMAP_ENTRY_NR - 1);
+                "%s: intremap index (%d) is larger than"
+                " the maximum index (%d)!\n",
+                __func__, index, IREMAP_ENTRY_NR - 1);
         for ( i = 0; i < nr; ++i )
             msi_desc[i].remap_index = -1;
         spin_unlock_irqrestore(&ir_ctrl->iremap_lock, flags);
@@ -647,35 +599,32 @@ static int msi_msg_to_remap_entry(
     GET_IREMAP_ENTRY(ir_ctrl->iremap_maddr, index,
                      iremap_entries, iremap_entry);
 
-    if ( !pi_desc )
-    {
-        new_ire.remap.dm = msg->address_lo >> MSI_ADDR_DESTMODE_SHIFT;
-        new_ire.remap.tm = msg->data >> MSI_DATA_TRIGGER_SHIFT;
-        new_ire.remap.dlm = msg->data >> MSI_DATA_DELIVERY_MODE_SHIFT;
-        /* Hardware requires RH = 1 for lowest priority delivery mode */
-        new_ire.remap.rh = (new_ire.remap.dlm == dest_LowestPrio);
-        new_ire.remap.vector = (msg->data >> MSI_DATA_VECTOR_SHIFT) &
-                                MSI_DATA_VECTOR_MASK;
-        if ( x2apic_enabled )
-            new_ire.remap.dst = msg->dest32;
-        else
-            new_ire.remap.dst =
-                MASK_EXTR(msg->address_lo, MSI_ADDR_DEST_ID_MASK) << 8;
-        new_ire.remap.p = 1;
-    }
+    memcpy(&new_ire, iremap_entry, sizeof(struct iremap_entry));
+
+    /* Set interrupt remapping table entry */
+    new_ire.lo.fpd = 0;
+    new_ire.lo.dm = (msg->address_lo >> MSI_ADDR_DESTMODE_SHIFT) & 0x1;
+    new_ire.lo.tm = (msg->data >> MSI_DATA_TRIGGER_SHIFT) & 0x1;
+    new_ire.lo.dlm = (msg->data >> MSI_DATA_DELIVERY_MODE_SHIFT) & 0x1;
+    /* Hardware require RH = 1 for LPR delivery mode */
+    new_ire.lo.rh = (new_ire.lo.dlm == dest_LowestPrio);
+    new_ire.lo.avail = 0;
+    new_ire.lo.res_1 = 0;
+    new_ire.lo.vector = (msg->data >> MSI_DATA_VECTOR_SHIFT) &
+                        MSI_DATA_VECTOR_MASK;
+    new_ire.lo.res_2 = 0;
+    if ( x2apic_enabled )
+        new_ire.lo.dst = msg->dest32;
     else
-    {
-        new_ire.post.im = 1;
-        new_ire.post.vector = msi_desc->gvec;
-        new_ire.post.pda_l = virt_to_maddr(pi_desc) >> (32 - PDA_LOW_BIT);
-        new_ire.post.pda_h = virt_to_maddr(pi_desc) >> 32;
-        new_ire.post.p = 1;
-    }
+        new_ire.lo.dst = ((msg->address_lo >> MSI_ADDR_DEST_ID_SHIFT)
+                          & 0xff) << 8;
 
     if ( pdev )
         set_msi_source_id(pdev, &new_ire);
     else
         set_hpet_source_id(msi_desc->hpet_id, &new_ire);
+    new_ire.hi.res_1 = 0;
+    new_ire.lo.p = 1;    /* finally, set present bit */
 
     /* now construct new MSI/MSI-X rte entry */
     remap_rte = (struct msi_msg_remap_entry *)msg;
@@ -691,11 +640,10 @@ static int msi_msg_to_remap_entry(
     remap_rte->address_hi = 0;
     remap_rte->data = index - i;
 
-    update_irte(iommu, iremap_entry, &new_ire, msi_desc->irte_initialized);
-    msi_desc->irte_initialized = true;
-
-    iommu_flush_cache_entry(iremap_entry, sizeof(*iremap_entry));
+    memcpy(iremap_entry, &new_ire, sizeof(struct iremap_entry));
+    iommu_flush_cache_entry(iremap_entry, sizeof(struct iremap_entry));
     iommu_flush_iec_index(iommu, 0, index);
+    invalidate_sync(iommu);
 
     unmap_vtd_domain_page(iremap_entries);
     spin_unlock_irqrestore(&ir_ctrl->iremap_lock, flags);
@@ -743,8 +691,9 @@ int __init intel_setup_hpet_msi(struct msi_desc *msi_desc)
     if ( msi_desc->remap_index >= IREMAP_ENTRY_NR )
     {
         dprintk(XENLOG_ERR VTDPREFIX,
-                "HPET intremap index (%d) larger than maximum index (%d)!\n",
-                msi_desc->remap_index, IREMAP_ENTRY_NR - 1);
+                "%s: intremap index (%d) is larger than"
+                " the maximum index (%d)!\n",
+                __func__, msi_desc->remap_index, IREMAP_ENTRY_NR - 1);
         msi_desc->remap_index = -1;
         rc = -ENXIO;
     }
@@ -802,15 +751,14 @@ int enable_intremap(struct iommu *iommu, int eim)
         ir_ctrl->iremap_num = 0;
     }
 
+    /* set extended interrupt mode bit */
+    ir_ctrl->iremap_maddr |= eim ? IRTA_EIME : 0;
+
     spin_lock_irqsave(&iommu->register_lock, flags);
 
-    /*
-     * Set size of the interrupt remapping table and optionally Extended
-     * Interrupt Mode.
-     */
-    dmar_writeq(iommu->reg, DMAR_IRTA_REG,
-                ir_ctrl->iremap_maddr | IRTA_REG_TABLE_SIZE |
-                (eim ? IRTA_EIME : 0));
+    /* set size of the interrupt remapping table */
+    ir_ctrl->iremap_maddr |= IRTA_REG_TABLE_SIZE;
+    dmar_writeq(iommu->reg, DMAR_IRTA_REG, ir_ctrl->iremap_maddr);
 
     /* set SIRTP */
     gcmd = dmar_readl(iommu->reg, DMAR_GSTS_REG);
@@ -887,16 +835,11 @@ int iommu_enable_x2apic_IR(void)
     struct acpi_drhd_unit *drhd;
     struct iommu *iommu;
 
-    if ( system_state < SYS_STATE_active )
-    {
-        if ( !iommu_supports_eim() )
-            return -EOPNOTSUPP;
+    if ( !iommu_supports_eim() )
+        return -1;
 
-        if ( !platform_supports_x2apic() )
-            return -ENXIO;
-    }
-    else if ( !x2apic_enabled )
-        return -EOPNOTSUPP;
+    if ( !platform_supports_x2apic() )
+        return -1;
 
     for_each_drhd_unit ( drhd )
     {
@@ -921,7 +864,7 @@ int iommu_enable_x2apic_IR(void)
         {
             dprintk(XENLOG_INFO VTDPREFIX,
                     "Failed to enable Queued Invalidation!\n");
-            return -EIO;
+            return -1;
         }
     }
 
@@ -933,7 +876,7 @@ int iommu_enable_x2apic_IR(void)
         {
             dprintk(XENLOG_INFO VTDPREFIX,
                     "Failed to enable Interrupt Remapping!\n");
-            return -EIO;
+            return -1;
         }
     }
 
@@ -948,8 +891,7 @@ void iommu_disable_x2apic_IR(void)
 {
     struct acpi_drhd_unit *drhd;
 
-    /* x2apic_enabled implies iommu_supports_eim(). */
-    if ( !x2apic_enabled )
+    if ( !iommu_supports_eim() )
         return;
 
     for_each_drhd_unit ( drhd )
@@ -957,40 +899,4 @@ void iommu_disable_x2apic_IR(void)
 
     for_each_drhd_unit ( drhd )
         disable_qinval(drhd->iommu);
-}
-
-/*
- * This function is used to update the IRTE for posted-interrupt
- * when guest changes MSI/MSI-X information.
- */
-int pi_update_irte(const struct pi_desc *pi_desc, const struct pirq *pirq,
-    const uint8_t gvec)
-{
-    struct irq_desc *desc;
-    struct msi_desc *msi_desc;
-    int rc;
-
-    desc = pirq_spin_lock_irq_desc(pirq, NULL);
-    if ( !desc )
-        return -EINVAL;
-
-    msi_desc = desc->msi_desc;
-    if ( !msi_desc )
-    {
-        rc = -ENODEV;
-        goto unlock_out;
-    }
-    msi_desc->pi_desc = pi_desc;
-    msi_desc->gvec = gvec;
-
-    spin_unlock_irq(&desc->lock);
-
-    ASSERT(pcidevs_locked());
-
-    return msi_msg_write_remap_rte(msi_desc, &msi_desc->msg);
-
- unlock_out:
-    spin_unlock_irq(&desc->lock);
-
-    return rc;
 }

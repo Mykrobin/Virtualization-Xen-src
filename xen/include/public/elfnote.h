@@ -173,9 +173,7 @@
  * The (non-default) location the initial phys-to-machine map should be
  * placed at by the hypervisor (Dom0) or the tools (DomU).
  * The kernel must be prepared for this mapping to be established using
- * large pages, despite such otherwise not being available to guests. Note
- * that these large pages may be misaligned in PFN space (they'll obviously
- * be aligned in MFN and virtual address spaces).
+ * large pages, despite such otherwise not being available to guests.
  * The kernel must also be able to handle the page table pages used for
  * this mapping not being accessible through the initial mapping.
  * (Only x86-64 supports this at present.)
@@ -202,19 +200,9 @@
 #define XEN_ELFNOTE_SUPPORTED_FEATURES 17
 
 /*
- * Physical entry point into the kernel.
- *
- * 32bit entry point into the kernel. When requested to launch the
- * guest kernel in a HVM container, Xen will use this entry point to
- * launch the guest in 32bit protected mode with paging disabled.
- * Ignored otherwise.
- */
-#define XEN_ELFNOTE_PHYS32_ENTRY 18
-
-/*
  * The number of the highest elfnote defined.
  */
-#define XEN_ELFNOTE_MAX XEN_ELFNOTE_PHYS32_ENTRY
+#define XEN_ELFNOTE_MAX XEN_ELFNOTE_SUPPORTED_FEATURES
 
 /*
  * System information exported through crash notes.

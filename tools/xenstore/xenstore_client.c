@@ -40,7 +40,6 @@ enum mode {
 
 static char *output_buf = NULL;
 static int output_pos = 0;
-static struct expanding_buffer ebuf;
 
 static int output_size = 0;
 
@@ -87,7 +86,6 @@ usage(enum mode mode, int incl_mode, const char *progname)
 	errx(1, "Usage: %s %s[-h] [-s] [-t] key [...]", progname, mstr);
     case MODE_exists:
 	mstr = incl_mode ? "exists " : "";
-	/* fallthrough */
     case MODE_list:
 	mstr = mstr ? : incl_mode ? "list " : "";
 	errx(1, "Usage: %s %s[-h] [-p] [-s] key [...]", progname, mstr);
@@ -128,15 +126,12 @@ static int show_whole_path = 0;
 
 static void do_ls(struct xs_handle *h, char *path, int cur_depth, int show_perms)
 {
+    static struct expanding_buffer ebuf;
     char **e;
-    char *newpath, *val;
+    char newpath[STRING_MAX], *val;
     int newpath_len;
     int i;
     unsigned int num, len;
-
-    newpath = malloc(STRING_MAX);
-    if (!newpath)
-      err(1, "malloc in do_ls");
 
     e = xs_directory(h, XBT_NULL, path, &num);
     if (e == NULL)
@@ -149,7 +144,7 @@ static void do_ls(struct xs_handle *h, char *path, int cur_depth, int show_perms
         int linewid;
 
         /* Compose fullpath */
-        newpath_len = snprintf(newpath, STRING_MAX, "%s%s%s", path,
+        newpath_len = snprintf(newpath, sizeof(newpath), "%s%s%s", path, 
                 path[strlen(path)-1] == '/' ? "" : "/", 
                 e[i]);
 
@@ -166,7 +161,7 @@ static void do_ls(struct xs_handle *h, char *path, int cur_depth, int show_perms
         }
 
 	/* Fetch value */
-        if ( newpath_len < STRING_MAX ) {
+        if ( newpath_len < sizeof(newpath) ) {
             val = xs_read(h, XBT_NULL, newpath, &len);
         }
         else {
@@ -222,7 +217,6 @@ static void do_ls(struct xs_handle *h, char *path, int cur_depth, int show_perms
         do_ls(h, newpath, cur_depth+1, show_perms); 
     }
     free(e);
-    free(newpath);
 }
 
 static void
@@ -314,6 +308,7 @@ perform(enum mode mode, int optind, int argc, char **argv, struct xs_handle *xsh
             /* CANNOT BE REACHED */
             errx(1, "invalid mode %d", mode);
         case MODE_read: {
+            static struct expanding_buffer ebuf;
             unsigned len;
             char *val = xs_read(xsh, xth, argv[optind], &len);
             if (val == NULL) {
@@ -328,6 +323,7 @@ perform(enum mode mode, int optind, int argc, char **argv, struct xs_handle *xsh
             break;
         }
         case MODE_write: {
+            static struct expanding_buffer ebuf;
             char *val_spec = argv[optind + 1];
             unsigned len;
             expanding_buffer_ensure(&ebuf, strlen(val_spec)+1);
@@ -658,12 +654,6 @@ again:
 
     if (output_pos)
 	printf("%s", output_buf);
-
-    free(output_buf);
-    free(ebuf.buf);
-
-    if (xsh)
-        xs_close(xsh);
 
     return ret;
 }

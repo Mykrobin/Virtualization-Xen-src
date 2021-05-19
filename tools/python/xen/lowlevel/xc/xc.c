@@ -5,8 +5,9 @@
  */
 
 #include <Python.h>
-#define XC_WANT_COMPAT_MAP_FOREIGN_API
 #include <xenctrl.h>
+#include <xenguest.h>
+#include <zlib.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -16,6 +17,7 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 
+#include "xenctrl.h"
 #include <xen/elfnote.h>
 #include <xen/tmem.h>
 #include "xc_dom.h"
@@ -33,17 +35,6 @@
 #define CLS "xc"
 
 #define FLASK_CTX_LEN 1024
-
-/* Python 2 compatibility */
-#if PY_MAJOR_VERSION >= 3
-#define PyLongOrInt_FromLong PyLong_FromLong
-#define PyLongOrInt_Check PyLong_Check
-#define PyLongOrInt_AsLong PyLong_AsLong
-#else
-#define PyLongOrInt_FromLong PyInt_FromLong
-#define PyLongOrInt_Check PyInt_Check
-#define PyLongOrInt_AsLong PyInt_AsLong
-#endif
 
 static PyObject *xc_error_obj, *zero;
 
@@ -138,14 +129,14 @@ static PyObject *pyxc_domain_create(XcObject *self,
         for ( i = 0; i < sizeof(xen_domain_handle_t); i++ )
         {
             PyObject *p = PyList_GetItem(pyhandle, i);
-            if ( !PyLongOrInt_Check(p) )
+            if ( !PyInt_Check(p) )
                 goto out_exception;
-            handle[i] = (uint8_t)PyLongOrInt_AsLong(p);
+            handle[i] = (uint8_t)PyInt_AsLong(p);
         }
     }
 
     if ( (ret = xc_domain_create(self->xc_handle, ssidref,
-                                 handle, flags, &dom, NULL)) < 0 )
+                                 handle, flags, &dom)) < 0 )
         return pyxc_error_to_exception(self->xc_handle);
 
     if ( target )
@@ -153,7 +144,7 @@ static PyObject *pyxc_domain_create(XcObject *self,
             return pyxc_error_to_exception(self->xc_handle);
 
 
-    return PyLongOrInt_FromLong(dom);
+    return PyInt_FromLong(dom);
 
 out_exception:
     errno = EINVAL;
@@ -253,7 +244,7 @@ static PyObject *pyxc_vcpu_setaffinity(XcObject *self,
     {
         for ( i = 0; i < PyList_Size(cpulist); i++ ) 
         {
-            long cpu = PyLongOrInt_AsLong(PyList_GetItem(cpulist, i));
+            long cpu = PyInt_AsLong(PyList_GetItem(cpulist, i));
             if ( cpu < 0 || cpu >= nr_cpus )
             {
                 free(cpumap);
@@ -265,8 +256,7 @@ static PyObject *pyxc_vcpu_setaffinity(XcObject *self,
         }
     }
   
-    if ( xc_vcpu_setaffinity(self->xc_handle, dom, vcpu, cpumap,
-                             NULL, XEN_VCPUAFFINITY_HARD) != 0 )
+    if ( xc_vcpu_setaffinity(self->xc_handle, dom, vcpu, cpumap) != 0 )
     {
         free(cpumap);
         return pyxc_error_to_exception(self->xc_handle);
@@ -295,9 +285,9 @@ static PyObject *pyxc_domain_sethandle(XcObject *self, PyObject *args)
     for ( i = 0; i < sizeof(xen_domain_handle_t); i++ )
     {
         PyObject *p = PyList_GetItem(pyhandle, i);
-        if ( !PyLongOrInt_Check(p) )
+        if ( !PyInt_Check(p) )
             goto out_exception;
-        handle[i] = (uint8_t)PyLongOrInt_AsLong(p);
+        handle[i] = (uint8_t)PyInt_AsLong(p);
     }
 
     if (xc_domain_sethandle(self->xc_handle, dom, handle) < 0)
@@ -372,7 +362,7 @@ static PyObject *pyxc_domain_getinfo(XcObject *self,
             return NULL;
         }
         for ( j = 0; j < sizeof(xen_domain_handle_t); j++ )
-            PyList_SetItem(pyhandle, j, PyLongOrInt_FromLong(info[i].handle[j]));
+            PyList_SetItem(pyhandle, j, PyInt_FromLong(info[i].handle[j]));
         PyDict_SetItemString(info_dict, "handle", pyhandle);
         Py_DECREF(pyhandle);
         PyList_SetItem(list, i, info_dict);
@@ -413,8 +403,7 @@ static PyObject *pyxc_vcpu_getinfo(XcObject *self,
     if(cpumap == NULL)
         return pyxc_error_to_exception(self->xc_handle);
 
-    rc = xc_vcpu_getaffinity(self->xc_handle, dom, vcpu, cpumap,
-                             NULL, XEN_VCPUAFFINITY_HARD);
+    rc = xc_vcpu_getaffinity(self->xc_handle, dom, vcpu, cpumap);
     if ( rc < 0 )
     {
         free(cpumap);
@@ -431,7 +420,7 @@ static PyObject *pyxc_vcpu_getinfo(XcObject *self,
     for ( i = 0; i < nr_cpus; i++ )
     {
         if (*(cpumap + i / 8) & 1 ) {
-            PyObject *pyint = PyLongOrInt_FromLong(i);
+            PyObject *pyint = PyInt_FromLong(i);
             PyList_Append(cpulist, pyint);
             Py_DECREF(pyint);
         }
@@ -443,27 +432,139 @@ static PyObject *pyxc_vcpu_getinfo(XcObject *self,
     return info_dict;
 }
 
-static PyObject *pyxc_hvm_param_get(XcObject *self,
+static PyObject *pyxc_getBitSize(XcObject *self,
+                                    PyObject *args,
+                                    PyObject *kwds)
+{
+    PyObject *info_type;
+    char *image = NULL, *cmdline = "", *features = NULL;
+    int type = 0;
+    static char *kwd_list[] = { "image", "cmdline", "features", NULL };
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "sss", kwd_list,
+                                      &image, &cmdline, &features) )
+        return NULL;
+
+    xc_get_bit_size(self->xc_handle, image, cmdline, features, &type);
+    if (type < 0)
+        return pyxc_error_to_exception(self->xc_handle);
+    info_type = Py_BuildValue("{s:i}",
+                              "type", type);
+    return info_type;
+}
+
+static PyObject *pyxc_linux_build(XcObject *self,
+                                  PyObject *args,
+                                  PyObject *kwds)
+{
+    uint32_t domid;
+    struct xc_dom_image *dom;
+    char *image, *ramdisk = NULL, *cmdline = "", *features = NULL;
+    int flags = 0;
+    int store_evtchn, console_evtchn;
+    int vhpt = 0;
+    int superpages = 0;
+    unsigned int mem_mb;
+    unsigned long store_mfn = 0;
+    unsigned long console_mfn = 0;
+    PyObject* elfnote_dict;
+    PyObject* elfnote = NULL;
+    PyObject* ret;
+    int i;
+
+    static char *kwd_list[] = { "domid", "store_evtchn", "memsize",
+                                "console_evtchn", "image",
+                                /* optional */
+                                "ramdisk", "cmdline", "flags",
+                                "features", "vhpt", "superpages", NULL };
+
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "iiiis|ssisii", kwd_list,
+                                      &domid, &store_evtchn, &mem_mb,
+                                      &console_evtchn, &image,
+                                      /* optional */
+                                      &ramdisk, &cmdline, &flags,
+                                      &features, &vhpt, &superpages) )
+        return NULL;
+
+    xc_dom_loginit(self->xc_handle);
+    if (!(dom = xc_dom_allocate(self->xc_handle, cmdline, features)))
+        return pyxc_error_to_exception(self->xc_handle);
+
+    /* for IA64 */
+    dom->vhpt_size_log2 = vhpt;
+
+    dom->superpages = superpages;
+
+    if ( xc_dom_linux_build(self->xc_handle, dom, domid, mem_mb, image,
+                            ramdisk, flags, store_evtchn, &store_mfn,
+                            console_evtchn, &console_mfn) != 0 ) {
+        goto out;
+    }
+
+    if ( !(elfnote_dict = PyDict_New()) )
+        goto out;
+    
+    for ( i = 0; i < ARRAY_SIZE(dom->parms.elf_notes); i++ )
+    {
+        switch ( dom->parms.elf_notes[i].type )
+        {
+        case XEN_ENT_NONE:
+            continue;
+        case XEN_ENT_LONG:
+            elfnote = Py_BuildValue("k", dom->parms.elf_notes[i].data.num);
+            break;
+        case XEN_ENT_STR:
+            elfnote = Py_BuildValue("s", dom->parms.elf_notes[i].data.str);
+            break;
+        }
+        PyDict_SetItemString(elfnote_dict,
+                             dom->parms.elf_notes[i].name,
+                             elfnote);
+        Py_DECREF(elfnote);
+    }
+
+    ret = Py_BuildValue("{s:i,s:i,s:N}",
+                        "store_mfn", store_mfn,
+                        "console_mfn", console_mfn,
+                        "notes", elfnote_dict);
+
+    if ( dom->arch_hooks->native_protocol )
+    {
+        PyObject *native_protocol =
+            Py_BuildValue("s", dom->arch_hooks->native_protocol);
+        PyDict_SetItemString(ret, "native_protocol", native_protocol);
+        Py_DECREF(native_protocol);
+    }
+
+    xc_dom_release(dom);
+
+    return ret;
+
+  out:
+    xc_dom_release(dom);
+    return pyxc_error_to_exception(self->xc_handle);
+}
+
+static PyObject *pyxc_get_hvm_param(XcObject *self,
                                     PyObject *args,
                                     PyObject *kwds)
 {
     uint32_t dom;
     int param;
-    uint64_t value;
+    unsigned long value;
 
     static char *kwd_list[] = { "domid", "param", NULL }; 
     if ( !PyArg_ParseTupleAndKeywords(args, kwds, "ii", kwd_list,
                                       &dom, &param) )
         return NULL;
 
-    if ( xc_hvm_param_get(self->xc_handle, dom, param, &value) != 0 )
+    if ( xc_get_hvm_param(self->xc_handle, dom, param, &value) != 0 )
         return pyxc_error_to_exception(self->xc_handle);
 
-    return PyLong_FromUnsignedLongLong(value);
+    return PyLong_FromUnsignedLong(value);
 
 }
 
-static PyObject *pyxc_hvm_param_set(XcObject *self,
+static PyObject *pyxc_set_hvm_param(XcObject *self,
                                     PyObject *args,
                                     PyObject *kwds)
 {
@@ -476,7 +577,7 @@ static PyObject *pyxc_hvm_param_set(XcObject *self,
                                       &dom, &param, &value) )
         return NULL;
 
-    if ( xc_hvm_param_set(self->xc_handle, dom, param, value) != 0 )
+    if ( xc_set_hvm_param(self->xc_handle, dom, param, value) != 0 )
         return pyxc_error_to_exception(self->xc_handle);
 
     Py_INCREF(zero);
@@ -564,7 +665,7 @@ static PyObject *pyxc_assign_device(XcObject *self,
         sbdf |= (dev & 0x1f) << 3;
         sbdf |= (func & 0x7);
 
-        if ( xc_assign_device(self->xc_handle, dom, sbdf, 0) != 0 )
+        if ( xc_assign_device(self->xc_handle, dom, sbdf) != 0 )
         {
             if (errno == ENOSYS)
                 sbdf = -1;
@@ -689,7 +790,7 @@ static void pyxc_dom_extract_cpuid(PyObject *config,
 
     for ( i = 0; i < 4; i++ )
         if ( (obj = PyDict_GetItemString(config, regs_extract[i])) != NULL )
-            regs[i] = PyBytes_AS_STRING(obj);
+            regs[i] = PyString_AS_STRING(obj);
 }
 
 static PyObject *pyxc_create_cpuid_dict(char **regs)
@@ -704,11 +805,34 @@ static PyObject *pyxc_create_cpuid_dict(char **regs)
        if ( regs[i] == NULL )
            continue;
        PyDict_SetItemString(dict, regs_extract[i],
-                            PyBytes_FromString(regs[i]));
+                            PyString_FromString(regs[i]));
        free(regs[i]);
        regs[i] = NULL;
    }
    return dict;
+}
+
+static PyObject *pyxc_dom_check_cpuid(XcObject *self,
+                                      PyObject *args)
+{
+    PyObject *sub_input, *config;
+    unsigned int input[2];
+    char *regs[4], *regs_transform[4];
+
+    if ( !PyArg_ParseTuple(args, "iOO", &input[0], &sub_input, &config) )
+        return NULL;
+
+    pyxc_dom_extract_cpuid(config, regs);
+
+    input[1] = XEN_CPUID_INPUT_UNUSED;
+    if ( PyLong_Check(sub_input) )
+        input[1] = PyLong_AsUnsignedLong(sub_input);
+
+    if ( xc_cpuid_check(self->xc_handle, input,
+                        (const char **)regs, regs_transform) )
+        return pyxc_error_to_exception(self->xc_handle);
+
+    return pyxc_create_cpuid_dict(regs_transform);
 }
 
 static PyObject *pyxc_dom_set_policy_cpuid(XcObject *self,
@@ -719,7 +843,7 @@ static PyObject *pyxc_dom_set_policy_cpuid(XcObject *self,
     if ( !PyArg_ParseTuple(args, "i", &domid) )
         return NULL;
 
-    if ( xc_cpuid_apply_policy(self->xc_handle, domid, NULL, 0) )
+    if ( xc_cpuid_apply_policy(self->xc_handle, domid) )
         return pyxc_error_to_exception(self->xc_handle);
 
     Py_INCREF(zero);
@@ -784,6 +908,77 @@ static PyObject *pyxc_dom_suppress_spurious_page_faults(XcObject *self,
 }
 #endif /* __i386__ || __x86_64__ */
 
+static PyObject *pyxc_hvm_build(XcObject *self,
+                                PyObject *args,
+                                PyObject *kwds)
+{
+    uint32_t dom;
+    struct hvm_info_table *va_hvm;
+    uint8_t *va_map, sum;
+    int i;
+    char *image;
+    int memsize, target=-1, vcpus = 1, acpi = 0, apic = 1;
+    PyObject *vcpu_avail_handle = NULL;
+    uint8_t vcpu_avail[(HVM_MAX_VCPUS + 7)/8];
+
+    static char *kwd_list[] = { "domid",
+                                "memsize", "image", "target", "vcpus", 
+                                "vcpu_avail", "acpi", "apic", NULL };
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "iis|iiOii", kwd_list,
+                                      &dom, &memsize, &image, &target, &vcpus,
+                                      &vcpu_avail_handle, &acpi, &apic) )
+        return NULL;
+
+    memset(vcpu_avail, 0, sizeof(vcpu_avail));
+    vcpu_avail[0] = 1;
+    if ( vcpu_avail_handle != NULL )
+    {
+        if ( PyInt_Check(vcpu_avail_handle) )
+        {
+            unsigned long v = PyInt_AsLong(vcpu_avail_handle);
+            for ( i = 0; i < sizeof(long); i++ )
+                vcpu_avail[i] = (uint8_t)(v>>(i*8));
+        }
+        else if ( PyLong_Check(vcpu_avail_handle) )
+        {
+            if ( _PyLong_AsByteArray((PyLongObject *)vcpu_avail_handle,
+                                     (unsigned char *)vcpu_avail,
+                                     sizeof(vcpu_avail), 1, 0) )
+                return NULL;
+        }
+        else
+        {
+            errno = EINVAL;
+            PyErr_SetFromErrno(xc_error_obj);
+            return NULL;
+        }
+    }
+
+    if ( target == -1 )
+        target = memsize;
+
+    if ( xc_hvm_build_target_mem(self->xc_handle, dom, memsize,
+                                 target, image) != 0 )
+        return pyxc_error_to_exception(self->xc_handle);
+
+    /* Fix up the HVM info table. */
+    va_map = xc_map_foreign_range(self->xc_handle, dom, XC_PAGE_SIZE,
+                                  PROT_READ | PROT_WRITE,
+                                  HVM_INFO_PFN);
+    if ( va_map == NULL )
+        return PyErr_SetFromErrno(xc_error_obj);
+    va_hvm = (struct hvm_info_table *)(va_map + HVM_INFO_OFFSET);
+    va_hvm->apic_mode    = apic;
+    va_hvm->nr_vcpus     = vcpus;
+    memcpy(va_hvm->vcpu_online, vcpu_avail, sizeof(vcpu_avail));
+    for ( i = 0, sum = 0; i < va_hvm->length; i++ )
+        sum += ((uint8_t *)va_hvm)[i];
+    va_hvm->checksum -= sum;
+    munmap(va_map, XC_PAGE_SIZE);
+
+    return Py_BuildValue("{}");
+}
+
 static PyObject *pyxc_gnttab_hvm_seed(XcObject *self,
 				      PyObject *args,
 				      PyObject *kwds)
@@ -824,7 +1019,7 @@ static PyObject *pyxc_evtchn_alloc_unbound(XcObject *self,
     if ( (port = xc_evtchn_alloc_unbound(self->xc_handle, dom, remote_dom)) < 0 )
         return pyxc_error_to_exception(self->xc_handle);
 
-    return PyLongOrInt_FromLong(port);
+    return PyInt_FromLong(port);
 }
 
 static PyObject *pyxc_evtchn_reset(XcObject *self,
@@ -892,7 +1087,7 @@ static PyObject *pyxc_readconsolering(XcObject *self,
 {
     unsigned int clear = 0, index = 0, incremental = 0;
     unsigned int count = 16384 + 1, size = count;
-    char        *str, *ptr;
+    char        *str = malloc(size), *ptr;
     PyObject    *obj;
     int          ret;
 
@@ -900,17 +1095,15 @@ static PyObject *pyxc_readconsolering(XcObject *self,
 
     if ( !PyArg_ParseTupleAndKeywords(args, kwds, "|iii", kwd_list,
                                       &clear, &index, &incremental) ||
-         !(str = malloc(size)) )
+         !str )
         return NULL;
 
     ret = xc_readconsolering(self->xc_handle, str, &count, clear,
                              incremental, &index);
-    if ( ret < 0 ) {
-        free(str);
+    if ( ret < 0 )
         return pyxc_error_to_exception(self->xc_handle);
-    }
 
-    while ( !incremental && count == size && ret >= 0 )
+    while ( !incremental && count == size )
     {
         size += count - 1;
         if ( size < count )
@@ -924,11 +1117,14 @@ static PyObject *pyxc_readconsolering(XcObject *self,
         count = size - count;
         ret = xc_readconsolering(self->xc_handle, str, &count, clear,
                                  1, &index);
+        if ( ret < 0 )
+            break;
+
         count += str - ptr;
         str = ptr;
     }
 
-    obj = PyBytes_FromStringAndSize(str, count);
+    obj = PyString_FromStringAndSize(str, count);
     free(str);
     return obj;
 }
@@ -987,99 +1183,80 @@ static PyObject *pyxc_physinfo(XcObject *self)
                             "virt_caps",        virt_caps);
 }
 
-static PyObject *pyxc_getcpuinfo(XcObject *self, PyObject *args, PyObject *kwds)
-{
-    xc_cpuinfo_t *cpuinfo, *cpuinfo_ptr;
-    PyObject *cpuinfo_list_obj, *cpuinfo_obj;
-    int max_cpus, nr_cpus, ret, i;
-    static char *kwd_list[] = { "max_cpus", NULL };
-    static char kwd_type[] = "i";
-
-    if(!PyArg_ParseTupleAndKeywords(args, kwds, kwd_type, kwd_list, &max_cpus))
-        return NULL;
-
-    cpuinfo = malloc(sizeof(xc_cpuinfo_t) * max_cpus);
-    if (!cpuinfo)
-        return NULL;
-
-    ret = xc_getcpuinfo(self->xc_handle, max_cpus, cpuinfo, &nr_cpus);
-    if (ret != 0) {
-        free(cpuinfo);
-        return pyxc_error_to_exception(self->xc_handle);
-    }
-
-    cpuinfo_list_obj = PyList_New(0);
-    cpuinfo_ptr = cpuinfo;
-    for (i = 0; i < nr_cpus; i++) {
-        cpuinfo_obj = Py_BuildValue("{s:k}", "idletime", cpuinfo_ptr->idletime);
-        PyList_Append(cpuinfo_list_obj, cpuinfo_obj);
-        Py_DECREF(cpuinfo_obj);
-        cpuinfo_ptr++;
-    }
-
-    free(cpuinfo);
-
-    return cpuinfo_list_obj;
-}
-
 static PyObject *pyxc_topologyinfo(XcObject *self)
 {
-    xc_cputopo_t *cputopo = NULL;
-    unsigned i, num_cpus = 0;
+#define MAX_CPU_INDEX 255
+    xc_topologyinfo_t tinfo = { 0 };
+    int i, max_cpu_index;
     PyObject *ret_obj = NULL;
     PyObject *cpu_to_core_obj, *cpu_to_socket_obj, *cpu_to_node_obj;
+    DECLARE_HYPERCALL_BUFFER(xc_cpu_to_core_t, coremap);
+    DECLARE_HYPERCALL_BUFFER(xc_cpu_to_socket_t, socketmap);
+    DECLARE_HYPERCALL_BUFFER(xc_cpu_to_node_t, nodemap);
 
-    if ( xc_cputopoinfo(self->xc_handle, &num_cpus, NULL) != 0 )
+    coremap = xc_hypercall_buffer_alloc(self->xc_handle, coremap, sizeof(*coremap) * (MAX_CPU_INDEX+1));
+    if ( coremap == NULL )
+        goto out;
+    socketmap = xc_hypercall_buffer_alloc(self->xc_handle, socketmap, sizeof(*socketmap) * (MAX_CPU_INDEX+1));
+    if ( socketmap == NULL  )
+        goto out;
+    nodemap = xc_hypercall_buffer_alloc(self->xc_handle, nodemap, sizeof(*nodemap) * (MAX_CPU_INDEX+1));
+    if ( nodemap == NULL )
         goto out;
 
-    cputopo = calloc(num_cpus, sizeof(*cputopo));
-    if ( cputopo == NULL )
-    	goto out;
+    set_xen_guest_handle(tinfo.cpu_to_core, coremap);
+    set_xen_guest_handle(tinfo.cpu_to_socket, socketmap);
+    set_xen_guest_handle(tinfo.cpu_to_node, nodemap);
+    tinfo.max_cpu_index = MAX_CPU_INDEX;
 
-    if ( xc_cputopoinfo(self->xc_handle, &num_cpus, cputopo) != 0 )
+    if ( xc_topologyinfo(self->xc_handle, &tinfo) != 0 )
         goto out;
+
+    max_cpu_index = tinfo.max_cpu_index;
+    if ( max_cpu_index > MAX_CPU_INDEX )
+        max_cpu_index = MAX_CPU_INDEX;
 
     /* Construct cpu-to-* lists. */
     cpu_to_core_obj = PyList_New(0);
     cpu_to_socket_obj = PyList_New(0);
     cpu_to_node_obj = PyList_New(0);
-    for ( i = 0; i < num_cpus; i++ )
+    for ( i = 0; i <= max_cpu_index; i++ )
     {
-        if ( cputopo[i].core == XEN_INVALID_CORE_ID )
+        if ( coremap[i] == INVALID_TOPOLOGY_ID )
         {
             PyList_Append(cpu_to_core_obj, Py_None);
         }
         else
         {
-            PyObject *pyint = PyLongOrInt_FromLong(cputopo[i].core);
+            PyObject *pyint = PyInt_FromLong(coremap[i]);
             PyList_Append(cpu_to_core_obj, pyint);
             Py_DECREF(pyint);
         }
 
-        if ( cputopo[i].socket == XEN_INVALID_SOCKET_ID )
+        if ( socketmap[i] == INVALID_TOPOLOGY_ID )
         {
             PyList_Append(cpu_to_socket_obj, Py_None);
         }
         else
         {
-            PyObject *pyint = PyLongOrInt_FromLong(cputopo[i].socket);
+            PyObject *pyint = PyInt_FromLong(socketmap[i]);
             PyList_Append(cpu_to_socket_obj, pyint);
             Py_DECREF(pyint);
         }
 
-        if ( cputopo[i].node == XEN_INVALID_NODE_ID )
+        if ( nodemap[i] == INVALID_TOPOLOGY_ID )
         {
             PyList_Append(cpu_to_node_obj, Py_None);
         }
         else
         {
-            PyObject *pyint = PyLongOrInt_FromLong(cputopo[i].node);
+            PyObject *pyint = PyInt_FromLong(nodemap[i]);
             PyList_Append(cpu_to_node_obj, pyint);
             Py_DECREF(pyint);
         }
     }
 
-    ret_obj = Py_BuildValue("{s:i}", "max_cpu_index", num_cpus - 1);
+    ret_obj = Py_BuildValue("{s:i}", "max_cpu_index", max_cpu_index);
 
     PyDict_SetItemString(ret_obj, "cpu_to_core", cpu_to_core_obj);
     Py_DECREF(cpu_to_core_obj);
@@ -1091,70 +1268,85 @@ static PyObject *pyxc_topologyinfo(XcObject *self)
     Py_DECREF(cpu_to_node_obj);
 
 out:
-    free(cputopo);
+    xc_hypercall_buffer_free(self->xc_handle, coremap);
+    xc_hypercall_buffer_free(self->xc_handle, socketmap);
+    xc_hypercall_buffer_free(self->xc_handle, nodemap);
     return ret_obj ? ret_obj : pyxc_error_to_exception(self->xc_handle);
+#undef MAX_CPU_INDEX
 }
 
 static PyObject *pyxc_numainfo(XcObject *self)
 {
-    unsigned i, j, num_nodes = 0;
+#define MAX_NODE_INDEX 31
+    xc_numainfo_t ninfo = { 0 };
+    int i, j, max_node_index;
     uint64_t free_heap;
     PyObject *ret_obj = NULL, *node_to_node_dist_list_obj;
     PyObject *node_to_memsize_obj, *node_to_memfree_obj;
     PyObject *node_to_dma32_mem_obj, *node_to_node_dist_obj;
-    xc_meminfo_t *meminfo = NULL;
-    uint32_t *distance = NULL;
+    DECLARE_HYPERCALL_BUFFER(xc_node_to_memsize_t, node_memsize);
+    DECLARE_HYPERCALL_BUFFER(xc_node_to_memfree_t, node_memfree);
+    DECLARE_HYPERCALL_BUFFER(xc_node_to_node_dist_t, nodes_dist);
 
-    if ( xc_numainfo(self->xc_handle, &num_nodes, NULL, NULL) != 0 )
+    node_memsize = xc_hypercall_buffer_alloc(self->xc_handle, node_memsize, sizeof(*node_memsize)*(MAX_NODE_INDEX+1));
+    if ( node_memsize == NULL )
+        goto out;
+    node_memfree = xc_hypercall_buffer_alloc(self->xc_handle, node_memfree, sizeof(*node_memfree)*(MAX_NODE_INDEX+1));
+    if ( node_memfree == NULL )
+        goto out;
+    nodes_dist = xc_hypercall_buffer_alloc(self->xc_handle, nodes_dist, sizeof(*nodes_dist)*(MAX_NODE_INDEX+1)*(MAX_NODE_INDEX+1));
+    if ( nodes_dist == NULL )
         goto out;
 
-    meminfo = calloc(num_nodes, sizeof(*meminfo));
-    distance = calloc(num_nodes * num_nodes, sizeof(*distance));
-    if ( (meminfo == NULL) || (distance == NULL) )
+    set_xen_guest_handle(ninfo.node_to_memsize, node_memsize);
+    set_xen_guest_handle(ninfo.node_to_memfree, node_memfree);
+    set_xen_guest_handle(ninfo.node_to_node_distance, nodes_dist);
+    ninfo.max_node_index = MAX_NODE_INDEX;
+
+    if ( xc_numainfo(self->xc_handle, &ninfo) != 0 )
         goto out;
 
-    if ( xc_numainfo(self->xc_handle, &num_nodes, meminfo, distance) != 0 )
-        goto out;
+    max_node_index = ninfo.max_node_index;
+    if ( max_node_index > MAX_NODE_INDEX )
+        max_node_index = MAX_NODE_INDEX;
 
     /* Construct node-to-* lists. */
     node_to_memsize_obj = PyList_New(0);
     node_to_memfree_obj = PyList_New(0);
     node_to_dma32_mem_obj = PyList_New(0);
     node_to_node_dist_list_obj = PyList_New(0);
-    for ( i = 0; i < num_nodes; i++ )
+    for ( i = 0; i <= max_node_index; i++ )
     {
         PyObject *pyint;
-        unsigned invalid_node;
 
         /* Total Memory */
-        pyint = PyLongOrInt_FromLong(meminfo[i].memsize >> 20); /* MB */
+        pyint = PyInt_FromLong(node_memsize[i] >> 20); /* MB */
         PyList_Append(node_to_memsize_obj, pyint);
         Py_DECREF(pyint);
 
         /* Free Memory */
-        pyint = PyLongOrInt_FromLong(meminfo[i].memfree >> 20); /* MB */
+        pyint = PyInt_FromLong(node_memfree[i] >> 20); /* MB */
         PyList_Append(node_to_memfree_obj, pyint);
         Py_DECREF(pyint);
 
         /* DMA memory. */
         xc_availheap(self->xc_handle, 0, 32, i, &free_heap);
-        pyint = PyLongOrInt_FromLong(free_heap >> 20); /* MB */
+        pyint = PyInt_FromLong(free_heap >> 20); /* MB */
         PyList_Append(node_to_dma32_mem_obj, pyint);
         Py_DECREF(pyint);
 
         /* Node to Node Distance */
         node_to_node_dist_obj = PyList_New(0);
-        invalid_node = (meminfo[i].memsize == XEN_INVALID_MEM_SZ);
-        for ( j = 0; j < num_nodes; j++ )
+        for ( j = 0; j <= max_node_index; j++ )
         {
-            uint32_t dist = distance[i * num_nodes + j];
-            if ( invalid_node || (dist == XEN_INVALID_NODE_DIST) )
+            uint32_t dist = nodes_dist[i*(max_node_index+1) + j];
+            if ( dist == INVALID_TOPOLOGY_ID )
             {
                 PyList_Append(node_to_node_dist_obj, Py_None);
             }
             else
             {
-                pyint = PyLongOrInt_FromLong(dist);
+                pyint = PyInt_FromLong(dist);
                 PyList_Append(node_to_node_dist_obj, pyint);
                 Py_DECREF(pyint);
             }
@@ -1163,7 +1355,7 @@ static PyObject *pyxc_numainfo(XcObject *self)
         Py_DECREF(node_to_node_dist_obj);
     }
 
-    ret_obj = Py_BuildValue("{s:i}", "max_node_index", num_nodes + 1);
+    ret_obj = Py_BuildValue("{s:i}", "max_node_index", max_node_index);
 
     PyDict_SetItemString(ret_obj, "node_memsize", node_to_memsize_obj);
     Py_DECREF(node_to_memsize_obj);
@@ -1179,9 +1371,11 @@ static PyObject *pyxc_numainfo(XcObject *self)
     Py_DECREF(node_to_node_dist_list_obj);
 
 out:
-    free(meminfo);
-    free(distance);
+    xc_hypercall_buffer_free(self->xc_handle, node_memsize);
+    xc_hypercall_buffer_free(self->xc_handle, node_memfree);
+    xc_hypercall_buffer_free(self->xc_handle, nodes_dist);
     return ret_obj ? ret_obj : pyxc_error_to_exception(self->xc_handle);
+#undef MAX_NODE_INDEX
 }
 
 static PyObject *pyxc_xeninfo(XcObject *self)
@@ -1235,6 +1429,51 @@ static PyObject *pyxc_xeninfo(XcObject *self)
                          "cc_compile_by", xen_cc.compile_by,
                          "cc_compile_domain", xen_cc.compile_domain,
                          "cc_compile_date", xen_cc.compile_date);
+}
+
+
+static PyObject *pyxc_sedf_domain_set(XcObject *self,
+                                      PyObject *args,
+                                      PyObject *kwds)
+{
+    uint32_t domid;
+    uint64_t period, slice, latency;
+    uint16_t extratime, weight;
+    static char *kwd_list[] = { "domid", "period", "slice",
+                                "latency", "extratime", "weight",NULL };
+    
+    if( !PyArg_ParseTupleAndKeywords(args, kwds, "iLLLhh", kwd_list, 
+                                     &domid, &period, &slice,
+                                     &latency, &extratime, &weight) )
+        return NULL;
+   if ( xc_sedf_domain_set(self->xc_handle, domid, period,
+                           slice, latency, extratime,weight) != 0 )
+        return pyxc_error_to_exception(self->xc_handle);
+
+    Py_INCREF(zero);
+    return zero;
+}
+
+static PyObject *pyxc_sedf_domain_get(XcObject *self, PyObject *args)
+{
+    uint32_t domid;
+    uint64_t period, slice,latency;
+    uint16_t weight, extratime;
+    
+    if(!PyArg_ParseTuple(args, "i", &domid))
+        return NULL;
+    
+    if (xc_sedf_domain_get(self->xc_handle, domid, &period,
+                           &slice,&latency,&extratime,&weight))
+        return pyxc_error_to_exception(self->xc_handle);
+
+    return Py_BuildValue("{s:i,s:L,s:L,s:L,s:i,s:i}",
+                         "domid",    domid,
+                         "period",    period,
+                         "slice",     slice,
+                         "latency",   latency,
+                         "extratime", extratime,
+                         "weight",    weight);
 }
 
 static PyObject *pyxc_shadow_control(PyObject *self,
@@ -1348,19 +1587,16 @@ static PyObject *pyxc_sched_credit2_domain_set(XcObject *self,
 {
     uint32_t domid;
     uint16_t weight;
-    uint16_t cap;
-    static char *kwd_list[] = { "domid", "weight", "cap", NULL };
-    static char kwd_type[] = "I|HH";
-    struct xen_domctl_sched_credit2 sdom = { };
+    static char *kwd_list[] = { "domid", "weight", NULL };
+    static char kwd_type[] = "I|H";
+    struct xen_domctl_sched_credit2 sdom;
 
     weight = 0;
-    cap = 0;
     if( !PyArg_ParseTupleAndKeywords(args, kwds, kwd_type, kwd_list,
-                                     &domid, &weight, &cap) )
+                                     &domid, &weight) )
         return NULL;
 
     sdom.weight = weight;
-    sdom.cap = cap;
 
     if ( xc_sched_credit2_domain_set(self->xc_handle, domid, &sdom) != 0 )
         return pyxc_error_to_exception(self->xc_handle);
@@ -1372,7 +1608,7 @@ static PyObject *pyxc_sched_credit2_domain_set(XcObject *self,
 static PyObject *pyxc_sched_credit2_domain_get(XcObject *self, PyObject *args)
 {
     uint32_t domid;
-    struct xen_domctl_sched_credit2 sdom = { };
+    struct xen_domctl_sched_credit2 sdom;
 
     if( !PyArg_ParseTuple(args, "I", &domid) )
         return NULL;
@@ -1380,8 +1616,8 @@ static PyObject *pyxc_sched_credit2_domain_get(XcObject *self, PyObject *args)
     if ( xc_sched_credit2_domain_get(self->xc_handle, domid, &sdom) != 0 )
         return pyxc_error_to_exception(self->xc_handle);
 
-    return Py_BuildValue("{s:HH}",
-                         "weight", "cap",  sdom.weight, sdom.cap);
+    return Py_BuildValue("{s:H}",
+                         "weight",  sdom.weight);
 }
 
 static PyObject *pyxc_domain_setmaxmem(XcObject *self, PyObject *args)
@@ -1603,34 +1839,38 @@ static PyObject *pyxc_tmem_control(XcObject *self,
     int32_t pool_id;
     uint32_t subop;
     uint32_t cli_id;
-    uint32_t len;
-    uint32_t arg;
+    uint32_t arg1;
+    uint32_t arg2;
+    uint64_t arg3;
     char *buf;
     char _buffer[32768], *buffer = _buffer;
     int rc;
 
-    static char *kwd_list[] = { "pool_id", "subop", "cli_id", "arg1", "arg2", "buf", NULL };
+    static char *kwd_list[] = { "pool_id", "subop", "cli_id", "arg1", "arg2", "arg3", "buf", NULL };
 
-    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "iiiiis", kwd_list,
-                        &pool_id, &subop, &cli_id, &len, &arg, &buf) )
+    if ( !PyArg_ParseTupleAndKeywords(args, kwds, "iiiiiis", kwd_list,
+                        &pool_id, &subop, &cli_id, &arg1, &arg2, &arg3, &buf) )
         return NULL;
 
-    if ( (subop == XEN_SYSCTL_TMEM_OP_LIST) && (len > 32768) )
-        len = 32768;
+    if ( (subop == TMEMC_LIST) && (arg1 > 32768) )
+        arg1 = 32768;
 
-    if ( (rc = xc_tmem_control(self->xc_handle, pool_id, subop, cli_id, len, arg, buffer)) < 0 )
+    if ( (rc = xc_tmem_control(self->xc_handle, pool_id, subop, cli_id, arg1, arg2, arg3, buffer)) < 0 )
         return Py_BuildValue("i", rc);
 
     switch (subop) {
-        case XEN_SYSCTL_TMEM_OP_LIST:
+        case TMEMC_LIST:
             return Py_BuildValue("s", buffer);
-        case XEN_SYSCTL_TMEM_OP_FLUSH:
+        case TMEMC_FLUSH:
             return Py_BuildValue("i", rc);
-        case XEN_SYSCTL_TMEM_OP_QUERY_FREEABLE_MB:
+        case TMEMC_QUERY_FREEABLE_MB:
             return Py_BuildValue("i", rc);
-        case XEN_SYSCTL_TMEM_OP_THAW:
-        case XEN_SYSCTL_TMEM_OP_FREEZE:
-        case XEN_SYSCTL_TMEM_OP_DESTROY:
+        case TMEMC_THAW:
+        case TMEMC_FREEZE:
+        case TMEMC_DESTROY:
+        case TMEMC_SET_WEIGHT:
+        case TMEMC_SET_CAP:
+        case TMEMC_SET_COMPRESS:
         default:
             break;
     }
@@ -1691,7 +1931,7 @@ static PyObject *cpumap_to_cpulist(XcObject *self, xc_cpumap_t cpumap)
     {
         if ( *cpumap & (1 << (i % 8)) )
         {
-            PyObject* pyint = PyLongOrInt_FromLong(i);
+            PyObject* pyint = PyInt_FromLong(i);
 
             PyList_Append(cpulist, pyint);
             Py_DECREF(pyint);
@@ -1706,7 +1946,7 @@ static PyObject *pyxc_cpupool_create(XcObject *self,
                                      PyObject *args,
                                      PyObject *kwds)
 {
-    uint32_t cpupool = XC_CPUPOOL_POOLID_ANY, sched = XEN_SCHEDULER_CREDIT;
+    uint32_t cpupool = 0, sched = XEN_SCHEDULER_CREDIT;
 
     static char *kwd_list[] = { "pool", "sched", NULL };
 
@@ -1717,7 +1957,7 @@ static PyObject *pyxc_cpupool_create(XcObject *self,
     if ( xc_cpupool_create(self->xc_handle, &cpupool, sched) < 0 )
         return pyxc_error_to_exception(self->xc_handle);
 
-    return PyLongOrInt_FromLong(cpupool);
+    return PyInt_FromLong(cpupool);
 }
 
 static PyObject *pyxc_cpupool_destroy(XcObject *self,
@@ -1850,6 +2090,8 @@ static PyObject *pyflask_context_to_sid(PyObject *self, PyObject *args,
 {
     xc_interface *xc_handle;
     char *ctx;
+    char *buf;
+    uint32_t len;
     uint32_t sid;
     int ret;
 
@@ -1859,21 +2101,34 @@ static PyObject *pyflask_context_to_sid(PyObject *self, PyObject *args,
                                       &ctx) )
         return NULL;
 
+    len = strlen(ctx);
+
+    buf = malloc(len);
+    if (!buf) {
+        errno = -ENOMEM;
+        PyErr_SetFromErrno(xc_error_obj);
+    }
+    
+    memcpy(buf, ctx, len);
+    
     xc_handle = xc_interface_open(0,0,0);
     if (!xc_handle) {
+        free(buf);
         return PyErr_SetFromErrno(xc_error_obj);
     }
-
-    ret = xc_flask_context_to_sid(xc_handle, ctx, strlen(ctx), &sid);
-
+    
+    ret = xc_flask_context_to_sid(xc_handle, buf, len, &sid);
+        
     xc_interface_close(xc_handle);
 
+    free(buf);
+    
     if ( ret != 0 ) {
         errno = -ret;
         return PyErr_SetFromErrno(xc_error_obj);
     }
 
-    return PyLongOrInt_FromLong(sid);
+    return PyInt_FromLong(sid);
 }
 
 static PyObject *pyflask_sid_to_context(PyObject *self, PyObject *args,
@@ -2151,6 +2406,34 @@ static PyMethodDef pyxc_methods[] = {
       " cpumap   [int]:  Bitmap of CPUs this VCPU can run on\n"
       " cpu      [int]:  CPU that this VCPU is currently bound to\n" },
 
+    { "linux_build", 
+      (PyCFunction)pyxc_linux_build, 
+      METH_VARARGS | METH_KEYWORDS, "\n"
+      "Build a new Linux guest OS.\n"
+      " dom     [int]:      Identifier of domain to build into.\n"
+      " image   [str]:      Name of kernel image file. May be gzipped.\n"
+      " ramdisk [str, n/a]: Name of ramdisk file, if any.\n"
+      " cmdline [str, n/a]: Kernel parameters, if any.\n\n"
+      " vcpus   [int, 1]:   Number of Virtual CPUS in domain.\n\n"
+      "Returns: [int] 0 on success; -1 on error.\n" },
+
+    {"getBitSize",
+      (PyCFunction)pyxc_getBitSize,
+      METH_VARARGS | METH_KEYWORDS, "\n"
+      "Get the bitsize of a guest OS.\n"
+      " image   [str]:      Name of kernel image file. May be gzipped.\n"
+      " cmdline [str, n/a]: Kernel parameters, if any.\n\n"},
+
+    { "hvm_build", 
+      (PyCFunction)pyxc_hvm_build, 
+      METH_VARARGS | METH_KEYWORDS, "\n"
+      "Build a new HVM guest OS.\n"
+      " dom     [int]:      Identifier of domain to build into.\n"
+      " image   [str]:      Name of HVM loader image file.\n"
+      " vcpus   [int, 1]:   Number of Virtual CPUS in domain.\n\n"
+      " vcpu_avail [long, 1]: Which Virtual CPUS available.\n\n"
+      "Returns: [int] 0 on success; -1 on error.\n" },
+
     { "gnttab_hvm_seed",
       (PyCFunction)pyxc_gnttab_hvm_seed,
       METH_KEYWORDS, "\n"
@@ -2163,7 +2446,7 @@ static PyMethodDef pyxc_methods[] = {
       "Returns: None on sucess. Raises exception on error.\n" },
 
     { "hvm_get_param", 
-      (PyCFunction)pyxc_hvm_param_get,
+      (PyCFunction)pyxc_get_hvm_param, 
       METH_VARARGS | METH_KEYWORDS, "\n"
       "get a parameter of HVM guest OS.\n"
       " dom     [int]:      Identifier of domain to build into.\n"
@@ -2171,7 +2454,7 @@ static PyMethodDef pyxc_methods[] = {
       "Returns: [long] value of the param.\n" },
 
     { "hvm_set_param", 
-      (PyCFunction)pyxc_hvm_param_set,
+      (PyCFunction)pyxc_set_hvm_param, 
       METH_VARARGS | METH_KEYWORDS, "\n"
       "set a parameter of HVM guest OS.\n"
       " dom     [int]:      Identifier of domain to build into.\n"
@@ -2220,6 +2503,30 @@ static PyMethodDef pyxc_methods[] = {
       "Get the current scheduler type in use.\n"
       "Returns: [int] sched_id.\n" },    
 
+    { "sedf_domain_set",
+      (PyCFunction)pyxc_sedf_domain_set,
+      METH_KEYWORDS, "\n"
+      "Set the scheduling parameters for a domain when running with Atropos.\n"
+      " dom       [int]:  domain to set\n"
+      " period    [long]: domain's scheduling period\n"
+      " slice     [long]: domain's slice per period\n"
+      " latency   [long]: domain's wakeup latency hint\n"
+      " extratime [int]:  domain aware of extratime?\n"
+      "Returns: [int] 0 on success; -1 on error.\n" },
+
+    { "sedf_domain_get",
+      (PyCFunction)pyxc_sedf_domain_get,
+      METH_VARARGS, "\n"
+      "Get the current scheduling parameters for a domain when running with\n"
+      "the Atropos scheduler."
+      " dom       [int]: domain to query\n"
+      "Returns:   [dict]\n"
+      " domain    [int]: domain ID\n"
+      " period    [long]: scheduler period\n"
+      " slice     [long]: CPU reservation per period\n"
+      " latency   [long]: domain's wakeup latency hint\n"
+      " extratime [int]:  domain aware of extratime?\n"},
+    
     { "sched_credit_domain_set",
       (PyCFunction)pyxc_sched_credit_domain_set,
       METH_KEYWORDS, "\n"
@@ -2302,13 +2609,6 @@ static PyMethodDef pyxc_methods[] = {
       METH_NOARGS, "\n"
       "Get information about the physical host machine\n"
       "Returns [dict]: information about the hardware"
-      "        [None]: on failure.\n" },
-
-    { "getcpuinfo",
-      (PyCFunction)pyxc_getcpuinfo,
-      METH_VARARGS | METH_KEYWORDS, "\n"
-      "Get information about physical CPUs\n"
-      "Returns [list]: information about physical CPUs"
       "        [None]: on failure.\n" },
 
     { "topologyinfo",
@@ -2447,6 +2747,17 @@ static PyMethodDef pyxc_methods[] = {
       " keys    [str]: String of keys to inject.\n" },
 
 #if defined(__i386__) || defined(__x86_64__)
+    { "domain_check_cpuid", 
+      (PyCFunction)pyxc_dom_check_cpuid, 
+      METH_VARARGS, "\n"
+      "Apply checks to host CPUID.\n"
+      " input [long]: Input for cpuid instruction (eax)\n"
+      " sub_input [long]: Second input (optional, may be None) for cpuid "
+      "                     instruction (ecx)\n"
+      " config [dict]: Dictionary of register\n"
+      " config [dict]: Dictionary of register, use for checking\n\n"
+      "Returns: [int] 0 on success; exception on error.\n" },
+    
     { "domain_set_cpuid", 
       (PyCFunction)pyxc_dom_set_cpuid, 
       METH_VARARGS, "\n"
@@ -2486,8 +2797,8 @@ static PyMethodDef pyxc_methods[] = {
       " pool_id [int]: Identifier of the tmem pool (-1 == all).\n"
       " subop [int]: Supplementary Operation.\n"
       " cli_id [int]: Client identifier (-1 == all).\n"
-      " len [int]: Length of 'buf'.\n"
-      " arg [int]: Argument.\n"
+      " arg1 [int]: Argument.\n"
+      " arg2 [int]: Argument.\n"
       " buf [str]: Buffer.\n\n"
       "Returns: [int] 0 or [str] tmem info on success; exception on error.\n" },
 
@@ -2620,6 +2931,11 @@ static PyMethodDef pyxc_methods[] = {
 };
 
 
+static PyObject *PyXc_getattr(PyObject *obj, char *name)
+{
+    return Py_FindMethod(pyxc_methods, obj, name);
+}
+
 static PyObject *PyXc_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 {
     XcObject *self = (XcObject *)type->tp_alloc(type, 0);
@@ -2650,68 +2966,67 @@ static void PyXc_dealloc(XcObject *self)
         self->xc_handle = NULL;
     }
 
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    self->ob_type->tp_free((PyObject *)self);
 }
 
 static PyTypeObject PyXcType = {
-#if PY_MAJOR_VERSION >= 3
-    .ob_base = { PyObject_HEAD_INIT(NULL) },
-#else
     PyObject_HEAD_INIT(NULL)
-#endif
-    .tp_name = PKG "." CLS,
-    .tp_basicsize = sizeof(XcObject),
-    .tp_itemsize = 0,
-    .tp_dealloc = (destructor)PyXc_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_doc = "Xen client connections",
-    .tp_methods = pyxc_methods,
-    .tp_init = (initproc)PyXc_init,
-    .tp_new = PyXc_new,
+    0,
+    PKG "." CLS,
+    sizeof(XcObject),
+    0,
+    (destructor)PyXc_dealloc,     /* tp_dealloc        */
+    NULL,                         /* tp_print          */
+    PyXc_getattr,                 /* tp_getattr        */
+    NULL,                         /* tp_setattr        */
+    NULL,                         /* tp_compare        */
+    NULL,                         /* tp_repr           */
+    NULL,                         /* tp_as_number      */
+    NULL,                         /* tp_as_sequence    */
+    NULL,                         /* tp_as_mapping     */
+    NULL,                         /* tp_hash           */
+    NULL,                         /* tp_call           */
+    NULL,                         /* tp_str            */
+    NULL,                         /* tp_getattro       */
+    NULL,                         /* tp_setattro       */
+    NULL,                         /* tp_as_buffer      */
+    Py_TPFLAGS_DEFAULT,           /* tp_flags          */
+    "Xen client connections",     /* tp_doc            */
+    NULL,                         /* tp_traverse       */
+    NULL,                         /* tp_clear          */
+    NULL,                         /* tp_richcompare    */
+    0,                            /* tp_weaklistoffset */
+    NULL,                         /* tp_iter           */
+    NULL,                         /* tp_iternext       */
+    pyxc_methods,                 /* tp_methods        */
+    NULL,                         /* tp_members        */
+    NULL,                         /* tp_getset         */
+    NULL,                         /* tp_base           */
+    NULL,                         /* tp_dict           */
+    NULL,                         /* tp_descr_get      */
+    NULL,                         /* tp_descr_set      */
+    0,                            /* tp_dictoffset     */
+    (initproc)PyXc_init,          /* tp_init           */
+    NULL,                         /* tp_alloc          */
+    PyXc_new,                     /* tp_new            */
 };
 
 static PyMethodDef xc_methods[] = { { NULL } };
 
-
-#if PY_MAJOR_VERSION >= 3
-static PyModuleDef xc_module = {
-    PyModuleDef_HEAD_INIT,
-    PKG,     /* name */
-    NULL,   /* docstring */
-    -1,     /* size of per-interpreter state, -1 means the module use global
-               variables */
-    xc_methods
-};
-#endif
-
-#if PY_MAJOR_VERSION >= 3
-#define INITERROR return NULL
-PyMODINIT_FUNC PyInit_xc(void)
-#else
-#define INITERROR return
 PyMODINIT_FUNC initxc(void)
-#endif
 {
     PyObject *m;
 
     if (PyType_Ready(&PyXcType) < 0)
-        INITERROR;
+        return;
 
-#if PY_MAJOR_VERSION >= 3
-    m = PyModule_Create(&xc_module);
-#else
     m = Py_InitModule(PKG, xc_methods);
-#endif
 
     if (m == NULL)
-        INITERROR;
+      return;
 
     xc_error_obj = PyErr_NewException(PKG ".Error", PyExc_RuntimeError, NULL);
-    if (xc_error_obj == NULL) {
-        Py_DECREF(m);
-        INITERROR;
-    }
-    zero = PyLongOrInt_FromLong(0);
+    zero = PyInt_FromLong(0);
 
     /* KAF: This ensures that we get debug output in a timely manner. */
     setbuf(stdout, NULL);
@@ -2724,12 +3039,10 @@ PyMODINIT_FUNC initxc(void)
     PyModule_AddObject(m, "Error", xc_error_obj);
 
     /* Expose some libxc constants to Python */
+    PyModule_AddIntConstant(m, "XEN_SCHEDULER_SEDF", XEN_SCHEDULER_SEDF);
     PyModule_AddIntConstant(m, "XEN_SCHEDULER_CREDIT", XEN_SCHEDULER_CREDIT);
     PyModule_AddIntConstant(m, "XEN_SCHEDULER_CREDIT2", XEN_SCHEDULER_CREDIT2);
 
-#if PY_MAJOR_VERSION >= 3
-    return m;
-#endif
 }
 
 

@@ -6,6 +6,7 @@
  * Copyright (c) 2003-2008, K A Fraser
  */
 
+#include <xen/config.h>
 #include <xen/delay.h>
 #include <xen/init.h>
 #include <xen/mm.h>
@@ -29,18 +30,6 @@ static struct serial_port com[SERHND_IDX + 1] = {
 };
 
 static bool_t __read_mostly post_irq;
-
-static inline void serial_start_tx(struct serial_port *port)
-{
-    if ( port->driver->start_tx != NULL )
-        port->driver->start_tx(port);
-}
-
-static inline void serial_stop_tx(struct serial_port *port)
-{
-    if ( port->driver->stop_tx != NULL )
-        port->driver->stop_tx(port);
-}
 
 void serial_rx_interrupt(struct serial_port *port, struct cpu_user_regs *regs)
 {
@@ -87,18 +76,6 @@ void serial_tx_interrupt(struct serial_port *port, struct cpu_user_regs *regs)
         cpu_relax();
     }
 
-    if ( port->txbufc == port->txbufp )
-    {
-        /* Disable TX. nothing to send */
-        serial_stop_tx(port);
-        spin_unlock(&port->tx_lock);
-        goto out;
-    }
-    else
-    {
-        if ( port->driver->tx_ready(port) )
-            serial_start_tx(port);
-    }
     for ( i = 0, n = port->driver->tx_ready(port); i < n; i++ )
     {
         if ( port->txbufc == port->txbufp )
@@ -140,8 +117,6 @@ static void __serial_putc(struct serial_port *port, char c)
                     cpu_relax();
                 if ( n > 0 )
                 {
-                    /* Enable TX before sending chars */
-                    serial_start_tx(port);
                     while ( n-- )
                         port->driver->putc(
                             port,
@@ -160,8 +135,6 @@ static void __serial_putc(struct serial_port *port, char c)
         if ( ((port->txbufp - port->txbufc) == 0) &&
              port->driver->tx_ready(port) > 0 )
         {
-            /* Enable TX before sending chars */
-            serial_start_tx(port);
             /* Buffer and UART FIFO are both empty, and port is available. */
             port->driver->putc(port, c);
         }
@@ -179,16 +152,11 @@ static void __serial_putc(struct serial_port *port, char c)
         while ( !(n = port->driver->tx_ready(port)) )
             cpu_relax();
         if ( n > 0 )
-        {
-            /* Enable TX before sending chars */
-            serial_start_tx(port);
             port->driver->putc(port, c);
-        }
     }
     else
     {
         /* Simple synchronous transmitter. */
-        serial_start_tx(port);
         port->driver->putc(port, c);
     }
 }
@@ -309,7 +277,7 @@ int __init serial_parse_handle(char *conf)
         goto common;
     }
 
-    if ( !strncmp(conf, "dtuart", 6) )
+    if ( !strncmp(conf, "dtuart", 5) )
     {
         handle = SERHND_DTUART;
         goto common;
@@ -436,7 +404,6 @@ void serial_start_sync(int handle)
                 /* port is unavailable and might not come up until reenabled by
                    dom0, we can't really do proper sync */
                 break;
-            serial_start_tx(port);
             port->driver->putc(
                 port, port->txbuf[mask_serial_txbuf_idx(port->txbufc++)]);
         }
@@ -531,6 +498,15 @@ int __init serial_irq(int idx)
         return com[idx].driver->irq(&com[idx]);
 
     return -1;
+}
+
+const struct dt_irq __init *serial_dt_irq(int idx)
+{
+    if ( (idx >= 0) && (idx < ARRAY_SIZE(com)) &&
+         com[idx].driver && com[idx].driver->dt_irq_get )
+        return com[idx].driver->dt_irq_get(&com[idx]);
+
+    return NULL;
 }
 
 const struct vuart_info *serial_vuart_info(int idx)

@@ -24,12 +24,12 @@
  * IN THE SOFTWARE.
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/event.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/sched.h>
-#include <xen/trace.h>
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/io.h>
 #include <asm/hvm/support.h>
@@ -55,7 +55,7 @@ static int vpic_get_priority(struct hvm_hw_vpic *vpic, uint8_t mask)
         return VPIC_PRIO_NONE;
 
     /* prio = ffs(mask ROR vpic->priority_add); */
-    asm ( "ror %%cl,%b1 ; rep; bsf %1,%0"
+    asm ( "ror %%cl,%b1 ; bsf %1,%0"
           : "=r" (prio) : "q" ((uint32_t)mask), "c" (vpic->priority_add) );
     return prio;
 }
@@ -99,8 +99,6 @@ static void vpic_update_int_output(struct hvm_hw_vpic *vpic)
     ASSERT(vpic_is_locked(vpic));
 
     irq = vpic_get_highest_priority_irq(vpic);
-    TRACE_3D(TRC_HVM_EMUL_PIC_INT_OUTPUT, vpic->int_output, vpic->is_master,
-             irq);
     if ( vpic->int_output == (irq >= 0) )
         return;
 
@@ -114,10 +112,7 @@ static void vpic_update_int_output(struct hvm_hw_vpic *vpic)
             /* Master INT line is connected in Virtual Wire Mode. */
             struct vcpu *v = vpic_domain(vpic)->arch.hvm_domain.i8259_target;
             if ( v != NULL )
-            {
-                TRACE_1D(TRC_HVM_EMUL_PIC_KICK, irq);
                 vcpu_kick(v);
-            }
         }
         else
         {
@@ -140,7 +135,6 @@ static void __vpic_intack(struct hvm_hw_vpic *vpic, int irq)
 
     ASSERT(vpic_is_locked(vpic));
 
-    TRACE_2D(TRC_HVM_EMUL_PIC_INTACK, vpic->is_master, irq);
     /* Edge-triggered: clear the IRR (forget the edge). */
     if ( !(vpic->elcr & mask) )
         vpic->irr &= ~mask;
@@ -323,7 +317,7 @@ static uint32_t vpic_ioport_read(struct hvm_hw_vpic *vpic, uint32_t addr)
 }
 
 static int vpic_intercept_pic_io(
-    int dir, unsigned int port, unsigned int bytes, uint32_t *val)
+    int dir, uint32_t port, uint32_t bytes, uint32_t *val)
 {
     struct hvm_hw_vpic *vpic;
 
@@ -345,7 +339,7 @@ static int vpic_intercept_pic_io(
 }
 
 static int vpic_intercept_elcr_io(
-    int dir, unsigned int port, unsigned int bytes, uint32_t *val)
+    int dir, uint32_t port, uint32_t bytes, uint32_t *val)
 {
     struct hvm_hw_vpic *vpic;
     uint32_t data;
@@ -376,9 +370,6 @@ static int vpic_save(struct domain *d, hvm_domain_context_t *h)
     struct hvm_hw_vpic *s;
     int i;
 
-    if ( !has_vpic(d) )
-        return 0;
-
     /* Save the state of both PICs */
     for ( i = 0; i < 2 ; i++ )
     {
@@ -394,10 +385,7 @@ static int vpic_load(struct domain *d, hvm_domain_context_t *h)
 {
     struct hvm_hw_vpic *s;
     uint16_t inst;
-
-    if ( !has_vpic(d) )
-        return -ENODEV;
-
+    
     /* Which PIC is this? */
     inst = hvm_load_instance(h);
     if ( inst > 1 )
@@ -417,9 +405,6 @@ void vpic_reset(struct domain *d)
 {
     struct hvm_hw_vpic *vpic;
 
-    if ( !has_vpic(d) )
-        return;
-
     /* Master PIC. */
     vpic = &d->arch.hvm_domain.vpic[0];
     memset(vpic, 0, sizeof(*vpic));
@@ -433,9 +418,6 @@ void vpic_reset(struct domain *d)
 
 void vpic_init(struct domain *d)
 {
-    if ( !has_vpic(d) )
-        return;
-
     vpic_reset(d);
 
     register_portio_handler(d, 0x20, 2, vpic_intercept_pic_io);
@@ -450,11 +432,9 @@ void vpic_irq_positive_edge(struct domain *d, int irq)
     struct hvm_hw_vpic *vpic = &d->arch.hvm_domain.vpic[irq >> 3];
     uint8_t mask = 1 << (irq & 7);
 
-    ASSERT(has_vpic(d));
     ASSERT(irq <= 15);
     ASSERT(vpic_is_locked(vpic));
 
-    TRACE_1D(TRC_HVM_EMUL_PIC_POSEDGE, irq);
     if ( irq == 2 )
         return;
 
@@ -468,11 +448,9 @@ void vpic_irq_negative_edge(struct domain *d, int irq)
     struct hvm_hw_vpic *vpic = &d->arch.hvm_domain.vpic[irq >> 3];
     uint8_t mask = 1 << (irq & 7);
 
-    ASSERT(has_vpic(d));
     ASSERT(irq <= 15);
     ASSERT(vpic_is_locked(vpic));
 
-    TRACE_1D(TRC_HVM_EMUL_PIC_NEGEDGE, irq);
     if ( irq == 2 )
         return;
 
@@ -486,10 +464,6 @@ int vpic_ack_pending_irq(struct vcpu *v)
     int irq, vector;
     struct hvm_hw_vpic *vpic = &v->domain->arch.hvm_domain.vpic[0];
 
-    ASSERT(has_vpic(v->domain));
-
-    TRACE_2D(TRC_HVM_EMUL_PIC_PEND_IRQ_CALL, vlapic_accept_pic_intr(v),
-             vpic->int_output);
     if ( !vlapic_accept_pic_intr(v) || !vpic->int_output )
         return -1;
 
@@ -500,12 +474,3 @@ int vpic_ack_pending_irq(struct vcpu *v)
     vector = vpic[irq >> 3].irq_base + (irq & 7);
     return vector;
 }
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * indent-tabs-mode: nil
- * End:
- */

@@ -11,6 +11,7 @@
  */
 
 #define XSM_NO_WRAPPERS
+#define XSM_INLINE /* */
 #include <xsm/dummy.h>
 
 struct xsm_operations dummy_xsm_ops;
@@ -26,7 +27,7 @@ struct xsm_operations dummy_xsm_ops;
         }                                                              \
     } while (0)
 
-void __init xsm_fixup_ops (struct xsm_operations *ops)
+void xsm_fixup_ops (struct xsm_operations *ops)
 {
     set_to_dummy_if_null(ops, security_domaininfo);
     set_to_dummy_if_null(ops, domain_create);
@@ -37,6 +38,7 @@ void __init xsm_fixup_ops (struct xsm_operations *ops)
     set_to_dummy_if_null(ops, domctl);
     set_to_dummy_if_null(ops, sysctl);
     set_to_dummy_if_null(ops, readconsole);
+    set_to_dummy_if_null(ops, do_mca);
 
     set_to_dummy_if_null(ops, evtchn_unbound);
     set_to_dummy_if_null(ops, evtchn_interdomain);
@@ -57,8 +59,6 @@ void __init xsm_fixup_ops (struct xsm_operations *ops)
     set_to_dummy_if_null(ops, alloc_security_evtchn);
     set_to_dummy_if_null(ops, free_security_evtchn);
     set_to_dummy_if_null(ops, show_security_evtchn);
-    set_to_dummy_if_null(ops, init_hardware_domain);
-
     set_to_dummy_if_null(ops, get_pod_target);
     set_to_dummy_if_null(ops, set_pod_target);
 
@@ -80,24 +80,15 @@ void __init xsm_fixup_ops (struct xsm_operations *ops)
     set_to_dummy_if_null(ops, map_domain_irq);
     set_to_dummy_if_null(ops, unmap_domain_pirq);
     set_to_dummy_if_null(ops, unmap_domain_irq);
-    set_to_dummy_if_null(ops, bind_pt_irq);
-    set_to_dummy_if_null(ops, unbind_pt_irq);
     set_to_dummy_if_null(ops, irq_permission);
     set_to_dummy_if_null(ops, iomem_permission);
     set_to_dummy_if_null(ops, iomem_mapping);
     set_to_dummy_if_null(ops, pci_config_permission);
-    set_to_dummy_if_null(ops, get_vnumainfo);
 
-#if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_PCI)
     set_to_dummy_if_null(ops, get_device_group);
+    set_to_dummy_if_null(ops, test_assign_device);
     set_to_dummy_if_null(ops, assign_device);
     set_to_dummy_if_null(ops, deassign_device);
-#endif
-
-#if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_DEVICE_TREE)
-    set_to_dummy_if_null(ops, assign_dtdevice);
-    set_to_dummy_if_null(ops, deassign_dtdevice);
-#endif
 
     set_to_dummy_if_null(ops, resource_plug_core);
     set_to_dummy_if_null(ops, resource_unplug_core);
@@ -109,52 +100,38 @@ void __init xsm_fixup_ops (struct xsm_operations *ops)
 
     set_to_dummy_if_null(ops, page_offline);
     set_to_dummy_if_null(ops, tmem_op);
+    set_to_dummy_if_null(ops, tmem_control);
     set_to_dummy_if_null(ops, hvm_param);
-    set_to_dummy_if_null(ops, hvm_control);
     set_to_dummy_if_null(ops, hvm_param_nested);
-    set_to_dummy_if_null(ops, hvm_param_altp2mhvm);
-    set_to_dummy_if_null(ops, hvm_altp2mhvm_op);
 
     set_to_dummy_if_null(ops, do_xsm_op);
-#ifdef CONFIG_COMPAT
-    set_to_dummy_if_null(ops, do_compat_op);
-#endif
 
     set_to_dummy_if_null(ops, add_to_physmap);
     set_to_dummy_if_null(ops, remove_from_physmap);
-    set_to_dummy_if_null(ops, map_gmfn_foreign);
 
-    set_to_dummy_if_null(ops, vm_event_control);
-
-#ifdef CONFIG_HAS_MEM_ACCESS
-    set_to_dummy_if_null(ops, mem_access);
-#endif
-
-#ifdef CONFIG_HAS_MEM_PAGING
-    set_to_dummy_if_null(ops, mem_paging);
-#endif
-
-#ifdef CONFIG_HAS_MEM_SHARING
-    set_to_dummy_if_null(ops, mem_sharing);
-#endif
-
-    set_to_dummy_if_null(ops, platform_op);
 #ifdef CONFIG_X86
-    set_to_dummy_if_null(ops, do_mca);
     set_to_dummy_if_null(ops, shadow_control);
+    set_to_dummy_if_null(ops, hvm_set_pci_intx_level);
+    set_to_dummy_if_null(ops, hvm_set_isa_irq_level);
+    set_to_dummy_if_null(ops, hvm_set_pci_link_route);
+    set_to_dummy_if_null(ops, hvm_inject_msi);
+    set_to_dummy_if_null(ops, mem_event_control);
+    set_to_dummy_if_null(ops, mem_event_op);
     set_to_dummy_if_null(ops, mem_sharing_op);
     set_to_dummy_if_null(ops, apic);
+    set_to_dummy_if_null(ops, platform_op);
     set_to_dummy_if_null(ops, machine_memory_map);
     set_to_dummy_if_null(ops, domain_memory_map);
     set_to_dummy_if_null(ops, mmu_update);
     set_to_dummy_if_null(ops, mmuext_op);
     set_to_dummy_if_null(ops, update_va_mapping);
     set_to_dummy_if_null(ops, priv_mapping);
+    set_to_dummy_if_null(ops, bind_pt_irq);
+    set_to_dummy_if_null(ops, unbind_pt_irq);
     set_to_dummy_if_null(ops, ioport_permission);
     set_to_dummy_if_null(ops, ioport_mapping);
-    set_to_dummy_if_null(ops, pmu_op);
-    set_to_dummy_if_null(ops, dm_op);
 #endif
-    set_to_dummy_if_null(ops, xen_version);
-    set_to_dummy_if_null(ops, domain_resource_map);
+#ifdef CONFIG_ARM
+    set_to_dummy_if_null(ops, map_gmfn_foreign);
+#endif
 }

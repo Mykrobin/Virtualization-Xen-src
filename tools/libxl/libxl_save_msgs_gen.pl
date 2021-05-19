@@ -23,14 +23,17 @@ our @msgs = (
                                                  STRING doing_what),
                                                 'unsigned long', 'done',
                                                 'unsigned long', 'total'] ],
-    [  3, 'srcxA',  "suspend", [] ],
-    [  4, 'srcxA',  "postcopy", [] ],
-    [  5, 'srcxA',  "checkpoint", [] ],
-    [  6, 'srcxA',  "wait_checkpoint", [] ],
-    [  7, 'scxA',   "switch_qemu_logdirty",  [qw(uint32_t domid
+    [  3, 'scxW',   "suspend", [] ],         
+    [  4, 'scxW',   "postcopy", [] ],        
+    [  5, 'scxA',   "checkpoint", [] ],      
+    [  6, 'scxA',   "switch_qemu_logdirty",  [qw(int domid
                                               unsigned enable)] ],
-    [  8, 'rcx',    "restore_results",       ['xen_pfn_t', 'store_gfn',
-                                              'xen_pfn_t', 'console_gfn'] ],
+    #                toolstack_save          done entirely `by hand'
+    [  7, 'rcxW',   "toolstack_restore",     [qw(uint32_t domid
+                                                BLOCK tsdata)] ],
+    [  8, 'r',      "restore_results",       ['unsigned long', 'store_mfn',
+                                              'unsigned long', 'console_mfn',
+                                              'unsigned long', 'genidad'] ],
     [  9, 'srW',    "complete",              [qw(int retval
                                                  int errnoval)] ],
 );
@@ -70,9 +73,9 @@ END_BOTH
 
 END_CALLOUT
 
+#include "_libxl_save_msgs_${ah}.h"
 #include <xenctrl.h>
 #include <xenguest.h>
-#include "_libxl_save_msgs_${ah}.h"
 
 END_HELPER
 }
@@ -141,7 +144,7 @@ static void bytes_put(unsigned char *const buf, int *len,
 
 END
 
-foreach my $simpletype (qw(int uint16_t uint32_t unsigned), 'unsigned long', 'xen_pfn_t') {
+foreach my $simpletype (qw(int uint16_t uint32_t unsigned), 'unsigned long') {
     my $typeid = typeid($simpletype);
     $out_body{'callout'} .= <<END;
 static int ${typeid}_get(const unsigned char **msg,
@@ -196,7 +199,7 @@ static void BLOCK_put(unsigned char *const buf,
     uint32_t_put(buf, len, size);
     bytes_put(buf, len, bytes, size);
 }
-
+    
 static void STRING_put(unsigned char *const buf,
 		       int *len,
 		       const char *string)
@@ -206,7 +209,7 @@ static void STRING_put(unsigned char *const buf,
     assert(slen < (uint32_t)0x40000000);
     BLOCK_put(buf, len, (const void*)string, slen+1);
 }
-
+    
 END
 
 foreach my $sr (qw(save restore)) {

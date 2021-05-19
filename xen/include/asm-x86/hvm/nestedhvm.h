@@ -13,7 +13,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #ifndef _HVM_NESTEDHVM_H
@@ -33,7 +34,7 @@ enum nestedhvm_vmexits {
 };
 
 /* Nested HVM on/off per domain */
-bool nestedhvm_enabled(const struct domain *d);
+bool_t nestedhvm_enabled(struct domain *d);
 
 /* Nested VCPU */
 int nestedhvm_vcpu_initialise(struct vcpu *v);
@@ -55,10 +56,6 @@ bool_t nestedhvm_vcpu_in_guestmode(struct vcpu *v);
 #define NESTEDHVM_PAGEFAULT_DIRECT_MMIO 6
 int nestedhvm_hap_nested_page_fault(struct vcpu *v, paddr_t *L2_gpa,
     bool_t access_r, bool_t access_w, bool_t access_x);
-
-int nestedhap_walk_L1_p2m(struct vcpu *v, paddr_t L2_gpa, paddr_t *L1_gpa,
-                          unsigned int *page_order, uint8_t *p2m_acc,
-                          bool_t access_r, bool_t access_w, bool_t access_x);
 
 /* IO permission map */
 unsigned long *nestedhvm_vcpu_iomap_get(bool_t ioport_80, bool_t ioport_ed);

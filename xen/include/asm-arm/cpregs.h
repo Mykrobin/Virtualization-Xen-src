@@ -83,22 +83,16 @@
 #define DBGBVR1         p14,0,c0,c1,4   /* Breakpoint Value 1 */
 #define DBGBCR1         p14,0,c0,c1,5   /* Breakpoint Control 1 */
 #define DBGOSLAR        p14,0,c1,c0,4   /* OS Lock Access */
-#define DBGOSLSR        p14,0,c1,c1,4   /* OS Lock Status Register */
 #define DBGOSDLR        p14,0,c1,c3,4   /* OS Double Lock */
-#define DBGPRCR         p14,0,c1,c4,4   /* Debug Power Control Register */
 
 /* CP14 CR0: */
 #define TEECR           p14,6,c0,c0,0   /* ThumbEE Configuration Register */
 
 /* CP14 CR1: */
-#define DBGDRAR64       p14,0,c1        /* Debug ROM Address Register (64-bit access) */
-#define DBGDRAR         p14,0,c1,c0,0   /* Debug ROM Address Register (32-bit access) */
 #define TEEHBR          p14,6,c1,c0,0   /* ThumbEE Handler Base Register */
 #define JOSCR           p14,7,c1,c0,0   /* Jazelle OS Control Register */
 
 /* CP14 CR2: */
-#define DBGDSAR64       p14,0,c2        /* Debug Self Address Offset Register (64-bit access) */
-#define DBGDSAR         p14,0,c2,c0,0   /* Debug Self Address Offset Register (32-bit access) */
 #define JMCR            p14,7,c2,c0,0   /* Jazelle Main Configuration Register */
 
 
@@ -106,7 +100,6 @@
 
 /* CP15 CR0: CPUID and Cache Type Registers */
 #define MIDR            p15,0,c0,c0,0   /* Main ID Register */
-#define CTR             p15,0,c0,c0,1   /* Cache Type Register */
 #define MPIDR           p15,0,c0,c0,5   /* Multiprocessor Affinity Register */
 #define ID_PFR0         p15,0,c0,c1,0   /* Processor Feature Register 0 */
 #define ID_PFR1         p15,0,c0,c1,1   /* Processor Feature Register 1 */
@@ -229,8 +222,8 @@
 #define PMCEID0         p15,0,c9,c12,6  /* Perf. Mon. Common Event Identification register 0 */
 #define PMCEID1         p15,0,c9,c12,7  /* Perf. Mon. Common Event Identification register 1 */
 #define PMCCNTR         p15,0,c9,c13,0  /* Perf. Mon. Cycle Count Register */
-#define PMXEVTYPER      p15,0,c9,c13,1  /* Perf. Mon. Event Type Select Register */
-#define PMXEVCNTR       p15,0,c9,c13,2  /* Perf. Mon. Event Count Register */
+#define PMXEVCNTR       p15,0,c9,c13,1  /* Perf. Mon. Event Type Select Register */
+#define PMXEVCNR        p15,0,c9,c13,2  /* Perf. Mon. Event Count Register */
 #define PMUSERENR       p15,0,c9,c14,0  /* Perf. Mon. User Enable Register */
 #define PMINTENSET      p15,0,c9,c14,1  /* Perf. Mon. Interrupt Enable Set Register */
 #define PMINTENCLR      p15,0,c9,c14,2  /* Perf. Mon. Interrupt Enable Clear Register */
@@ -247,9 +240,6 @@
 /* CP15 CR11: DMA Operations for TCM Access */
 
 /* CP15 CR12:  */
-#define ICC_SGI1R       p15,0,c12       /* Interrupt Controller SGI Group 1 */
-#define ICC_ASGI1R      p15,1,c12       /* Interrupt Controller Alias SGI Group 1 Register */
-#define ICC_SGI0R       p15,2,c12       /* Interrupt Controller SGI Group 0 */
 #define VBAR            p15,0,c12,c0,0  /* Vector Base Address Register */
 #define HVBAR           p15,4,c12,c0,0  /* Hyp. Vector Base Address Register */
 
@@ -304,10 +294,11 @@
 #define CPACR_EL1               CPACR
 #define CPTR_EL2                HCPTR
 #define CSSELR_EL1              CSSELR
-#define CTR_EL0                 CTR
 #define DACR32_EL2              DACR
 #define ESR_EL1                 DFSR
 #define ESR_EL2                 HSR
+#define FAR_EL1                 HIFAR
+#define FAR_EL2                 HIFAR
 #define HCR_EL2                 HCR
 #define HPFAR_EL2               HPFAR
 #define HSTR_EL2                HSTR

@@ -1,9 +1,9 @@
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/string.h>
 #include <xen/delay.h>
 #include <xen/smp.h>
 #include <asm/current.h>
-#include <asm/debugreg.h>
 #include <asm/processor.h>
 #include <asm/xstate.h>
 #include <asm/msr.h>
@@ -12,42 +12,32 @@
 #include <asm/apic.h>
 #include <mach_apic.h>
 #include <asm/setup.h>
-#include <public/sysctl.h> /* for XEN_INVALID_{SOCKET,CORE}_ID */
 
 #include "cpu.h"
-#include "mcheck/x86_mca.h"
 
-bool_t opt_arat = 1;
+static bool_t __cpuinitdata use_xsave = 1;
+boolean_param("xsave", use_xsave);
+
+bool_t __devinitdata opt_arat = 1;
 boolean_param("arat", opt_arat);
 
-/* pku: Flag to enable Memory Protection Keys (default on). */
-static bool_t opt_pku = 1;
-boolean_param("pku", opt_pku);
-
-unsigned int opt_cpuid_mask_ecx = ~0u;
+unsigned int __devinitdata opt_cpuid_mask_ecx = ~0u;
 integer_param("cpuid_mask_ecx", opt_cpuid_mask_ecx);
-unsigned int opt_cpuid_mask_edx = ~0u;
+unsigned int __devinitdata opt_cpuid_mask_edx = ~0u;
 integer_param("cpuid_mask_edx", opt_cpuid_mask_edx);
 
-unsigned int opt_cpuid_mask_xsave_eax = ~0u;
+unsigned int __devinitdata opt_cpuid_mask_xsave_eax = ~0u;
 integer_param("cpuid_mask_xsave_eax", opt_cpuid_mask_xsave_eax);
 
-unsigned int opt_cpuid_mask_ext_ecx = ~0u;
+unsigned int __devinitdata opt_cpuid_mask_ext_ecx = ~0u;
 integer_param("cpuid_mask_ext_ecx", opt_cpuid_mask_ext_ecx);
-unsigned int opt_cpuid_mask_ext_edx = ~0u;
+unsigned int __devinitdata opt_cpuid_mask_ext_edx = ~0u;
 integer_param("cpuid_mask_ext_edx", opt_cpuid_mask_ext_edx);
 
-unsigned int __initdata expected_levelling_cap;
-unsigned int __read_mostly levelling_caps;
-
-DEFINE_PER_CPU(struct cpuidmasks, cpuidmasks);
-struct cpuidmasks __read_mostly cpuidmask_defaults;
-
-const struct cpu_dev *__read_mostly cpu_devs[X86_VENDOR_NUM] = {};
+struct cpu_dev * cpu_devs[X86_VENDOR_NUM] = {};
 
 unsigned int paddr_bits __read_mostly = 36;
 unsigned int hap_paddr_bits __read_mostly = 36;
-unsigned int vaddr_bits __read_mostly = VADDR_BITS;
 
 /*
  * Default host IA32_CR_PAT value to cover all memory types.
@@ -55,50 +45,12 @@ unsigned int vaddr_bits __read_mostly = VADDR_BITS;
  */
 u64 host_pat = 0x050100070406;
 
-static unsigned int cleared_caps[NCAPINTS];
-static unsigned int forced_caps[NCAPINTS];
+static unsigned int __cpuinitdata cleared_caps[NCAPINTS];
 
 void __init setup_clear_cpu_cap(unsigned int cap)
 {
-	const uint32_t *dfs;
-	unsigned int i;
-
-	if (__test_and_set_bit(cap, cleared_caps))
-		return;
-
-	if (test_bit(cap, forced_caps))
-		printk("%pS clearing previously forced feature %#x\n",
-		       __builtin_return_address(0), cap);
-
 	__clear_bit(cap, boot_cpu_data.x86_capability);
-	dfs = lookup_deep_deps(cap);
-
-	if (!dfs)
-		return;
-
-	for (i = 0; i < FSCAPINTS; ++i) {
-		cleared_caps[i] |= dfs[i];
-		boot_cpu_data.x86_capability[i] &= ~dfs[i];
-		if (!(forced_caps[i] & dfs[i]))
-			continue;
-		printk("%pS implicitly clearing previously forced feature(s) %u:%#x\n",
-		       __builtin_return_address(0),
-		       i, forced_caps[i] & dfs[i]);
-	}
-}
-
-void __init setup_force_cpu_cap(unsigned int cap)
-{
-	if (__test_and_set_bit(cap, forced_caps))
-		return;
-
-	if (test_bit(cap, cleared_caps)) {
-		printk("%pS tries to force previously cleared feature %#x\n",
-		       __builtin_return_address(0), cap);
-		return;
-	}
-
-	__set_bit(cap, boot_cpu_data.x86_capability);
+	__set_bit(cap, cleared_caps);
 }
 
 static void default_init(struct cpuinfo_x86 * c)
@@ -109,106 +61,21 @@ static void default_init(struct cpuinfo_x86 * c)
 	__clear_bit(X86_FEATURE_SEP, c->x86_capability);
 }
 
-static const struct cpu_dev default_cpu = {
+static struct cpu_dev default_cpu = {
 	.c_init	= default_init,
 	.c_vendor = "Unknown",
 };
-static const struct cpu_dev *this_cpu = &default_cpu;
-
-static DEFINE_PER_CPU(uint64_t, msr_misc_features);
-void (* __read_mostly ctxt_switch_masking)(const struct vcpu *next);
-
-bool __init probe_cpuid_faulting(void)
-{
-	uint64_t val;
-	int rc;
-
-	if ((rc = rdmsr_safe(MSR_INTEL_PLATFORM_INFO, val)) == 0)
-	{
-		struct msr_domain_policy *dp = &raw_msr_domain_policy;
-
-		dp->plaform_info.available = true;
-		if (val & MSR_PLATFORM_INFO_CPUID_FAULTING)
-			dp->plaform_info.cpuid_faulting = true;
-	}
-
-	if (rc ||
-	    !(val & MSR_PLATFORM_INFO_CPUID_FAULTING) ||
-	    rdmsr_safe(MSR_INTEL_MISC_FEATURES_ENABLES,
-		       this_cpu(msr_misc_features)))
-	{
-		setup_clear_cpu_cap(X86_FEATURE_CPUID_FAULTING);
-		return false;
-	}
-
-	expected_levelling_cap |= LCAP_faulting;
-	levelling_caps |=  LCAP_faulting;
-	setup_force_cpu_cap(X86_FEATURE_CPUID_FAULTING);
-
-	return true;
-}
-
-static void set_cpuid_faulting(bool enable)
-{
-	uint64_t *this_misc_features = &this_cpu(msr_misc_features);
-	uint64_t val = *this_misc_features;
-
-	if (!!(val & MSR_MISC_FEATURES_CPUID_FAULTING) == enable)
-		return;
-
-	val ^= MSR_MISC_FEATURES_CPUID_FAULTING;
-
-	wrmsrl(MSR_INTEL_MISC_FEATURES_ENABLES, val);
-	*this_misc_features = val;
-}
-
-void ctxt_switch_levelling(const struct vcpu *next)
-{
-	const struct domain *nextd = next ? next->domain : NULL;
-
-	if (cpu_has_cpuid_faulting) {
-		/*
-		 * No need to alter the faulting setting if we are switching
-		 * to idle; it won't affect any code running in idle context.
-		 */
-		if (nextd && is_idle_domain(nextd))
-			return;
-		/*
-		 * We *should* be enabling faulting for the control domain.
-		 *
-		 * Unfortunately, the domain builder (having only ever been a
-		 * PV guest) expects to be able to see host cpuid state in a
-		 * native CPUID instruction, to correctly build a CPUID policy
-		 * for HVM guests (notably the xstate leaves).
-		 *
-		 * This logic is fundimentally broken for HVM toolstack
-		 * domains, and faulting causes PV guests to behave like HVM
-		 * guests from their point of view.
-		 *
-		 * Future development plans will move responsibility for
-		 * generating the maximum full cpuid policy into Xen, at which
-		 * this problem will disappear.
-		 */
-		set_cpuid_faulting(nextd && !is_control_domain(nextd) &&
-				   (is_pv_domain(nextd) ||
-				    next->arch.msr->
-				    misc_features_enables.cpuid_faulting));
-		return;
-	}
-
-	if (ctxt_switch_masking)
-		ctxt_switch_masking(next);
-}
+static struct cpu_dev * this_cpu = &default_cpu;
 
 bool_t opt_cpu_info;
 boolean_param("cpuinfo", opt_cpu_info);
 
-int get_model_name(struct cpuinfo_x86 *c)
+int __cpuinit get_model_name(struct cpuinfo_x86 *c)
 {
 	unsigned int *v;
 	char *p, *q;
 
-	if (c->extended_cpuid_level < 0x80000004)
+	if (cpuid_eax(0x80000000) < 0x80000004)
 		return 0;
 
 	v = (unsigned int *) c->x86_model_id;
@@ -233,11 +100,13 @@ int get_model_name(struct cpuinfo_x86 *c)
 }
 
 
-void display_cacheinfo(struct cpuinfo_x86 *c)
+void __cpuinit display_cacheinfo(struct cpuinfo_x86 *c)
 {
-	unsigned int dummy, ecx, edx, l2size;
+	unsigned int n, dummy, ecx, edx, l2size;
 
-	if (c->extended_cpuid_level >= 0x80000005) {
+	n = cpuid_eax(0x80000000);
+
+	if (n >= 0x80000005) {
 		cpuid(0x80000005, &dummy, &dummy, &ecx, &edx);
 		if (opt_cpu_info)
 			printk("CPU: L1 I cache %dK (%d bytes/line),"
@@ -246,7 +115,7 @@ void display_cacheinfo(struct cpuinfo_x86 *c)
 		c->x86_cache_size=(ecx>>24)+(edx>>24);	
 	}
 
-	if (c->extended_cpuid_level < 0x80000006)	/* Some chips just has a large L1. */
+	if (n < 0x80000006)	/* Some chips just has a large L1. */
 		return;
 
 	ecx = cpuid_ecx(0x80000006);
@@ -259,52 +128,33 @@ void display_cacheinfo(struct cpuinfo_x86 *c)
 		       l2size, ecx & 0xFF);
 }
 
-int get_cpu_vendor(uint32_t b, uint32_t c, uint32_t d, enum get_cpu_vendor mode)
+static void __cpuinit get_cpu_vendor(struct cpuinfo_x86 *c, int early)
 {
+	char *v = c->x86_vendor_id;
 	int i;
 	static int printed;
 
 	for (i = 0; i < X86_VENDOR_NUM; i++) {
 		if (cpu_devs[i]) {
-			struct {
-				uint32_t b, d, c;
-			} *ptr = (void *)cpu_devs[i]->c_ident;
-
-			if (ptr->b == b && ptr->c == c && ptr->d == d) {
-				if (mode == gcv_host)
+			if (!strcmp(v,cpu_devs[i]->c_ident[0]) ||
+			    (cpu_devs[i]->c_ident[1] && 
+			     !strcmp(v,cpu_devs[i]->c_ident[1]))) {
+				c->x86_vendor = i;
+				if (!early)
 					this_cpu = cpu_devs[i];
-				return i;
+				return;
 			}
 		}
 	}
-	if (mode == gcv_guest)
-		return X86_VENDOR_UNKNOWN;
 	if (!printed) {
 		printed++;
 		printk(KERN_ERR "CPU: Vendor unknown, using generic init.\n");
 		printk(KERN_ERR "CPU: Your system may be unstable.\n");
 	}
+	c->x86_vendor = X86_VENDOR_UNKNOWN;
 	this_cpu = &default_cpu;
-
-	return X86_VENDOR_UNKNOWN;
 }
 
-static inline u32 _phys_pkg_id(u32 cpuid_apic, int index_msb)
-{
-	return cpuid_apic >> index_msb;
-}
-
-/*
- * cpuid returns the value latched in the HW at reset, not the APIC ID
- * register's value.  For any box whose BIOS changes APIC IDs, like
- * clustered APIC systems, we must use get_apic_id().
- *
- * See Intel's IA-32 SW Dev's Manual Vol2 under CPUID.
- */
-static inline u32 phys_pkg_id(u32 cpuid_apic, int index_msb)
-{
-	return _phys_pkg_id(get_apic_id(), index_msb);
-}
 
 /* Do minimum CPU detection early.
    Fields really needed: vendor, cpuid_level, family, model, mask, cache alignment.
@@ -315,123 +165,98 @@ static inline u32 phys_pkg_id(u32 cpuid_apic, int index_msb)
 static void __init early_cpu_detect(void)
 {
 	struct cpuinfo_x86 *c = &boot_cpu_data;
-	u32 eax, ebx, ecx, edx;
+	u32 cap4, tfms, cap0, misc;
 
 	c->x86_cache_alignment = 32;
 
 	/* Get vendor name */
-	cpuid(0x00000000, &c->cpuid_level, &ebx, &ecx, &edx);
-	*(u32 *)&c->x86_vendor_id[0] = ebx;
-	*(u32 *)&c->x86_vendor_id[8] = ecx;
-	*(u32 *)&c->x86_vendor_id[4] = edx;
+	cpuid(0x00000000, &c->cpuid_level,
+	      (int *)&c->x86_vendor_id[0],
+	      (int *)&c->x86_vendor_id[8],
+	      (int *)&c->x86_vendor_id[4]);
 
-	c->x86_vendor = get_cpu_vendor(ebx, ecx, edx, gcv_host);
+	get_cpu_vendor(c, 1);
 
-	cpuid(0x00000001, &eax, &ebx, &ecx, &edx);
-	c->x86 = get_cpu_family(eax, &c->x86_model, &c->x86_mask);
-
-	edx &= ~cleared_caps[cpufeat_word(X86_FEATURE_FPU)];
-	ecx &= ~cleared_caps[cpufeat_word(X86_FEATURE_SSE3)];
-	if (edx & cpufeat_mask(X86_FEATURE_CLFLUSH))
-		c->x86_cache_alignment = ((ebx >> 8) & 0xff) * 8;
+	cpuid(0x00000001, &tfms, &misc, &cap4, &cap0);
+	c->x86 = (tfms >> 8) & 15;
+	c->x86_model = (tfms >> 4) & 15;
+	if (c->x86 == 0xf)
+		c->x86 += (tfms >> 20) & 0xff;
+	if (c->x86 >= 0x6)
+		c->x86_model += ((tfms >> 16) & 0xF) << 4;
+	c->x86_mask = tfms & 15;
+	cap0 &= ~cleared_caps[0];
+	cap4 &= ~cleared_caps[4];
+	if (cap0 & (1<<19))
+		c->x86_cache_alignment = ((misc >> 8) & 0xff) * 8;
 	/* Leaf 0x1 capabilities filled in early for Xen. */
-	c->x86_capability[cpufeat_word(X86_FEATURE_FPU)] = edx;
-	c->x86_capability[cpufeat_word(X86_FEATURE_SSE3)] = ecx;
-
-	printk(XENLOG_INFO
-	       "CPU Vendor: %s, Family %u (%#x), Model %u (%#x), Stepping %u (raw %08x)\n",
-	       this_cpu->c_vendor, c->x86, c->x86,
-	       c->x86_model, c->x86_model, c->x86_mask, eax);
-
-	eax = cpuid_eax(0x80000000);
-	if ((eax >> 16) == 0x8000 && eax >= 0x80000008) {
-		eax = cpuid_eax(0x80000008);
-		paddr_bits = eax & 0xff;
-		if (paddr_bits > PADDR_BITS)
-			paddr_bits = PADDR_BITS;
-		vaddr_bits = (eax >> 8) & 0xff;
-		if (vaddr_bits > VADDR_BITS)
-			vaddr_bits = VADDR_BITS;
-		hap_paddr_bits = ((eax >> 16) & 0xff) ?: paddr_bits;
-		if (hap_paddr_bits > PADDR_BITS)
-			hap_paddr_bits = PADDR_BITS;
-	}
-
-	if (c->x86_vendor != X86_VENDOR_AMD)
-		park_offline_cpus = opt_mce;
-
-	initialize_cpu_data(0);
+	c->x86_capability[0] = cap0;
+	c->x86_capability[4] = cap4;
 }
 
-static void generic_identify(struct cpuinfo_x86 *c)
+static void __cpuinit generic_identify(struct cpuinfo_x86 *c)
 {
-	u32 eax, ebx, ecx, edx, tmp;
+	u32 tfms, xlvl, capability, excap, eax, ebx;
 
 	/* Get vendor name */
-	cpuid(0x00000000, &c->cpuid_level, &ebx, &ecx, &edx);
-	*(u32 *)&c->x86_vendor_id[0] = ebx;
-	*(u32 *)&c->x86_vendor_id[8] = ecx;
-	*(u32 *)&c->x86_vendor_id[4] = edx;
-
-	c->x86_vendor = get_cpu_vendor(ebx, ecx, edx, gcv_host);
+	cpuid(0x00000000, &c->cpuid_level,
+	      (int *)&c->x86_vendor_id[0],
+	      (int *)&c->x86_vendor_id[8],
+	      (int *)&c->x86_vendor_id[4]);
+		
+	get_cpu_vendor(c, 0);
 	/* Initialize the standard set of capabilities */
 	/* Note that the vendor-specific code below might override */
-
-	/* Model and family information. */
-	cpuid(0x00000001, &eax, &ebx, &ecx, &edx);
-	c->x86 = get_cpu_family(eax, &c->x86_model, &c->x86_mask);
-	c->apicid = phys_pkg_id((ebx >> 24) & 0xFF, 0);
-	c->phys_proc_id = c->apicid;
-
-	if (this_cpu->c_early_init)
-		this_cpu->c_early_init(c);
-
-	/* c_early_init() may have adjusted cpuid levels/features.  Reread. */
-	c->cpuid_level = cpuid_eax(0);
-	cpuid(0x00000001, &eax, &ebx, &ecx, &edx);
-	c->x86_capability[cpufeat_word(X86_FEATURE_FPU)] = edx;
-	c->x86_capability[cpufeat_word(X86_FEATURE_SSE3)] = ecx;
-
-	if ( cpu_has(c, X86_FEATURE_CLFLUSH) )
+	
+	/* Intel-defined flags: level 0x00000001 */
+	cpuid(0x00000001, &tfms, &ebx, &excap, &capability);
+	c->x86_capability[0] = capability;
+	c->x86_capability[4] = excap;
+	c->x86 = (tfms >> 8) & 15;
+	c->x86_model = (tfms >> 4) & 15;
+	if (c->x86 == 0xf)
+		c->x86 += (tfms >> 20) & 0xff;
+	if (c->x86 >= 0x6)
+		c->x86_model += ((tfms >> 16) & 0xF) << 4;
+	c->x86_mask = tfms & 15;
+	if ( cpu_has(c, X86_FEATURE_CLFLSH) )
 		c->x86_clflush_size = ((ebx >> 8) & 0xff) * 8;
 
-	if ( (c->cpuid_level >= CPUID_PM_LEAF) &&
-	     (cpuid_ecx(CPUID_PM_LEAF) & CPUID6_ECX_APERFMPERF_CAPABILITY) )
-		set_bit(X86_FEATURE_APERFMPERF, c->x86_capability);
-
 	/* AMD-defined flags: level 0x80000001 */
-	c->extended_cpuid_level = cpuid_eax(0x80000000);
-	if ((c->extended_cpuid_level >> 16) != 0x8000)
-		c->extended_cpuid_level = 0;
-	if (c->extended_cpuid_level > 0x80000000)
-		cpuid(0x80000001, &tmp, &tmp,
-		      &c->x86_capability[cpufeat_word(X86_FEATURE_LAHF_LM)],
-		      &c->x86_capability[cpufeat_word(X86_FEATURE_SYSCALL)]);
-	if (c == &boot_cpu_data)
-		bootsym(cpuid_ext_features) =
-			c->x86_capability[cpufeat_word(X86_FEATURE_NX)];
+	xlvl = cpuid_eax(0x80000000);
+	if ( (xlvl & 0xffff0000) == 0x80000000 ) {
+		if ( xlvl >= 0x80000001 ) {
+			c->x86_capability[1] = cpuid_edx(0x80000001);
+			c->x86_capability[6] = cpuid_ecx(0x80000001);
+		}
+		if ( xlvl >= 0x80000004 )
+			get_model_name(c); /* Default name */
+		if ( xlvl >= 0x80000008 ) {
+			eax = cpuid_eax(0x80000008);
+			paddr_bits = eax & 0xff;
+			hap_paddr_bits = ((eax >> 16) & 0xff) ?: paddr_bits;
+		}
+	}
 
-	if (c->extended_cpuid_level >= 0x80000004)
-		get_model_name(c); /* Default name */
-	if (c->extended_cpuid_level >= 0x80000007)
-		c->x86_capability[cpufeat_word(X86_FEATURE_ITSC)]
-			= cpuid_edx(0x80000007);
-	if (c->extended_cpuid_level >= 0x80000008)
-		c->x86_capability[cpufeat_word(X86_FEATURE_CLZERO)]
-			= cpuid_ebx(0x80000008);
+	/* Might lift BIOS max_leaf=3 limit. */
+	early_intel_workaround(c);
 
 	/* Intel-defined flags: level 0x00000007 */
-	if ( c->cpuid_level >= 0x00000007 )
-		cpuid_count(0x00000007, 0, &tmp,
-			    &c->x86_capability[cpufeat_word(X86_FEATURE_FSGSBASE)],
-			    &c->x86_capability[cpufeat_word(X86_FEATURE_PKU)],
-			    &c->x86_capability[cpufeat_word(X86_FEATURE_AVX512_4VNNIW)]);
+	if ( c->cpuid_level >= 0x00000007 ) {
+		u32 dummy;
+		cpuid_count(0x00000007, 0, &dummy, &ebx, &dummy, &dummy);
+		c->x86_capability[X86_FEATURE_FSGSBASE / 32] = ebx;
+	}
+
+#ifdef CONFIG_X86_HT
+	c->phys_proc_id = (cpuid_ebx(1) >> 24) & 0xff;
+#endif
 }
 
 /*
  * This does the hard work of actually picking apart the CPU stuff...
  */
-void identify_cpu(struct cpuinfo_x86 *c)
+void __cpuinit identify_cpu(struct cpuinfo_x86 *c)
 {
 	int i;
 
@@ -444,19 +269,30 @@ void identify_cpu(struct cpuinfo_x86 *c)
 	c->x86_max_cores = 1;
 	c->x86_num_siblings = 1;
 	c->x86_clflush_size = 0;
-	c->phys_proc_id = XEN_INVALID_SOCKET_ID;
-	c->cpu_core_id = XEN_INVALID_CORE_ID;
-	c->compute_unit_id = INVALID_CUID;
+	c->phys_proc_id = BAD_APICID;
+	c->cpu_core_id = BAD_APICID;
+	c->compute_unit_id = BAD_APICID;
 	memset(&c->x86_capability, 0, sizeof c->x86_capability);
 
 	generic_identify(c);
 
 #ifdef NOISY_CAPS
-	printk(KERN_DEBUG "CPU: After vendor identify, caps:");
+	printk(KERN_DEBUG "CPU: After generic identify, caps:");
 	for (i = 0; i < NCAPINTS; i++)
 		printk(" %08x", c->x86_capability[i]);
 	printk("\n");
 #endif
+
+	if (this_cpu->c_identify) {
+		this_cpu->c_identify(c);
+
+#ifdef NOISY_CAPS
+		printk(KERN_DEBUG "CPU: After vendor identify, caps:");
+		for (i = 0; i < NCAPINTS; i++)
+			printk(" %08x", c->x86_capability[i]);
+		printk("\n");
+#endif
+	}
 
 	/*
 	 * Vendor-specific initialization.  In this section we
@@ -471,21 +307,20 @@ void identify_cpu(struct cpuinfo_x86 *c)
 	if (this_cpu->c_init)
 		this_cpu->c_init(c);
 
+        /* Initialize xsave/xrstor features */
+	if ( !use_xsave )
+		clear_bit(X86_FEATURE_XSAVE, boot_cpu_data.x86_capability);
 
-   	if (c == &boot_cpu_data && !opt_pku)
-		setup_clear_cpu_cap(X86_FEATURE_PKU);
+	if ( cpu_has_xsave )
+		xstate_init(c == &boot_cpu_data);
 
 	/*
 	 * The vendor-specific functions might have changed features.  Now
 	 * we do "generic changes."
 	 */
-	for (i = 0; i < FSCAPINTS; ++i)
-		c->x86_capability[i] &= known_features[i];
 
-	for (i = 0 ; i < NCAPINTS ; ++i) {
-		c->x86_capability[i] |= forced_caps[i];
+	for (i = 0 ; i < NCAPINTS ; ++i)
 		c->x86_capability[i] &= ~cleared_caps[i];
-	}
 
 	/* If the model name is still unset, do table lookup. */
 	if ( !c->x86_model_id[0] ) {
@@ -496,18 +331,12 @@ void identify_cpu(struct cpuinfo_x86 *c)
 
 	/* Now the feature flags better reflect actual CPU features! */
 
-	if ( cpu_has_xsave )
-		xstate_init(c);
-
 #ifdef NOISY_CAPS
 	printk(KERN_DEBUG "CPU: After all inits, caps:");
 	for (i = 0; i < NCAPINTS; i++)
 		printk(" %08x", c->x86_capability[i]);
 	printk("\n");
 #endif
-
-	if (system_state == SYS_STATE_resume)
-		return;
 
 	/*
 	 * On SMP, boot_cpu_data holds the common feature set between
@@ -520,12 +349,23 @@ void identify_cpu(struct cpuinfo_x86 *c)
 		for ( i = 0 ; i < NCAPINTS ; i++ )
 			boot_cpu_data.x86_capability[i] &= c->x86_capability[i];
 
-		mcheck_init(c, false);
+		mcheck_init(c, 0);
 	} else {
-		mcheck_init(c, true);
+		mcheck_init(c, 1);
 
 		mtrr_bp_init();
 	}
+}
+
+/* cpuid returns the value latched in the HW at reset, not the APIC ID
+ * register's value.  For any box whose BIOS changes APIC IDs, like
+ * clustered APIC systems, we must use hard_smp_processor_id.
+ *
+ * See Intel's IA-32 SW Dev's Manual Vol2 under CPUID.
+ */
+static inline u32 phys_pkg_id(u32 cpuid_apic, int index_msb)
+{
+	return hard_smp_processor_id() >> index_msb;
 }
 
 /* leaf 0xb SMT level */
@@ -544,7 +384,7 @@ void identify_cpu(struct cpuinfo_x86 *c)
  * Check for extended topology enumeration cpuid leaf 0xb and if it
  * exists, use it for cpu topology detection.
  */
-void detect_extended_topology(struct cpuinfo_x86 *c)
+void __cpuinit detect_extended_topology(struct cpuinfo_x86 *c)
 {
 	unsigned int eax, ebx, ecx, edx, sub_index;
 	unsigned int ht_mask_width, core_plus_mask_width;
@@ -560,13 +400,13 @@ void detect_extended_topology(struct cpuinfo_x86 *c)
 	if ( ebx == 0 || (LEAFB_SUBTYPE(ecx) != SMT_TYPE) )
 		return;
 
-	__set_bit(X86_FEATURE_XTOPOLOGY, c->x86_capability);
+	set_bit(X86_FEATURE_XTOPOLOGY, c->x86_capability);
 
 	initial_apicid = edx;
 
 	/* Populate HT related information from sub-leaf level 0 */
+	core_level_siblings = c->x86_num_siblings = LEVEL_MAX_SIBLINGS(ebx);
 	core_plus_mask_width = ht_mask_width = BITS_SHIFT_NEXT_LEVEL(eax);
-	core_level_siblings = c->x86_num_siblings = 1u << ht_mask_width;
 
 	sub_index = 1;
 	do {
@@ -574,15 +414,15 @@ void detect_extended_topology(struct cpuinfo_x86 *c)
 
 		/* Check for the Core type in the implemented sub leaves */
 		if ( LEAFB_SUBTYPE(ecx) == CORE_TYPE ) {
+			core_level_siblings = LEVEL_MAX_SIBLINGS(ebx);
 			core_plus_mask_width = BITS_SHIFT_NEXT_LEVEL(eax);
-			core_level_siblings = 1u << core_plus_mask_width;
 			break;
 		}
 
 		sub_index++;
 	} while ( LEAFB_SUBTYPE(ecx) != INVALID_TYPE );
 
-	core_select_mask = (~(~0u << core_plus_mask_width)) >> ht_mask_width;
+	core_select_mask = (~(-1 << core_plus_mask_width)) >> ht_mask_width;
 
 	c->cpu_core_id = phys_pkg_id(initial_apicid, ht_mask_width)
 		& core_select_mask;
@@ -601,22 +441,32 @@ void detect_extended_topology(struct cpuinfo_x86 *c)
 	}
 }
 
-void detect_ht(struct cpuinfo_x86 *c)
+#ifdef CONFIG_X86_HT
+void __cpuinit detect_ht(struct cpuinfo_x86 *c)
 {
 	u32 	eax, ebx, ecx, edx;
 	int 	index_msb, core_bits;
 
-	if (!cpu_has(c, X86_FEATURE_HTT) ||
-	    cpu_has(c, X86_FEATURE_CMP_LEGACY) ||
-	    cpu_has(c, X86_FEATURE_XTOPOLOGY))
+	cpuid(1, &eax, &ebx, &ecx, &edx);
+
+	c->apicid = phys_pkg_id((ebx >> 24) & 0xFF, 0);
+
+	if (!cpu_has(c, X86_FEATURE_HT) || cpu_has(c, X86_FEATURE_CMP_LEGACY)
+        || cpu_has(c, X86_FEATURE_XTOPOLOGY))
 		return;
 
-	cpuid(1, &eax, &ebx, &ecx, &edx);
 	c->x86_num_siblings = (ebx & 0xff0000) >> 16;
 
 	if (c->x86_num_siblings == 1) {
 		printk(KERN_INFO  "CPU: Hyper-Threading is disabled\n");
 	} else if (c->x86_num_siblings > 1 ) {
+
+		if (c->x86_num_siblings > nr_cpu_ids) {
+			printk(KERN_WARNING "CPU: Unsupported number of the siblings %d", c->x86_num_siblings);
+			c->x86_num_siblings = 1;
+			return;
+		}
+
 		index_msb = get_count_order(c->x86_num_siblings);
 		c->phys_proc_id = phys_pkg_id((ebx >> 24) & 0xFF, index_msb);
 
@@ -638,45 +488,9 @@ void detect_ht(struct cpuinfo_x86 *c)
 			       c->cpu_core_id);
 	}
 }
+#endif
 
-unsigned int __init apicid_to_socket(unsigned int apicid)
-{
-	unsigned int dummy;
-
-	if (boot_cpu_has(X86_FEATURE_XTOPOLOGY)) {
-		unsigned int eax, ecx, sub_index = 1, core_plus_mask_width;
-
-		cpuid_count(0xb, SMT_LEVEL, &eax, &dummy, &dummy, &dummy);
-		core_plus_mask_width = BITS_SHIFT_NEXT_LEVEL(eax);
-		do {
-			cpuid_count(0xb, sub_index, &eax, &dummy, &ecx,
-			            &dummy);
-
-			if (LEAFB_SUBTYPE(ecx) == CORE_TYPE) {
-				core_plus_mask_width =
-					BITS_SHIFT_NEXT_LEVEL(eax);
-				break;
-			}
-
-			sub_index++;
-		} while (LEAFB_SUBTYPE(ecx) != INVALID_TYPE);
-
-		return _phys_pkg_id(apicid, core_plus_mask_width);
-	}
-
-	if (boot_cpu_has(X86_FEATURE_HTT) &&
-	    !boot_cpu_has(X86_FEATURE_CMP_LEGACY)) {
-		unsigned int num_siblings = (cpuid_ebx(1) & 0xff0000) >> 16;
-
-		if (num_siblings)
-			return _phys_pkg_id(apicid,
-			                    get_count_order(num_siblings));
-	}
-
-	return apicid;
-}
-
-void print_cpu_info(unsigned int cpu)
+void __cpuinit print_cpu_info(unsigned int cpu)
 {
 	const struct cpuinfo_x86 *c = cpu_data + cpu;
 	const char *vendor = NULL;
@@ -719,94 +533,20 @@ void __init early_cpu_init(void)
 	centaur_init_cpu();
 	early_cpu_detect();
 }
-
-/*
- * Sets up system tables and descriptors.
- *
- * - Sets up TSS with stack pointers, including ISTs
- * - Inserts TSS selector into regular and compat GDTs
- * - Loads GDT, IDT, TR then null LDT
- * - Sets up IST references in the IDT
- */
-void load_system_tables(void)
-{
-	unsigned int cpu = smp_processor_id();
-	unsigned long stack_bottom = get_stack_bottom(),
-		stack_top = stack_bottom & ~(STACK_SIZE - 1);
-
-	struct tss64 *tss = &this_cpu(tss_page).tss;
-	struct desc_struct *gdt =
-		this_cpu(gdt_table) - FIRST_RESERVED_GDT_ENTRY;
-	struct desc_struct *compat_gdt =
-		this_cpu(compat_gdt_table) - FIRST_RESERVED_GDT_ENTRY;
-
-	const struct desc_ptr gdtr = {
-		.base = (unsigned long)gdt,
-		.limit = LAST_RESERVED_GDT_BYTE,
-	};
-	const struct desc_ptr idtr = {
-		.base = (unsigned long)idt_tables[cpu],
-		.limit = (IDT_ENTRIES * sizeof(idt_entry_t)) - 1,
-	};
-
-	*tss = (struct tss64){
-		/* Main stack for interrupts/exceptions. */
-		.rsp0 = stack_bottom,
-
-		/* Ring 1 and 2 stacks poisoned. */
-		.rsp1 = 0x8600111111111111ul,
-		.rsp2 = 0x8600111111111111ul,
-
-		/*
-		 * MCE, NMI and Double Fault handlers get their own stacks.
-		 * All others poisoned.
-		 */
-		.ist = {
-			[IST_MCE - 1] = stack_top + IST_MCE * PAGE_SIZE,
-			[IST_DF  - 1] = stack_top + IST_DF  * PAGE_SIZE,
-			[IST_NMI - 1] = stack_top + IST_NMI * PAGE_SIZE,
-			[IST_DB  - 1] = stack_top + IST_DB  * PAGE_SIZE,
-
-			[IST_MAX ... ARRAY_SIZE(tss->ist) - 1] =
-				0x8600111111111111ul,
-		},
-
-		.bitmap = IOBMP_INVALID_OFFSET,
-	};
-
-	BUILD_BUG_ON(sizeof(*tss) <= 0x67); /* Mandated by the architecture. */
-
-	_set_tssldt_desc(gdt + TSS_ENTRY, (unsigned long)tss,
-			 sizeof(*tss) - 1, SYS_DESC_tss_avail);
-	_set_tssldt_desc(compat_gdt + TSS_ENTRY, (unsigned long)tss,
-			 sizeof(*tss) - 1, SYS_DESC_tss_busy);
-
-	lgdt(&gdtr);
-	lidt(&idtr);
-	ltr(TSS_ENTRY << 3);
-	lldt(0);
-
-	enable_each_ist(idt_tables[cpu]);
-
-	/*
-	 * Bottom-of-stack must be 16-byte aligned!
-	 *
-	 * Defer checks until exception support is sufficiently set up.
-	 */
-	BUILD_BUG_ON((sizeof(struct cpu_info) -
-		      offsetof(struct cpu_info, guest_cpu_user_regs.es)) & 0xf);
-	BUG_ON(system_state != SYS_STATE_early_boot && (stack_bottom & 0xf));
-}
-
 /*
  * cpu_init() initializes state that is per-CPU. Some data is already
  * initialized (naturally) in the bootstrap process, such as the GDT
  * and IDT. We reload them nevertheless, this function acts as a
  * 'CPU state barrier', nothing should get across.
  */
-void cpu_init(void)
+void __cpuinit cpu_init(void)
 {
 	int cpu = smp_processor_id();
+	struct tss_struct *t = &this_cpu(init_tss);
+	struct desc_ptr gdt_desc = {
+		.base = (unsigned long)(this_cpu(gdt_table) - FIRST_RESERVED_GDT_ENTRY),
+		.limit = LAST_RESERVED_GDT_BYTE
+	};
 
 	if (cpumask_test_and_set_cpu(cpu, &cpu_initialized)) {
 		printk(KERN_WARNING "CPU#%d already initialized!\n", cpu);
@@ -821,60 +561,29 @@ void cpu_init(void)
 	/* Install correct page table. */
 	write_ptbase(current);
 
+	asm volatile ( "lgdt %0" : : "m" (gdt_desc) );
+
+	/* No nested task. */
+	asm volatile ("pushf ; andw $0xbfff,(%"__OP"sp) ; popf" );
+
 	/* Ensure FPU gets initialised for each domain. */
 	stts();
 
-	/* Reset debug registers: */
-	write_debugreg(0, 0);
-	write_debugreg(1, 0);
-	write_debugreg(2, 0);
-	write_debugreg(3, 0);
-	write_debugreg(6, X86_DR6_DEFAULT);
-	write_debugreg(7, X86_DR7_DEFAULT);
+	/* Set up and load the per-CPU TSS and LDT. */
+	t->bitmap = IOBMP_INVALID_OFFSET;
+	/* Bottom-of-stack must be 16-byte aligned! */
+	BUG_ON((get_stack_bottom() & 15) != 0);
+	t->rsp0 = get_stack_bottom();
+	load_TR();
+	asm volatile ( "lldt %%ax" : : "a" (0) );
 
-	/* Enable NMIs.  Our loader (e.g. Tboot) may have left them disabled. */
-	enable_nmis();
+	/* Clear all 6 debug registers: */
+#define CD(register) asm volatile ( "mov %0,%%db" #register : : "r"(0UL) );
+	CD(0); CD(1); CD(2); CD(3); /* no db4 and db5 */; CD(6); CD(7);
+#undef CD
 }
 
 void cpu_uninit(unsigned int cpu)
 {
 	cpumask_clear_cpu(cpu, &cpu_initialized);
-}
-
-/*
- * x86_match_cpu - match the current CPU against an array of
- * x86_cpu_ids
- * @match: Pointer to array of x86_cpu_ids. Last entry terminated with
- *         {}.
- * Return the entry if the current CPU matches the entries in the
- * passed x86_cpu_id match table. Otherwise NULL.  The match table
- * contains vendor (X86_VENDOR_*), family, model and feature bits or
- * respective wildcard entries.
- *
- * A typical table entry would be to match a specific CPU
- * { X86_VENDOR_INTEL, 6, 0x12 }
- * or to match a specific CPU feature
- * { X86_FEATURE_MATCH(X86_FEATURE_FOOBAR) }
- *
- * This always matches against the boot cpu, assuming models and
-features are
- * consistent over all CPUs.
- */
-const struct x86_cpu_id *x86_match_cpu(const struct x86_cpu_id table[])
-{
-	const struct x86_cpu_id *m;
-	const struct cpuinfo_x86 *c = &boot_cpu_data;
-
-	for (m = table; m->vendor | m->family | m->model | m->feature; m++) {
-		if (c->x86_vendor != m->vendor)
-			continue;
-		if (c->x86 != m->family)
-			continue;
-		if (c->x86_model != m->model)
-			continue;
-		if (!cpu_has(c, m->feature))
-			continue;
-		return m;
-	}
-	return NULL;
 }

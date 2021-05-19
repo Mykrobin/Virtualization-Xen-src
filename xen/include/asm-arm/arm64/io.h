@@ -20,9 +20,7 @@
 #ifndef _ARM_ARM64_IO_H
 #define _ARM_ARM64_IO_H
 
-#include <asm/system.h>
 #include <asm/byteorder.h>
-#include <asm/alternative.h>
 
 /*
  * Generic IO read/write.  These perform native-endian accesses.
@@ -50,40 +48,28 @@ static inline void __raw_writeq(u64 val, volatile void __iomem *addr)
 static inline u8 __raw_readb(const volatile void __iomem *addr)
 {
         u8 val;
-        asm volatile(ALTERNATIVE("ldrb %w0, [%1]",
-                                 "ldarb %w0, [%1]",
-                                 ARM64_WORKAROUND_DEVICE_LOAD_ACQUIRE)
-                     : "=r" (val) : "r" (addr));
+        asm volatile("ldrb %w0, [%1]" : "=r" (val) : "r" (addr));
         return val;
 }
 
 static inline u16 __raw_readw(const volatile void __iomem *addr)
 {
         u16 val;
-        asm volatile(ALTERNATIVE("ldrh %w0, [%1]",
-                                 "ldarh %w0, [%1]",
-                                 ARM64_WORKAROUND_DEVICE_LOAD_ACQUIRE)
-                     : "=r" (val) : "r" (addr));
+        asm volatile("ldrh %w0, [%1]" : "=r" (val) : "r" (addr));
         return val;
 }
 
 static inline u32 __raw_readl(const volatile void __iomem *addr)
 {
         u32 val;
-        asm volatile(ALTERNATIVE("ldr %w0, [%1]",
-                                 "ldar %w0, [%1]",
-                                 ARM64_WORKAROUND_DEVICE_LOAD_ACQUIRE)
-                     : "=r" (val) : "r" (addr));
+        asm volatile("ldr %w0, [%1]" : "=r" (val) : "r" (addr));
         return val;
 }
 
 static inline u64 __raw_readq(const volatile void __iomem *addr)
 {
         u64 val;
-        asm volatile(ALTERNATIVE("ldr %0, [%1]",
-                                 "ldar %0, [%1]",
-                                 ARM64_WORKAROUND_DEVICE_LOAD_ACQUIRE)
-                     : "=r" (val) : "r" (addr));
+        asm volatile("ldr %0, [%1]" : "=r" (val) : "r" (addr));
         return val;
 }
 
@@ -122,27 +108,5 @@ static inline u64 __raw_readq(const volatile void __iomem *addr)
 #define writew(v,c)             ({ __iowmb(); writew_relaxed((v),(c)); })
 #define writel(v,c)             ({ __iowmb(); writel_relaxed((v),(c)); })
 #define writeq(v,c)             ({ __iowmb(); writeq_relaxed((v),(c)); })
-
-/*
- * Emulate x86 io ports for ARM.
- */
-static inline int emulate_read(u64 addr)
-{
-    printk(XENLOG_G_WARNING "Can't access IO %lx\n", addr);
-    return 0;
-}
-
-static inline void emulate_write(u64 addr)
-{
-    printk(XENLOG_G_WARNING "Can't access IO %lx\n", addr);
-}
-
-#define inb(c) ( emulate_read(c) )
-#define inw(c) ( emulate_read(c) )
-#define inl(c) ( emulate_read(c) )
-
-#define outb(v, c) ( emulate_write(c) )
-#define outw(v, c) ( emulate_write(c) )
-#define outl(v, c) ( emulate_write(c) )
 
 #endif /* _ARM_ARM64_IO_H */

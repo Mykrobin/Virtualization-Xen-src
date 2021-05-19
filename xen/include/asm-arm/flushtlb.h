@@ -8,14 +8,11 @@
  * TLB since @page_timestamp.
  */
 /* XXX lazy implementation just doesn't clear anything.... */
-static inline void tlbflush_filter(cpumask_t *mask, uint32_t page_timestamp) {}
+#define tlbflush_filter(mask, page_timestamp)                           \
+do {                                                                    \
+} while ( 0 )
 
 #define tlbflush_current_time()                 (0)
-
-static inline void page_set_tlbflush_timestamp(struct page_info *page)
-{
-    page->tlbflush_timestamp = tlbflush_current_time();
-}
 
 #if defined(CONFIG_ARM_32)
 # include <asm/arm32/flushtlb.h>

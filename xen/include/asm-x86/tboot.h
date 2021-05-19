@@ -39,6 +39,10 @@
 
 #include <xen/acpi.h>
 
+#ifndef __packed
+#define __packed   __attribute__ ((packed))
+#endif
+
 typedef struct __packed {
   uint32_t    data1;
   uint16_t    data2;
@@ -119,7 +123,6 @@ typedef struct __packed {
 
 extern tboot_shared_t *g_tboot_shared;
 
-#ifdef CONFIG_TBOOT
 void tboot_probe(void);
 void tboot_shutdown(uint32_t shutdown_type);
 int tboot_in_measured_env(void);
@@ -128,24 +131,6 @@ int tboot_parse_dmar_table(acpi_table_handler dmar_handler);
 int tboot_s3_resume(void);
 void tboot_s3_error(int error);
 int tboot_wake_ap(int apicid, unsigned long sipi_vec);
-#else
-static inline void tboot_probe(void) {}
-static inline void tboot_shutdown(uint32_t shutdown_type) {}
-static inline int tboot_in_measured_env(void) { return 0; }
-static inline int tboot_protect_mem_regions(void) { return 1; }
-
-static inline int tboot_parse_dmar_table(acpi_table_handler dmar_handler)
-{
-    return acpi_table_parse(ACPI_SIG_DMAR, dmar_handler);
-}
-
-static inline int tboot_s3_resume(void) { return 0; }
-static inline void tboot_s3_error(int error) {}
-static inline int tboot_wake_ap(int apicid, unsigned long sipi_vec)
-{
-    return 1;
-}
-#endif /* CONFIG_TBOOT */
 
 #endif /* __TBOOT_H__ */
 

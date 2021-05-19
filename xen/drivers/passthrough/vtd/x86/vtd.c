@@ -11,7 +11,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  * Copyright (C) Allen Kay <allen.m.kay@intel.com>
  * Copyright (C) Weidong Han <weidong.han@intel.com>
@@ -35,12 +36,12 @@
  * iommu_inclusive_mapping: when set, all memory below 4GB is included in dom0
  * 1:1 iommu mappings except xen and unusable regions.
  */
-static bool_t __hwdom_initdata iommu_inclusive_mapping = 1;
+static bool_t __initdata iommu_inclusive_mapping = 1;
 boolean_param("iommu_inclusive_mapping", iommu_inclusive_mapping);
 
 void *map_vtd_domain_page(u64 maddr)
 {
-    return map_domain_page(_mfn(paddr_to_pfn(maddr)));
+    return map_domain_page(maddr >> PAGE_SHIFT_4K);
 }
 
 void unmap_vtd_domain_page(void *va)
@@ -66,15 +67,13 @@ void flush_all_cache()
 static int _hvm_dpci_isairq_eoi(struct domain *d,
                                 struct hvm_pirq_dpci *pirq_dpci, void *arg)
 {
-    struct hvm_irq *hvm_irq = hvm_domain_irq(d);
+    struct hvm_irq *hvm_irq = &d->arch.hvm_domain.irq;
     unsigned int isairq = (long)arg;
-    const struct dev_intx_gsi_link *digl;
+    struct dev_intx_gsi_link *digl, *tmp;
 
-    list_for_each_entry ( digl, &pirq_dpci->digl_list, list )
+    list_for_each_entry_safe ( digl, tmp, &pirq_dpci->digl_list, list )
     {
-        unsigned int link = hvm_pci_intx_link(digl->device, digl->intx);
-
-        if ( hvm_irq->pci_link.route[link] == isairq )
+        if ( hvm_irq->pci_link.route[digl->link] == isairq )
         {
             hvm_pci_intx_deassert(d, digl->device, digl->intx);
             if ( --pirq_dpci->pending == 0 )
@@ -108,18 +107,16 @@ void hvm_dpci_isairq_eoi(struct domain *d, unsigned int isairq)
     spin_unlock(&d->event_lock);
 }
 
-void __hwdom_init vtd_set_hwdom_mapping(struct domain *d)
+void __init iommu_set_dom0_mapping(struct domain *d)
 {
     unsigned long i, j, tmp, top;
 
-    BUG_ON(!is_hardware_domain(d));
+    BUG_ON(d->domain_id != 0);
 
     top = max(max_pdx, pfn_to_pdx(0xffffffffUL >> PAGE_SHIFT) + 1);
 
     for ( i = 0; i < top; i++ )
     {
-        int rc = 0;
-
         /*
          * Set up 1:1 mapping for dom0. Default to use only conventional RAM
          * areas and let RMRRs include needed reserved regions. When set, the
@@ -129,7 +126,7 @@ void __hwdom_init vtd_set_hwdom_mapping(struct domain *d)
         unsigned long pfn = pdx_to_pfn(i);
 
         if ( pfn > (0xffffffffUL >> PAGE_SHIFT) ?
-             (!mfn_valid(_mfn(pfn)) ||
+             (!mfn_valid(pfn) ||
               !page_is_ram_type(pfn, RAM_TYPE_CONVENTIONAL)) :
              iommu_inclusive_mapping ?
              page_is_ram_type(pfn, RAM_TYPE_UNUSABLE) :
@@ -142,17 +139,8 @@ void __hwdom_init vtd_set_hwdom_mapping(struct domain *d)
 
         tmp = 1 << (PAGE_SHIFT - PAGE_SHIFT_4K);
         for ( j = 0; j < tmp; j++ )
-        {
-            int ret = iommu_map_page(d, pfn * tmp + j, pfn * tmp + j,
-                                     IOMMUF_readable|IOMMUF_writable);
-
-            if ( !rc )
-               rc = ret;
-        }
-
-        if ( rc )
-           printk(XENLOG_WARNING VTDPREFIX " d%d: IOMMU mapping failed: %d\n",
-                  d->domain_id, rc);
+            iommu_map_page(d, pfn * tmp + j, pfn * tmp + j,
+                           IOMMUF_readable|IOMMUF_writable);
 
         if (!(i & (0xfffff >> (PAGE_SHIFT - PAGE_SHIFT_4K))))
             process_pending_softirqs();

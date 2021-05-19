@@ -18,11 +18,13 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#include <xen/config.h>
 #include <acpi/pdc_intel.h>
 #include <acpi/acconfig.h>
 #include <acpi/actbl.h>
@@ -76,8 +78,9 @@ int __acpi_release_global_lock(unsigned int *lock);
 	    :"=r"(n_hi), "=r"(n_lo)	\
 	    :"0"(n_hi), "1"(n_lo))
 
-extern bool acpi_lapic, acpi_ioapic, acpi_noirq;
-extern bool acpi_force, acpi_ht, acpi_disabled;
+extern bool_t acpi_lapic, acpi_ioapic, acpi_noirq;
+extern bool_t acpi_force, acpi_ht, acpi_disabled;
+extern bool_t acpi_skip_timer_override;
 extern u32 acpi_smi_cmd;
 extern u8 acpi_enable_value, acpi_disable_value;
 void acpi_pic_sci_set_trigger(unsigned int, u16);
@@ -88,6 +91,9 @@ static inline void disable_acpi(void)
 	acpi_ht = 0;
 	acpi_noirq = 1;
 }
+
+/* Fixmap pages to reserve for ACPI boot-time tables (see fixmap.h) */
+#define FIX_ACPI_PAGES 4
 
 static inline void acpi_noirq_set(void) { acpi_noirq = 1; }
 
@@ -103,7 +109,7 @@ extern void acpi_reserve_bootmem(void);
 
 #define ARCH_HAS_POWER_INIT	1
 
-extern s8 acpi_numa;
+extern int acpi_numa;
 extern int acpi_scan_nodes(u64 start, u64 end);
 #define NR_NODE_MEMBLKS (MAX_NUMNODES*2)
 
@@ -145,7 +151,6 @@ extern u32 x86_acpiid_to_apicid[];
 #define INVALID_ACPIID		(-1U)
 
 extern u32 pmtmr_ioport;
-extern unsigned int pmtmr_width;
 
 int acpi_dmar_init(void);
 void acpi_mmcfg_init(void);
@@ -159,7 +164,5 @@ void hvm_acpi_sleep_button(struct domain *d);
 /* suspend/resume */
 void save_rest_processor_state(void);
 void restore_rest_processor_state(void);
-
-#define ACPI_MAP_MEM_ATTR	PAGE_HYPERVISOR_UCMINUS
 
 #endif /*__X86_ASM_ACPI_H*/

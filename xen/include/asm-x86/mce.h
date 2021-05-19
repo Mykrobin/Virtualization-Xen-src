@@ -27,7 +27,6 @@ struct vmce_bank {
 struct vmce {
     uint64_t mcg_cap;
     uint64_t mcg_status;
-    uint64_t mcg_ext_ctl;
     spinlock_t lock;
     struct vmce_bank bank[GUEST_MC_BANK_NUM];
 };
@@ -37,8 +36,6 @@ extern void vmce_init_vcpu(struct vcpu *);
 extern int vmce_restore_vcpu(struct vcpu *, const struct hvm_vmce_vcpu *);
 extern int vmce_wrmsr(uint32_t msr, uint64_t val);
 extern int vmce_rdmsr(uint32_t msr, uint64_t *val);
-extern bool vmce_has_lmce(const struct vcpu *v);
-extern int vmce_enable_mca_cap(struct domain *d, uint64_t cap);
 
 extern unsigned int nr_mce_banks;
 

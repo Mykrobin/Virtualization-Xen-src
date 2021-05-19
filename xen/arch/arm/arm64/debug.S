@@ -17,16 +17,15 @@
  * GNU General Public License for more details.
  */
 
+#include <asm/config.h>
 #include <asm/early_printk.h>
 
 #ifdef EARLY_PRINTK_INC
 #include EARLY_PRINTK_INC
 #endif
 
-/*
- * Print a character on the UART - this function is called by C
- * x0: character to print
- */
+/* Print a character on the UART - this function is called by C
+ * x0: character to print */
 GLOBAL(early_putch)
         ldr   x15, =EARLY_UART_VIRTUAL_ADDRESS
         early_uart_ready x15, 1

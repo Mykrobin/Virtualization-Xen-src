@@ -14,10 +14,12 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <xen/sched.h>
+#include <xen/hvm/iommu.h>
 #include <asm/amd-iommu.h>
 #include <asm/hvm/svm/amd-iommu-proto.h>
 #include "../ats.h"
@@ -289,29 +291,35 @@ void amd_iommu_flush_iotlb(u8 devfn, const struct pci_dev *pdev,
     unsigned long flags;
     struct amd_iommu *iommu;
     unsigned int req_id, queueid, maxpend;
+    struct pci_ats_dev *ats_pdev;
 
     if ( !ats_enabled )
         return;
 
-    if ( !pci_ats_enabled(pdev->seg, pdev->bus, pdev->devfn) )
+    ats_pdev = get_ats_device(pdev->seg, pdev->bus, pdev->devfn);
+    if ( ats_pdev == NULL )
         return;
 
-    iommu = find_iommu_for_device(pdev->seg, PCI_BDF2(pdev->bus, pdev->devfn));
+    if ( !pci_ats_enabled(ats_pdev->seg, ats_pdev->bus, ats_pdev->devfn) )
+        return;
+
+    iommu = find_iommu_for_device(ats_pdev->seg,
+                                  PCI_BDF2(ats_pdev->bus, ats_pdev->devfn));
 
     if ( !iommu )
     {
         AMD_IOMMU_DEBUG("%s: Can't find iommu for %04x:%02x:%02x.%u\n",
-                        __func__, pdev->seg, pdev->bus,
-                        PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
+                        __func__, ats_pdev->seg, ats_pdev->bus,
+                        PCI_SLOT(ats_pdev->devfn), PCI_FUNC(ats_pdev->devfn));
         return;
     }
 
     if ( !iommu_has_cap(iommu, PCI_CAP_IOTLB_SHIFT) )
         return;
 
-    req_id = get_dma_requestor_id(iommu->seg, PCI_BDF2(pdev->bus, devfn));
+    req_id = get_dma_requestor_id(iommu->seg, PCI_BDF2(ats_pdev->bus, devfn));
     queueid = req_id;
-    maxpend = pdev->ats.queue_depth & 0xff;
+    maxpend = ats_pdev->ats_queue_depth & 0xff;
 
     /* send INVALIDATE_IOTLB_PAGES command */
     spin_lock_irqsave(&iommu->lock, flags);
@@ -346,7 +354,8 @@ static void _amd_iommu_flush_pages(struct domain *d,
 {
     unsigned long flags;
     struct amd_iommu *iommu;
-    unsigned int dom_id = d->domain_id;
+    struct hvm_iommu *hd = domain_hvm_iommu(d);
+    unsigned int dom_id = hd->domain_id;
 
     /* send INVALIDATE_IOMMU_PAGES command */
     for_each_amd_iommu ( iommu )

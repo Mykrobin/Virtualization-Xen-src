@@ -1,4 +1,4 @@
-subdir-$(CONFIG_X86) += x86
+subdir-$(x86) += x86
 
 obj-y += iommu.o
 obj-y += dmar.o

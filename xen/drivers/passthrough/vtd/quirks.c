@@ -11,7 +11,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  * Author: Allen Kay <allen.m.kay@intel.com>
  */
@@ -21,6 +22,7 @@
 #include <xen/xmalloc.h>
 #include <xen/domain_page.h>
 #include <xen/iommu.h>
+#include <asm/hvm/iommu.h>
 #include <xen/numa.h>
 #include <xen/softirq.h>
 #include <xen/time.h>
@@ -47,11 +49,6 @@
 #define IS_CTG(id)    (id == 0x2a408086)
 #define IS_ILK(id)    (id == 0x00408086 || id == 0x00448086 || id== 0x00628086 || id == 0x006A8086)
 #define IS_CPT(id)    (id == 0x01008086 || id == 0x01048086)
-
-/* SandyBridge IGD timeouts in milliseconds */
-#define SNB_IGD_TIMEOUT_LEGACY    1000
-#define SNB_IGD_TIMEOUT            670
-static unsigned int snb_igd_timeout;
 
 static u32 __read_mostly ioh_id;
 static u32 __initdata igd_id;
@@ -120,7 +117,7 @@ static void __init snb_errata_init(void)
  */
 static void __init map_igd_reg(void)
 {
-    u64 igd_mmio;
+    u64 igd_mmio, igd_reg;
 
     if ( !is_cantiga_b3 && !is_snb_gfx )
         return;
@@ -128,10 +125,16 @@ static void __init map_igd_reg(void)
     if ( igd_reg_va )
         return;
 
-    igd_mmio   = pci_conf_read32(0, 0, IGD_DEV, 0, PCI_BASE_ADDRESS_1);
-    igd_mmio <<= 32;
-    igd_mmio  += pci_conf_read32(0, 0, IGD_DEV, 0, PCI_BASE_ADDRESS_0);
-    igd_reg_va = ioremap(igd_mmio & IGD_BAR_MASK, 0x3000);
+    /* get IGD mmio address in PCI BAR */
+    igd_mmio = ((u64)pci_conf_read32(0, 0, IGD_DEV, 0, 0x14) << 32) +
+                     pci_conf_read32(0, 0, IGD_DEV, 0, 0x10);
+
+    /* offset of IGD regster we want to access is in 0x2000 range */
+    igd_reg = (igd_mmio & IGD_BAR_MASK) + 0x2000;
+
+    /* ioremap this physical page */
+    set_fixmap_nocache(FIX_IGD_MMIO, igd_reg);
+    igd_reg_va = (u8 *)fix_to_virt(FIX_IGD_MMIO);
 }
 
 /*
@@ -149,10 +152,12 @@ static int cantiga_vtd_ops_preamble(struct iommu* iommu)
         return 0;
 
     /*
-     * Read IGD register at IGD MMIO + 0x20A4 to force IGD
-     * to exit low power state.
+     * read IGD register at IGD MMIO + 0x20A4 to force IGD
+     * to exit low power state.  Since map_igd_reg()
+     * already mapped page starting 0x2000, we just need to
+     * add page offset 0x0A4 to virtual address base.
      */
-    return *(volatile int *)(igd_reg_va + 0x20A4);
+    return ( *((volatile int *)(igd_reg_va + 0x0A4)) );
 }
 
 /*
@@ -161,16 +166,6 @@ static int cantiga_vtd_ops_preamble(struct iommu* iommu)
  * Workaround is to prevent graphics get into RC6
  * state when doing VT-d IOTLB operations, do the VT-d
  * IOTLB operation, and then re-enable RC6 state.
- *
- * This quirk is enabled with the snb_igd_quirk command
- * line parameter.  Specifying snb_igd_quirk with no value
- * (or any of the standard boolean values) enables this
- * quirk and sets the timeout to the legacy timeout of
- * 1000 msec.  Setting this parameter to the string
- * "cap" enables this quirk and sets the timeout to
- * the theoretical maximum of 670 msec.  Setting this
- * parameter to a numerical value enables the quirk and
- * sets the timeout to that numerical number of msecs.
  */
 static void snb_vtd_ops_preamble(struct iommu* iommu)
 {
@@ -184,13 +179,13 @@ static void snb_vtd_ops_preamble(struct iommu* iommu)
     if ( !igd_reg_va )
         return;
 
-    *(volatile u32 *)(igd_reg_va + 0x2054) = 0x000FFFFF;
-    *(volatile u32 *)(igd_reg_va + 0x2700) = 0;
+    *((volatile u32 *)(igd_reg_va + 0x54)) = 0x000FFFFF;
+    *((volatile u32 *)(igd_reg_va + 0x700)) = 0;
 
     start_time = NOW();
-    while ( (*(volatile u32 *)(igd_reg_va + 0x22AC) & 0xF) != 0 )
+    while ( (*((volatile u32 *)(igd_reg_va + 0x2AC)) & 0xF) != 0 )
     {
-        if ( NOW() > start_time + snb_igd_timeout )
+        if ( NOW() > start_time + DMAR_OPERATION_TIMEOUT )
         {
             dprintk(XENLOG_INFO VTDPREFIX,
                     "snb_vtd_ops_preamble: failed to disable idle handshake\n");
@@ -199,7 +194,7 @@ static void snb_vtd_ops_preamble(struct iommu* iommu)
         cpu_relax();
     }
 
-    *(volatile u32 *)(igd_reg_va + 0x2050) = 0x10001;
+    *((volatile u32*)(igd_reg_va + 0x50)) = 0x10001;
 }
 
 static void snb_vtd_ops_postamble(struct iommu* iommu)
@@ -213,18 +208,21 @@ static void snb_vtd_ops_postamble(struct iommu* iommu)
     if ( !igd_reg_va )
         return;
 
-    *(volatile u32 *)(igd_reg_va + 0x2054) = 0xA;
-    *(volatile u32 *)(igd_reg_va + 0x2050) = 0x10000;
+    *((volatile u32 *)(igd_reg_va + 0x54)) = 0xA;
+    *((volatile u32 *)(igd_reg_va + 0x50)) = 0x10000;
 }
 
 /*
  * call before VT-d translation enable and IOTLB flush operations.
  */
 
+static int snb_igd_quirk;
+boolean_param("snb_igd_quirk", snb_igd_quirk);
+
 void vtd_ops_preamble_quirk(struct iommu* iommu)
 {
     cantiga_vtd_ops_preamble(iommu);
-    if ( snb_igd_timeout != 0 )
+    if ( snb_igd_quirk )
     {
         spin_lock(&igd_lock);
 
@@ -238,7 +236,7 @@ void vtd_ops_preamble_quirk(struct iommu* iommu)
  */
 void vtd_ops_postamble_quirk(struct iommu* iommu)
 {
-    if ( snb_igd_timeout != 0 )
+    if ( snb_igd_quirk )
     {
         snb_vtd_ops_postamble(iommu);
 
@@ -246,29 +244,6 @@ void vtd_ops_postamble_quirk(struct iommu* iommu)
         spin_unlock(&igd_lock);
     }
 }
-
-static int __init parse_snb_timeout(const char *s)
-{
-    int t;
-    const char *q = NULL;
-
-    t = parse_bool(s, NULL);
-    if ( t < 0 )
-    {
-        if ( *s == '\0' )
-            t = SNB_IGD_TIMEOUT_LEGACY;
-        else if ( strcmp(s, "cap") == 0 )
-            t = SNB_IGD_TIMEOUT;
-        else
-            t = strtoul(s, &q, 0);
-    }
-    else
-        t = t ? SNB_IGD_TIMEOUT_LEGACY : 0;
-    snb_igd_timeout = MILLISECS(t);
-
-    return (q && *q) ? -EINVAL : 0;
-}
-custom_param("snb_igd_quirk", parse_snb_timeout);
 
 /* 5500/5520/X58 Chipset Interrupt remapping errata, for stepping B-3.
  * Fixed in stepping C-2. */
@@ -329,12 +304,10 @@ void __init platform_quirks_init(void)
  * assigning Intel integrated wifi device to a guest.
  */
 
-static int __must_check map_me_phantom_function(struct domain *domain,
-                                                u32 dev, int map)
+static void map_me_phantom_function(struct domain *domain, u32 dev, int map)
 {
     struct acpi_drhd_unit *drhd;
     struct pci_dev *pdev;
-    int rc;
 
     /* find ME VT-d engine base on a real ME device */
     pdev = pci_get_pdev(0, 0, PCI_DEVFN(dev, 0));
@@ -342,26 +315,23 @@ static int __must_check map_me_phantom_function(struct domain *domain,
 
     /* map or unmap ME phantom function */
     if ( map )
-        rc = domain_context_mapping_one(domain, drhd->iommu, 0,
-                                        PCI_DEVFN(dev, 7), NULL);
+        domain_context_mapping_one(domain, drhd->iommu, 0,
+                                   PCI_DEVFN(dev, 7), NULL);
     else
-        rc = domain_context_unmap_one(domain, drhd->iommu, 0,
-                                      PCI_DEVFN(dev, 7));
-
-    return rc;
+        domain_context_unmap_one(domain, drhd->iommu, 0,
+                                 PCI_DEVFN(dev, 7));
 }
 
-int me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
+void me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
 {
     u32 id;
-    int rc = 0;
 
     id = pci_conf_read32(0, 0, 0, 0, 0);
     if ( IS_CTG(id) )
     {
         /* quit if ME does not exist */
         if ( pci_conf_read32(0, 0, 3, 0, 0) == 0xffffffff )
-            return 0;
+            return;
 
         /* if device is WLAN device, map ME phantom device 0:3.7 */
         id = pci_conf_read32(0, bus, PCI_SLOT(devfn), PCI_FUNC(devfn), 0);
@@ -375,7 +345,7 @@ int me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
             case 0x423b8086:
             case 0x423c8086:
             case 0x423d8086:
-                rc = map_me_phantom_function(domain, 3, map);
+                map_me_phantom_function(domain, 3, map);
                 break;
             default:
                 break;
@@ -385,7 +355,7 @@ int me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
     {
         /* quit if ME does not exist */
         if ( pci_conf_read32(0, 0, 22, 0, 0) == 0xffffffff )
-            return 0;
+            return;
 
         /* if device is WLAN device, map ME phantom device 0:22.7 */
         id = pci_conf_read32(0, bus, PCI_SLOT(devfn), PCI_FUNC(devfn), 0);
@@ -401,14 +371,12 @@ int me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
             case 0x42388086:        /* Puma Peak */
             case 0x422b8086:
             case 0x422c8086:
-                rc = map_me_phantom_function(domain, 22, map);
+                map_me_phantom_function(domain, 22, map);
                 break;
             default:
                 break;
         }
     }
-
-    return rc;
 }
 
 void pci_vtd_quirk(const struct pci_dev *pdev)
@@ -436,6 +404,7 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
      *   - This can cause system failure upon non-fatal VT-d faults.
      *   - Potential security issue if malicious guest trigger VT-d faults.
      */
+    case 0x0e28: /* Xeon-E5v2 (IvyBridge) */
     case 0x342e: /* Tylersburg chipset (Nehalem / Westmere systems) */
     case 0x3728: /* Xeon C5500/C3500 (JasperForest) */
     case 0x3c28: /* Sandybridge */
@@ -539,29 +508,4 @@ void pci_vtd_quirk(const struct pci_dev *pdev)
                    bar, seg, bus, dev, func);
         break;
     }
-}
-
-void __init quirk_iommu_caps(struct iommu *iommu)
-{
-    /*
-     * IOMMU Quirks:
-     *
-     * SandyBridge IOMMUs claim support for 2M and 1G superpages, but don't
-     * implement superpages internally.
-     *
-     * There are issues changing the walk length under in-flight DMA, which
-     * has manifested as incompatibility between EPT/IOMMU sharing and the
-     * workaround for CVE-2018-12207 / XSA-304.  Hide the superpages
-     * capabilities in the IOMMU, which will prevent Xen from sharing the EPT
-     * and IOMMU pagetables.
-     *
-     * Detection of SandyBridge unfortunately has to be done by processor
-     * model because the client parts don't expose their IOMMUs as PCI devices
-     * we could match with a Device ID.
-     */
-    if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL &&
-         boot_cpu_data.x86 == 6 &&
-         (boot_cpu_data.x86_model == 0x2a ||
-          boot_cpu_data.x86_model == 0x2d) )
-        iommu->cap &= ~(0xful << 34);
 }

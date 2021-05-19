@@ -4,6 +4,7 @@
  * VGA support routines.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
@@ -116,9 +117,9 @@ void __init video_endboot(void)
                 const struct pci_dev *pdev;
                 u8 b = bus, df = devfn, sb;
 
-                pcidevs_lock();
+                spin_lock(&pcidevs_lock);
                 pdev = pci_get_pdev(0, bus, devfn);
-                pcidevs_unlock();
+                spin_unlock(&pcidevs_lock);
 
                 if ( !pdev ||
                      pci_conf_read16(0, bus, PCI_SLOT(devfn), PCI_FUNC(devfn),

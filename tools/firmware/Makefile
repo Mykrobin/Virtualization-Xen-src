@@ -1,34 +1,29 @@
 XEN_ROOT = $(CURDIR)/../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-ifneq ($(XEN_TARGET_ARCH),x86_32)
-CONFIG_PV_SHIM := y
-endif
-
 # hvmloader is a 32-bit protected mode binary.
 TARGET      := hvmloader/hvmloader
 INST_DIR := $(DESTDIR)$(XENFIRMWAREDIR)
-DEBG_DIR := $(DESTDIR)$(DEBUG_DIR)$(XENFIRMWAREDIR)
 
 SUBDIRS-y :=
+ifeq ($(OVMF_PATH),)
 SUBDIRS-$(CONFIG_OVMF) += ovmf-dir
+endif
+ifeq ($(SEABIOS_PATH),)
 SUBDIRS-$(CONFIG_SEABIOS) += seabios-dir
+endif
 SUBDIRS-$(CONFIG_ROMBIOS) += rombios
 SUBDIRS-$(CONFIG_ROMBIOS) += vgabios
 SUBDIRS-$(CONFIG_ROMBIOS) += etherboot
-SUBDIRS-$(CONFIG_PV_SHIM) += xen-dir
 SUBDIRS-y += hvmloader
-
-LD32BIT-$(CONFIG_FreeBSD) := LD32BIT_FLAG=-melf_i386_fbsd
 
 ovmf-dir:
 	GIT=$(GIT) $(XEN_ROOT)/scripts/git-checkout.sh $(OVMF_UPSTREAM_URL) $(OVMF_UPSTREAM_REVISION) ovmf-dir
 	cp ovmf-makefile ovmf-dir/Makefile;
 
 seabios-dir:
-	GIT=$(GIT) $(XEN_ROOT)/scripts/git-checkout.sh $(SEABIOS_UPSTREAM_URL) $(SEABIOS_UPSTREAM_REVISION) seabios-dir
+	GIT=$(GIT) $(XEN_ROOT)/scripts/git-checkout.sh $(SEABIOS_UPSTREAM_URL) $(SEABIOS_UPSTREAM_TAG) seabios-dir
 	cp seabios-config seabios-dir/.config;
-	$(MAKE) -C seabios-dir olddefconfig
 
 .PHONY: all
 all: $(SUBDIRS-y)
@@ -41,38 +36,13 @@ ifeq ($(CONFIG_ROMBIOS),y)
 	false ; \
 	fi
 endif
-	$(MAKE) $(LD32BIT-y) CC=$(CC) PYTHON=$(PYTHON) subdirs-$@
+	$(MAKE) PYTHON=$(PYTHON) subdirs-$@
 
 
 .PHONY: install
 install: all
 	[ -d $(INST_DIR) ] || $(INSTALL_DIR) $(INST_DIR)
-	[ -d $(DEBG_DIR) ] || $(INSTALL_DIR) $(DEBG_DIR)
 	[ ! -e $(TARGET) ] || $(INSTALL_DATA) $(TARGET) $(INST_DIR)
-ifeq ($(CONFIG_SEABIOS),y)
-	$(INSTALL_DATA) seabios-dir/out/bios.bin $(INST_DIR)/seabios.bin
-endif
-ifeq ($(CONFIG_OVMF),y)
-	$(INSTALL_DATA) ovmf-dir/ovmf.bin $(INST_DIR)/ovmf.bin
-endif
-ifeq ($(CONFIG_PV_SHIM),y)
-	$(INSTALL_DATA) xen-dir/xen-shim $(INST_DIR)/xen-shim
-	$(INSTALL_DATA) xen-dir/xen-shim-syms $(DEBG_DIR)/xen-shim-syms
-endif
-
-.PHONY: uninstall
-uninstall:
-	rm -f $(addprefix $(INST_DIR)/, $(notdir $(TARGET)))
-ifeq ($(CONFIG_SEABIOS),y)
-	rm -f $(INST_DIR)/seabios.bin
-endif
-ifeq ($(CONFIG_OVMF),y)
-	rm -f $(INST_DIR)/ovmf.bin
-endif
-ifeq ($(CONFIG_PV_SHIM),y)
-	rm -f $(INST_DIR)/xen-shim
-	rm -f $(DEBG_DIR)/xen-shim-syms
-endif
 
 .PHONY: clean
 clean: subdirs-clean
@@ -83,14 +53,14 @@ distclean: subdirs-distclean
 subdir-distclean-etherboot: .phony
 	$(MAKE) -C etherboot distclean
 
-subdir-distclean-ovmf-dir: .phony
+subdir-distclean-ovmf: .phony
 	rm -rf ovmf-dir ovmf-dir-remote
 
 subdir-distclean-seabios-dir: .phony
 	rm -rf seabios-dir seabios-dir-remote
 
 .PHONY: ovmf-dir-force-update
-ovmf-dir-force-update: ovmf-dir
+ovmf-dir-force-update:
 	set -ex; \
 	if [ "$(OVMF_UPSTREAM_REVISION)" ]; then \
 		cd ovmf-dir-remote; \
@@ -98,33 +68,21 @@ ovmf-dir-force-update: ovmf-dir
 		$(GIT) reset --hard $(OVMF_UPSTREAM_REVISION); \
 	fi
 
-subdir-clean-ovmf-dir:
+subdir-clean-ovmf:
 	set -e; if test -d ovmf-dir/.; then \
 		$(MAKE) -C ovmf-dir clean; \
 	fi
 
 .PHONY: seabios-dir-force-update
-seabios-dir-force-update: seabios-dir
+seabios-dir-force-update:
 	set -ex; \
-	if [ "$(SEABIOS_UPSTREAM_REVISION)" ]; then \
+	if [ "$(SEABIOS_UPSTREAM_TAG)" ]; then \
 		cd seabios-dir-remote; \
 		$(GIT) fetch origin; \
-		$(GIT) reset --hard $(SEABIOS_UPSTREAM_REVISION); \
+		$(GIT) reset --hard $(SEABIOS_UPSTREAM_TAG); \
 	fi
 
 subdir-clean-seabios-dir:
 	set -e; if test -d seabios-dir/.; then \
 		$(MAKE) -C seabios-dir clean; \
 	fi
-
-subtree-force-update:
-ifeq ($(CONFIG_SEABIOS),y)
-	$(MAKE) seabios-dir-force-update
-endif
-ifeq ($(CONFIG_OVMF),y)
-	$(MAKE) ovmf-dir-force-update
-endif
-
-subtree-force-update-all:
-	$(MAKE) seabios-dir-force-update
-	$(MAKE) ovmf-dir-force-update

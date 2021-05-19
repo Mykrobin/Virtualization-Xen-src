@@ -12,7 +12,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  */
 
@@ -22,9 +23,8 @@
 #include <asm/types.h>
 #include <asm/hvm/svm/vmcb.h>
 
-void svm_sync_vmcb(struct vcpu *v, enum vmcb_sync_state new_state);
-void svm_vmcb_dump(const char *from, const struct vmcb_struct *vmcb);
-bool svm_vmcb_isvalid(const char *from, const struct vmcb_struct *vmcb,
-                      const struct vcpu *v, bool verbose);
+void svm_vmcb_dump(const char *from, struct vmcb_struct *vmcb);
+bool_t svm_vmcb_isvalid(const char *from, struct vmcb_struct *vmcb,
+                        bool_t verbose);
 
 #endif /* __ASM_X86_HVM_SVM_SVMDEBUG_H__ */

@@ -12,12 +12,14 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #include "xc_private.h"
 #include <unistd.h>
 #include <stdio.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -26,6 +28,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <sys/ioctl.h>
+#include <stdint.h>
 
 #define OCON_ISID    0    /* initial SIDs */
 #define OCON_PIRQ    1    /* physical irqs */
@@ -37,6 +40,7 @@
 int xc_flask_op(xc_interface *xch, xen_flask_op_t *op)
 {
     int ret = -1;
+    DECLARE_HYPERCALL;
     DECLARE_HYPERCALL_BOUNCE(op, sizeof(*op), XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
 
     op->interface_version = XEN_FLASK_INTERFACE_VERSION;
@@ -47,9 +51,10 @@ int xc_flask_op(xc_interface *xch, xen_flask_op_t *op)
         goto out;
     }
 
-    ret = xencall1(xch->xcall, __HYPERVISOR_xsm_op,
-                   HYPERCALL_BUFFER_AS_ARG(op));
-    if ( ret < 0 )
+    hypercall.op     = __HYPERVISOR_xsm_op;
+    hypercall.arg[0] = HYPERCALL_BUFFER_AS_ARG(op);
+
+    if ( (ret = do_xen_hypercall(xch, &hypercall)) < 0 )
     {
         if ( errno == EACCES )
             fprintf(stderr, "XSM operation failed!\n");
@@ -188,12 +193,6 @@ int xc_flask_getbool_byname(xc_interface *xch, char *name, int *curr, int *pend)
     DECLARE_FLASK_OP;
     DECLARE_HYPERCALL_BOUNCE(name, strlen(name), XC_HYPERCALL_BUFFER_BOUNCE_IN);
 
-    if ( xc_hypercall_bounce_pre(xch, name) )
-    {
-        PERROR("Could not bounce memory for flask op hypercall");
-        return -1;
-    }
-
     op.cmd = FLASK_GETBOOL;
     op.u.boolean.bool_id = -1;
     op.u.boolean.size = strlen(name);
@@ -219,12 +218,6 @@ int xc_flask_setbool(xc_interface *xch, char *name, int value, int commit)
     int rv;
     DECLARE_FLASK_OP;
     DECLARE_HYPERCALL_BOUNCE(name, strlen(name), XC_HYPERCALL_BUFFER_BOUNCE_IN);
-
-    if ( xc_hypercall_bounce_pre(xch, name) )
-    {
-        PERROR("Could not bounce memory for flask op hypercall");
-        return -1;
-    }
 
     op.cmd = FLASK_SETBOOL;
     op.u.boolean.bool_id = -1;
@@ -429,7 +422,7 @@ int xc_flask_setavc_threshold(xc_interface *xch, int threshold)
     return xc_flask_op(xch, &op);
 }
 
-int xc_flask_relabel_domain(xc_interface *xch, uint32_t domid, uint32_t sid)
+int xc_flask_relabel_domain(xc_interface *xch, int domid, uint32_t sid)
 {
     DECLARE_FLASK_OP;
     op.cmd = FLASK_RELABEL_DOMAIN;

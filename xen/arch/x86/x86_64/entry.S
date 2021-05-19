@@ -4,8 +4,7 @@
  * Copyright (c) 2005, K A Fraser
  */
 
-        .file "x86_64/entry.S"
-
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/softirq.h>
 #include <asm/asm_defns.h>
@@ -14,8 +13,9 @@
 #include <public/xen.h>
 #include <irq_vectors.h>
 
+        ALIGN
 /* %rbx: struct vcpu */
-ENTRY(switch_to_kernel)
+switch_to_kernel:
         leaq  VCPU_trap_bounce(%rbx),%rdx
         /* TB_eip = (32-bit syscall && syscall32_addr) ?
          *          syscall32_addr : syscall_addr */
@@ -32,153 +32,11 @@ ENTRY(switch_to_kernel)
         movb  %cl,TRAPBOUNCE_flags(%rdx)
         call  create_bounce_frame
         andl  $~X86_EFLAGS_DF,UREGS_eflags(%rsp)
-/* %rbx: struct vcpu */
-test_all_events:
-        ASSERT_NOT_IN_ATOMIC
-        cli                             # tests must not race interrupts
-/*test_softirqs:*/
-        movl  VCPU_processor(%rbx), %eax
-        shll  $IRQSTAT_shift, %eax
-        leaq  irq_stat+IRQSTAT_softirq_pending(%rip), %rcx
-        cmpl  $0, (%rcx, %rax, 1)
-        jne   process_softirqs
-
-        /* Inject exception if pending. */
-        lea   VCPU_trap_bounce(%rbx), %rdx
-        testb $TBF_EXCEPTION, TRAPBOUNCE_flags(%rdx)
-        jnz   .Lprocess_trapbounce
-
-        cmpb  $0, VCPU_mce_pending(%rbx)
-        jne   process_mce
-.Ltest_guest_nmi:
-        cmpb  $0, VCPU_nmi_pending(%rbx)
-        jne   process_nmi
-test_guest_events:
-        movq  VCPU_vcpu_info(%rbx), %rax
-        movzwl VCPUINFO_upcall_pending(%rax), %eax
-        decl  %eax
-        cmpl  $0xfe, %eax
-        ja    restore_all_guest
-/*process_guest_events:*/
-        sti
-        leaq  VCPU_trap_bounce(%rbx), %rdx
-        movq  VCPU_event_addr(%rbx), %rax
-        movq  %rax, TRAPBOUNCE_eip(%rdx)
-        movb  $TBF_INTERRUPT, TRAPBOUNCE_flags(%rdx)
-        call  create_bounce_frame
         jmp   test_all_events
-
-        ALIGN
-/* %rbx: struct vcpu */
-process_softirqs:
-        sti
-        call do_softirq
-        jmp  test_all_events
-
-        ALIGN
-/* %rbx: struct vcpu, %rdx struct trap_bounce */
-.Lprocess_trapbounce:
-        sti
-.Lbounce_exception:
-        call  create_bounce_frame
-        movb  $0, TRAPBOUNCE_flags(%rdx)
-        jmp   test_all_events
-
-        ALIGN
-/* %rbx: struct vcpu */
-process_mce:
-        testb $1 << VCPU_TRAP_MCE, VCPU_async_exception_mask(%rbx)
-        jnz  .Ltest_guest_nmi
-        sti
-        movb $0, VCPU_mce_pending(%rbx)
-        call set_guest_machinecheck_trapbounce
-        test %al, %al
-        jz   test_all_events
-        movzbl VCPU_async_exception_mask(%rbx), %edx # save mask for the
-        movb %dl, VCPU_mce_old_mask(%rbx)            # iret hypercall
-        orl  $1 << VCPU_TRAP_MCE, %edx
-        movb %dl, VCPU_async_exception_mask(%rbx)
-        jmp  process_trap
-
-        ALIGN
-/* %rbx: struct vcpu */
-process_nmi:
-        testb $1 << VCPU_TRAP_NMI, VCPU_async_exception_mask(%rbx)
-        jnz  test_guest_events
-        sti
-        movb $0, VCPU_nmi_pending(%rbx)
-        call set_guest_nmi_trapbounce
-        test %al, %al
-        jz   test_all_events
-        movzbl VCPU_async_exception_mask(%rbx), %edx # save mask for the
-        movb %dl, VCPU_nmi_old_mask(%rbx)            # iret hypercall
-        orl  $1 << VCPU_TRAP_NMI, %edx
-        movb %dl, VCPU_async_exception_mask(%rbx)
-        /* FALLTHROUGH */
-process_trap:
-        leaq VCPU_trap_bounce(%rbx), %rdx
-        call create_bounce_frame
-        jmp  test_all_events
-
-/* No special register assumptions. */
-ENTRY(ret_from_intr)
-        GET_CURRENT(bx)
-        testb $3, UREGS_cs(%rsp)
-        jz    restore_all_xen
-        movq  VCPU_domain(%rbx), %rax
-        cmpb  $0, DOMAIN_is_32bit_pv(%rax)
-        je    test_all_events
-        jmp   compat_test_all_events
-
-        .section .text.entry, "ax", @progbits
 
 /* %rbx: struct vcpu, interrupts disabled */
 restore_all_guest:
         ASSERT_INTERRUPTS_DISABLED
-
-        /* Stash guest SPEC_CTRL value while we can read struct vcpu. */
-        mov VCPU_arch_msr(%rbx), %rdx
-        mov VCPUMSR_spec_ctrl_raw(%rdx), %r15d
-
-        /* Copy guest mappings and switch to per-CPU root page table. */
-        mov   VCPU_cr3(%rbx), %r9
-        GET_STACK_END(dx)
-        mov   STACK_CPUINFO_FIELD(pv_cr3)(%rdx), %rdi
-        test  %rdi, %rdi
-        jz    .Lrag_keep_cr3
-        mov   %rdi, %rax
-        cmpb  $0, STACK_CPUINFO_FIELD(root_pgt_changed)(%rdx)
-        je    .Lrag_copy_done
-        movb  $0, STACK_CPUINFO_FIELD(root_pgt_changed)(%rdx)
-        movabs $PADDR_MASK & PAGE_MASK, %rsi
-        movabs $DIRECTMAP_VIRT_START, %rcx
-        and   %rsi, %rdi
-        and   %r9, %rsi
-        add   %rcx, %rdi
-        add   %rcx, %rsi
-        mov   $ROOT_PAGETABLE_FIRST_XEN_SLOT, %ecx
-        mov   root_table_offset(SH_LINEAR_PT_VIRT_START)*8(%rsi), %r8
-        mov   %r8, root_table_offset(SH_LINEAR_PT_VIRT_START)*8(%rdi)
-        rep movsq
-        mov   $ROOT_PAGETABLE_ENTRIES - \
-               ROOT_PAGETABLE_LAST_XEN_SLOT - 1, %ecx
-        sub   $(ROOT_PAGETABLE_FIRST_XEN_SLOT - \
-                ROOT_PAGETABLE_LAST_XEN_SLOT - 1) * 8, %rsi
-        sub   $(ROOT_PAGETABLE_FIRST_XEN_SLOT - \
-                ROOT_PAGETABLE_LAST_XEN_SLOT - 1) * 8, %rdi
-        rep movsq
-.Lrag_copy_done:
-        mov   %r9, STACK_CPUINFO_FIELD(xen_cr3)(%rdx)
-        movb  $1, STACK_CPUINFO_FIELD(use_pv_cr3)(%rdx)
-        mov   %rax, %cr3
-.Lrag_keep_cr3:
-
-        /* Restore stashed SPEC_CTRL value. */
-        mov   %r15d, %eax
-
-        /* WARNING! `ret`, `call *`, `jmp *` not safe beyond this point. */
-        SPEC_CTRL_EXIT_TO_PV    /* Req: a=spec_ctrl %rsp=regs/cpuinfo, Clob: cd */
-
         RESTORE_ALL
         testw $TRAP_syscall,4(%rsp)
         jz    iret_exit_to_guest
@@ -208,25 +66,41 @@ iret_exit_to_guest:
         orl   $X86_EFLAGS_IF,24(%rsp)
         addq  $8,%rsp
 .Lft0:  iretq
-        _ASM_PRE_EXTABLE(.Lft0, handle_exception)
+
+.section .fixup,"ax"
+.Lfx0:  sti
+        SAVE_ALL
+        movq  UREGS_error_code(%rsp),%rsi
+        movq  %rsp,%rax
+        andq  $~0xf,%rsp
+        pushq $__HYPERVISOR_DS         # SS
+        pushq %rax                     # RSP
+        pushfq                         # RFLAGS
+        pushq $__HYPERVISOR_CS         # CS
+        leaq  .Ldf0(%rip),%rax
+        pushq %rax                     # RIP
+        pushq %rsi                     # error_code/entry_vector
+        jmp   handle_exception
+.Ldf0:  GET_CURRENT(%rbx)
+        jmp   test_all_events
+failsafe_callback:
+        GET_CURRENT(%rbx)
+        leaq  VCPU_trap_bounce(%rbx),%rdx
+        movq  VCPU_failsafe_addr(%rbx),%rax
+        movq  %rax,TRAPBOUNCE_eip(%rdx)
+        movb  $TBF_FAILSAFE,TRAPBOUNCE_flags(%rdx)
+        bt    $_VGCF_failsafe_disables_events,VCPU_guest_context_flags(%rbx)
+        jnc   1f
+        orb   $TBF_INTERRUPT,TRAPBOUNCE_flags(%rdx)
+1:      call  create_bounce_frame
+        jmp   test_all_events
+.previous
+        _ASM_PRE_EXTABLE(.Lft0, .Lfx0)
+        _ASM_EXTABLE(.Ldf0, failsafe_callback)
 
         ALIGN
 /* No special register assumptions. */
 restore_all_xen:
-        /*
-         * Check whether we need to switch to the per-CPU page tables, in
-         * case we return to late PV exit code (from an NMI or #MC).
-         */
-        GET_STACK_END(bx)
-        cmpb  $0, STACK_CPUINFO_FIELD(use_pv_cr3)(%rbx)
-UNLIKELY_START(ne, exit_cr3)
-        mov   STACK_CPUINFO_FIELD(pv_cr3)(%rbx), %rax
-        mov   %rax, %cr3
-UNLIKELY_END(exit_cr3)
-
-        /* WARNING! `ret`, `call *`, `jmp *` not safe beyond this point. */
-        SPEC_CTRL_EXIT_TO_XEN_IST /* Req: %rbx=end, Clob: acd */
-
         RESTORE_ALL adj=8
         iretq
 
@@ -240,73 +114,171 @@ UNLIKELY_END(exit_cr3)
  * When entering SYSCALL from user mode:
  *  Vector directly to the registered arch.syscall_addr.
  *
- * Initial work is done by per-CPU trampolines. At this point %rsp has been
- * initialised to point at the correct Xen stack, %rsp has been saved, and
- * %rax needs to be restored from the %ss save slot. All other registers are
- * still to be saved onto the stack, starting with RFLAGS, and an appropriate
- * %ss must be saved into the space left by the trampoline.
+ * Initial work is done by per-CPU stack trampolines. At this point %rsp
+ * has been initialised to point at the correct Xen stack, and %rsp, %rflags
+ * and %cs have been saved. All other registers are still to be saved onto
+ * the stack, starting with %rip, and an appropriate %ss must be saved into
+ * the space left by the trampoline.
  */
-ENTRY(lstar_enter)
-        /* sti could live here when we don't switch page tables below. */
-        movq  8(%rsp),%rax /* Restore %rax. */
-        movq  $FLAT_KERNEL_SS,8(%rsp)
-        pushq %r11
-        pushq $FLAT_KERNEL_CS64
+ENTRY(syscall_enter)
+        sti
+        movl  $FLAT_KERNEL_SS,24(%rsp)
         pushq %rcx
         pushq $0
-        movl  $TRAP_syscall, 4(%rsp)
-        SAVE_ALL
-
-        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
-        /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
-
-        GET_STACK_END(bx)
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%rbx), %rcx
-        test  %rcx, %rcx
-        jz    .Llstar_cr3_okay
-        movb  $0, STACK_CPUINFO_FIELD(use_pv_cr3)(%rbx)
-        mov   %rcx, %cr3
-        movq  $0, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
-.Llstar_cr3_okay:
-        sti
-
-        movq  STACK_CPUINFO_FIELD(current_vcpu)(%rbx), %rbx
+        movq  24(%rsp),%r11 /* Re-load user RFLAGS into %r11 before saving */
+        SAVE_VOLATILE TRAP_syscall
+        GET_CURRENT(%rbx)
+        movq  VCPU_domain(%rbx),%rcx
+        testb $1,DOMAIN_is_32bit_pv(%rcx)
+        jnz   compat_syscall
         testb $TF_kernel_mode,VCPU_thread_flags(%rbx)
         jz    switch_to_kernel
 
-        mov   %rsp, %rdi
-        call  pv_hypercall
+/*hypercall:*/
+        movq  %r10,%rcx
+        cmpq  $NR_hypercalls,%rax
+        jae   bad_hypercall
+#ifndef NDEBUG
+        /* Deliberately corrupt parameter regs not used by this hypercall. */
+        pushq %rdi; pushq %rsi; pushq %rdx; pushq %rcx; pushq %r8 ; pushq %r9 
+        leaq  hypercall_args_table(%rip),%r10
+        movq  $6,%rcx
+        sub   (%r10,%rax,1),%cl
+        movq  %rsp,%rdi
+        movl  $0xDEADBEEF,%eax
+        rep   stosq
+        popq  %r9 ; popq  %r8 ; popq  %rcx; popq  %rdx; popq  %rsi; popq  %rdi
+        movq  UREGS_rax(%rsp),%rax
+        pushq %rax
+        pushq UREGS_rip+8(%rsp)
+#define SHADOW_BYTES 16 /* Shadow EIP + shadow hypercall # */
+#else
+#define SHADOW_BYTES 0  /* No on-stack shadow state */
+#endif
+        cmpb  $0,tb_init_done(%rip)
+UNLIKELY_START(ne, trace)
+        call  __trace_hypercall_entry
+        /* Restore the registers that __trace_hypercall_entry clobbered. */
+        movq  UREGS_rax+SHADOW_BYTES(%rsp),%rax   /* Hypercall #  */
+        movq  UREGS_rdi+SHADOW_BYTES(%rsp),%rdi   /* Arg 1        */
+        movq  UREGS_rsi+SHADOW_BYTES(%rsp),%rsi   /* Arg 2        */
+        movq  UREGS_rdx+SHADOW_BYTES(%rsp),%rdx   /* Arg 3        */
+        movq  UREGS_r10+SHADOW_BYTES(%rsp),%rcx   /* Arg 4        */
+        movq  UREGS_r8 +SHADOW_BYTES(%rsp),%r8    /* Arg 5        */
+        movq  UREGS_r9 +SHADOW_BYTES(%rsp),%r9    /* Arg 6        */
+#undef SHADOW_BYTES
+UNLIKELY_END(trace)
+        leaq  hypercall_table(%rip),%r10
+        PERFC_INCR(hypercalls, %rax, %rbx)
+        callq *(%r10,%rax,8)
+#ifndef NDEBUG
+        /* Deliberately corrupt parameter regs used by this hypercall. */
+        popq  %r10         # Shadow RIP
+        cmpq  %r10,UREGS_rip+8(%rsp)
+        popq  %rcx         # Shadow hypercall index
+        jne   skip_clobber /* If RIP has changed then don't clobber. */
+        leaq  hypercall_args_table(%rip),%r10
+        movb  (%r10,%rcx,1),%cl
+        movl  $0xDEADBEEF,%r10d
+        cmpb  $1,%cl; jb skip_clobber; movq %r10,UREGS_rdi(%rsp)
+        cmpb  $2,%cl; jb skip_clobber; movq %r10,UREGS_rsi(%rsp)
+        cmpb  $3,%cl; jb skip_clobber; movq %r10,UREGS_rdx(%rsp)
+        cmpb  $4,%cl; jb skip_clobber; movq %r10,UREGS_r10(%rsp)
+        cmpb  $5,%cl; jb skip_clobber; movq %r10,UREGS_r8(%rsp)
+        cmpb  $6,%cl; jb skip_clobber; movq %r10,UREGS_r9(%rsp)
+skip_clobber:
+#endif
+        movq  %rax,UREGS_rax(%rsp)       # save the return value
+
+/* %rbx: struct vcpu */
+test_all_events:
+        ASSERT_NOT_IN_ATOMIC
+        cli                             # tests must not race interrupts
+/*test_softirqs:*/  
+        movl  VCPU_processor(%rbx),%eax
+        shll  $IRQSTAT_shift,%eax
+        leaq  irq_stat+IRQSTAT_softirq_pending(%rip),%rcx
+        cmpl  $0,(%rcx,%rax,1)
+        jne   process_softirqs
+        testb $1,VCPU_mce_pending(%rbx)
+        jnz   process_mce
+.Ltest_guest_nmi:
+        testb $1,VCPU_nmi_pending(%rbx)
+        jnz   process_nmi
+test_guest_events:
+        movq  VCPU_vcpu_info(%rbx),%rax
+        movzwl VCPUINFO_upcall_pending(%rax),%eax
+        decl  %eax
+        cmpl  $0xfe,%eax
+        ja    restore_all_guest
+/*process_guest_events:*/
+        sti
+        leaq  VCPU_trap_bounce(%rbx),%rdx
+        movq  VCPU_event_addr(%rbx),%rax
+        movq  %rax,TRAPBOUNCE_eip(%rdx)
+        movb  $TBF_INTERRUPT,TRAPBOUNCE_flags(%rdx)
+        call  create_bounce_frame
         jmp   test_all_events
 
+        ALIGN
+/* %rbx: struct vcpu */
+process_softirqs:
+        sti       
+        SAVE_PRESERVED
+        call do_softirq
+        jmp  test_all_events
+
+        ALIGN
+/* %rbx: struct vcpu */
+process_mce:
+        testb $1 << VCPU_TRAP_MCE,VCPU_async_exception_mask(%rbx)
+        jnz  .Ltest_guest_nmi
+        sti
+        movb $0,VCPU_mce_pending(%rbx)
+        call set_guest_machinecheck_trapbounce
+        test %eax,%eax
+        jz   test_all_events
+        movzbl VCPU_async_exception_mask(%rbx),%edx # save mask for the
+        movb %dl,VCPU_mce_old_mask(%rbx)            # iret hypercall
+        orl  $1 << VCPU_TRAP_MCE,%edx
+        movb %dl,VCPU_async_exception_mask(%rbx)
+        jmp  process_trap
+
+        ALIGN
+/* %rbx: struct vcpu */
+process_nmi:
+        testb $1 << VCPU_TRAP_NMI,VCPU_async_exception_mask(%rbx)
+        jnz  test_guest_events
+        sti
+        movb $0,VCPU_nmi_pending(%rbx)
+        call set_guest_nmi_trapbounce
+        test %eax,%eax
+        jz   test_all_events
+        movzbl VCPU_async_exception_mask(%rbx),%edx # save mask for the
+        movb %dl,VCPU_nmi_old_mask(%rbx)            # iret hypercall
+        orl  $1 << VCPU_TRAP_NMI,%edx
+        movb %dl,VCPU_async_exception_mask(%rbx)
+        /* FALLTHROUGH */
+process_trap:
+        leaq VCPU_trap_bounce(%rbx),%rdx
+        call create_bounce_frame
+        jmp  test_all_events
+
+bad_hypercall:
+        movq $-ENOSYS,UREGS_rax(%rsp)
+        jmp  test_all_events
+
 ENTRY(sysenter_entry)
-        /* sti could live here when we don't switch page tables below. */
+        sti
         pushq $FLAT_USER_SS
         pushq $0
         pushfq
 GLOBAL(sysenter_eflags_saved)
-        ASM_CLAC
         pushq $3 /* ring 3 null cs */
         pushq $0 /* null rip */
         pushq $0
-        movl  $TRAP_syscall, 4(%rsp)
-        SAVE_ALL
-
-        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
-        /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
-
-        GET_STACK_END(bx)
-        /* PUSHF above has saved EFLAGS.IF clear (the caller had it set). */
-        orl   $X86_EFLAGS_IF, UREGS_eflags(%rsp)
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%rbx), %rcx
-        test  %rcx, %rcx
-        jz    .Lsyse_cr3_okay
-        movb  $0, STACK_CPUINFO_FIELD(use_pv_cr3)(%rbx)
-        mov   %rcx, %cr3
-        movq  $0, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
-.Lsyse_cr3_okay:
-        sti
-
-        movq  STACK_CPUINFO_FIELD(current_vcpu)(%rbx), %rbx
+        SAVE_VOLATILE TRAP_syscall
+        GET_CURRENT(%rbx)
         cmpb  $0,VCPU_sysenter_disables_events(%rbx)
         movq  VCPU_sysenter_addr(%rbx),%rax
         setne %cl
@@ -322,6 +294,7 @@ UNLIKELY_END(sysenter_nt_set)
         leal  (,%rcx,TBF_INTERRUPT),%ecx
 UNLIKELY_START(z, sysenter_gpf)
         movq  VCPU_trap_ctxt(%rbx),%rsi
+        SAVE_PRESERVED
         movl  $TRAP_gp_fault,UREGS_entry_vector(%rsp)
         movl  %eax,TRAPBOUNCE_error_code(%rdx)
         movq  TRAP_gp_fault * TRAPINFO_sizeof + TRAPINFO_eip(%rsi),%rax
@@ -332,69 +305,31 @@ UNLIKELY_END(sysenter_gpf)
         movq  VCPU_domain(%rbx),%rdi
         movq  %rax,TRAPBOUNCE_eip(%rdx)
         movb  %cl,TRAPBOUNCE_flags(%rdx)
-        cmpb  $0, DOMAIN_is_32bit_pv(%rdi)
-        jne   compat_sysenter
+        testb $1,DOMAIN_is_32bit_pv(%rdi)
+        jnz   compat_sysenter
         jmp   .Lbounce_exception
 
 ENTRY(int80_direct_trap)
-        ASM_CLAC
         pushq $0
-        movl  $0x80, 4(%rsp)
-        SAVE_ALL
-
-        SPEC_CTRL_ENTRY_FROM_PV /* Req: %rsp=regs/cpuinfo, Clob: acd */
-        /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
-
-        GET_STACK_END(bx)
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%rbx), %rcx
-        test  %rcx, %rcx
-        jz    .Lint80_cr3_okay
-        movb  $0, STACK_CPUINFO_FIELD(use_pv_cr3)(%rbx)
-        mov   %rcx, %cr3
-        movq  $0, STACK_CPUINFO_FIELD(xen_cr3)(%rbx)
-.Lint80_cr3_okay:
-        sti
+        SAVE_VOLATILE 0x80
 
         cmpb  $0,untrusted_msi(%rip)
 UNLIKELY_START(ne, msi_check)
         movl  $0x80,%edi
         call  check_for_unexpected_msi
+        LOAD_C_CLOBBERED
 UNLIKELY_END(msi_check)
 
-        movq  STACK_CPUINFO_FIELD(current_vcpu)(%rbx), %rbx
+        GET_CURRENT(%rbx)
 
-        mov   VCPU_trap_ctxt(%rbx), %rsi
-        mov   VCPU_domain(%rbx), %rax
-
-        /*
-         * if ( null_trap_info(v, &v->arch.pv_vcpu.trap_ctxt[0x80]) )
-         *    goto int80_slow_path;
-         */
-        mov    0x80 * TRAPINFO_sizeof + TRAPINFO_eip(%rsi), %rdi
-        movzwl 0x80 * TRAPINFO_sizeof + TRAPINFO_cs (%rsi), %ecx
-
-        mov   %ecx, %edx
-        and   $~3, %edx
-
-        cmpb  $0, DOMAIN_is_32bit_pv(%rax)
-        cmove %rdi, %rdx
-
-        test  %rdx, %rdx
+        /* Check that the callback is non-null. */
+        leaq  VCPU_int80_bounce(%rbx),%rdx
+        cmpb  $0,TRAPBOUNCE_flags(%rdx)
         jz    int80_slow_path
 
-        /* Construct trap_bounce from trap_ctxt[0x80]. */
-        lea   VCPU_trap_bounce(%rbx), %rdx
-        mov   %cx, TRAPBOUNCE_cs(%rdx)
-        mov   %rdi, TRAPBOUNCE_eip(%rdx)
-
-        /* TB_flags = (TI_GET_IF(ti) ? TBF_INTERRUPT : 0); */
-        testb $4, 0x80 * TRAPINFO_sizeof + TRAPINFO_flags(%rsi)
-        setnz %cl
-        lea   (, %rcx, TBF_INTERRUPT), %ecx
-        mov   %cl, TRAPBOUNCE_flags(%rdx)
-
-        cmpb  $0, DOMAIN_is_32bit_pv(%rax)
-        jne   compat_int80_direct_trap
+        movq  VCPU_domain(%rbx),%rax
+        testb $1,DOMAIN_is_32bit_pv(%rax)
+        jnz   compat_int80_direct_trap
 
         call  create_bounce_frame
         jmp   test_all_events
@@ -404,23 +339,15 @@ int80_slow_path:
          * Setup entry vector and error code as if this was a GPF caused by an
          * IDT entry with DPL==0.
          */
-        movl  $((0x80 << 3) | X86_XEC_IDT),UREGS_error_code(%rsp)
+        movl  $((0x80 << 3) | 0x2),UREGS_error_code(%rsp)
+        SAVE_PRESERVED
         movl  $TRAP_gp_fault,UREGS_entry_vector(%rsp)
         /* A GPF wouldn't have incremented the instruction pointer. */
         subq  $2,UREGS_rip(%rsp)
-        /*
-         * While we've cleared xen_cr3 above already, normal exception handling
-         * code has logic to restore the original value from %r15. Therefore we
-         * need to set up %r14 here, while %r15 is required to still be zero.
-         */
-        GET_STACK_END(14)
         jmp   handle_exception_saved
 
-        /* create_bounce_frame & helpers don't need to be in .text.entry */
-        .text
-
 /* CREATE A BASIC EXCEPTION FRAME ON GUEST OS STACK:                     */
-/*   { RCX, R11, [ERRCODE,] RIP, CS, RFLAGS, RSP, SS }                   */
+/*   { RCX, R11, [DS-GS,] [CR2,] [ERRCODE,] RIP, CS, RFLAGS, RSP, SS }   */
 /* %rdx: trap_bounce, %rbx: struct vcpu                                  */
 /* On return only %rbx and %rdx are guaranteed non-clobbered.            */
 create_bounce_frame:
@@ -438,9 +365,9 @@ create_bounce_frame:
         movq  UREGS_rsp+8(%rsp),%rsi
         andb  $0xfc,UREGS_cs+8(%rsp)    # Indicate kernel context to guest.
 2:      andq  $~0xf,%rsi                # Stack frames are 16-byte aligned.
-        movq  $HYPERVISOR_VIRT_START+1,%rax
+        movq  $HYPERVISOR_VIRT_START,%rax
         cmpq  %rax,%rsi
-        movq  $HYPERVISOR_VIRT_END+8*8,%rax
+        movq  $HYPERVISOR_VIRT_END+60,%rax
         sbb   %ecx,%ecx                 # In +ve address space? Then okay.
         cmpq  %rax,%rsi
         adc   %ecx,%ecx                 # Above Xen private area? Then okay.
@@ -448,55 +375,53 @@ UNLIKELY_START(g, create_bounce_frame_bad_sp)
         lea   UNLIKELY_DISPATCH_LABEL(create_bounce_frame_bad_sp)(%rip), %rdi
         jmp   asm_domain_crash_synchronous  /* Does not return */
 __UNLIKELY_END(create_bounce_frame_bad_sp)
-
-#define STORE_GUEST_STACK(reg, n) \
-0:      movq  %reg,(n)*8(%rsi); \
-        _ASM_EXTABLE(0b, domain_crash_page_fault_ ## n ## x8)
-
-        subq  $7*8,%rsi
+        movb  TRAPBOUNCE_flags(%rdx),%cl
+        subq  $40,%rsi
         movq  UREGS_ss+8(%rsp),%rax
-        ASM_STAC
-        movq  VCPU_domain(%rbx),%rdi
-        STORE_GUEST_STACK(rax,6)        # SS
+.Lft2:  movq  %rax,32(%rsi)             # SS
         movq  UREGS_rsp+8(%rsp),%rax
-        STORE_GUEST_STACK(rax,5)        # RSP
+.Lft3:  movq  %rax,24(%rsi)             # RSP
         movq  VCPU_vcpu_info(%rbx),%rax
         pushq VCPUINFO_upcall_mask(%rax)
-        testb $TBF_INTERRUPT,TRAPBOUNCE_flags(%rdx)
+        testb $TBF_INTERRUPT,%cl
         setnz %ch                       # TBF_INTERRUPT -> set upcall mask
         orb   %ch,VCPUINFO_upcall_mask(%rax)
         popq  %rax
         shlq  $32,%rax                  # Bits 32-39: saved_upcall_mask
         movw  UREGS_cs+8(%rsp),%ax      # Bits  0-15: CS
-        STORE_GUEST_STACK(rax,3)        # CS / saved_upcall_mask
+.Lft4:  movq  %rax,8(%rsi)              # CS / saved_upcall_mask
         shrq  $32,%rax
         testb $0xFF,%al                 # Bits 0-7: saved_upcall_mask
         setz  %ch                       # %ch == !saved_upcall_mask
         movl  UREGS_eflags+8(%rsp),%eax
-        andl  $~(X86_EFLAGS_IF|X86_EFLAGS_IOPL),%eax
+        andl  $~X86_EFLAGS_IF,%eax
         addb  %ch,%ch                   # Bit 9 (EFLAGS.IF)
         orb   %ch,%ah                   # Fold EFLAGS.IF into %eax
-        xorl  %ecx,%ecx                 # if ( VM_ASSIST(v->domain, architectural_iopl) )
-        testb $1 << VMASST_TYPE_architectural_iopl,DOMAIN_vm_assist(%rdi)
-        cmovnzl VCPU_iopl(%rbx),%ecx    # Bits 13:12 (EFLAGS.IOPL)
-        orl   %ecx,%eax                 # Fold EFLAGS.IOPL into %eax
-        STORE_GUEST_STACK(rax,4)        # RFLAGS
+.Lft5:  movq  %rax,16(%rsi)             # RFLAGS
         movq  UREGS_rip+8(%rsp),%rax
-        STORE_GUEST_STACK(rax,2)        # RIP
-        testb $TBF_EXCEPTION_ERRCODE,TRAPBOUNCE_flags(%rdx)
+.Lft6:  movq  %rax,(%rsi)               # RIP
+        testb $TBF_EXCEPTION_ERRCODE,%cl
         jz    1f
         subq  $8,%rsi
         movl  TRAPBOUNCE_error_code(%rdx),%eax
-        STORE_GUEST_STACK(rax,2)        # ERROR CODE
-1:
+.Lft7:  movq  %rax,(%rsi)               # ERROR CODE
+1:      testb $TBF_FAILSAFE,%cl
+UNLIKELY_START(nz, bounce_failsafe)
+        subq  $32,%rsi
+        movl  %gs,%eax
+.Lft8:  movq  %rax,24(%rsi)             # GS
+        movl  %fs,%eax
+.Lft9:  movq  %rax,16(%rsi)             # FS
+        movl  %es,%eax
+.Lft10: movq  %rax,8(%rsi)              # ES
+        movl  %ds,%eax
+.Lft11: movq  %rax,(%rsi)               # DS
+UNLIKELY_END(bounce_failsafe)
+        subq  $16,%rsi
         movq  UREGS_r11+8(%rsp),%rax
-        STORE_GUEST_STACK(rax,1)        # R11
+.Lft12: movq  %rax,8(%rsi)              # R11
         movq  UREGS_rcx+8(%rsp),%rax
-        STORE_GUEST_STACK(rax,0)        # RCX
-        ASM_CLAC
-
-#undef STORE_GUEST_STACK
-
+.Lft13: movq  %rax,(%rsi)               # RCX
         /* Rewrite our stack frame and return to guest-OS mode. */
         /* IA32 Ref. Vol. 3: TF, VM, RF and NT flags are cleared on trap. */
         /* Also clear AC: alignment checks shouldn't trigger in kernel mode. */
@@ -514,155 +439,69 @@ UNLIKELY_START(z, create_bounce_frame_bad_bounce_ip)
 __UNLIKELY_END(create_bounce_frame_bad_bounce_ip)
         movq  %rax,UREGS_rip+8(%rsp)
         ret
+        _ASM_EXTABLE(.Lft2,  dom_crash_sync_extable)
+        _ASM_EXTABLE(.Lft3,  dom_crash_sync_extable)
+        _ASM_EXTABLE(.Lft4,  dom_crash_sync_extable)
+        _ASM_EXTABLE(.Lft5,  dom_crash_sync_extable)
+        _ASM_EXTABLE(.Lft6,  dom_crash_sync_extable)
+        _ASM_EXTABLE(.Lft7,  dom_crash_sync_extable)
+        _ASM_EXTABLE(.Lft8,  dom_crash_sync_extable)
+        _ASM_EXTABLE(.Lft9,  dom_crash_sync_extable)
+        _ASM_EXTABLE(.Lft10, dom_crash_sync_extable)
+        _ASM_EXTABLE(.Lft11, dom_crash_sync_extable)
+        _ASM_EXTABLE(.Lft12, dom_crash_sync_extable)
+        _ASM_EXTABLE(.Lft13, dom_crash_sync_extable)
 
-        .pushsection .fixup, "ax", @progbits
-        # Numeric tags below represent the intended overall %rsi adjustment.
-domain_crash_page_fault_6x8:
-        addq  $8,%rsi
-domain_crash_page_fault_5x8:
-        addq  $8,%rsi
-domain_crash_page_fault_4x8:
-        addq  $8,%rsi
-domain_crash_page_fault_3x8:
-        addq  $8,%rsi
-domain_crash_page_fault_2x8:
-        addq  $8,%rsi
-domain_crash_page_fault_1x8:
-        addq  $8,%rsi
-domain_crash_page_fault_0x8:
-        ASM_CLAC
-        movq  %rsi,%rdi
-        call  show_page_walk
 ENTRY(dom_crash_sync_extable)
-        ASM_CLAC
         # Get out of the guest-save area of the stack.
-        GET_STACK_END(ax)
+        GET_STACK_BASE(%rax)
         leaq  STACK_CPUINFO_FIELD(guest_cpu_user_regs)(%rax),%rsp
         # create_bounce_frame() temporarily clobbers CS.RPL. Fix up.
-        movq  STACK_CPUINFO_FIELD(current_vcpu)(%rax), %rax
+        __GET_CURRENT(%rax)
         movq  VCPU_domain(%rax),%rax
-        cmpb  $0, DOMAIN_is_32bit_pv(%rax)
-        sete  %al
+        testb $1,DOMAIN_is_32bit_pv(%rax)
+        setz  %al
         leal  (%rax,%rax,2),%eax
         orb   %al,UREGS_cs(%rsp)
         xorl  %edi,%edi
         jmp   asm_domain_crash_synchronous /* Does not return */
-        .popsection
 
-        .section .text.entry, "ax", @progbits
-
-ENTRY(common_interrupt)
-        SAVE_ALL CLAC
-
-        GET_STACK_END(14)
-
-        SPEC_CTRL_ENTRY_FROM_INTR /* Req: %rsp=regs, %r14=end, Clob: acd */
-        /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
-
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%r14), %rcx
-        mov   STACK_CPUINFO_FIELD(use_pv_cr3)(%r14), %bl
-        mov   %rcx, %r15
-        test  %rcx, %rcx
-        jz    .Lintr_cr3_okay
-        movb  $0, STACK_CPUINFO_FIELD(use_pv_cr3)(%r14)
-        mov   %rcx, %cr3
-        xor   %ecx, %ecx
-        mov   %rcx, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
-        testb $3, UREGS_cs(%rsp)
-        cmovnz %rcx, %r15
-        cmovnz %rcx, %rbx
-.Lintr_cr3_okay:
-
-        CR4_PV32_RESTORE
-        movq %rsp,%rdi
-        callq do_IRQ
-        mov   %r15, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
-        mov   %bl, STACK_CPUINFO_FIELD(use_pv_cr3)(%r14)
-        jmp ret_from_intr
+/* No special register assumptions. */
+ENTRY(ret_from_intr)
+        GET_CURRENT(%rbx)
+        testb $3,UREGS_cs(%rsp)
+        jz    restore_all_xen
+        movq  VCPU_domain(%rbx),%rax
+        testb $1,DOMAIN_is_32bit_pv(%rax)
+        jz    test_all_events
+        jmp   compat_test_all_events
 
 ENTRY(page_fault)
         movl  $TRAP_page_fault,4(%rsp)
 /* No special register assumptions. */
 GLOBAL(handle_exception)
-        SAVE_ALL CLAC
-
-        GET_STACK_END(14)
-
-        SPEC_CTRL_ENTRY_FROM_INTR /* Req: %rsp=regs, %r14=end, Clob: acd */
-        /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
-
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%r14), %rcx
-        mov   STACK_CPUINFO_FIELD(use_pv_cr3)(%r14), %r13b
-        mov   %rcx, %r15
-        test  %rcx, %rcx
-        jz    .Lxcpt_cr3_okay
-        movb  $0, STACK_CPUINFO_FIELD(use_pv_cr3)(%r14)
-        mov   %rcx, %cr3
-        xor   %ecx, %ecx
-        mov   %rcx, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
-        testb $3, UREGS_cs(%rsp)
-        cmovnz %rcx, %r15
-        cmovnz %rcx, %r13
-.Lxcpt_cr3_okay:
-
+        SAVE_ALL
 handle_exception_saved:
-        GET_CURRENT(bx)
         testb $X86_EFLAGS_IF>>8,UREGS_eflags+1(%rsp)
         jz    exception_with_ints_disabled
-
-        ALTERNATIVE_2 "jmp .Lcr4_pv32_done", \
-            __stringify(mov VCPU_domain(%rbx), %rax), X86_FEATURE_XEN_SMEP, \
-            __stringify(mov VCPU_domain(%rbx), %rax), X86_FEATURE_XEN_SMAP
-
-        testb $3,UREGS_cs(%rsp)
-        jz    .Lcr4_pv32_done
-        cmpb  $0,DOMAIN_is_32bit_pv(%rax)
-        je    .Lcr4_pv32_done
-        call  cr4_pv32_restore
-        /*
-         * An NMI or #MC may occur between clearing CR4.SMEP / CR4.SMAP in
-         * compat_restore_all_guest and it actually returning to guest
-         * context, in which case the guest would run with the two features
-         * enabled. The only bad that can happen from this is a kernel mode
-         * #PF which the guest doesn't expect. Rather than trying to make the
-         * NMI/#MC exit path honor the intended CR4 setting, simply check
-         * whether the wrong CR4 was in use when the #PF occurred, and exit
-         * back to the guest (which will in turn clear the two CR4 bits) to
-         * re-execute the instruction. If we get back here, the CR4 bits
-         * should then be found clear (unless another NMI/#MC occurred at
-         * exactly the right time), and we'll continue processing the
-         * exception as normal.
-         */
-        test  %rax,%rax
-        jnz   .Lcr4_pv32_done
-        /*
-         * The below effectively is
-         * if ( regs->entry_vector == TRAP_page_fault &&
-         *      (regs->error_code & PFEC_page_present) &&
-         *      !(regs->error_code & ~(PFEC_write_access|PFEC_insn_fetch)) )
-         *     goto compat_test_all_events;
-         */
-        mov   $PFEC_page_present,%al
-        cmpb  $TRAP_page_fault,UREGS_entry_vector(%rsp)
-        jne   .Lcr4_pv32_done
-        xor   UREGS_error_code(%rsp),%eax
-        test  $~(PFEC_write_access|PFEC_insn_fetch),%eax
-        jz    compat_test_all_events
-.Lcr4_pv32_done:
         sti
 1:      movq  %rsp,%rdi
         movzbl UREGS_entry_vector(%rsp),%eax
         leaq  exception_table(%rip),%rdx
+        GET_CURRENT(%rbx)
         PERFC_INCR(exceptions, %rax, %rbx)
-        mov   (%rdx, %rax, 8), %rdx
-        INDIRECT_CALL %rdx
-        mov   %r15, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
-        mov   %r13b, STACK_CPUINFO_FIELD(use_pv_cr3)(%r14)
+        callq *(%rdx,%rax,8)
         testb $3,UREGS_cs(%rsp)
         jz    restore_all_xen
+        leaq  VCPU_trap_bounce(%rbx),%rdx
         movq  VCPU_domain(%rbx),%rax
-        cmpb  $0, DOMAIN_is_32bit_pv(%rax)
-        jne   compat_test_all_events
+        testb $1,DOMAIN_is_32bit_pv(%rax)
+        jnz   compat_post_handle_exception
+        testb $TBF_EXCEPTION,TRAPBOUNCE_flags(%rdx)
+        jz    test_all_events
+.Lbounce_exception:
+        call  create_bounce_frame
+        movb  $0,TRAPBOUNCE_flags(%rdx)
         jmp   test_all_events
 
 /* No special register assumptions. */
@@ -684,16 +523,14 @@ exception_with_ints_disabled:
         rep;  movsq                     # make room for ec/ev
 1:      movq  UREGS_error_code(%rsp),%rax # ec/ev
         movq  %rax,UREGS_kernel_sizeof(%rsp)
-        mov   %r15, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
-        mov   %r13b, STACK_CPUINFO_FIELD(use_pv_cr3)(%r14)
         jmp   restore_all_xen           # return to fixup code
 
 /* No special register assumptions. */
 FATAL_exception_with_ints_disabled:
-        xorl  %esi,%esi
-        movq  %rsp,%rdi
+        movzbl UREGS_entry_vector(%rsp),%edi
+        movq  %rsp,%rsi
         call  fatal_trap
-        BUG   /* fatal_trap() shouldn't return. */
+        ud2
 
 ENTRY(divide_error)
         pushq $0
@@ -718,7 +555,7 @@ ENTRY(device_not_available)
 ENTRY(debug)
         pushq $0
         movl  $TRAP_debug,4(%rsp)
-        jmp   handle_ist_exception
+        jmp   handle_exception
 
 ENTRY(int3)
         pushq $0
@@ -738,6 +575,11 @@ ENTRY(bounds)
 ENTRY(invalid_op)
         pushq $0
         movl  $TRAP_invalid_op,4(%rsp)
+        jmp   handle_exception
+
+ENTRY(coprocessor_segment_overrun)
+        pushq $0
+        movl  $TRAP_copro_seg,4(%rsp)
         jmp   handle_exception
 
 ENTRY(invalid_TSS)
@@ -760,31 +602,20 @@ ENTRY(alignment_check)
         movl  $TRAP_alignment_check,4(%rsp)
         jmp   handle_exception
 
+ENTRY(spurious_interrupt_bug)
+        pushq $0
+        movl  $TRAP_spurious_int,4(%rsp)
+        jmp   handle_exception
+
 ENTRY(double_fault)
         movl  $TRAP_double_fault,4(%rsp)
-        /* Set AC to reduce chance of further SMAP faults */
-        SAVE_ALL STAC
-
-        GET_STACK_END(14)
-
-        SPEC_CTRL_ENTRY_FROM_INTR_IST /* Req: %rsp=regs, %r14=end, Clob: acd */
-        /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
-
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%r14), %rbx
-        test  %rbx, %rbx
-        jz    .Ldblf_cr3_okay
-        movb  $0, STACK_CPUINFO_FIELD(use_pv_cr3)(%r14)
-        mov   %rbx, %cr3
-        movq $0, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
-.Ldblf_cr3_okay:
-
+        SAVE_ALL
         movq  %rsp,%rdi
         call  do_double_fault
-        BUG   /* do_double_fault() shouldn't return. */
+        ud2
 
         .pushsection .init.text, "ax", @progbits
 ENTRY(early_page_fault)
-        movl  $TRAP_page_fault,4(%rsp)
         SAVE_ALL
         movq  %rsp,%rdi
         call  do_early_page_fault
@@ -795,33 +626,11 @@ ENTRY(nmi)
         pushq $0
         movl  $TRAP_nmi,4(%rsp)
 handle_ist_exception:
-        SAVE_ALL CLAC
-
-        GET_STACK_END(14)
-
-        SPEC_CTRL_ENTRY_FROM_INTR_IST /* Req: %rsp=regs, %r14=end, Clob: acd */
-        /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
-
-        mov   STACK_CPUINFO_FIELD(xen_cr3)(%r14), %rcx
-        mov   STACK_CPUINFO_FIELD(use_pv_cr3)(%r14), %bl
-        mov   %rcx, %r15
-        test  %rcx, %rcx
-        jz    .List_cr3_okay
-        movb  $0, STACK_CPUINFO_FIELD(use_pv_cr3)(%r14)
-        mov   %rcx, %cr3
-        movq  $0, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
-.List_cr3_okay:
-
-        CR4_PV32_RESTORE
+        SAVE_ALL
         testb $3,UREGS_cs(%rsp)
         jz    1f
-        /*
-         * Interrupted guest context. Clear the restore value for xen_cr3
-         * and copy the context to stack bottom.
-         */
-        xor   %r15, %r15
-        xor   %ebx, %ebx
-        GET_CPUINFO_FIELD(guest_cpu_user_regs,di)
+        /* Interrupted guest context. Copy the context to stack bottom. */
+        GET_CPUINFO_FIELD(guest_cpu_user_regs,%rdi)
         movq  %rsp,%rsi
         movl  $UREGS_kernel_sizeof/8,%ecx
         movq  %rdi,%rsp
@@ -829,17 +638,14 @@ handle_ist_exception:
 1:      movq  %rsp,%rdi
         movzbl UREGS_entry_vector(%rsp),%eax
         leaq  exception_table(%rip),%rdx
-        mov   (%rdx, %rax, 8), %rdx
-        INDIRECT_CALL %rdx
-        mov   %r15, STACK_CPUINFO_FIELD(xen_cr3)(%r14)
-        mov   %bl, STACK_CPUINFO_FIELD(use_pv_cr3)(%r14)
+        callq *(%rdx,%rax,8)
         cmpb  $TRAP_nmi,UREGS_entry_vector(%rsp)
         jne   ret_from_intr
 
         /* We want to get straight to the IRET on the NMI exit path. */
         testb $3,UREGS_cs(%rsp)
         jz    restore_all_xen
-        GET_CURRENT(bx)
+        GET_CURRENT(%rbx)
         /* Send an IPI to ourselves to cover for the lack of event checking. */
         movl  VCPU_processor(%rbx),%eax
         shll  $IRQSTAT_shift,%eax
@@ -858,58 +664,147 @@ ENTRY(machine_check)
         movl  $TRAP_machine_check,4(%rsp)
         jmp   handle_ist_exception
 
+/* Enable NMIs.  No special register assumptions. Only %rax is not preserved. */
+ENTRY(enable_nmis)
+        movq  %rsp, %rax /* Grab RSP before pushing */
+
+        /* Set up stack frame */
+        pushq $0               /* SS */
+        pushq %rax             /* RSP */
+        pushfq                 /* RFLAGS */
+        pushq $__HYPERVISOR_CS /* CS */
+        leaq  1f(%rip),%rax
+        pushq %rax             /* RIP */
+
+        iretq /* Disable the hardware NMI latch */
+1:
+        retq
+
 /* No op trap handler.  Required for kexec crash path. */
 GLOBAL(trap_nop)
         iretq
 
-/* Table of automatically generated entry points.  One per vector. */
-        .pushsection .init.rodata, "a", @progbits
-GLOBAL(autogen_entrypoints)
-        /* pop into the .init.rodata section and record an entry point. */
-        .macro entrypoint ent
-        .pushsection .init.rodata
-        .quad \ent
-        .popsection
-        .endm
 
-        .popsection
-autogen_stubs: /* Automatically generated stubs. */
 
-        vec = 0
-        .rept NR_VECTORS
+.section .rodata, "a", @progbits
 
-        /* Common interrupts, heading towards do_IRQ(). */
-#ifdef CONFIG_PV
-        .if vec >= FIRST_DYNAMIC_VECTOR && vec != HYPERCALL_VECTOR && vec != LEGACY_SYSCALL_VECTOR
-#else
-        .if vec >= FIRST_DYNAMIC_VECTOR
-#endif
+ENTRY(exception_table)
+        .quad do_divide_error
+        .quad do_debug
+        .quad do_nmi
+        .quad do_int3
+        .quad do_overflow
+        .quad do_bounds
+        .quad do_invalid_op
+        .quad do_device_not_available
+        .quad 0 # double_fault
+        .quad do_coprocessor_segment_overrun
+        .quad do_invalid_TSS
+        .quad do_segment_not_present
+        .quad do_stack_segment
+        .quad do_general_protection
+        .quad do_page_fault
+        .quad do_spurious_interrupt_bug
+        .quad do_coprocessor_error
+        .quad do_alignment_check
+        .quad do_machine_check
+        .quad do_simd_coprocessor_error
+        .size exception_table, . - exception_table
 
-        ALIGN
-1:      pushq $0
-        movb  $vec,4(%rsp)
-        jmp   common_interrupt
-
-        entrypoint 1b
-
-        /* Reserved exceptions, heading towards do_reserved_trap(). */
-        .elseif vec == TRAP_copro_seg || vec == TRAP_spurious_int || (vec > TRAP_simd_error && vec < TRAP_nr)
-
-1:      test  $8,%spl        /* 64bit exception frames are 16 byte aligned, but the word */
-        jz    2f             /* size is 8 bytes.  Check whether the processor gave us an */
-        pushq $0             /* error code, and insert an empty one if not.              */
-2:      movb  $vec,4(%rsp)
-        jmp   handle_exception
-
-        entrypoint 1b
-
-        /* Hand crafted entry points above. */
-        .else
-        entrypoint 0
-        .endif
-
-        vec = vec + 1
+ENTRY(hypercall_table)
+        .quad do_set_trap_table     /*  0 */
+        .quad do_mmu_update
+        .quad do_set_gdt
+        .quad do_stack_switch
+        .quad do_set_callbacks
+        .quad do_fpu_taskswitch     /*  5 */
+        .quad do_sched_op_compat
+        .quad do_platform_op
+        .quad do_set_debugreg
+        .quad do_get_debugreg
+        .quad do_update_descriptor  /* 10 */
+        .quad do_ni_hypercall
+        .quad do_memory_op
+        .quad do_multicall
+        .quad do_update_va_mapping
+        .quad do_set_timer_op       /* 15 */
+        .quad do_event_channel_op_compat
+        .quad do_xen_version
+        .quad do_console_io
+        .quad do_physdev_op_compat
+        .quad do_grant_table_op     /* 20 */
+        .quad do_vm_assist
+        .quad do_update_va_mapping_otherdomain
+        .quad do_iret
+        .quad do_vcpu_op
+        .quad do_set_segment_base   /* 25 */
+        .quad do_mmuext_op
+        .quad do_xsm_op
+        .quad do_nmi_op
+        .quad do_sched_op
+        .quad do_callback_op        /* 30 */
+        .quad do_xenoprof_op
+        .quad do_event_channel_op
+        .quad do_physdev_op
+        .quad do_hvm_op
+        .quad do_sysctl             /* 35 */
+        .quad do_domctl
+        .quad do_kexec_op
+        .quad do_tmem_op
+        .rept __HYPERVISOR_arch_0-((.-hypercall_table)/8)
+        .quad do_ni_hypercall
+        .endr
+        .quad do_mca                /* 48 */
+        .quad paging_domctl_continuation
+        .rept NR_hypercalls-((.-hypercall_table)/8)
+        .quad do_ni_hypercall
         .endr
 
-        .section .init.rodata
-        .size autogen_entrypoints, . - autogen_entrypoints
+ENTRY(hypercall_args_table)
+        .byte 1 /* do_set_trap_table    */  /*  0 */
+        .byte 4 /* do_mmu_update        */
+        .byte 2 /* do_set_gdt           */
+        .byte 2 /* do_stack_switch      */
+        .byte 3 /* do_set_callbacks     */
+        .byte 1 /* do_fpu_taskswitch    */  /*  5 */
+        .byte 2 /* do_sched_op_compat   */
+        .byte 1 /* do_platform_op       */
+        .byte 2 /* do_set_debugreg      */
+        .byte 1 /* do_get_debugreg      */
+        .byte 2 /* do_update_descriptor */  /* 10 */
+        .byte 0 /* do_ni_hypercall      */
+        .byte 2 /* do_memory_op         */
+        .byte 2 /* do_multicall         */
+        .byte 3 /* do_update_va_mapping */
+        .byte 1 /* do_set_timer_op      */  /* 15 */
+        .byte 1 /* do_event_channel_op_compat */
+        .byte 2 /* do_xen_version       */
+        .byte 3 /* do_console_io        */
+        .byte 1 /* do_physdev_op_compat */
+        .byte 3 /* do_grant_table_op    */  /* 20 */
+        .byte 2 /* do_vm_assist         */
+        .byte 4 /* do_update_va_mapping_otherdomain */
+        .byte 0 /* do_iret              */
+        .byte 3 /* do_vcpu_op           */
+        .byte 2 /* do_set_segment_base  */  /* 25 */
+        .byte 4 /* do_mmuext_op         */
+        .byte 1 /* do_xsm_op            */
+        .byte 2 /* do_nmi_op            */
+        .byte 2 /* do_sched_op          */
+        .byte 2 /* do_callback_op       */  /* 30 */
+        .byte 2 /* do_xenoprof_op       */
+        .byte 2 /* do_event_channel_op  */
+        .byte 2 /* do_physdev_op        */
+        .byte 2 /* do_hvm_op            */
+        .byte 1 /* do_sysctl            */  /* 35 */
+        .byte 1 /* do_domctl            */
+        .byte 2 /* do_kexec             */
+        .byte 1 /* do_tmem_op           */
+        .rept __HYPERVISOR_arch_0-(.-hypercall_args_table)
+        .byte 0 /* do_ni_hypercall      */
+        .endr
+        .byte 1 /* do_mca               */  /* 48 */
+        .byte 1 /* paging_domctl_continuation */
+        .rept NR_hypercalls-(.-hypercall_args_table)
+        .byte 0 /* do_ni_hypercall      */
+        .endr

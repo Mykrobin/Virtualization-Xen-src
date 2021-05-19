@@ -27,7 +27,6 @@
 #include <asm/hvm/io.h>
 #include <asm/hvm/support.h>
 #include <asm/current.h>
-#include <xen/trace.h>
 
 #define USEC_PER_SEC    1000000UL
 #define NS_PER_USEC     1000UL
@@ -38,9 +37,10 @@
 #define MIN_PER_HOUR    60
 #define HOUR_PER_DAY    24
 
-#define domain_vrtc(x) (&(x)->arch.hvm_domain.pl_time->vrtc)
+#define domain_vrtc(x) (&(x)->arch.hvm_domain.pl_time.vrtc)
 #define vcpu_vrtc(x)   (domain_vrtc((x)->domain))
-#define vrtc_domain(x) (container_of(x, struct pl_time, vrtc)->domain)
+#define vrtc_domain(x) (container_of((x), struct domain, \
+                                     arch.hvm_domain.pl_time.vrtc))
 #define vrtc_vcpu(x)   (pt_global_vcpu_target(vrtc_domain(x)))
 #define epoch_year     1900
 #define get_year(x)    (x + epoch_year)
@@ -75,7 +75,7 @@ static void rtc_update_irq(RTCState *s)
     s->hw.cmos_data[RTC_REG_C] |= RTC_IRQF;
     if ( rtc_mode_is(s, no_ack) )
         hvm_isa_irq_deassert(vrtc_domain(s), RTC_IRQ);
-    hvm_isa_irq_assert(vrtc_domain(s), RTC_IRQ, NULL);
+    hvm_isa_irq_assert(vrtc_domain(s), RTC_IRQ);
 }
 
 /* Called by the VPT code after it's injected a PF interrupt for us.
@@ -91,7 +91,6 @@ static void rtc_pf_callback(struct vcpu *v, void *opaque)
          && ++(s->pt_dead_ticks) >= 10 )
     {
         /* VM is ignoring its RTC; no point in running the timer */
-        TRACE_0D(TRC_HVM_EMUL_RTC_STOP_TIMER);
         destroy_periodic_time(&s->pt);
         s->period = 0;
     }
@@ -153,11 +152,8 @@ static void rtc_timer_update(RTCState *s)
                 else
                     delta = period - ((now - s->start_time) % period);
                 if ( s->hw.cmos_data[RTC_REG_B] & RTC_PIE )
-                {
-                    TRACE_2D(TRC_HVM_EMUL_RTC_START_TIMER, delta, period);
                     create_periodic_time(v, &s->pt, delta, period,
                                          RTC_IRQ, rtc_pf_callback, s);
-                }
                 else
                     s->check_ticks_since = now;
             }
@@ -165,7 +161,6 @@ static void rtc_timer_update(RTCState *s)
         }
         /* fall through */
     default:
-        TRACE_0D(TRC_HVM_EMUL_RTC_STOP_TIMER);
         destroy_periodic_time(&s->pt);
         s->period = 0;
         break;
@@ -518,7 +513,6 @@ static int rtc_ioport_write(void *opaque, uint32_t addr, uint32_t data)
         rtc_update_irq(s);
         if ( (data ^ orig) & RTC_PIE )
         {
-            TRACE_0D(TRC_HVM_EMUL_RTC_STOP_TIMER);
             destroy_periodic_time(&s->pt);
             s->period = 0;
             rtc_timer_update(s);
@@ -696,7 +690,7 @@ static uint32_t rtc_ioport_read(RTCState *s, uint32_t addr)
 }
 
 static int handle_rtc_io(
-    int dir, unsigned int port, unsigned int bytes, uint32_t *val)
+    int dir, uint32_t port, uint32_t bytes, uint32_t *val)
 {
     struct RTCState *vrtc = vcpu_vrtc(current);
 
@@ -725,14 +719,11 @@ void rtc_migrate_timers(struct vcpu *v)
 {
     RTCState *s = vcpu_vrtc(v);
 
-    if ( !has_vrtc(v->domain) )
-        return;
-
     if ( v->vcpu_id == 0 )
     {
-        migrate_timer(&s->update_timer, v->processor);
-        migrate_timer(&s->update_timer2, v->processor);
-        migrate_timer(&s->alarm_timer, v->processor);
+        migrate_timer(&s->update_timer, v->processor);;
+        migrate_timer(&s->update_timer2, v->processor);;
+        migrate_timer(&s->alarm_timer, v->processor);;
     }
 }
 
@@ -741,10 +732,6 @@ static int rtc_save(struct domain *d, hvm_domain_context_t *h)
 {
     RTCState *s = domain_vrtc(d);
     int rc;
-
-    if ( !has_vrtc(d) )
-        return 0;
-
     spin_lock(&s->lock);
     rc = hvm_save_entry(RTC, 0, h, &s->hw);
     spin_unlock(&s->lock);
@@ -755,9 +742,6 @@ static int rtc_save(struct domain *d, hvm_domain_context_t *h)
 static int rtc_load(struct domain *d, hvm_domain_context_t *h)
 {
     RTCState *s = domain_vrtc(d);
-
-    if ( !has_vrtc(d) )
-        return -ENODEV;
 
     spin_lock(&s->lock);
 
@@ -789,10 +773,6 @@ void rtc_reset(struct domain *d)
 {
     RTCState *s = domain_vrtc(d);
 
-    if ( !has_vrtc(d) )
-        return;
-
-    TRACE_0D(TRC_HVM_EMUL_RTC_STOP_TIMER);
     destroy_periodic_time(&s->pt);
     s->period = 0;
     s->pt.source = PTSRC_isa;
@@ -801,9 +781,6 @@ void rtc_reset(struct domain *d)
 void rtc_init(struct domain *d)
 {
     RTCState *s = domain_vrtc(d);
-
-    if ( !has_vrtc(d) )
-        return;
 
     spin_lock_init(&s->lock);
 
@@ -835,12 +812,8 @@ void rtc_deinit(struct domain *d)
 {
     RTCState *s = domain_vrtc(d);
 
-    if ( !has_vrtc(d) )
-        return;
-
     spin_barrier(&s->lock);
 
-    TRACE_0D(TRC_HVM_EMUL_RTC_STOP_TIMER);
     destroy_periodic_time(&s->pt);
     kill_timer(&s->update_timer);
     kill_timer(&s->update_timer2);
@@ -851,19 +824,7 @@ void rtc_update_clock(struct domain *d)
 {
     RTCState *s = domain_vrtc(d);
 
-    if ( !has_vrtc(d) )
-        return;
-
     spin_lock(&s->lock);
     s->current_tm = gmtime(get_localtime(d));
     spin_unlock(&s->lock);
 }
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * indent-tabs-mode: nil
- * End:
- */

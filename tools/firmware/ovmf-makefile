@@ -1,3 +1,6 @@
+# OVMF building system is not ready yet to run in parallel.
+# Force it to be serial in order to exploit parallelism for neighbors.
+
 XEN_ROOT=$(CURDIR)/../../..
 include $(XEN_ROOT)/tools/Rules.mk
 
@@ -7,7 +10,6 @@ else
 TARGET=RELEASE
 endif
 
-# OVMF build system has its own parallel building support.
 .NOTPARALLEL:
 MAKEFLAGS  += -j1
 
@@ -16,8 +18,7 @@ all: build
 
 .PHONY: build
 build:
-	if test -e .git ; then $(GIT) submodule update --init --recursive ; fi
-	OvmfPkg/build.sh -a X64 -b $(TARGET) -n 4
+	OvmfPkg/build.sh -a X64 -b $(TARGET)
 	cp Build/OvmfX64/$(TARGET)_GCC*/FV/OVMF.fd ovmf.bin
 
 .PHONY: clean

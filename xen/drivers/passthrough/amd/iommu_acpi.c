@@ -14,9 +14,11 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/acpi.h>
 #include <asm/apicdef.h>
@@ -632,67 +634,48 @@ static u16 __init parse_ivhd_device_extended_range(
     return dev_length;
 }
 
-static int __init parse_ivrs_ioapic(const char *str)
+static DECLARE_BITMAP(ioapic_cmdline, ARRAY_SIZE(ioapic_sbdf)) __initdata;
+
+static void __init parse_ivrs_ioapic(char *str)
 {
     const char *s = str;
     unsigned long id;
     unsigned int seg, bus, dev, func;
-    unsigned int idx;
 
-    if ( *s != '[' )
-        return -EINVAL;
-
+    ASSERT(*s == '[');
     id = simple_strtoul(s + 1, &s, 0);
-    if ( *s != ']' || *++s != '=' )
-        return -EINVAL;
+    if ( id >= ARRAY_SIZE(ioapic_sbdf) || *s != ']' || *++s != '=' )
+        return;
 
     s = parse_pci(s + 1, &seg, &bus, &dev, &func);
     if ( !s || *s )
-        return -EINVAL;
+        return;
 
-    idx = ioapic_id_to_index(id);
-    if ( idx == MAX_IO_APICS )
-    {
-        idx = get_next_ioapic_sbdf_index();
-        if ( idx == MAX_IO_APICS )
-        {
-            printk(XENLOG_ERR "Error: %s: Too many IO APICs.\n", __func__);
-            return -EINVAL;
-        }
-    }
-
-    ioapic_sbdf[idx].bdf = PCI_BDF(bus, dev, func);
-    ioapic_sbdf[idx].seg = seg;
-    ioapic_sbdf[idx].id = id;
-    ioapic_sbdf[idx].cmdline = true;
-
-    return 0;
+    ioapic_sbdf[id].bdf = PCI_BDF(bus, dev, func);
+    ioapic_sbdf[id].seg = seg;
+    __set_bit(id, ioapic_cmdline);
 }
 custom_param("ivrs_ioapic[", parse_ivrs_ioapic);
 
-static int __init parse_ivrs_hpet(const char *str)
+static void __init parse_ivrs_hpet(char *str)
 {
     const char *s = str;
     unsigned long id;
     unsigned int seg, bus, dev, func;
 
-    if ( *s != '[' )
-        return -EINVAL;
-
+    ASSERT(*s == '[');
     id = simple_strtoul(s + 1, &s, 0);
     if ( id != (typeof(hpet_sbdf.id))id || *s != ']' || *++s != '=' )
-        return -EINVAL;
+        return;
 
     s = parse_pci(s + 1, &seg, &bus, &dev, &func);
     if ( !s || *s )
-        return -EINVAL;
+        return;
 
     hpet_sbdf.id = id;
     hpet_sbdf.bdf = PCI_BDF(bus, dev, func);
     hpet_sbdf.seg = seg;
     hpet_sbdf.init = HPET_CMDL;
-
-    return 0;
 }
 custom_param("ivrs_hpet[", parse_ivrs_hpet);
 
@@ -701,7 +684,7 @@ static u16 __init parse_ivhd_device_special(
     u16 header_length, u16 block_length, struct amd_iommu *iommu)
 {
     u16 dev_length, bdf;
-    unsigned int apic, idx;
+    int apic;
 
     dev_length = sizeof(*special);
     if ( header_length < (block_length + dev_length) )
@@ -732,19 +715,21 @@ static u16 __init parse_ivhd_device_special(
          * consistency here --- whether entry's IOAPIC ID is valid and
          * whether there are conflicting/duplicated entries.
          */
-        for ( idx = 0; idx < nr_ioapic_sbdf; idx++ )
+        apic = find_first_bit(ioapic_cmdline, ARRAY_SIZE(ioapic_sbdf));
+        while ( apic < ARRAY_SIZE(ioapic_sbdf) )
         {
-            if ( ioapic_sbdf[idx].bdf == bdf &&
-                 ioapic_sbdf[idx].seg == seg &&
-                 ioapic_sbdf[idx].cmdline )
+            if ( ioapic_sbdf[apic].bdf == bdf &&
+                 ioapic_sbdf[apic].seg == seg )
                 break;
+            apic = find_next_bit(ioapic_cmdline, ARRAY_SIZE(ioapic_sbdf),
+                                 apic + 1);
         }
-        if ( idx < nr_ioapic_sbdf )
+        if ( apic < ARRAY_SIZE(ioapic_sbdf) )
         {
             AMD_IOMMU_DEBUG("IVHD: Command line override present for IO-APIC %#x"
                             "(IVRS: %#x devID %04x:%02x:%02x.%u)\n",
-                            ioapic_sbdf[idx].id, special->handle, seg,
-                            PCI_BUS(bdf), PCI_SLOT(bdf), PCI_FUNC(bdf));
+                            apic, special->handle, seg, PCI_BUS(bdf),
+                            PCI_SLOT(bdf), PCI_FUNC(bdf));
             break;
         }
 
@@ -753,14 +738,20 @@ static u16 __init parse_ivhd_device_special(
             if ( IO_APIC_ID(apic) != special->handle )
                 continue;
 
-            idx = ioapic_id_to_index(special->handle);
-            if ( idx != MAX_IO_APICS && ioapic_sbdf[idx].cmdline )
+            if ( special->handle >= ARRAY_SIZE(ioapic_sbdf) )
+            {
+                printk(XENLOG_ERR "IVHD Error: IO-APIC %#x entry beyond bounds\n",
+                       special->handle);
+                return 0;
+            }
+
+            if ( test_bit(special->handle, ioapic_cmdline) )
                 AMD_IOMMU_DEBUG("IVHD: Command line override present for IO-APIC %#x\n",
                                 special->handle);
-            else if ( idx != MAX_IO_APICS && ioapic_sbdf[idx].pin_2_idx )
+            else if ( ioapic_sbdf[special->handle].pin_2_idx )
             {
-                if ( ioapic_sbdf[idx].bdf == bdf &&
-                     ioapic_sbdf[idx].seg == seg )
+                if ( ioapic_sbdf[special->handle].bdf == bdf &&
+                     ioapic_sbdf[special->handle].seg == seg )
                     AMD_IOMMU_DEBUG("IVHD Warning: Duplicate IO-APIC %#x entries\n",
                                     special->handle);
                 else
@@ -773,27 +764,19 @@ static u16 __init parse_ivhd_device_special(
             }
             else
             {
-                idx = get_next_ioapic_sbdf_index();
-                if ( idx == MAX_IO_APICS )
-                {
-                    printk(XENLOG_ERR "IVHD Error: Too many IO APICs.\n");
-                    return 0;
-                }
-
                 /* set device id of ioapic */
-                ioapic_sbdf[idx].bdf = bdf;
-                ioapic_sbdf[idx].seg = seg;
-                ioapic_sbdf[idx].id = special->handle;
+                ioapic_sbdf[special->handle].bdf = bdf;
+                ioapic_sbdf[special->handle].seg = seg;
 
-                ioapic_sbdf[idx].pin_2_idx = xmalloc_array(
+                ioapic_sbdf[special->handle].pin_2_idx = xmalloc_array(
                     u16, nr_ioapic_entries[apic]);
                 if ( nr_ioapic_entries[apic] &&
-                     !ioapic_sbdf[idx].pin_2_idx )
+                     !ioapic_sbdf[IO_APIC_ID(apic)].pin_2_idx )
                 {
                     printk(XENLOG_ERR "IVHD Error: Out of memory\n");
                     return 0;
                 }
-                memset(ioapic_sbdf[idx].pin_2_idx, -1,
+                memset(ioapic_sbdf[IO_APIC_ID(apic)].pin_2_idx, -1,
                        nr_ioapic_entries[apic] *
                        sizeof(*ioapic_sbdf->pin_2_idx));
             }
@@ -826,7 +809,7 @@ static u16 __init parse_ivhd_device_special(
             hpet_sbdf.init = HPET_IVHD;
             break;
         default:
-            ASSERT_UNREACHABLE();
+            ASSERT(0);
             break;
         }
         break;
@@ -839,27 +822,13 @@ static u16 __init parse_ivhd_device_special(
     return dev_length;
 }
 
-static inline size_t
-get_ivhd_header_size(const struct acpi_ivrs_hardware *ivhd_block)
-{
-    switch ( ivhd_block->header.type )
-    {
-    case ACPI_IVRS_TYPE_HARDWARE:
-        return offsetof(struct acpi_ivrs_hardware, efr_image);
-    case ACPI_IVRS_TYPE_HARDWARE_11H:
-        return sizeof(struct acpi_ivrs_hardware);
-    }
-    return 0;
-}
-
 static int __init parse_ivhd_block(const struct acpi_ivrs_hardware *ivhd_block)
 {
     const union acpi_ivhd_device *ivhd_device;
     u16 block_length, dev_length;
-    size_t hdr_size = get_ivhd_header_size(ivhd_block) ;
     struct amd_iommu *iommu;
 
-    if ( ivhd_block->header.length < hdr_size )
+    if ( ivhd_block->header.length < sizeof(*ivhd_block) )
     {
         AMD_IOMMU_DEBUG("IVHD Error: Invalid Block Length!\n");
         return -ENODEV;
@@ -877,7 +846,7 @@ static int __init parse_ivhd_block(const struct acpi_ivrs_hardware *ivhd_block)
     }
 
     /* parse Device Entries */
-    block_length = hdr_size;
+    block_length = sizeof(*ivhd_block);
     while ( ivhd_block->header.length >=
             (block_length + sizeof(struct acpi_ivrs_de_header)) )
     {
@@ -946,6 +915,34 @@ static int __init parse_ivhd_block(const struct acpi_ivrs_hardware *ivhd_block)
     return 0;
 }
 
+static int __init parse_ivrs_block(const struct acpi_ivrs_header *ivrs_block)
+{
+    const struct acpi_ivrs_hardware *ivhd_block;
+    const struct acpi_ivrs_memory *ivmd_block;
+
+    switch ( ivrs_block->type )
+    {
+    case ACPI_IVRS_TYPE_HARDWARE:
+        ivhd_block = container_of(ivrs_block, const struct acpi_ivrs_hardware,
+                                  header);
+        return parse_ivhd_block(ivhd_block);
+
+    case ACPI_IVRS_TYPE_MEMORY_ALL:
+    case ACPI_IVRS_TYPE_MEMORY_ONE:
+    case ACPI_IVRS_TYPE_MEMORY_RANGE:
+    case ACPI_IVRS_TYPE_MEMORY_IOMMU:
+        ivmd_block = container_of(ivrs_block, const struct acpi_ivrs_memory,
+                                  header);
+        return parse_ivmd_block(ivmd_block);
+
+    default:
+        AMD_IOMMU_DEBUG("IVRS Error: Invalid Block Type!\n");
+        return -ENODEV;
+    }
+
+    return 0;
+}
+
 static void __init dump_acpi_table_header(struct acpi_table_header *table)
 {
     int i;
@@ -982,25 +979,6 @@ static void __init dump_acpi_table_header(struct acpi_table_header *table)
 
 }
 
-#define to_ivhd_block(hdr) \
-    container_of(hdr, const struct acpi_ivrs_hardware, header)
-#define to_ivmd_block(hdr) \
-    container_of(hdr, const struct acpi_ivrs_memory, header)
-
-static inline bool_t is_ivhd_block(u8 type)
-{
-    return (type == ACPI_IVRS_TYPE_HARDWARE ||
-            type == ACPI_IVRS_TYPE_HARDWARE_11H);
-}
-
-static inline bool_t is_ivmd_block(u8 type)
-{
-    return (type == ACPI_IVRS_TYPE_MEMORY_ALL ||
-            type == ACPI_IVRS_TYPE_MEMORY_ONE ||
-            type == ACPI_IVRS_TYPE_MEMORY_RANGE ||
-            type == ACPI_IVRS_TYPE_MEMORY_IOMMU);
-}
-
 static int __init parse_ivrs_table(struct acpi_table_header *table)
 {
     const struct acpi_ivrs_header *ivrs_block;
@@ -1033,23 +1011,25 @@ static int __init parse_ivrs_table(struct acpi_table_header *table)
             return -ENODEV;
         }
 
-        if ( ivrs_block->type == ivhd_type )
-            error = parse_ivhd_block(to_ivhd_block(ivrs_block));
-        else if ( is_ivmd_block (ivrs_block->type) )
-            error = parse_ivmd_block(to_ivmd_block(ivrs_block));
+        error = parse_ivrs_block(ivrs_block);
         length += ivrs_block->length;
     }
 
     /* Each IO-APIC must have been mentioned in the table. */
     for ( apic = 0; !error && iommu_intremap && apic < nr_ioapics; ++apic )
     {
-        unsigned int idx;
-
         if ( !nr_ioapic_entries[apic] )
             continue;
 
-        idx = ioapic_id_to_index(IO_APIC_ID(apic));
-        if ( idx == MAX_IO_APICS )
+        if ( !ioapic_sbdf[IO_APIC_ID(apic)].seg &&
+             /* SB IO-APIC is always on this device in AMD systems. */
+             ioapic_sbdf[IO_APIC_ID(apic)].bdf == PCI_BDF(0, 0x14, 0) )
+            sb_ioapic = 1;
+
+        if ( ioapic_sbdf[IO_APIC_ID(apic)].pin_2_idx )
+            continue;
+
+        if ( !test_bit(IO_APIC_ID(apic), ioapic_cmdline) )
         {
             printk(XENLOG_ERR "IVHD Error: no information for IO-APIC %#x\n",
                    IO_APIC_ID(apic));
@@ -1057,18 +1037,10 @@ static int __init parse_ivrs_table(struct acpi_table_header *table)
                 return -ENXIO;
         }
 
-        if ( !ioapic_sbdf[idx].seg &&
-             /* SB IO-APIC is always on this device in AMD systems. */
-             ioapic_sbdf[idx].bdf == PCI_BDF(0, 0x14, 0) )
-            sb_ioapic = 1;
-
-        if ( ioapic_sbdf[idx].pin_2_idx )
-            continue;
-
-        ioapic_sbdf[idx].pin_2_idx = xmalloc_array(
+        ioapic_sbdf[IO_APIC_ID(apic)].pin_2_idx = xmalloc_array(
             u16, nr_ioapic_entries[apic]);
-        if ( ioapic_sbdf[idx].pin_2_idx )
-            memset(ioapic_sbdf[idx].pin_2_idx, -1,
+        if ( ioapic_sbdf[IO_APIC_ID(apic)].pin_2_idx )
+            memset(ioapic_sbdf[IO_APIC_ID(apic)].pin_2_idx, -1,
                    nr_ioapic_entries[apic] * sizeof(*ioapic_sbdf->pin_2_idx));
         else
         {
@@ -1112,7 +1084,9 @@ static int __init detect_iommu_acpi(struct acpi_table_header *table)
         if ( table->length < (length + ivrs_block->length) )
             return -ENODEV;
         if ( ivrs_block->type == ACPI_IVRS_TYPE_HARDWARE &&
-             amd_iommu_detect_one_acpi(to_ivhd_block(ivrs_block)) != 0 )
+             amd_iommu_detect_one_acpi(
+                 container_of(ivrs_block, const struct acpi_ivrs_hardware,
+                              header)) != 0 )
             return -ENODEV;
         length += ivrs_block->length;
     }
@@ -1129,16 +1103,15 @@ static int __init get_last_bdf_ivhd(
 {
     const union acpi_ivhd_device *ivhd_device;
     u16 block_length, dev_length;
-    size_t hdr_size = get_ivhd_header_size(ivhd_block);
     int last_bdf = 0;
 
-    if ( ivhd_block->header.length < hdr_size )
+    if ( ivhd_block->header.length < sizeof(*ivhd_block) )
     {
         AMD_IOMMU_DEBUG("IVHD Error: Invalid Block Length!\n");
         return -ENODEV;
     }
 
-    block_length = hdr_size;
+    block_length = sizeof(*ivhd_block);
     while ( ivhd_block->header.length >=
             (block_length + sizeof(struct acpi_ivrs_de_header)) )
     {
@@ -1205,9 +1178,11 @@ static int __init get_last_bdf_acpi(struct acpi_table_header *table)
         ivrs_block = (struct acpi_ivrs_header *)((u8 *)table + length);
         if ( table->length < (length + ivrs_block->length) )
             return -ENODEV;
-        if ( ivrs_block->type == ivhd_type )
+        if ( ivrs_block->type == ACPI_IVRS_TYPE_HARDWARE )
         {
-            int ret = get_last_bdf_ivhd(to_ivhd_block(ivrs_block));
+            int ret = get_last_bdf_ivhd(
+                 container_of(ivrs_block, const struct acpi_ivrs_hardware,
+                              header));
 
             if ( ret < 0 )
                 return ret;
@@ -1233,51 +1208,8 @@ int __init amd_iommu_get_ivrs_dev_entries(void)
 
 int __init amd_iommu_update_ivrs_mapping_acpi(void)
 {
+    if ( unlikely(acpi_gbl_FADT.boot_flags & ACPI_FADT_NO_MSI) )
+        return -EPERM;
+
     return acpi_table_parse(ACPI_SIG_IVRS, parse_ivrs_table);
-}
-
-static int __init
-get_supported_ivhd_type(struct acpi_table_header *table)
-{
-    size_t length = sizeof(struct acpi_table_ivrs);
-    const struct acpi_ivrs_header *ivrs_block, *blk = NULL;
-
-    while ( table->length > (length + sizeof(*ivrs_block)) )
-    {
-        ivrs_block = (struct acpi_ivrs_header *)((u8 *)table + length);
-
-        if ( table->length < (length + ivrs_block->length) )
-        {
-            AMD_IOMMU_DEBUG("IVRS Error: "
-                            "Table Length Exceeded: %#x -> %#lx\n",
-                            table->length,
-                            (length + ivrs_block->length));
-            return -ENODEV;
-        }
-
-        if ( is_ivhd_block(ivrs_block->type) &&
-            (!blk || blk->type < ivrs_block->type) )
-        {
-            AMD_IOMMU_DEBUG("IVRS Block: Found type %#x flags %#x len %#x id %#x\n",
-                            ivrs_block->type, ivrs_block->flags,
-                            ivrs_block->length, ivrs_block->device_id);
-            blk = ivrs_block;
-        }
-        length += ivrs_block->length;
-    }
-
-    if ( !blk )
-    {
-        printk(XENLOG_ERR "Cannot find supported IVHD type.\n");
-        return -ENODEV;
-    }
-
-    AMD_IOMMU_DEBUG("Using IVHD type %#x\n", blk->type);
-
-    return blk->type;
-}
-
-int __init amd_iommu_get_supported_ivhd_type(void)
-{
-    return acpi_table_parse(ACPI_SIG_IVRS, get_supported_ivhd_type);
 }

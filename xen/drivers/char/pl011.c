@@ -17,10 +17,12 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/console.h>
 #include <xen/serial.h>
 #include <xen/init.h>
 #include <xen/irq.h>
+#include <asm/early_printk.h>
 #include <xen/device_tree.h>
 #include <xen/errno.h>
 #include <asm/device.h>
@@ -30,8 +32,8 @@
 #include <asm/io.h>
 
 static struct pl011 {
-    unsigned int data_bits, parity, stop_bits;
-    unsigned int irq;
+    unsigned int baud, clock_hz, data_bits, parity, stop_bits;
+    struct dt_irq irq;
     void __iomem *regs;
     /* UART with IRQ line: interrupt-driven I/O. */
     struct irqaction irqaction;
@@ -40,7 +42,6 @@ static struct pl011 {
     /* struct timer timer; */
     /* unsigned int timeout_ms; */
     /* bool_t probing, intr_works; */
-    bool sbsa;  /* ARM SBSA generic interface */
 } pl011_com = {0};
 
 /* These parity settings can be ORed directly into the LCR. */
@@ -50,21 +51,14 @@ static struct pl011 {
 #define PARITY_MARK  (PEN|SPS)
 #define PARITY_SPACE (PEN|EPS|SPS)
 
-/* SBSA v2.x document requires, all reads/writes must be 32-bit accesses */
 #define pl011_read(uart, off)           readl((uart)->regs + (off))
 #define pl011_write(uart, off,val)      writel((val), (uart)->regs + (off))
-
-static unsigned int pl011_intr_status(struct pl011 *uart)
-{
-    /* UARTMIS is not documented in SBSA v2.x, so use UARTRIS/UARTIMSC. */
-    return (pl011_read(uart, RIS) & pl011_read(uart, IMSC));
-}
 
 static void pl011_interrupt(int irq, void *data, struct cpu_user_regs *regs)
 {
     struct serial_port *port = data;
     struct pl011 *uart = port->uart;
-    unsigned int status = pl011_intr_status(uart);
+    unsigned int status = pl011_read(uart, MIS);
 
     if ( status )
     {
@@ -83,7 +77,7 @@ static void pl011_interrupt(int irq, void *data, struct cpu_user_regs *regs)
             if ( status & (TXI) )
                 serial_tx_interrupt(port, regs);
 
-            status = pl011_intr_status(uart);
+            status = pl011_read(uart, MIS);
         } while (status != 0);
     }
 }
@@ -91,22 +85,36 @@ static void pl011_interrupt(int irq, void *data, struct cpu_user_regs *regs)
 static void __init pl011_init_preirq(struct serial_port *port)
 {
     struct pl011 *uart = port->uart;
+    unsigned int divisor;
     unsigned int cr;
 
     /* No interrupts, please. */
     pl011_write(uart, IMSC, 0);
 
-    if ( !uart->sbsa )
-    {
-        /* Definitely no DMA */
-        pl011_write(uart, DMACR, 0x0);
+    /* Definitely no DMA */
+    pl011_write(uart, DMACR, 0x0);
 
-        /* This write must follow FBRD and IBRD writes. */
-        pl011_write(uart, LCR_H, (uart->data_bits - 5) << 5
-                                | FEN
-                                | ((uart->stop_bits - 1) << 3)
-                                | uart->parity);
+    /* Line control and baud-rate generator. */
+    if ( uart->baud != BAUD_AUTO )
+    {
+        /* Baud rate specified: program it into the divisor latch. */
+        divisor = (uart->clock_hz << 2) / uart->baud; /* clk << 6 / bd << 4 */
+        pl011_write(uart, FBRD, divisor & 0x3f);
+        pl011_write(uart, IBRD, divisor >> 6);
     }
+    else
+    {
+        /* Baud rate already set: read it out from the divisor latch. */
+        divisor = (pl011_read(uart, IBRD) << 6) | (pl011_read(uart, FBRD));
+        if (!divisor)
+            early_panic("pl011: No Baud rate configured\n");
+        uart->baud = (uart->clock_hz << 2) / divisor;
+    }
+    /* This write must follow FBRD and IBRD writes. */
+    pl011_write(uart, LCR_H, (uart->data_bits - 5) << 5
+                            | FEN
+                            | ((uart->stop_bits - 1) << 3)
+                            | uart->parity);
     /* Clear errors */
     pl011_write(uart, RSR, 0);
 
@@ -114,13 +122,10 @@ static void __init pl011_init_preirq(struct serial_port *port)
     pl011_write(uart, IMSC, 0);
     pl011_write(uart, ICR, ALLI);
 
-    if ( !uart->sbsa )
-    {
-        /* Enable the UART for RX and TX; keep RTS and DTR */
-        cr = pl011_read(uart, CR);
-        cr &= RTS | DTR;
-        pl011_write(uart, CR, cr | RXE | TXE | UARTEN);
-    }
+    /* Enable the UART for RX and TX; keep RTS and DTR */
+    cr = pl011_read(uart, CR);
+    cr &= RTS | DTR;
+    pl011_write(uart, CR, cr | RXE | TXE | UARTEN);
 }
 
 static void __init pl011_init_postirq(struct serial_port *port)
@@ -128,13 +133,13 @@ static void __init pl011_init_postirq(struct serial_port *port)
     struct pl011 *uart = port->uart;
     int rc;
 
-    if ( uart->irq > 0 )
+    if ( uart->irq.irq > 0 )
     {
         uart->irqaction.handler = pl011_interrupt;
         uart->irqaction.name    = "pl011";
         uart->irqaction.dev_id  = port;
-        if ( (rc = setup_irq(uart->irq, 0, &uart->irqaction)) != 0 )
-            printk("ERROR: Failed to allocate pl011 IRQ %d\n", uart->irq);
+        if ( (rc = setup_dt_irq(&uart->irq, &uart->irqaction)) != 0 )
+            printk("ERROR: Failed to allocate pl011 IRQ %d\n", uart->irq.irq);
     }
 
     /* Clear pending error interrupts */
@@ -182,8 +187,14 @@ static int pl011_getc(struct serial_port *port, char *pc)
 static int __init pl011_irq(struct serial_port *port)
 {
     struct pl011 *uart = port->uart;
+    return ((uart->irq.irq > 0) ? uart->irq.irq : -1);
+}
 
-    return ((uart->irq > 0) ? uart->irq : -1);
+static const struct dt_irq __init *pl011_dt_irq(struct serial_port *port)
+{
+    struct pl011 *uart = port->uart;
+
+    return &uart->irq;
 }
 
 static const struct vuart_info *pl011_vuart(struct serial_port *port)
@@ -191,20 +202,6 @@ static const struct vuart_info *pl011_vuart(struct serial_port *port)
     struct pl011 *uart = port->uart;
 
     return &uart->vuart;
-}
-
-static void pl011_tx_stop(struct serial_port *port)
-{
-    struct pl011 *uart = port->uart;
-
-    pl011_write(uart, IMSC, pl011_read(uart, IMSC) & ~(TXI));
-}
-
-static void pl011_tx_start(struct serial_port *port)
-{
-    struct pl011 *uart = port->uart;
-
-    pl011_write(uart, IMSC, pl011_read(uart, IMSC) | (TXI));
 }
 
 static struct uart_driver __read_mostly pl011_driver = {
@@ -217,27 +214,53 @@ static struct uart_driver __read_mostly pl011_driver = {
     .putc         = pl011_putc,
     .getc         = pl011_getc,
     .irq          = pl011_irq,
-    .start_tx     = pl011_tx_start,
-    .stop_tx      = pl011_tx_stop,
+    .dt_irq_get   = pl011_dt_irq,
     .vuart_info   = pl011_vuart,
 };
 
-static int __init pl011_uart_init(int irq, u64 addr, u64 size, bool sbsa)
+/* TODO: Parse UART config from the command line */
+static int __init pl011_uart_init(struct dt_device_node *dev,
+                                  const void *data)
 {
+    const char *config = data;
     struct pl011 *uart;
+    int res;
+    u64 addr, size;
+
+    if ( strcmp(config, "") )
+    {
+        early_printk("WARNING: UART configuration is not supported\n");
+    }
 
     uart = &pl011_com;
-    uart->irq       = irq;
+
+    uart->clock_hz  = 0x16e3600;
+    uart->baud      = BAUD_AUTO;
     uart->data_bits = 8;
     uart->parity    = PARITY_NONE;
     uart->stop_bits = 1;
-    uart->sbsa      = sbsa;
 
-    uart->regs = ioremap_nocache(addr, size);
+    res = dt_device_get_address(dev, 0, &addr, &size);
+    if ( res )
+    {
+        early_printk("pl011: Unable to retrieve the base"
+                     " address of the UART\n");
+        return res;
+    }
+
+    uart->regs = ioremap_attr(addr, size, PAGE_HYPERVISOR_NOCACHE);
     if ( !uart->regs )
     {
-        printk("pl011: Unable to map the UART memory\n");
+        early_printk("pl011: Unable to map the UART memory\n");
+
         return -ENOMEM;
+    }
+
+    res = dt_device_get_irq(dev, 0, &uart->irq);
+    if ( res )
+    {
+        early_printk("pl011: Unable to retrieve the IRQ\n");
+        return res;
     }
 
     uart->vuart.base_addr = addr;
@@ -249,112 +272,21 @@ static int __init pl011_uart_init(int irq, u64 addr, u64 size, bool sbsa)
     /* Register with generic serial driver. */
     serial_register_uart(SERHND_DTUART, &pl011_driver, uart);
 
-    return 0;
-}
-
-/* TODO: Parse UART config from the command line */
-static int __init pl011_dt_uart_init(struct dt_device_node *dev,
-                                     const void *data)
-{
-    const char *config = data;
-    int res;
-    u64 addr, size;
-
-    if ( strcmp(config, "") )
-    {
-        printk("WARNING: UART configuration is not supported\n");
-    }
-
-    res = dt_device_get_address(dev, 0, &addr, &size);
-    if ( res )
-    {
-        printk("pl011: Unable to retrieve the base"
-               " address of the UART\n");
-        return res;
-    }
-
-    res = platform_get_irq(dev, 0);
-    if ( res < 0 )
-    {
-        printk("pl011: Unable to retrieve the IRQ\n");
-        return -EINVAL;
-    }
-
-    res = pl011_uart_init(res, addr, size, false);
-    if ( res < 0 )
-    {
-        printk("pl011: Unable to initialize\n");
-        return res;
-    }
-
     dt_device_set_used_by(dev, DOMID_XEN);
 
     return 0;
 }
 
-static const struct dt_device_match pl011_dt_match[] __initconst =
+static const char * const pl011_dt_compat[] __initconst =
 {
-    DT_MATCH_COMPATIBLE("arm,pl011"),
-    { /* sentinel */ },
+    "arm,pl011",
+    NULL
 };
 
 DT_DEVICE_START(pl011, "PL011 UART", DEVICE_SERIAL)
-        .dt_match = pl011_dt_match,
-        .init = pl011_dt_uart_init,
+        .compatible = pl011_dt_compat,
+        .init = pl011_uart_init,
 DT_DEVICE_END
-
-#ifdef CONFIG_ACPI
-#include <xen/acpi.h>
-
-static int __init pl011_acpi_uart_init(const void *data)
-{
-    acpi_status status;
-    struct acpi_table_spcr *spcr = NULL;
-    int res;
-    bool sbsa;
-
-    status = acpi_get_table(ACPI_SIG_SPCR, 0,
-                            (struct acpi_table_header **)&spcr);
-
-    if ( ACPI_FAILURE(status) )
-    {
-        printk("pl011: Failed to get SPCR table\n");
-        return -EINVAL;
-    }
-
-    sbsa = (spcr->interface_type == ACPI_DBG2_SBSA ||
-            spcr->interface_type == ACPI_DBG2_SBSA_32);
-
-    /* trigger/polarity information is not available in spcr */
-    irq_set_type(spcr->interrupt, IRQ_TYPE_LEVEL_HIGH);
-
-    res = pl011_uart_init(spcr->interrupt, spcr->serial_port.address,
-                          PAGE_SIZE, sbsa);
-    if ( res < 0 )
-    {
-        printk("pl011: Unable to initialize\n");
-        return res;
-    }
-
-    return 0;
-}
-
-ACPI_DEVICE_START(apl011, "PL011 UART", DEVICE_SERIAL)
-        .class_type = ACPI_DBG2_PL011,
-        .init = pl011_acpi_uart_init,
-ACPI_DEVICE_END
-
-ACPI_DEVICE_START(asbsa_uart, "SBSA UART", DEVICE_SERIAL)
-    .class_type = ACPI_DBG2_SBSA,
-    .init = pl011_acpi_uart_init,
-ACPI_DEVICE_END
-
-ACPI_DEVICE_START(asbsa32_uart, "SBSA32 UART", DEVICE_SERIAL)
-    .class_type = ACPI_DBG2_SBSA_32,
-    .init = pl011_acpi_uart_init,
-ACPI_DEVICE_END
-
-#endif
 
 /*
  * Local variables:

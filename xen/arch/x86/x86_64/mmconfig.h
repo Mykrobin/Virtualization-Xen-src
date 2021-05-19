@@ -11,11 +11,13 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  * Author: Allen Kay <allen.m.kay@intel.com> - adapted from linux
  */
 
+#define PCI_VENDOR_ID_INTEL        0x8086
 #define PCI_DEVICE_ID_INTEL_E7520_MCH    0x3590
 #define PCI_DEVICE_ID_INTEL_82945G_HB    0x2770
 
@@ -27,7 +29,10 @@
 #define PCI_PROBE_MASK        0x000f
 #define PCI_PROBE_NOEARLY    0x0010
 
+#define PCI_VENDOR_ID_AMD             0x1022
 #define PCI_CHECK_ENABLE_AMD_MMCONF     0x20000
+
+#define PCI_VENDOR_ID_NVIDIA       0x10de
 
 extern unsigned int pci_probe;
 
@@ -73,6 +78,10 @@ static inline void mmio_config_writel(void __iomem *pos, u32 val)
 {
     asm volatile("movl %%eax,(%1)" :: "a" (val), "r" (pos) : "memory");
 }
+
+/* external variable defines */
+extern int pci_mmcfg_config_num;
+extern struct acpi_mcfg_allocation *pci_mmcfg_config;
 
 /* function prototypes */
 int acpi_parse_mcfg(struct acpi_table_header *header);

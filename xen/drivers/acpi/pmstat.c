@@ -14,13 +14,15 @@
 # more details.
 #
 # You should have received a copy of the GNU General Public License along with
-# this program; If not, see <http://www.gnu.org/licenses/>.
+# this program; if not, write to the Free Software Foundation, Inc., 59 
+# Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #
 # The full GNU General Public License is included in this distribution in the
 # file called LICENSE.
 #
 *****************************************************************************/
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/sched.h>
@@ -446,6 +448,18 @@ int do_pm_op(struct xen_sysctl_pm_op *op)
         sched_smt_power_savings = !!op->u.set_sched_opt_smt;
         op->u.set_sched_opt_smt = saved_value;
 
+        break;
+    }
+
+    case XEN_SYSCTL_pm_op_set_vcpu_migration_delay:
+    {
+        set_vcpu_migration_delay(op->u.set_vcpu_migration_delay);
+        break;
+    }
+
+    case XEN_SYSCTL_pm_op_get_vcpu_migration_delay:
+    {
+        op->u.get_vcpu_migration_delay = get_vcpu_migration_delay();
         break;
     }
 

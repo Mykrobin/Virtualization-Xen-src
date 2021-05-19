@@ -21,7 +21,6 @@ my $xen_path = "./";
 my $email = 1;
 my $email_usename = 1;
 my $email_maintainer = 1;
-my $email_reviewer = 1;
 my $email_list = 1;
 my $email_subscriber_list = 0;
 my $email_git_penguin_chiefs = 0;
@@ -36,7 +35,7 @@ my $email_git_min_percent = 5;
 my $email_git_since = "1-year-ago";
 my $email_hg_since = "-365";
 my $interactive = 0;
-my $email_remove_duplicates = 0;
+my $email_remove_duplicates = 1;
 my $email_use_mailmap = 1;
 my $email_drop_the_rest_supporter_if_supporter_found = 1;
 my $output_multiline = 1;
@@ -200,7 +199,6 @@ if (!GetOptions(
 		'mailmap!' => \$email_use_mailmap,
 		'drop_the_rest_supporter!' => \$email_drop_the_rest_supporter_if_supporter_found,
 		'm!' => \$email_maintainer,
-		'r!' => \$email_reviewer,
 		'n!' => \$email_usename,
 		'l!' => \$email_list,
 		's!' => \$email_subscriber_list,
@@ -259,8 +257,7 @@ if ($sections) {
 }
 
 if ($email &&
-    ($email_maintainer + $email_reviewer +
-     $email_list + $email_subscriber_list +
+    ($email_maintainer + $email_list + $email_subscriber_list +
      $email_git + $email_git_penguin_chiefs + $email_git_blame) == 0) {
     die "$P: Please select at least 1 email option\n";
 }
@@ -280,19 +277,12 @@ open (my $maint, '<', "${xen_path}MAINTAINERS")
 while (<$maint>) {
     my $line = $_;
 
-    if ($line =~ m/^([A-Z]):\s*(.*)/) {
+    if ($line =~ m/^(\C):\s*(.*)/) {
 	my $type = $1;
 	my $value = $2;
 
 	##Filename pattern matching
 	if ($type eq "F" || $type eq "X") {
-	    # Bash brace expansion, not nested
-	    # match {,*,*} and transform ',' to '|' one by one.
-	    # While there is more than one ',', convert one to '|'.
-	    while ($value =~ s/([^\\])\{(|[^},]*[^,\\]),((|[^},]*[^,\\]),(|[^}]*[^\\]))\}/$1\{$2|$3\}/g) {
-	    }
-	    $value =~ s/([^\\])\{(|[^},]*[^,\\]),(|[^}]*[^\\])\}/$1($2|$3)/g;
-
 	    $value =~ s@\.@\\\.@g;       ##Convert . to \.
 	    $value =~ s/\*/\.\*/g;       ##Convert * to .*
 	    $value =~ s/\?/\./g;         ##Convert ? to .
@@ -447,12 +437,10 @@ foreach my $file (@ARGV) {
 	    my $patch_line = $_;
 	    if (m/^\+\+\+\s+(\S+)/ or m/^---\s+(\S+)/) {
 		my $filename = $1;
-		if ($1 ne "/dev/null") { #Ignore the no-file placeholder
-		    $filename =~ s@^[^/]*/@@;
-		    $filename =~ s@\n@@;
-		    $lastfile = $filename;
-		    push(@files, $filename);
-		}
+		$filename =~ s@^[^/]*/@@;
+		$filename =~ s@\n@@;
+		$lastfile = $filename;
+		push(@files, $filename);
 		$patch_prefix = "^[+-].*";	#Now parsing the actual patch
 	    } elsif (m/^\@\@ -(\d+),(\d+)/) {
 		if ($email_git_blame) {
@@ -524,7 +512,7 @@ sub range_is_maintained {
 
     for (my $i = $start; $i < $end; $i++) {
 	my $line = $typevalue[$i];
-	if ($line =~ m/^([A-Z]):\s*(.*)/) {
+	if ($line =~ m/^(\C):\s*(.*)/) {
 	    my $type = $1;
 	    my $value = $2;
 	    if ($type eq 'S') {
@@ -542,7 +530,7 @@ sub range_has_maintainer {
 
     for (my $i = $start; $i < $end; $i++) {
 	my $line = $typevalue[$i];
-	if ($line =~ m/^([A-Z]):\s*(.*)/) {
+	if ($line =~ m/^(\C):\s*(.*)/) {
 	    my $type = $1;
 	    my $value = $2;
 	    if ($type eq 'M') {
@@ -576,15 +564,11 @@ sub get_maintainers {
     # Find responsible parties
 
     my %exact_pattern_match_hash = ();
-    # By default "THE REST" will be suppressed.
-    my $suppress_the_rest = 1;
 
     foreach my $file (@files) {
 
 	my %hash;
 	my $tvi = find_first_section();
-	# Unless stated otherwise, a file is maintained by "THE REST"
-	my $file_maintained_by_the_rest = 1;
 	while ($tvi < @typevalue) {
 	    my $start = find_starting_index($tvi);
 	    my $end = find_ending_index($tvi);
@@ -595,7 +579,7 @@ sub get_maintainers {
 
 	    for ($i = $start; $i < $end; $i++) {
 		my $line = $typevalue[$i];
-		if ($line =~ m/^([A-Z]):\s*(.*)/) {
+		if ($line =~ m/^(\C):\s*(.*)/) {
 		    my $type = $1;
 		    my $value = $2;
 		    if ($type eq 'X') {
@@ -610,7 +594,7 @@ sub get_maintainers {
 	    if (!$exclude) {
 		for ($i = $start; $i < $end; $i++) {
 		    my $line = $typevalue[$i];
-		    if ($line =~ m/^([A-Z]):\s*(.*)/) {
+		    if ($line =~ m/^(\C):\s*(.*)/) {
 			my $type = $1;
 			my $value = $2;
 			if ($type eq 'F') {
@@ -642,14 +626,6 @@ sub get_maintainers {
 
 	foreach my $line (sort {$hash{$b} <=> $hash{$a}} keys %hash) {
 	    add_categories($line);
-	    my $role = get_maintainer_role($line);
-
-	    # Check the role, if it is not "THE REST" then the file is not
-	    # only maintained by "THE REST".
-	    if ( get_maintainer_role($line) ne "supporter:THE REST" ) {
-		    $file_maintained_by_the_rest = 0;
-	    }
-
 	    if ($sections) {
 		my $i;
 		my $start = find_starting_index($line);
@@ -661,12 +637,6 @@ sub get_maintainers {
 			$line =~ s/([^\\])\.$/$1\?/g;	##Convert . back to ?
 			$line =~ s/\\\./\./g;       	##Convert \. to .
 			$line =~ s/\.\*/\*/g;       	##Convert .* to *
-			## Convert (|) back to {,}
-			# match (|*|*) and transform '|' to ',' one by one
-			# While there is more than one '|', convert one to ','.
-			while ($line =~ s/([^\\])\((|[^)|]*[^|\\])\|((|[^)|]*[^|\\])\|(|[^)]*[^\\]))\)/$1($2,$3)/g) {
-			}
-			$line =~ s/([^\\])\((|[^)|]*[^|\\])\|(|[^)]*[^\\])\)/$1\{$2,$3\}/g;
 		    }
 		    $line =~ s/^([A-Z]):/$1:\t/g;
 		    print("$line\n");
@@ -674,9 +644,6 @@ sub get_maintainers {
 		print("\n");
 	    }
 	}
-	# If the file is only maintained by "THE REST", then CC all of them on
-	# the patch.
-	$suppress_the_rest = 0 if $file_maintained_by_the_rest;
     }
 
     if ($keywords) {
@@ -686,8 +653,7 @@ sub get_maintainers {
 	}
     }
 
-    if ($email_drop_the_rest_supporter_if_supporter_found &&
-	$suppress_the_rest && $#email_to > 0) {
+    if ($email_drop_the_rest_supporter_if_supporter_found && $#email_to > 0) {
         my @email_new;
         my $do_replace = 0;
         foreach my $email (@email_to) {
@@ -794,7 +760,6 @@ MAINTAINER field selection options:
     --hg-since => hg history to use (default: $email_hg_since)
     --interactive => display a menu (mostly useful if used with the --git option)
     --m => include maintainer(s) if any
-    --r => include reviewer(s) if any
     --n => include name 'Full Name <addr\@domain.tld>'
     --l => include list(s) if any
     --s => include subscriber only list(s) if any
@@ -821,7 +786,7 @@ Other options:
   --help => show this help information
 
 Default options:
-  [--email --nogit --git-fallback --m --r --n --l --multiline -pattern-depth=0
+  [--email --nogit --git-fallback --m --n --l --multiline -pattern-depth=0
    --remove-duplicates --rolestats]
 
 Notes:
@@ -932,7 +897,7 @@ sub find_first_section {
 
     while ($index < @typevalue) {
 	my $tv = $typevalue[$index];
-	if (($tv =~ m/^([A-Z]):\s*(.*)/)) {
+	if (($tv =~ m/^(\C):\s*(.*)/)) {
 	    last;
 	}
 	$index++;
@@ -946,7 +911,7 @@ sub find_starting_index {
 
     while ($index > 0) {
 	my $tv = $typevalue[$index];
-	if (!($tv =~ m/^([A-Z]):\s*(.*)/)) {
+	if (!($tv =~ m/^(\C):\s*(.*)/)) {
 	    last;
 	}
 	$index--;
@@ -960,7 +925,7 @@ sub find_ending_index {
 
     while ($index < @typevalue) {
 	my $tv = $typevalue[$index];
-	if (!($tv =~ m/^([A-Z]):\s*(.*)/)) {
+	if (!($tv =~ m/^(\C):\s*(.*)/)) {
 	    last;
 	}
 	$index++;
@@ -986,7 +951,7 @@ sub get_maintainer_role {
 
     for ($i = $start + 1; $i < $end; $i++) {
 	my $tv = $typevalue[$i];
-	if ($tv =~ m/^([A-Z]):\s*(.*)/) {
+	if ($tv =~ m/^(\C):\s*(.*)/) {
 	    my $ptype = $1;
 	    my $pvalue = $2;
 	    if ($ptype eq "S") {
@@ -1045,7 +1010,7 @@ sub add_categories {
 
     for ($i = $start + 1; $i < $end; $i++) {
 	my $tv = $typevalue[$i];
-	if ($tv =~ m/^([A-Z]):\s*(.*)/) {
+	if ($tv =~ m/^(\C):\s*(.*)/) {
 	    my $ptype = $1;
 	    my $pvalue = $2;
 	    if ($ptype eq "L") {
@@ -1084,14 +1049,20 @@ sub add_categories {
 		}
 	    } elsif ($ptype eq "M") {
 		my ($name, $address) = parse_email($pvalue);
+		if ($name eq "") {
+		    if ($i > 0) {
+			my $tv = $typevalue[$i - 1];
+			if ($tv =~ m/^(\C):\s*(.*)/) {
+			    if ($1 eq "P") {
+				$name = $2;
+				$pvalue = format_email($name, $address, $email_usename);
+			    }
+			}
+		    }
+		}
 		if ($email_maintainer) {
 		    my $role = get_maintainer_role($i);
 		    push_email_addresses($pvalue, $role);
-		}
-	    } elsif ($ptype eq "R") {
-		my ($name, $address) = parse_email($pvalue);
-		if ($email_reviewer) {
-		    push_email_addresses($pvalue, 'reviewer');
 		}
 	    } elsif ($ptype eq "T") {
 		push(@scm, $pvalue);

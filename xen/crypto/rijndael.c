@@ -27,6 +27,7 @@
  */
 
 /* start for Xen */
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/lib.h>
@@ -379,8 +380,6 @@ static const u32 Te4[256] = {
     0x41414141U, 0x99999999U, 0x2d2d2d2dU, 0x0f0f0f0fU,
     0xb0b0b0b0U, 0x54545454U, 0xbbbbbbbbU, 0x16161616U,
 };
-
-#ifdef NEED_RIJNDAEL_DECRYPT
 static const u32 Td0[256] = {
     0x51f4a750U, 0x7e416553U, 0x1a17a4c3U, 0x3a275e96U,
     0x3bab6bcbU, 0x1f9d45f1U, 0xacfa58abU, 0x4be30393U,
@@ -711,7 +710,6 @@ static const u32 Td4[256] = {
     0xe1e1e1e1U, 0x69696969U, 0x14141414U, 0x63636363U,
     0x55555555U, 0x21212121U, 0x0c0c0c0cU, 0x7d7d7d7dU,
 };
-#endif
 static const u32 rcon[] = {
 	0x01000000, 0x02000000, 0x04000000, 0x08000000,
 	0x10000000, 0x20000000, 0x40000000, 0x80000000,
@@ -1236,7 +1234,7 @@ rijndaelDecrypt(const u32 rk[/*4*(Nr + 1)*/], int Nr, const u8 ct[16],
 
 /* setup key context for encryption only */
 int
-rijndael_set_key_enc_only(rijndael_ctx *ctx, const unsigned char *key, int bits)
+rijndael_set_key_enc_only(rijndael_ctx *ctx, const u_char *key, int bits)
 {
 	int rounds;
 
@@ -1252,7 +1250,7 @@ rijndael_set_key_enc_only(rijndael_ctx *ctx, const unsigned char *key, int bits)
 
 /* setup key context for both encryption and decryption */
 int
-rijndael_set_key(rijndael_ctx *ctx, const unsigned char *key, int bits)
+rijndael_set_key(rijndael_ctx *ctx, const u_char *key, int bits)
 {
 	int rounds;
 
@@ -1269,13 +1267,13 @@ rijndael_set_key(rijndael_ctx *ctx, const unsigned char *key, int bits)
 }
 
 void
-rijndael_decrypt(rijndael_ctx *ctx, const unsigned char *src, unsigned char *dst)
+rijndael_decrypt(rijndael_ctx *ctx, const u_char *src, u_char *dst)
 {
 	rijndaelDecrypt(ctx->dk, ctx->Nr, src, dst);
 }
 
 void
-rijndael_encrypt(rijndael_ctx *ctx, const unsigned char *src, unsigned char *dst)
+rijndael_encrypt(rijndael_ctx *ctx, const u_char *src, u_char *dst)
 {
 	rijndaelEncrypt(ctx->ek, ctx->Nr, src, dst);
 }

@@ -1,5 +1,6 @@
 /* Trigger a page-in in a separate thread-of-execution to avoid deadlock */
 #include <pthread.h>
+#include <xc_private.h>
 #include "xenpaging.h"
 
 struct page_in_args {
@@ -62,7 +63,7 @@ void page_in_trigger(void)
 
 void create_page_in_thread(struct xenpaging *paging)
 {
-    page_in_args.dom = paging->vm_event.domain_id;
+    page_in_args.dom = paging->mem_event.domain_id;
     page_in_args.pagein_queue = paging->pagein_queue;
     page_in_args.xch = paging->xc_handle;
     if (pthread_create(&page_in_thread, NULL, page_in, &page_in_args) == 0)

@@ -17,19 +17,21 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/console.h>
 #include <xen/errno.h>
 #include <xen/serial.h>
 #include <xen/init.h>
 #include <xen/irq.h>
 #include <xen/mm.h>
+#include <asm/early_printk.h>
 #include <asm/device.h>
 #include <asm/exynos4210-uart.h>
 #include <asm/io.h>
 
 static struct exynos4210_uart {
     unsigned int baud, clock_hz, data_bits, parity, stop_bits;
-    unsigned int irq;
+    struct dt_irq irq;
     void *regs;
     struct irqaction irqaction;
     struct vuart_info vuart;
@@ -196,9 +198,9 @@ static void __init exynos4210_uart_init_postirq(struct serial_port *port)
     uart->irqaction.name    = "exynos4210_uart";
     uart->irqaction.dev_id  = port;
 
-    if ( (rc = setup_irq(uart->irq, 0, &uart->irqaction)) != 0 )
+    if ( (rc = setup_dt_irq(&uart->irq, &uart->irqaction)) != 0 )
         dprintk(XENLOG_ERR, "Failed to allocated exynos4210_uart IRQ %d\n",
-                uart->irq);
+                uart->irq.irq);
 
     /* Unmask interrupts */
     exynos4210_write(uart, UINTM, ~UINTM_ALLI);
@@ -271,7 +273,14 @@ static int __init exynos4210_uart_irq(struct serial_port *port)
 {
     struct exynos4210_uart *uart = port->uart;
 
-    return uart->irq;
+    return uart->irq.irq;
+}
+
+static const struct dt_irq __init *exynos4210_uart_dt_irq(struct serial_port *port)
+{
+    struct exynos4210_uart *uart = port->uart;
+
+    return &uart->irq;
 }
 
 static const struct vuart_info *exynos4210_vuart_info(struct serial_port *port)
@@ -291,6 +300,7 @@ static struct uart_driver __read_mostly exynos4210_uart_driver = {
     .putc         = exynos4210_uart_putc,
     .getc         = exynos4210_uart_getc,
     .irq          = exynos4210_uart_irq,
+    .dt_irq_get   = exynos4210_uart_dt_irq,
     .vuart_info   = exynos4210_vuart_info,
 };
 
@@ -304,7 +314,9 @@ static int __init exynos4210_uart_init(struct dt_device_node *dev,
     u64 addr, size;
 
     if ( strcmp(config, "") )
-        printk("WARNING: UART configuration is not supported\n");
+    {
+        early_printk("WARNING: UART configuration is not supported\n");
+    }
 
     uart = &exynos4210_com;
 
@@ -317,24 +329,22 @@ static int __init exynos4210_uart_init(struct dt_device_node *dev,
     res = dt_device_get_address(dev, 0, &addr, &size);
     if ( res )
     {
-        printk("exynos4210: Unable to retrieve the base"
-               " address of the UART\n");
+        early_printk("exynos4210: Unable to retrieve the base"
+                     " address of the UART\n");
         return res;
     }
-
-    res = platform_get_irq(dev, 0);
-    if ( res < 0 )
-    {
-        printk("exynos4210: Unable to retrieve the IRQ\n");
-        return -EINVAL;
-    }
-    uart->irq = res;
 
     uart->regs = ioremap_nocache(addr, size);
     if ( !uart->regs )
     {
-        printk("exynos4210: Unable to map the UART memory\n");
+        early_printk("exynos4210: Unable to map the UART memory\n");
         return -ENOMEM;
+    }
+    res = dt_device_get_irq(dev, 0, &uart->irq);
+    if ( res )
+    {
+        early_printk("exynos4210: Unable to retrieve the IRQ\n");
+        return res;
     }
 
     uart->vuart.base_addr = addr;
@@ -351,14 +361,14 @@ static int __init exynos4210_uart_init(struct dt_device_node *dev,
     return 0;
 }
 
-static const struct dt_device_match exynos4210_dt_match[] __initconst =
+static const char * const exynos4210_dt_compat[] __initconst =
 {
-    DT_MATCH_COMPATIBLE("samsung,exynos4210-uart"),
-    { /* sentinel */ },
+    "samsung,exynos4210-uart",
+    NULL
 };
 
 DT_DEVICE_START(exynos4210, "Exynos 4210 UART", DEVICE_SERIAL)
-        .dt_match = exynos4210_dt_match,
+        .compatible = exynos4210_dt_compat,
         .init = exynos4210_uart_init,
 DT_DEVICE_END
 

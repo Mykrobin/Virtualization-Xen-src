@@ -13,7 +13,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  */
 
@@ -22,6 +23,23 @@
 
 #include <xen/types.h>
 #include <xen/bitmap.h>
+
+#define SVM_REG_EAX (0) 
+#define SVM_REG_ECX (1) 
+#define SVM_REG_EDX (2) 
+#define SVM_REG_EBX (3) 
+#define SVM_REG_ESP (4) 
+#define SVM_REG_EBP (5) 
+#define SVM_REG_ESI (6) 
+#define SVM_REG_EDI (7) 
+#define SVM_REG_R8  (8)
+#define SVM_REG_R9  (9)
+#define SVM_REG_R10 (10)
+#define SVM_REG_R11 (11)
+#define SVM_REG_R12 (12)
+#define SVM_REG_R13 (13)
+#define SVM_REG_R14 (14)
+#define SVM_REG_R15 (15)
 
 #define svm_vmload(x)     svm_vmload_pa(__pa(x))
 #define svm_vmsave(x)     svm_vmsave_pa(__pa(x))
@@ -51,7 +69,7 @@ static inline void svm_invlpga(unsigned long vaddr, uint32_t asid)
 
 unsigned long *svm_msrbit(unsigned long *msr_bitmap, uint32_t msr);
 void __update_guest_eip(struct cpu_user_regs *regs, unsigned int inst_len);
-void svm_update_guest_cr(struct vcpu *, unsigned int cr, unsigned int flags);
+void svm_update_guest_cr(struct vcpu *, unsigned int cr);
 
 extern u32 svm_feature_flags;
 
@@ -64,9 +82,6 @@ extern u32 svm_feature_flags;
 #define SVM_FEATURE_FLUSHBYASID    6 /* TLB flush by ASID support */
 #define SVM_FEATURE_DECODEASSISTS  7 /* Decode assists support */
 #define SVM_FEATURE_PAUSEFILTER   10 /* Pause intercept filter support */
-#define SVM_FEATURE_PAUSETHRESH   12 /* Pause intercept filter support */
-#define SVM_FEATURE_VLOADSAVE     15 /* virtual vmload/vmsave */
-#define SVM_FEATURE_VGIF          16 /* Virtual GIF */
 
 #define cpu_has_svm_feature(f) test_bit(f, &svm_feature_flags)
 #define cpu_has_svm_npt       cpu_has_svm_feature(SVM_FEATURE_NPT)
@@ -75,26 +90,19 @@ extern u32 svm_feature_flags;
 #define cpu_has_svm_nrips     cpu_has_svm_feature(SVM_FEATURE_NRIPS)
 #define cpu_has_svm_cleanbits cpu_has_svm_feature(SVM_FEATURE_VMCBCLEAN)
 #define cpu_has_svm_decode    cpu_has_svm_feature(SVM_FEATURE_DECODEASSISTS)
-#define cpu_has_svm_vgif      cpu_has_svm_feature(SVM_FEATURE_VGIF)
 #define cpu_has_pause_filter  cpu_has_svm_feature(SVM_FEATURE_PAUSEFILTER)
-#define cpu_has_pause_thresh  cpu_has_svm_feature(SVM_FEATURE_PAUSETHRESH)
 #define cpu_has_tsc_ratio     cpu_has_svm_feature(SVM_FEATURE_TSCRATEMSR)
-#define cpu_has_svm_vloadsave cpu_has_svm_feature(SVM_FEATURE_VLOADSAVE)
 
-#define SVM_PAUSEFILTER_INIT    4000
-#define SVM_PAUSETHRESH_INIT    1000
+#define SVM_PAUSEFILTER_INIT    3000
 
 /* TSC rate */
 #define DEFAULT_TSC_RATIO       0x0000000100000000ULL
 #define TSC_RATIO_RSVD_BITS     0xffffff0000000000ULL
+#define TSC_RATIO(g_khz, h_khz) ( (((u64)(g_khz)<<32)/(u64)(h_khz)) & \
+                                  ~TSC_RATIO_RSVD_BITS )
+#define vcpu_tsc_ratio(v)       TSC_RATIO((v)->domain->arch.tsc_khz, cpu_khz)
 
 extern void svm_host_osvw_reset(void);
 extern void svm_host_osvw_init(void);
-
-/* EXITINFO1 fields on NPT faults */
-#define _NPT_PFEC_with_gla     32
-#define NPT_PFEC_with_gla      (1UL<<_NPT_PFEC_with_gla)
-#define _NPT_PFEC_in_gpt       33
-#define NPT_PFEC_in_gpt        (1UL<<_NPT_PFEC_in_gpt)
 
 #endif /* __ASM_X86_HVM_SVM_H__ */

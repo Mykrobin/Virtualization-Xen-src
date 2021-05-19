@@ -9,8 +9,6 @@
 #ifndef _ARM_BITOPS_H
 #define _ARM_BITOPS_H
 
-#include <asm/asm_defns.h>
-
 /*
  * Non-atomic bit manipulation.
  *
@@ -24,7 +22,6 @@
 #define BIT(nr)                 (1UL << (nr))
 #define BIT_MASK(nr)            (1UL << ((nr) % BITS_PER_WORD))
 #define BIT_WORD(nr)            ((nr) / BITS_PER_WORD)
-#define BIT_ULL(nr)             (1ULL << (nr))
 #define BITS_PER_BYTE           8
 
 #define ADDR (*(volatile int *) addr)
@@ -37,44 +34,6 @@
 #else
 # error "unknown ARM variant"
 #endif
-
-/*
- * Atomic bitops
- *
- * The helpers below *should* only be used on memory shared between
- * trusted threads or we know the memory cannot be accessed by another
- * thread.
- */
-
-void set_bit(int nr, volatile void *p);
-void clear_bit(int nr, volatile void *p);
-void change_bit(int nr, volatile void *p);
-int test_and_set_bit(int nr, volatile void *p);
-int test_and_clear_bit(int nr, volatile void *p);
-int test_and_change_bit(int nr, volatile void *p);
-
-void clear_mask16(uint16_t mask, volatile void *p);
-
-/*
- * The helpers below may fail to update the memory if the action takes
- * too long.
- *
- * @max_try: Maximum number of iterations
- *
- * The helpers will return true when the update has succeeded (i.e no
- * timeout) and false if the update has failed.
- */
-bool set_bit_timeout(int nr, volatile void *p, unsigned int max_try);
-bool clear_bit_timeout(int nr, volatile void *p, unsigned int max_try);
-bool change_bit_timeout(int nr, volatile void *p, unsigned int max_try);
-bool test_and_set_bit_timeout(int nr, volatile void *p,
-                              int *oldbit, unsigned int max_try);
-bool test_and_clear_bit_timeout(int nr, volatile void *p,
-                                int *oldbit, unsigned int max_try);
-bool test_and_change_bit_timeout(int nr, volatile void *p,
-                                 int *oldbit, unsigned int max_try);
-bool clear_mask16_timeout(uint16_t mask, volatile void *p,
-                          unsigned int max_try);
 
 /**
  * __test_and_set_bit - Set a bit and return its old value
@@ -140,25 +99,54 @@ static inline int test_bit(int nr, const volatile void *addr)
         return 1UL & (p[BIT_WORD(nr)] >> (nr & (BITS_PER_WORD-1)));
 }
 
+static inline int constant_fls(int x)
+{
+        int r = 32;
+
+        if (!x)
+                return 0;
+        if (!(x & 0xffff0000u)) {
+                x <<= 16;
+                r -= 16;
+        }
+        if (!(x & 0xff000000u)) {
+                x <<= 8;
+                r -= 8;
+        }
+        if (!(x & 0xf0000000u)) {
+                x <<= 4;
+                r -= 4;
+        }
+        if (!(x & 0xc0000000u)) {
+                x <<= 2;
+                r -= 2;
+        }
+        if (!(x & 0x80000000u)) {
+                x <<= 1;
+                r -= 1;
+        }
+        return r;
+}
+
 /*
  * On ARMv5 and above those functions can be implemented around
  * the clz instruction for much better code efficiency.
  */
 
-static inline int fls(unsigned int x)
+static inline int fls(int x)
 {
         int ret;
 
         if (__builtin_constant_p(x))
-               return generic_fls(x);
+               return constant_fls(x);
 
-        asm("clz\t%"__OP32"0, %"__OP32"1" : "=r" (ret) : "r" (x));
-        return 32 - ret;
+        asm("clz\t%0, %1" : "=r" (ret) : "r" (x));
+        ret = BITS_PER_LONG - ret;
+        return ret;
 }
 
 
-#define ffs(x) ({ unsigned int __t = (x); fls(__t & -__t); })
-#define ffsl(x) ({ unsigned long __t = (x); flsl(__t & -__t); })
+#define ffs(x) ({ unsigned long __t = (x); fls(__t & -__t); })
 
 /**
  * find_first_set_bit - find the first set bit in @word
@@ -169,7 +157,7 @@ static inline int fls(unsigned int x)
  */
 static inline unsigned int find_first_set_bit(unsigned long word)
 {
-        return ffsl(word) - 1;
+        return ffs(word) - 1;
 }
 
 /**

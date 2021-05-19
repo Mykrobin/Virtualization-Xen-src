@@ -19,7 +19,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #include "xc_private.h"
@@ -31,7 +32,7 @@ static int tbuf_enable(xc_interface *xch, int enable)
 
     sysctl.cmd = XEN_SYSCTL_tbuf_op;
     sysctl.interface_version = XEN_SYSCTL_INTERFACE_VERSION;
-    if ( enable )
+    if (enable)
         sysctl.u.tbuf_op.cmd  = XEN_SYSCTL_TBUFOP_enable;
     else
         sysctl.u.tbuf_op.cmd  = XEN_SYSCTL_TBUFOP_disable;
@@ -70,13 +71,11 @@ int xc_tbuf_get_size(xc_interface *xch, unsigned long *size)
                     sysctl.u.tbuf_op.buffer_mfn);
 
     if ( t_info == NULL || t_info->tbuf_size == 0 )
-        rc = -1;
-    else
-	*size = t_info->tbuf_size;
+        return -1;
 
-    xenforeignmemory_unmap(xch->fmem, t_info, sysctl.u.tbuf_op.size);
+    *size = t_info->tbuf_size;
 
-    return rc;
+    return 0;
 }
 
 int xc_tbuf_enable(xc_interface *xch, unsigned long pages, unsigned long *mfn,
@@ -114,30 +113,15 @@ int xc_tbuf_disable(xc_interface *xch)
     return tbuf_enable(xch, 0);
 }
 
-int xc_tbuf_set_cpu_mask(xc_interface *xch, xc_cpumap_t mask)
+int xc_tbuf_set_cpu_mask(xc_interface *xch, uint32_t mask)
 {
     DECLARE_SYSCTL;
-    DECLARE_HYPERCALL_BOUNCE(mask, 0, XC_HYPERCALL_BUFFER_BOUNCE_IN);
+    DECLARE_HYPERCALL_BUFFER(uint8_t, bytemap);
     int ret = -1;
-    int bits, cpusize;
+    uint64_t mask64 = mask;
 
-    cpusize = xc_get_cpumap_size(xch);
-    if (cpusize <= 0)
-    {
-        PERROR("Could not get number of cpus");
-        return -1;
-    }
-
-    HYPERCALL_BOUNCE_SET_SIZE(mask, cpusize);
-
-    bits = xc_get_max_cpus(xch);
-    if (bits <= 0)
-    {
-        PERROR("Could not get number of bits");
-        return -1;
-    }
-
-    if ( xc_hypercall_bounce_pre(xch, mask) )
+    bytemap = xc_hypercall_buffer_alloc(xch, bytemap, sizeof(mask64));
+    if (bytemap == NULL)
     {
         PERROR("Could not allocate memory for xc_tbuf_set_cpu_mask hypercall");
         goto out;
@@ -147,12 +131,14 @@ int xc_tbuf_set_cpu_mask(xc_interface *xch, xc_cpumap_t mask)
     sysctl.interface_version = XEN_SYSCTL_INTERFACE_VERSION;
     sysctl.u.tbuf_op.cmd  = XEN_SYSCTL_TBUFOP_set_cpu_mask;
 
-    set_xen_guest_handle(sysctl.u.tbuf_op.cpu_mask.bitmap, mask);
-    sysctl.u.tbuf_op.cpu_mask.nr_bits = bits;
+    bitmap_64_to_byte(bytemap, &mask64, sizeof (mask64) * 8);
+
+    set_xen_guest_handle(sysctl.u.tbuf_op.cpu_mask.bitmap, bytemap);
+    sysctl.u.tbuf_op.cpu_mask.nr_bits = sizeof(bytemap) * 8;
 
     ret = do_sysctl(xch, &sysctl);
 
-    xc_hypercall_bounce_post(xch, mask);
+    xc_hypercall_buffer_free(xch, bytemap);
 
  out:
     return ret;

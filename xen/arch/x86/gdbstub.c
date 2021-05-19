@@ -16,7 +16,8 @@
  * GNU General Public License for more details.
  * 
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 #include <asm/debugger.h>
 
@@ -66,7 +67,7 @@ gdb_arch_resume(struct cpu_user_regs *regs,
                 struct gdb_context *ctx)
 {
     if ( addr != -1UL )
-        regs->rip = addr;
+        regs->eip = addr;
 
     regs->eflags &= ~X86_EFLAGS_TF;
 

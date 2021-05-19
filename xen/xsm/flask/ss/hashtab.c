@@ -16,20 +16,27 @@ struct hashtab *hashtab_create(u32 (*hash_value)(struct hashtab *h,
             int (*keycmp)(struct hashtab *h, const void *key1,
 			  const void *key2), u32 size)
 {
-    struct hashtab *p = xzalloc(struct hashtab);
+    struct hashtab *p;
+    u32 i;
 
+    p = xmalloc(struct hashtab);
     if ( p == NULL )
         return p;
 
+    memset(p, 0, sizeof(*p));
     p->size = size;
+    p->nel = 0;
     p->hash_value = hash_value;
     p->keycmp = keycmp;
-    p->htable = xzalloc_array(struct hashtab_node *, size);
+    p->htable = xmalloc_array(struct hashtab_node *, size);
     if ( p->htable == NULL )
     {
         xfree(p);
         return NULL;
     }
+
+    for ( i = 0; i < size; i++ )
+        p->htable[i] = NULL;
 
     return p;
 }
@@ -54,9 +61,10 @@ int hashtab_insert(struct hashtab *h, void *key, void *datum)
     if ( cur && (h->keycmp(h, key, cur->key) == 0) )
         return -EEXIST;
 
-    newnode = xzalloc(struct hashtab_node);
+    newnode = xmalloc(struct hashtab_node);
     if ( newnode == NULL )
         return -ENOMEM;
+    memset(newnode, 0, sizeof(*newnode));
     newnode->key = key;
     newnode->datum = datum;
     if ( prev )

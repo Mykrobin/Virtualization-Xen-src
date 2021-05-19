@@ -5,6 +5,7 @@
  * We need the APIC definitions automatically as part of 'smp.h'
  */
 #ifndef __ASSEMBLY__
+#include <xen/config.h>
 #include <xen/kernel.h>
 #include <xen/cpumask.h>
 #include <asm/current.h>
@@ -15,22 +16,16 @@
 #include <asm/mpspec.h>
 #endif
 
-#define BAD_APICID   (-1U)
-#define INVALID_CUID (~0U)   /* AMD Compute Unit ID */
+#define BAD_APICID -1U
 #ifndef __ASSEMBLY__
 
 /*
  * Private routines/data
  */
+ 
+extern void smp_alloc_memory(void);
 DECLARE_PER_CPU(cpumask_var_t, cpu_sibling_mask);
 DECLARE_PER_CPU(cpumask_var_t, cpu_core_mask);
-DECLARE_PER_CPU(cpumask_var_t, scratch_cpumask);
-
-/*
- * Do we, for platform reasons, need to actually keep CPUs online when we
- * would otherwise prefer them to be off?
- */
-extern bool park_offline_cpus;
 
 void smp_send_nmi_allbutself(void);
 
@@ -41,6 +36,7 @@ extern void (*mtrr_hook) (void);
 
 extern void zap_low_mappings(void);
 
+#define MAX_APICID 256
 extern u32 x86_cpu_to_apicid[];
 
 #define cpu_physical_id(cpu)	x86_cpu_to_apicid[cpu]
@@ -57,24 +53,9 @@ int cpu_add(uint32_t apic_id, uint32_t acpi_id, uint32_t pxm);
  */
 #define raw_smp_processor_id() (get_processor_id())
 
+int hard_smp_processor_id(void);
+
 void __stop_this_cpu(void);
-
-long cpu_up_helper(void *data);
-long cpu_down_helper(void *data);
-
-long core_parking_helper(void *data);
-uint32_t get_cur_idle_nums(void);
-
-/*
- * The value may be greater than the actual socket number in the system and
- * is required not to change from the initial startup.
- */
-extern unsigned int nr_sockets;
-
-void set_nr_sockets(void);
-
-/* Representing HT and core siblings in each socket. */
-extern cpumask_t **socket_cpumask;
 
 #endif /* !__ASSEMBLY__ */
 

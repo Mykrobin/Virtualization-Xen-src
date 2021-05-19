@@ -49,18 +49,18 @@
 #define DBG(_level, _f, _a...) tlog_write(_level, _f, ##_a)
 #define ERR(_err, _f, _a...) tlog_error(_err, _f, ##_a)
 
-#if 1
+#if 1                                                                        
 #define ASSERT(p)							\
 	do {								\
 		if (!(p)) {						\
 			DPRINTF("Assertion '%s' failed, line %d, "	\
 				"file %s", #p, __LINE__, __FILE__);	\
-			abort();					\
+			*(int*)0 = 0;					\
 		}							\
 	} while (0)
 #else
 #define ASSERT(p) ((void)0)
-#endif
+#endif 
 
 
 #define TD_VBD_EIO_RETRIES          10
@@ -516,7 +516,7 @@ tapdisk_vbd_free_stack(td_vbd_t *vbd)
 int
 tapdisk_vbd_open_stack(td_vbd_t *vbd, uint16_t storage, td_flag_t flags)
 {
-	int i, err = 0;
+	int i, err;
 
 	vbd->flags   = flags;
 	vbd->storage = storage;
@@ -932,7 +932,7 @@ tapdisk_vbd_open_image(td_vbd_t *vbd, td_image_t *image)
 static int
 tapdisk_vbd_close_and_reopen_image(td_vbd_t *vbd, td_image_t *image)
 {
-	int i, err = 0;
+	int i, err;
 
 	td_close(image);
 
@@ -972,7 +972,7 @@ tapdisk_vbd_pause(td_vbd_t *vbd)
 int
 tapdisk_vbd_resume(td_vbd_t *vbd, const char *path, uint16_t drivertype)
 {
-	int i, err = 0;
+	int i, err;
 
 	if (!td_flag_test(vbd->state, TD_VBD_PAUSED)) {
 		EPRINTF("resume request for unpaused vbd %s\n", vbd->name);
@@ -1668,8 +1668,7 @@ out:
 
 		params.sector_size = image.secsize;
 		params.capacity    = image.size;
-		snprintf(params.name, sizeof(params.name),
-			 "%.*s", (int)sizeof(params.name) - 1, message);
+		snprintf(params.name, sizeof(params.name) - 1, "%s", message);
 
 		ioctl(vbd->ring.fd, BLKTAP2_IOCTL_SET_PARAMS, &params);
 		td_flag_clear(vbd->state, TD_VBD_PAUSED);
@@ -1685,7 +1684,7 @@ tapdisk_vbd_check_ring_message(td_vbd_t *vbd)
 	if (!vbd->ring.sring)
 		return -EINVAL;
 
-	switch (vbd->ring.sring->pvt.tapif_user.msg) {
+	switch (vbd->ring.sring->private.tapif_user.msg) {
 	case 0:
 		return 0;
 

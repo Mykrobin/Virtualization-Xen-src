@@ -17,7 +17,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #include "xc_private.h"
@@ -25,7 +26,7 @@
 #include <xen/grant_table.h>
 
 int xc_memshr_control(xc_interface *xch,
-                      uint32_t domid,
+                      domid_t domid,
                       int enable)
 {
     DECLARE_DOMCTL;
@@ -42,7 +43,7 @@ int xc_memshr_control(xc_interface *xch,
 }
 
 int xc_memshr_ring_enable(xc_interface *xch, 
-                          uint32_t domid,
+                          domid_t domid, 
                           uint32_t *port)
 {
     if ( !port )
@@ -50,23 +51,23 @@ int xc_memshr_ring_enable(xc_interface *xch,
         errno = EINVAL;
         return -1;
     }
-
-    return xc_vm_event_control(xch, domid,
-                               XEN_VM_EVENT_ENABLE,
-                               XEN_DOMCTL_VM_EVENT_OP_SHARING,
-                               port);
+        
+    return xc_mem_event_control(xch, domid,
+                                XEN_DOMCTL_MEM_EVENT_OP_SHARING_ENABLE,
+                                XEN_DOMCTL_MEM_EVENT_OP_SHARING,
+                                port);
 }
 
 int xc_memshr_ring_disable(xc_interface *xch, 
-                           uint32_t domid)
+                           domid_t domid)
 {
-    return xc_vm_event_control(xch, domid,
-                               XEN_VM_EVENT_DISABLE,
-                               XEN_DOMCTL_VM_EVENT_OP_SHARING,
-                               NULL);
+    return xc_mem_event_control(xch, domid,
+                                XEN_DOMCTL_MEM_EVENT_OP_SHARING_DISABLE,
+                                XEN_DOMCTL_MEM_EVENT_OP_SHARING,
+                                NULL);
 }
 
-static int xc_memshr_memop(xc_interface *xch, uint32_t domid,
+static int xc_memshr_memop(xc_interface *xch, domid_t domid, 
                             xen_mem_sharing_op_t *mso)
 {
     mso->domain = domid;
@@ -75,7 +76,7 @@ static int xc_memshr_memop(xc_interface *xch, uint32_t domid,
 }
 
 int xc_memshr_nominate_gfn(xc_interface *xch,
-                           uint32_t domid,
+                           domid_t domid,
                            unsigned long gfn,
                            uint64_t *handle)
 {
@@ -95,7 +96,7 @@ int xc_memshr_nominate_gfn(xc_interface *xch,
 }
 
 int xc_memshr_nominate_gref(xc_interface *xch,
-                            uint32_t domid,
+                            domid_t domid,
                             grant_ref_t gref,
                             uint64_t *handle)
 {
@@ -115,10 +116,10 @@ int xc_memshr_nominate_gref(xc_interface *xch,
 }
 
 int xc_memshr_share_gfns(xc_interface *xch,
-                         uint32_t source_domain,
+                         domid_t source_domain,
                          unsigned long source_gfn,
                          uint64_t source_handle,
-                         uint32_t client_domain,
+                         domid_t client_domain,
                          unsigned long client_gfn,
                          uint64_t client_handle)
 {
@@ -138,10 +139,10 @@ int xc_memshr_share_gfns(xc_interface *xch,
 }
 
 int xc_memshr_share_grefs(xc_interface *xch,
-                          uint32_t source_domain,
+                          domid_t source_domain,
                           grant_ref_t source_gref,
                           uint64_t source_handle,
-                          uint32_t client_domain,
+                          domid_t client_domain,
                           grant_ref_t client_gref,
                           uint64_t client_handle)
 {
@@ -161,10 +162,10 @@ int xc_memshr_share_grefs(xc_interface *xch,
 }
 
 int xc_memshr_add_to_physmap(xc_interface *xch,
-                    uint32_t source_domain,
+                    domid_t source_domain,
                     unsigned long source_gfn,
                     uint64_t source_handle,
-                    uint32_t client_domain,
+                    domid_t client_domain,
                     unsigned long client_gfn)
 {
     xen_mem_sharing_op_t mso;
@@ -181,36 +182,20 @@ int xc_memshr_add_to_physmap(xc_interface *xch,
     return xc_memshr_memop(xch, source_domain, &mso);
 }
 
-int xc_memshr_range_share(xc_interface *xch,
-                          uint32_t source_domain,
-                          uint32_t client_domain,
-                          uint64_t first_gfn,
-                          uint64_t last_gfn)
+int xc_memshr_domain_resume(xc_interface *xch,
+                            domid_t domid)
 {
     xen_mem_sharing_op_t mso;
 
     memset(&mso, 0, sizeof(mso));
 
-    mso.op = XENMEM_sharing_op_range_share;
+    mso.op = XENMEM_sharing_op_resume;
 
-    mso.u.range.client_domain = client_domain;
-    mso.u.range.first_gfn = first_gfn;
-    mso.u.range.last_gfn = last_gfn;
-
-    return xc_memshr_memop(xch, source_domain, &mso);
-}
-
-int xc_memshr_domain_resume(xc_interface *xch,
-                            uint32_t domid)
-{
-    return xc_vm_event_control(xch, domid,
-                               XEN_VM_EVENT_RESUME,
-                               XEN_DOMCTL_VM_EVENT_OP_SHARING,
-                               NULL);
+    return xc_memshr_memop(xch, domid, &mso);
 }
 
 int xc_memshr_debug_gfn(xc_interface *xch,
-                        uint32_t domid,
+                        domid_t domid,
                         unsigned long gfn)
 {
     xen_mem_sharing_op_t mso;
@@ -224,7 +209,7 @@ int xc_memshr_debug_gfn(xc_interface *xch,
 }
 
 int xc_memshr_debug_gref(xc_interface *xch,
-                         uint32_t domid,
+                         domid_t domid,
                          grant_ref_t gref)
 {
     xen_mem_sharing_op_t mso;

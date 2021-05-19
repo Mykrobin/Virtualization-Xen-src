@@ -5,6 +5,7 @@
  */
 #define COMPILE_OFFSETS
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/sched.h>
 #include <xen/bitops.h>
@@ -12,12 +13,11 @@
 #include <asm/current.h>
 #include <asm/procinfo.h>
 
-#define DEFINE(_sym, _val)                                                 \
-    asm volatile ("\n.ascii\"==>#define " #_sym " %0 /* " #_val " */<==\"" \
-                  : : "i" (_val) )
-#define BLANK()                                                            \
-    asm volatile ( "\n.ascii\"==><==\"" : : )
-#define OFFSET(_sym, _str, _mem)                                           \
+#define DEFINE(_sym, _val) \
+    __asm__ __volatile__ ( "\n->" #_sym " %0 " #_val : : "i" (_val) )
+#define BLANK() \
+    __asm__ __volatile__ ( "\n->" : : )
+#define OFFSET(_sym, _str, _mem) \
     DEFINE(_sym, offsetof(_str, _mem));
 
 void __dummy__(void)
@@ -26,7 +26,6 @@ void __dummy__(void)
    OFFSET(UREGS_lr, struct cpu_user_regs, lr);
    OFFSET(UREGS_pc, struct cpu_user_regs, pc);
    OFFSET(UREGS_cpsr, struct cpu_user_regs, cpsr);
-   OFFSET(UREGS_hsr, struct cpu_user_regs, hsr);
 
    OFFSET(UREGS_LR_usr, struct cpu_user_regs, lr_usr);
    OFFSET(UREGS_SP_usr, struct cpu_user_regs, sp_usr);

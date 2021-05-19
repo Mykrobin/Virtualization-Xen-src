@@ -47,7 +47,17 @@
     (sel) = (((sel) & 3) >= _rpl) ? (sel) : (((sel) & ~3) | _rpl); \
 })
 
+/* Stack selectors don't need fixing up if the kernel runs in ring 0. */
+#ifdef CONFIG_X86_SUPERVISOR_MODE_KERNEL
+#define fixup_guest_stack_selector(d, ss) ((void)0)
+#else
 #define fixup_guest_stack_selector(d, ss) __fixup_guest_selector(d, ss)
+#endif
+
+/*
+ * Code selectors are always fixed up. It allows the Xen exit stub to detect
+ * return to guest context, even when the guest kernel runs in ring 0.
+ */
 #define fixup_guest_code_selector(d, cs)  __fixup_guest_selector(d, cs)
 
 /*
@@ -65,7 +75,7 @@
  */
 #define guest_gate_selector_okay(d, sel)                                \
     ((((sel)>>3) < FIRST_RESERVED_GDT_ENTRY) || /* Guest seg? */        \
-     ((sel) == (!is_pv_32bit_domain(d) ?                                \
+     ((sel) == (!is_pv_32on64_domain(d) ?                               \
                 FLAT_KERNEL_CS :                /* Xen default seg? */  \
                 FLAT_COMPAT_KERNEL_CS)) ||                              \
      ((sel) & 4))                               /* LDT seg? */
@@ -88,37 +98,12 @@
 
 #ifndef __ASSEMBLY__
 
-/* System Descriptor types for GDT and IDT entries. */
-#define SYS_DESC_tss16_avail  1
-#define SYS_DESC_ldt          2
-#define SYS_DESC_tss16_busy   3
-#define SYS_DESC_call_gate16  4
-#define SYS_DESC_task_gate    5
-#define SYS_DESC_irq_gate16   6
-#define SYS_DESC_trap_gate16  7
-#define SYS_DESC_tss_avail    9
-#define SYS_DESC_tss_busy     11
-#define SYS_DESC_call_gate    12
-#define SYS_DESC_irq_gate     14
-#define SYS_DESC_trap_gate    15
-
 struct desc_struct {
     u32 a, b;
 };
 
-typedef union {
-    struct {
-        uint64_t a, b;
-    };
-    struct {
-        uint16_t addr0;
-        uint16_t cs;
-        uint8_t  ist; /* :3, 5 bits rsvd, but this yields far better code. */
-        uint8_t  type:4, s:1, dpl:2, p:1;
-        uint16_t addr1;
-        uint32_t addr2;
-        /* 32 bits rsvd. */
-    };
+typedef struct {
+    u64 a, b;
 } idt_entry_t;
 
 /* Write the lower 64 bits of an IDT Entry. This relies on the upper 32
@@ -139,10 +124,10 @@ static inline void _write_gate_lower(volatile idt_entry_t *gate,
 #define _set_gate(gate_addr,type,dpl,addr)               \
 do {                                                     \
     (gate_addr)->a = 0;                                  \
-    smp_wmb(); /* disable gate /then/ rewrite */         \
+    wmb(); /* disable gate /then/ rewrite */             \
     (gate_addr)->b =                                     \
         ((unsigned long)(addr) >> 32);                   \
-    smp_wmb(); /* rewrite /then/ enable gate */          \
+    wmb(); /* rewrite /then/ enable gate */              \
     (gate_addr)->a =                                     \
         (((unsigned long)(addr) & 0xFFFF0000UL) << 32) | \
         ((unsigned long)(dpl) << 45) |                   \
@@ -185,48 +170,29 @@ static inline void _update_gate_addr_lower(idt_entry_t *gate, void *addr)
 #define _set_tssldt_desc(desc,addr,limit,type)           \
 do {                                                     \
     (desc)[0].b = (desc)[1].b = 0;                       \
-    smp_wmb(); /* disable entry /then/ rewrite */        \
+    wmb(); /* disable entry /then/ rewrite */            \
     (desc)[0].a =                                        \
         ((u32)(addr) << 16) | ((u32)(limit) & 0xFFFF);   \
     (desc)[1].a = (u32)(((unsigned long)(addr)) >> 32);  \
-    smp_wmb(); /* rewrite /then/ enable entry */         \
+    wmb(); /* rewrite /then/ enable entry */             \
     (desc)[0].b =                                        \
         ((u32)(addr) & 0xFF000000U) |                    \
         ((u32)(type) << 8) | 0x8000U |                   \
         (((u32)(addr) & 0x00FF0000U) >> 16);             \
 } while (0)
 
-struct __packed desc_ptr {
+struct desc_ptr {
 	unsigned short limit;
 	unsigned long base;
-};
+} __attribute__((__packed__)) ;
 
 extern struct desc_struct boot_cpu_gdt_table[];
 DECLARE_PER_CPU(struct desc_struct *, gdt_table);
 extern struct desc_struct boot_cpu_compat_gdt_table[];
 DECLARE_PER_CPU(struct desc_struct *, compat_gdt_table);
 
+extern void set_intr_gate(unsigned int irq, void * addr);
 extern void load_TR(void);
-
-static inline void lgdt(const struct desc_ptr *gdtr)
-{
-    __asm__ __volatile__ ( "lgdt %0" :: "m" (*gdtr) : "memory" );
-}
-
-static inline void lidt(const struct desc_ptr *idtr)
-{
-    __asm__ __volatile__ ( "lidt %0" :: "m" (*idtr) : "memory" );
-}
-
-static inline void lldt(unsigned int sel)
-{
-    __asm__ __volatile__ ( "lldt %w0" :: "rm" (sel) : "memory" );
-}
-
-static inline void ltr(unsigned int sel)
-{
-    __asm__ __volatile__ ( "ltr %w0" :: "rm" (sel) : "memory" );
-}
 
 #endif /* !__ASSEMBLY__ */
 

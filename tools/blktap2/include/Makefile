@@ -6,14 +6,9 @@ all:
 
 .PHONY: install
 install:
-	$(INSTALL_DIR) -p $(DESTDIR)$(includedir)
+	$(INSTALL_DIR) -p $(DESTDIR)$(INCLUDEDIR)
 
-.PHONY: uninstall
-.uninstall:
 
 .PHONY: clean
 clean:
 	@:
-
-.PHONY: distclean
-distclean: clean

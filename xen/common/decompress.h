@@ -1,5 +1,6 @@
 #ifdef __XEN__
 
+#include <xen/config.h>
 #include <xen/cache.h>
 #include <xen/decompress.h>
 #include <xen/init.h>

@@ -6,7 +6,7 @@ static inline void flush_tlb_local(void)
 {
     asm volatile(
         "dsb sy;"
-        "tlbi vmalls12e1;"
+        "tlbi vmalle1;"
         "dsb sy;"
         "isb;"
         : : : "memory");
@@ -17,7 +17,7 @@ static inline void flush_tlb(void)
 {
     asm volatile(
         "dsb sy;"
-        "tlbi vmalls12e1is;"
+        "tlbi vmalle1is;"
         "dsb sy;"
         "isb;"
         : : : "memory");

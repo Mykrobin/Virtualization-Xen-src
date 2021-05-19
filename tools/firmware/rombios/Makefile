@@ -13,10 +13,7 @@ clean: subdirs-clean
 	rm -f  as86-sym.txt ld86-sym.txt 
 	rm -f  rombios*.txt rombios*.sym usage biossums
 	rm -f  BIOS-bochs-*
-	rm -f  $(DEPS_RM)
-
-.PHONY: distclean
-distclean: clean
+	rm -f  $(DEPS)
 
 BIOS-bochs-latest: rombios.c biossums 32bitgateway.c tcgbios.c
 	gcc -DBX_SMP_PROCESSORS=1 -E -P $< > _rombios_.c
@@ -31,4 +28,4 @@ BIOS-bochs-latest: rombios.c biossums 32bitgateway.c tcgbios.c
 biossums: biossums.c
 	gcc -o biossums biossums.c
 
--include $(DEPS_INCLUDE)
+-include $(DEPS)

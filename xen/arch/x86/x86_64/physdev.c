@@ -2,8 +2,7 @@
  * physdev.c
  */
 
-asm(".file \"" __FILE__ "\"");
-
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/guest_access.h>
 #include <compat/xen.h>

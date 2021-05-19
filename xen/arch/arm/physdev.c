@@ -4,6 +4,7 @@
  * Copyright (c) 2012, Citrix Systems
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/errno.h>

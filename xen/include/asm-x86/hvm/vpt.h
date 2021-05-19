@@ -13,12 +13,14 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #ifndef __ASM_X86_HVM_VPT_H__
 #define __ASM_X86_HVM_VPT_H__
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/time.h>
@@ -44,7 +46,6 @@ struct periodic_time {
     bool_t warned_timeout_too_short;
 #define PTSRC_isa    1 /* ISA time source */
 #define PTSRC_lapic  2 /* LAPIC time source */
-#define PTSRC_ioapic 3 /* IOAPIC time source */
     u8 source;                  /* PTSRC_ */
     u8 irq;
     struct vcpu *vcpu;          /* vcpu timer interrupt delivers to */
@@ -95,7 +96,7 @@ typedef struct HPETState {
     uint64_t hpet_to_ns_limit; /* max hpet ticks convertable to ns      */
     uint64_t mc_offset;
     struct periodic_time pt[HPET_TIMER_NUM];
-    rwlock_t lock;
+    spinlock_t lock;
 } HPETState;
 
 typedef struct RTCState {
@@ -121,6 +122,7 @@ typedef struct RTCState {
 
 #define FREQUENCE_PMTIMER  3579545  /* Timer should run at 3.579545 MHz */
 typedef struct PMTState {
+    struct hvm_hw_pmtimer pm;   /* 32bit timer value */
     struct vcpu *vcpu;          /* Keeps sync with this vcpu's guest-time */
     uint64_t last_gtime;        /* Last (guest) time we updated the timer */
     uint32_t not_accounted;     /* time not accounted at last update */
@@ -138,7 +140,6 @@ struct pl_time {    /* platform time */
     /* Ensures monotonicity in appropriate timer modes. */
     uint64_t last_guest_time;
     spinlock_t pl_time_lock;
-    struct domain *domain;
 };
 
 void pt_save_timer(struct vcpu *v);
@@ -189,7 +190,7 @@ void pmtimer_deinit(struct domain *d);
 void pmtimer_reset(struct domain *d);
 int pmtimer_change_ioport(struct domain *d, unsigned int version);
 
-void hpet_init(struct domain *d);
+void hpet_init(struct vcpu *v);
 void hpet_deinit(struct domain *d);
 void hpet_reset(struct domain *d);
 

@@ -1,13 +1,10 @@
 #ifndef _LIBFDT_ENV_H
 #define _LIBFDT_ENV_H
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/string.h>
 #include <asm/byteorder.h>
-
-typedef uint16_t fdt16_t;
-typedef uint32_t fdt32_t;
-typedef uint64_t fdt64_t;
 
 #define fdt16_to_cpu(x) be16_to_cpu(x)
 #define cpu_to_fdt16(x) cpu_to_be16(x)

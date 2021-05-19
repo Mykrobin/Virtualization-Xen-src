@@ -12,7 +12,8 @@ but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
 Lesser General Public License for more details.
 You should have received a copy of the GNU Lesser General Public
-License along with this library; If not, see <http://www.gnu.org/licenses/>.
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #include <stdint.h>
@@ -20,8 +21,7 @@ License along with this library; If not, see <http://www.gnu.org/licenses/>.
 uint64_t blowfish_test(uint64_t input);
 
 asm (
-    "\t.text\n"
-    "\t.globl _start\n"
+    ".globl _start\n"
     "_start:\n"
 #if defined(__i386__)
     "push %edx; push %eax; "

@@ -17,6 +17,7 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/console.h>
 #include <xen/device_tree.h>
 #include <xen/init.h>
@@ -28,12 +29,18 @@
 #include <xen/time.h>
 #include <xen/sched.h>
 #include <xen/event.h>
-#include <xen/acpi.h>
 #include <asm/system.h>
 #include <asm/time.h>
-#include <asm/vgic.h>
+#include <asm/gic.h>
 #include <asm/cpufeature.h>
 #include <asm/platform.h>
+
+/*
+ * Unfortunately the hypervisor timer interrupt appears to be buggy in
+ * some versions of the model. Disable this to use the physical timer
+ * instead.
+ */
+#define USE_HYP_TIMER 1
 
 uint64_t __read_mostly boot_count;
 
@@ -41,15 +48,13 @@ uint64_t __read_mostly boot_count;
  * register-mapped time source in the SoC. */
 unsigned long __read_mostly cpu_khz;  /* CPU clock frequency in kHz. */
 
-uint32_t __read_mostly timer_dt_clock_frequency;
+static struct dt_irq timer_irq[MAX_TIMER_PPI];
 
-static unsigned int timer_irq[MAX_TIMER_PPI];
-
-unsigned int timer_get_irq(enum timer_ppi ppi)
+const struct dt_irq *timer_dt_irq(enum timer_ppi ppi)
 {
     ASSERT(ppi >= TIMER_PHYS_SECURE_PPI && ppi < MAX_TIMER_PPI);
 
-    return timer_irq[ppi];
+    return &timer_irq[ppi];
 }
 
 /*static inline*/ s_time_t ticks_to_ns(uint64_t ticks)
@@ -62,127 +67,85 @@ unsigned int timer_get_irq(enum timer_ppi ppi)
     return muldiv64(ns, 1000 * cpu_khz, SECONDS(1));
 }
 
-static __initdata struct dt_device_node *timer;
-
-#ifdef CONFIG_ACPI
-static u32 __init acpi_get_timer_irq_type(u32 flags)
+/* TODO: On a real system the firmware would have set the frequency in
+   the CNTFRQ register.  Also we'd need to use devicetree to find
+   the RTC.  When we've seen some real systems, we can delete this.
+static uint32_t calibrate_timer(void)
 {
-    return (flags & ACPI_GTDT_INTERRUPT_MODE) ? IRQ_TYPE_EDGE_BOTH
-                                              : IRQ_TYPE_LEVEL_MASK;
+    uint32_t sec;
+    uint64_t start, end;
+    paddr_t rtc_base = 0x1C170000ull;
+    volatile uint32_t *rtc;
+
+    ASSERT(!local_irq_is_enabled());
+    set_fixmap(FIXMAP_MISC, rtc_base >> PAGE_SHIFT, DEV_SHARED);
+    rtc = (uint32_t *) FIXMAP_ADDR(FIXMAP_MISC);
+
+    printk("Calibrating timer against RTC...");
+    // Turn on the RTC
+    rtc[3] = 1;
+    // Wait for an edge
+    sec = rtc[0] + 1;
+    do {} while ( rtc[0] != sec );
+    // Now time a few seconds
+    start = READ_SYSREG64(CNTPCT_EL0);
+    do {} while ( rtc[0] < sec + 32 );
+    end = READ_SYSREG64(CNTPCT_EL0);
+    printk("done.\n");
+
+    clear_fixmap(FIXMAP_MISC);
+    return (end - start) / 32;
 }
+*/
 
-/* Initialize per-processor generic timer */
-static int __init arch_timer_acpi_init(struct acpi_table_header *header)
-{
-    u32 irq_type;
-    struct acpi_table_gtdt *gtdt;
-
-    gtdt = container_of(header, struct acpi_table_gtdt, header);
-
-    /* Initialize all the generic timer IRQ variable from GTDT table */
-    irq_type = acpi_get_timer_irq_type(gtdt->non_secure_el1_flags);
-    irq_set_type(gtdt->non_secure_el1_interrupt, irq_type);
-    timer_irq[TIMER_PHYS_NONSECURE_PPI] = gtdt->non_secure_el1_interrupt;
-
-    irq_type = acpi_get_timer_irq_type(gtdt->secure_el1_flags);
-    irq_set_type(gtdt->secure_el1_interrupt, irq_type);
-    timer_irq[TIMER_PHYS_SECURE_PPI] = gtdt->secure_el1_interrupt;
-
-    irq_type = acpi_get_timer_irq_type(gtdt->virtual_timer_flags);
-    irq_set_type(gtdt->virtual_timer_interrupt, irq_type);
-    timer_irq[TIMER_VIRT_PPI] = gtdt->virtual_timer_interrupt;
-
-    irq_type = acpi_get_timer_irq_type(gtdt->non_secure_el2_flags);
-    irq_set_type(gtdt->non_secure_el2_interrupt, irq_type);
-    timer_irq[TIMER_HYP_PPI] = gtdt->non_secure_el2_interrupt;
-
-    return 0;
-}
-
-static void __init preinit_acpi_xen_time(void)
-{
-    acpi_table_parse(ACPI_SIG_GTDT, arch_timer_acpi_init);
-}
-#else
-static void __init preinit_acpi_xen_time(void) { }
-#endif
-
-/* Set up the timer on the boot CPU (early init function) */
-static void __init preinit_dt_xen_time(void)
+/* Set up the timer on the boot CPU */
+int __init init_xen_time(void)
 {
     static const struct dt_device_match timer_ids[] __initconst =
     {
         DT_MATCH_TIMER,
         { /* sentinel */ },
     };
+    struct dt_device_node *dev;
     int res;
+    unsigned int i;
     u32 rate;
 
-    timer = dt_find_matching_node(NULL, timer_ids);
-    if ( !timer )
+    dev = dt_find_matching_node(NULL, timer_ids);
+    if ( !dev )
         panic("Unable to find a compatible timer in the device tree");
 
-    dt_device_set_used_by(timer, DOMID_XEN);
+    dt_device_set_used_by(dev, DOMID_XEN);
 
-    res = dt_property_read_u32(timer, "clock-frequency", &rate);
-    if ( res )
+    /* Retrieve all IRQs for the timer */
+    for ( i = TIMER_PHYS_SECURE_PPI; i < MAX_TIMER_PPI; i++ )
     {
-        cpu_khz = rate / 1000;
-        timer_dt_clock_frequency = rate;
+        res = dt_device_get_irq(dev, i, &timer_irq[i]);
+        if ( res )
+            panic("Timer: Unable to retrieve IRQ %u from the device tree", i);
     }
-}
 
-void __init preinit_xen_time(void)
-{
-    int res;
-
-    /* Initialize all the generic timers presented in GTDT */
-    if ( acpi_disabled )
-        preinit_dt_xen_time();
-    else
-        preinit_acpi_xen_time();
-
-    if ( !cpu_khz )
-        cpu_khz = READ_SYSREG32(CNTFRQ_EL0) / 1000;
+    printk("Generic Timer IRQ: phys=%u hyp=%u virt=%u\n",
+           timer_irq[TIMER_PHYS_NONSECURE_PPI].irq,
+           timer_irq[TIMER_HYP_PPI].irq,
+           timer_irq[TIMER_VIRT_PPI].irq);
 
     res = platform_init_time();
     if ( res )
         panic("Timer: Cannot initialize platform timer");
 
-    boot_count = get_cycles();
-}
-
-static void __init init_dt_xen_time(void)
-{
-    int res;
-    unsigned int i;
-
-    /* Retrieve all IRQs for the timer */
-    for ( i = TIMER_PHYS_SECURE_PPI; i < MAX_TIMER_PPI; i++ )
-    {
-        res = platform_get_irq(timer, i);
-
-        if ( res < 0 )
-            panic("Timer: Unable to retrieve IRQ %u from the device tree", i);
-        timer_irq[i] = res;
-    }
-}
-
-/* Set up the timer on the boot CPU (late init function) */
-int __init init_xen_time(void)
-{
-    if ( acpi_disabled )
-        init_dt_xen_time();
-
     /* Check that this CPU supports the Generic Timer interface */
     if ( !cpu_has_gentimer )
         panic("CPU does not support the Generic Timer v1 interface");
 
-    printk("Generic Timer IRQ: phys=%u hyp=%u virt=%u Freq: %lu KHz\n",
-           timer_irq[TIMER_PHYS_NONSECURE_PPI],
-           timer_irq[TIMER_HYP_PPI],
-           timer_irq[TIMER_VIRT_PPI],
-           cpu_khz);
+    res = dt_property_read_u32(dev, "clock-frequency", &rate);
+    if ( res )
+        cpu_khz = rate / 1000;
+    else
+        cpu_khz = READ_SYSREG32(CNTFRQ_EL0) / 1000;
+
+    boot_count = READ_SYSREG64(CNTPCT_EL0);
+    printk("Using generic timer at %lu KHz\n", cpu_khz);
 
     return 0;
 }
@@ -190,7 +153,7 @@ int __init init_xen_time(void)
 /* Return number of nanoseconds since boot */
 s_time_t get_s_time(void)
 {
-    uint64_t ticks = get_cycles() - boot_count;
+    uint64_t ticks = READ_SYSREG64(CNTPCT_EL0) - boot_count;
     return ticks_to_ns(ticks);
 }
 
@@ -203,13 +166,22 @@ int reprogram_timer(s_time_t timeout)
 
     if ( timeout == 0 )
     {
+#if USE_HYP_TIMER
         WRITE_SYSREG32(0, CNTHP_CTL_EL2);
+#else
+        WRITE_SYSREG32(0, CNTP_CTL_EL0);
+#endif
         return 1;
     }
 
     deadline = ns_to_ticks(timeout) + boot_count;
+#if USE_HYP_TIMER
     WRITE_SYSREG64(deadline, CNTHP_CVAL_EL2);
     WRITE_SYSREG32(CNTx_CTL_ENABLE, CNTHP_CTL_EL2);
+#else
+    WRITE_SYSREG64(deadline, CNTP_CVAL_EL0);
+    WRITE_SYSREG32(CNTx_CTL_ENABLE, CNTP_CTL_EL0);
+#endif
     isb();
 
     /* No need to check for timers in the past; the Generic Timer fires
@@ -220,20 +192,18 @@ int reprogram_timer(s_time_t timeout)
 /* Handle the firing timer */
 static void timer_interrupt(int irq, void *dev_id, struct cpu_user_regs *regs)
 {
-    if ( irq == (timer_irq[TIMER_HYP_PPI]) &&
+    if ( irq == (timer_irq[TIMER_HYP_PPI].irq) &&
          READ_SYSREG32(CNTHP_CTL_EL2) & CNTx_CTL_PENDING )
     {
-        perfc_incr(hyp_timer_irqs);
         /* Signal the generic timer code to do its work */
         raise_softirq(TIMER_SOFTIRQ);
         /* Disable the timer to avoid more interrupts */
         WRITE_SYSREG32(0, CNTHP_CTL_EL2);
     }
 
-    if ( irq == (timer_irq[TIMER_PHYS_NONSECURE_PPI]) &&
+    if ( irq == (timer_irq[TIMER_PHYS_NONSECURE_PPI].irq) &&
          READ_SYSREG32(CNTP_CTL_EL0) & CNTx_CTL_PENDING )
     {
-        perfc_incr(phys_timer_irqs);
         /* Signal the generic timer code to do its work */
         raise_softirq(TIMER_SOFTIRQ);
         /* Disable the timer to avoid more interrupts */
@@ -256,60 +226,44 @@ static void vtimer_interrupt(int irq, void *dev_id, struct cpu_user_regs *regs)
     if ( unlikely(is_idle_vcpu(current)) )
         return;
 
-    perfc_incr(virt_timer_irqs);
-
     current->arch.virt_timer.ctl = READ_SYSREG32(CNTV_CTL_EL0);
     WRITE_SYSREG32(current->arch.virt_timer.ctl | CNTx_CTL_MASK, CNTV_CTL_EL0);
-    vgic_inject_irq(current->domain, current, current->arch.virt_timer.irq, true);
+    vgic_vcpu_inject_irq(current, current->arch.virt_timer.irq, 1);
 }
 
-/*
- * Arch timer interrupt really ought to be level triggered, since the
- * design of the timer/comparator mechanism is based around that
- * concept.
- *
- * However some firmware (incorrectly) describes the interrupts as
- * edge triggered and, worse, some hardware allows us to program the
- * interrupt controller as edge triggered.
- *
- * Check each interrupt and warn if we find ourselves in this situation.
- */
-static void check_timer_irq_cfg(unsigned int irq, const char *which)
+/* Route timer's IRQ on this CPU */
+void __cpuinit route_timer_interrupt(void)
 {
-    struct irq_desc *desc = irq_to_desc(irq);
-
-    /*
-     * The interrupt controller driver will update desc->arch.type with
-     * the actual type which ended up configured in the hardware.
-     */
-    if ( desc->arch.type & IRQ_TYPE_LEVEL_MASK )
-        return;
-
-    printk(XENLOG_WARNING
-           "WARNING: %s-timer IRQ%u is not level triggered.\n", which, irq);
+    gic_route_dt_irq(&timer_irq[TIMER_PHYS_NONSECURE_PPI],
+                     cpumask_of(smp_processor_id()), 0xa0);
+    gic_route_dt_irq(&timer_irq[TIMER_HYP_PPI],
+                     cpumask_of(smp_processor_id()), 0xa0);
+    gic_route_dt_irq(&timer_irq[TIMER_VIRT_PPI],
+                     cpumask_of(smp_processor_id()), 0xa0);
 }
 
 /* Set up the timer interrupt on this CPU */
-void init_timer_interrupt(void)
+void __cpuinit init_timer_interrupt(void)
 {
     /* Sensible defaults */
     WRITE_SYSREG64(0, CNTVOFF_EL2);     /* No VM-specific offset */
+#if USE_HYP_TIMER
     /* Do not let the VMs program the physical timer, only read the physical counter */
-    WRITE_SYSREG32(CNTHCTL_EL2_EL1PCTEN, CNTHCTL_EL2);
+    WRITE_SYSREG32(CNTHCTL_PA, CNTHCTL_EL2);
+#else
+    /* Cannot let VMs access physical counter if we are using it */
+    WRITE_SYSREG32(0, CNTHCTL_EL2);
+#endif
     WRITE_SYSREG32(0, CNTP_CTL_EL0);    /* Physical timer disabled */
     WRITE_SYSREG32(0, CNTHP_CTL_EL2);   /* Hypervisor's timer disabled */
     isb();
 
-    request_irq(timer_irq[TIMER_HYP_PPI], 0, timer_interrupt,
-                "hyptimer", NULL);
-    request_irq(timer_irq[TIMER_VIRT_PPI], 0, vtimer_interrupt,
+    request_dt_irq(&timer_irq[TIMER_HYP_PPI], timer_interrupt,
+                   "hyptimer", NULL);
+    request_dt_irq(&timer_irq[TIMER_VIRT_PPI], vtimer_interrupt,
                    "virtimer", NULL);
-    request_irq(timer_irq[TIMER_PHYS_NONSECURE_PPI], 0, timer_interrupt,
-                "phytimer", NULL);
-
-    check_timer_irq_cfg(timer_irq[TIMER_HYP_PPI], "hypervisor");
-    check_timer_irq_cfg(timer_irq[TIMER_VIRT_PPI], "virtual");
-    check_timer_irq_cfg(timer_irq[TIMER_PHYS_NONSECURE_PPI], "NS-physical");
+    request_dt_irq(&timer_irq[TIMER_PHYS_NONSECURE_PPI], timer_interrupt,
+                   "phytimer", NULL);
 }
 
 /* Wait a set number of microseconds */
@@ -318,7 +272,7 @@ void udelay(unsigned long usecs)
     s_time_t deadline = get_s_time() + 1000 * (s_time_t) usecs;
     while ( get_s_time() - deadline < 0 )
         ;
-    dsb(sy);
+    dsb();
     isb();
 }
 
@@ -334,10 +288,15 @@ void update_vcpu_system_time(struct vcpu *v)
     /* XXX update shared_info->wc_* */
 }
 
-void domain_set_time_offset(struct domain *d, int64_t time_offset_seconds)
+void domain_set_time_offset(struct domain *d, int32_t time_offset_seconds)
 {
     d->time_offset_seconds = time_offset_seconds;
     /* XXX update guest visible wallclock time */
+}
+
+struct tm wallclock_time(void)
+{
+    return (struct tm) { 0 };
 }
 
 /*

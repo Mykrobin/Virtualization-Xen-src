@@ -11,7 +11,9 @@
  * General Public License for more details.
  *
  * You should have received a copy of the GNU General Public
- * License along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this program; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 021110-1307, USA.
  */
 
 /* This is the main module to interface with xen. This module exports APIs that
@@ -79,6 +81,7 @@ int xgtrc_on = 0;
 struct xen_domctl domctl;         /* just use a global domctl */
 
 static int     _hvm_guest;        /* hvm guest? 32bit HVMs have 64bit context */
+static int     _pvh_guest;        /* PV guest in HVM container */
 static domid_t _dom_id;           /* guest domid */
 static int     _max_vcpu_id;      /* thus max_vcpu_id+1 VCPUs */
 static int     _dom0_fd;          /* fd of /dev/privcmd */
@@ -126,11 +129,9 @@ xg_init()
     int flags, saved_errno;
 
     XGTRC("E\n");
-    if ((_dom0_fd=open("/dev/xen/privcmd", O_RDWR)) == -1) {
-        if ((_dom0_fd=open("/proc/xen/privcmd", O_RDWR)) == -1) {
-            perror("Failed to open /dev/xen/privcmd or /proc/xen/privcmd\n");
-            return -1;
-        }
+    if ((_dom0_fd=open("/proc/xen/privcmd", O_RDWR)) == -1) {
+        perror("Failed to open /proc/xen/privcmd\n");
+        return -1;
     }
     /* Although we return the file handle as the 'xc handle' the API
      * does not specify / guarentee that this integer is in fact
@@ -179,7 +180,7 @@ _domctl_hcall(uint32_t cmd,            /* which domctl hypercall */
     hypercall.op = __HYPERVISOR_domctl;
     hypercall.arg[0] = (unsigned long)&domctl;
 
-    rc = ioctl(_dom0_fd, IOCTL_PRIVCMD_HYPERCALL, &hypercall);
+    rc = ioctl(_dom0_fd, IOCTL_PRIVCMD_HYPERCALL, (ulong)&hypercall);
     if (domctlarg && sz)
         munlock(domctlarg, sz);
     return rc;
@@ -219,7 +220,7 @@ _check_hyp(int guest_bitness)
     hypercall.arg[0] = (unsigned long)XENVER_capabilities;
     hypercall.arg[1] = (unsigned long)&xen_caps;
 
-    rc = ioctl(_dom0_fd, IOCTL_PRIVCMD_HYPERCALL, &hypercall);
+    rc = ioctl(_dom0_fd, IOCTL_PRIVCMD_HYPERCALL, (ulong)&hypercall);
     munlock(&xen_caps, sizeof(xen_caps));
     XGTRC("XENCAPS:%s\n", xen_caps);
 
@@ -309,6 +310,7 @@ xg_attach(int domid, int guest_bitness)
 
     _max_vcpu_id = domctl.u.getdomaininfo.max_vcpu_id;
     _hvm_guest = (domctl.u.getdomaininfo.flags & XEN_DOMINF_hvm_guest);
+    _pvh_guest = (domctl.u.getdomaininfo.flags & XEN_DOMINF_pvh_guest);
     return _max_vcpu_id;
 }
 
@@ -369,7 +371,7 @@ _change_TF(vcpuid_t which_vcpu, int guest_bitness, int setit)
     int sz = sizeof(anyc);
 
     /* first try the MTF for hvm guest. otherwise do manually */
-    if (_hvm_guest) {
+    if (_hvm_guest || _pvh_guest) {
         domctl.u.debug_op.vcpu = which_vcpu;
         domctl.u.debug_op.op = setit ? XEN_DOMCTL_DEBUG_OP_SINGLE_STEP_ON :
                                        XEN_DOMCTL_DEBUG_OP_SINGLE_STEP_OFF;

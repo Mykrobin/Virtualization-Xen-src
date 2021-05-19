@@ -23,10 +23,7 @@ int hvm_local_events_need_delivery(struct vcpu *v);
 static inline int local_events_need_delivery(void)
 {
     struct vcpu *v = current;
-
-    ASSERT(!is_idle_vcpu(v));
-
-    return (is_hvm_vcpu(v) ? hvm_local_events_need_delivery(v) :
+    return (has_hvm_container_vcpu(v) ? hvm_local_events_need_delivery(v) :
             (vcpu_info(v, evtchn_upcall_pending) &&
              !vcpu_info(v, evtchn_upcall_mask)));
 }
@@ -42,9 +39,9 @@ static inline void local_event_delivery_enable(void)
 }
 
 /* No arch specific virq definition now. Default to global. */
-static inline bool arch_virq_is_global(unsigned int virq)
+static inline int arch_virq_is_global(uint32_t virq)
 {
-    return true;
+    return 1;
 }
 
 #endif

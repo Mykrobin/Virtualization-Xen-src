@@ -100,9 +100,9 @@ let daemonize () =
 
 		begin match Unix.fork () with
 		| 0 ->
-			let nullfd = Unix.openfile "/dev/null" [ Unix.O_RDWR ] 0 in
+			let nullfd = Unix.openfile "/dev/null" [ Unix.O_WRONLY ] 0 in
 			begin try
-				Unix.dup2 nullfd Unix.stdin;
+				Unix.close Unix.stdin;
 				Unix.dup2 nullfd Unix.stdout;
 				Unix.dup2 nullfd Unix.stderr;
 			with exn -> Unix.close nullfd; raise exn
@@ -122,7 +122,7 @@ let pidfile_write filename =
 		let pid = Unix.getpid () in
 		let buf = string_of_int pid ^ "\n" in
 		let len = String.length buf in
-		if Unix.write_substring fd buf 0 len <> len
+		if Unix.write fd buf 0 len <> len 
 		then failwith "pidfile_write failed";
 	)
 	(fun () -> Unix.close fd)

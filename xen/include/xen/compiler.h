@@ -7,16 +7,12 @@
 
 #define barrier()     __asm__ __volatile__("": : :"memory")
 
-#define likely(x)     __builtin_expect(!!(x),1)
-#define unlikely(x)   __builtin_expect(!!(x),0)
+#define likely(x)     __builtin_expect((x),1)
+#define unlikely(x)   __builtin_expect((x),0)
 
 #define inline        __inline__
-#define always_inline __inline__ __attribute__ ((__always_inline__))
-#define noinline      __attribute__((__noinline__))
-
-#define noreturn      __attribute__((__noreturn__))
-
-#define __packed      __attribute__((__packed__))
+#define always_inline __inline__ __attribute__ ((always_inline))
+#define noinline      __attribute__((noinline))
 
 #if (!defined(__clang__) && (__GNUC__ == 4) && (__GNUC_MINOR__ < 5))
 #define unreachable() do {} while (1)
@@ -34,8 +30,6 @@
 #define __used_section(s) __used __attribute__((__section__(s)))
 #define __text_section(s) __attribute__((__section__(s)))
 
-#define __aligned(a) __attribute__((__aligned__(a)))
-
 #ifdef INIT_SECTIONS_ONLY
 /*
  * For sources indicated to have only init code, make sure even
@@ -45,9 +39,8 @@
 #define __inline__ __inline__ __init
 #endif
 
-#define __attribute_pure__  __attribute__((__pure__))
+#define __attribute_pure__  __attribute__((pure))
 #define __attribute_const__ __attribute__((__const__))
-#define __transparent__     __attribute__((__transparent_union__))
 
 /*
  * The difference between the following two attributes is that __used is
@@ -63,8 +56,7 @@
 #define __used         __attribute__((__used__))
 #define __maybe_unused __attribute__((__unused__))
 
-#define __must_check __attribute__((__warn_unused_result__))
-#define __nonnull(...) __attribute__((__nonnull__(__VA_ARGS__)))
+#define __must_check __attribute__((warn_unused_result))
 
 #define offsetof(a,b) __builtin_offsetof(a,b)
 
@@ -81,9 +73,6 @@
 #pragma GCC visibility push(hidden)
 #endif
 
-/* Make the optimizer believe the variable can be manipulated arbitrarily. */
-#define OPTIMIZER_HIDE_VAR(var) __asm__ ( "" : "+g" (var) )
-
 /* This macro obfuscates arithmetic on a variable address so that gcc
    shouldn't recognize the original var, and make assumptions about it */
 /*
@@ -96,38 +85,5 @@
   ({ unsigned long __ptr;                       \
     __asm__ ("" : "=r"(__ptr) : "0"(ptr));      \
     (typeof(ptr)) (__ptr + (off)); })
-
-#ifdef __GCC_ASM_FLAG_OUTPUTS__
-# define ASM_FLAG_OUT(yes, no) yes
-#else
-# define ASM_FLAG_OUT(yes, no) no
-#endif
-
-/*
- * NB: we need to disable the gcc-compat warnings for clang in some places or
- * else it will complain with: "'break' is bound to loop, GCC binds it to
- * switch" when a switch is used inside of a while expression inside of a
- * switch statement, ie:
- *
- * switch ( ... )
- * {
- * case ...:
- *      while ( ({ int x; switch ( foo ) { case 1: x = 1; break; } x }) )
- *      {
- *              ...
- *
- * This has already been reported upstream:
- * http://bugs.llvm.org/show_bug.cgi?id=32595 
- */
-#ifdef __clang__
-# define CLANG_DISABLE_WARN_GCC_COMPAT_START                    \
-    _Pragma("clang diagnostic push")                            \
-    _Pragma("clang diagnostic ignored \"-Wgcc-compat\"")
-# define CLANG_DISABLE_WARN_GCC_COMPAT_END                      \
-    _Pragma("clang diagnostic pop")
-#else
-# define CLANG_DISABLE_WARN_GCC_COMPAT_START
-# define CLANG_DISABLE_WARN_GCC_COMPAT_END
-#endif
 
 #endif /* __LINUX_COMPILER_H */

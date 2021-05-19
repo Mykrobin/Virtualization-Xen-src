@@ -123,6 +123,7 @@ static int load_plugins(void)
 {
 	const char *fsdir = getenv("FSIMAGE_FSDIR");
 	struct dirent *dp = NULL;
+	struct dirent *dpp;
 	DIR *dir = NULL;
 	char *tmp = NULL;
 	size_t name_max;
@@ -138,26 +139,22 @@ static int load_plugins(void)
 	if ((tmp = malloc(name_max + 1)) == NULL)
 		goto fail;
 
+	if ((dp = malloc(sizeof (struct dirent) + name_max + 1)) == NULL)
+		goto fail;
+
 	if ((dir = opendir(fsdir)) == NULL)
 		goto fail;
 
-	for (;;) {
-		errno = 0;
-		dp = readdir(dir);
+	bzero(dp, sizeof (struct dirent) + name_max + 1);
 
-		if (dp == NULL && errno != 0)
-			goto fail;
-
-		if (dp == NULL)
-			break;
-
-		if (strcmp(dp->d_name, ".") == 0)
+	while (readdir_r(dir, dp, &dpp) == 0 && dpp != NULL) {
+		if (strcmp(dpp->d_name, ".") == 0)
 			continue;
-		if (strcmp(dp->d_name, "..") == 0)
+		if (strcmp(dpp->d_name, "..") == 0)
 			continue;
 
 		(void) snprintf(tmp, name_max, "%s/%s/fsimage.so", fsdir,
-			dp->d_name);
+			dpp->d_name);
 
 		if (init_plugin(tmp) != 0)
 			goto fail;

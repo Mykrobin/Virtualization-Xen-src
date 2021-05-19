@@ -1,5 +1,5 @@
 /*
- * xen/arch/arm/io.c
+ * xen/arch/arm/io.h
  *
  * ARM I/O handlers
  *
@@ -16,186 +16,32 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
-#include <xen/spinlock.h>
-#include <xen/sched.h>
-#include <xen/sort.h>
-#include <asm/cpuerrata.h>
 #include <asm/current.h>
-#include <asm/mmio.h>
 
-#include "decode.h"
+#include "io.h"
 
-static enum io_state handle_read(const struct mmio_handler *handler,
-                                 struct vcpu *v,
-                                 mmio_info_t *info)
+static const struct mmio_handler *const mmio_handlers[] =
 {
-    const struct hsr_dabt dabt = info->dabt;
-    struct cpu_user_regs *regs = guest_cpu_user_regs();
-    /*
-     * Initialize to zero to avoid leaking data if there is an
-     * implementation error in the emulation (such as not correctly
-     * setting r).
-     */
-    register_t r = 0;
-    uint8_t size = (1 << dabt.size) * 8;
+    &vgic_distr_mmio_handler,
+    &vuart_mmio_handler,
+};
+#define MMIO_HANDLER_NR ARRAY_SIZE(mmio_handlers)
 
-    if ( !handler->ops->read(v, info, &r, handler->priv) )
-        return IO_ABORT;
-
-    /*
-     * Sign extend if required.
-     * Note that we expect the read handler to have zeroed the bits
-     * outside the requested access size.
-     */
-    if ( dabt.sign && (r & (1UL << (size - 1))) )
-    {
-        /*
-         * We are relying on register_t using the same as
-         * an unsigned long in order to keep the 32-bit assembly
-         * code smaller.
-         */
-        BUILD_BUG_ON(sizeof(register_t) != sizeof(unsigned long));
-        r |= (~0UL) << size;
-    }
-
-    set_user_reg(regs, dabt.reg, r);
-
-    return IO_HANDLED;
-}
-
-static enum io_state handle_write(const struct mmio_handler *handler,
-                                  struct vcpu *v,
-                                  mmio_info_t *info)
-{
-    const struct hsr_dabt dabt = info->dabt;
-    struct cpu_user_regs *regs = guest_cpu_user_regs();
-    int ret;
-
-    ret = handler->ops->write(v, info, get_user_reg(regs, dabt.reg),
-                              handler->priv);
-    return ret ? IO_HANDLED : IO_ABORT;
-}
-
-/* This function assumes that mmio regions are not overlapped */
-static int cmp_mmio_handler(const void *key, const void *elem)
-{
-    const struct mmio_handler *handler0 = key;
-    const struct mmio_handler *handler1 = elem;
-
-    if ( handler0->addr < handler1->addr )
-        return -1;
-
-    if ( handler0->addr >= (handler1->addr + handler1->size) )
-        return 1;
-
-    return 0;
-}
-
-static const struct mmio_handler *find_mmio_handler(struct domain *d,
-                                                    paddr_t gpa)
-{
-    struct vmmio *vmmio = &d->arch.vmmio;
-    struct mmio_handler key = {.addr = gpa};
-    const struct mmio_handler *handler;
-
-    read_lock(&vmmio->lock);
-    handler = bsearch(&key, vmmio->handlers, vmmio->num_entries,
-                      sizeof(*handler), cmp_mmio_handler);
-    read_unlock(&vmmio->lock);
-
-    return handler;
-}
-
-enum io_state try_handle_mmio(struct cpu_user_regs *regs,
-                              const union hsr hsr,
-                              paddr_t gpa)
+int handle_mmio(mmio_info_t *info)
 {
     struct vcpu *v = current;
-    const struct mmio_handler *handler = NULL;
-    const struct hsr_dabt dabt = hsr.dabt;
-    mmio_info_t info = {
-        .gpa = gpa,
-        .dabt = dabt
-    };
+    int i;
 
-    ASSERT(hsr.ec == HSR_EC_DATA_ABORT_LOWER_EL);
-
-    handler = find_mmio_handler(v->domain, info.gpa);
-    if ( !handler )
-        return IO_UNHANDLED;
-
-    /* All the instructions used on emulated MMIO region should be valid */
-    if ( !dabt.valid )
-        return IO_ABORT;
-
-    /*
-     * Erratum 766422: Thumb store translation fault to Hypervisor may
-     * not have correct HSR Rt value.
-     */
-    if ( check_workaround_766422() && (regs->cpsr & PSR_THUMB) &&
-         dabt.write )
-    {
-        int rc;
-
-        rc = decode_instruction(regs, &info.dabt);
-        if ( rc )
-        {
-            gprintk(XENLOG_DEBUG, "Unable to decode instruction\n");
-            return IO_ABORT;
-        }
-    }
-
-    if ( info.dabt.write )
-        return handle_write(handler, v, &info);
-    else
-        return handle_read(handler, v, &info);
-}
-
-void register_mmio_handler(struct domain *d,
-                           const struct mmio_handler_ops *ops,
-                           paddr_t addr, paddr_t size, void *priv)
-{
-    struct vmmio *vmmio = &d->arch.vmmio;
-    struct mmio_handler *handler;
-
-    BUG_ON(vmmio->num_entries >= vmmio->max_num_entries);
-
-    write_lock(&vmmio->lock);
-
-    handler = &vmmio->handlers[vmmio->num_entries];
-
-    handler->ops = ops;
-    handler->addr = addr;
-    handler->size = size;
-    handler->priv = priv;
-
-    vmmio->num_entries++;
-
-    /* Sort mmio handlers in ascending order based on base address */
-    sort(vmmio->handlers, vmmio->num_entries, sizeof(struct mmio_handler),
-         cmp_mmio_handler, NULL);
-
-    write_unlock(&vmmio->lock);
-}
-
-int domain_io_init(struct domain *d, int max_count)
-{
-    rwlock_init(&d->arch.vmmio.lock);
-    d->arch.vmmio.num_entries = 0;
-    d->arch.vmmio.max_num_entries = max_count;
-    d->arch.vmmio.handlers = xzalloc_array(struct mmio_handler, max_count);
-    if ( !d->arch.vmmio.handlers )
-        return -ENOMEM;
+    for ( i = 0; i < MMIO_HANDLER_NR; i++ )
+        if ( mmio_handlers[i]->check_handler(v, info->gpa) )
+            return info->dabt.write ?
+                mmio_handlers[i]->write_handler(v, info) :
+                mmio_handlers[i]->read_handler(v, info);
 
     return 0;
 }
-
-void domain_io_free(struct domain *d)
-{
-    xfree(d->arch.vmmio.handlers);
-}
-
 /*
  * Local variables:
  * mode: C

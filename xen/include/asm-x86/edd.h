@@ -25,7 +25,7 @@
 
 #ifndef __ASSEMBLY__
 
-struct __packed edd_info {
+struct edd_info {
     /* Int13, Fn48: Check Extensions Present. */
     u8 device;                   /* %dl: device */
     u8 version;                  /* %ah: major version */
@@ -35,7 +35,7 @@ struct __packed edd_info {
     u8 legacy_max_head;          /* %dh: maximum head number */
     u8 legacy_sectors_per_track; /* %cl[5:0]: maximum sector number */
     /* Int13, Fn41: Get Device Parameters (as filled into %ds:%esi). */
-    struct __packed edd_device_params {
+    struct edd_device_params {
         u16 length;
         u16 info_flags;
         u32 num_default_cylinders;
@@ -51,97 +51,97 @@ struct __packed edd_info {
         u8 host_bus_type[4];
         u8 interface_type[8];
         union {
-            struct __packed {
+            struct {
                 u16 base_address;
                 u16 reserved1;
                 u32 reserved2;
-            } isa;
-            struct __packed {
+            } __attribute__ ((packed)) isa;
+            struct {
                 u8 bus;
                 u8 slot;
                 u8 function;
                 u8 channel;
                 u32 reserved;
-            } pci;
+            } __attribute__ ((packed)) pci;
             /* pcix is same as pci */
-            struct __packed {
+            struct {
                 u64 reserved;
-            } ibnd;
-            struct __packed {
+            } __attribute__ ((packed)) ibnd;
+            struct {
                 u64 reserved;
-            } xprs;
-            struct __packed {
+            } __attribute__ ((packed)) xprs;
+            struct {
                 u64 reserved;
-            } htpt;
-            struct __packed {
+            } __attribute__ ((packed)) htpt;
+            struct {
                 u64 reserved;
-            } unknown;
+            } __attribute__ ((packed)) unknown;
         } interface_path;
         union {
-            struct __packed {
+            struct {
                 u8 device;
                 u8 reserved1;
                 u16 reserved2;
                 u32 reserved3;
                 u64 reserved4;
-            } ata;
-            struct __packed {
+            } __attribute__ ((packed)) ata;
+            struct {
                 u8 device;
                 u8 lun;
                 u8 reserved1;
                 u8 reserved2;
                 u32 reserved3;
                 u64 reserved4;
-            } atapi;
-            struct __packed {
+            } __attribute__ ((packed)) atapi;
+            struct {
                 u16 id;
                 u64 lun;
                 u16 reserved1;
                 u32 reserved2;
-            } scsi;
-            struct __packed {
+            } __attribute__ ((packed)) scsi;
+            struct {
                 u64 serial_number;
                 u64 reserved;
-            } usb;
-            struct __packed {
+            } __attribute__ ((packed)) usb;
+            struct {
                 u64 eui;
                 u64 reserved;
-            } i1394;
-            struct __packed {
+            } __attribute__ ((packed)) i1394;
+            struct {
                 u64 wwid;
                 u64 lun;
-            } fibre;
-            struct __packed {
+            } __attribute__ ((packed)) fibre;
+            struct {
                 u64 identity_tag;
                 u64 reserved;
-            } i2o;
-            struct __packed {
+            } __attribute__ ((packed)) i2o;
+            struct {
                 u32 array_number;
                 u32 reserved1;
                 u64 reserved2;
-            } raid;
-            struct __packed {
+            } __attribute__ ((packed)) raid;
+            struct {
                 u8 device;
                 u8 reserved1;
                 u16 reserved2;
                 u32 reserved3;
                 u64 reserved4;
-            } sata;
-            struct __packed {
+            } __attribute__ ((packed)) sata;
+            struct {
                 u64 reserved1;
                 u64 reserved2;
-            } unknown;
+            } __attribute__ ((packed)) unknown;
         } device_path;
         u8 reserved4;
         u8 checksum;
-    }  edd_device_params;
-};
+    } __attribute__ ((packed)) edd_device_params;
+} __attribute__ ((packed));
 
-struct __packed mbr_signature {
+struct mbr_signature {
     u8 device;
     u8 pad[3];
     u32 signature;
-};
+} __attribute__ ((packed));
 
 /* These all reside in the boot trampoline. Access via bootsym(). */
 extern struct mbr_signature boot_mbr_signature[];

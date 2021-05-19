@@ -25,7 +25,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <xen/kernel.h>
@@ -43,15 +44,18 @@
 	UUID_LE(0xfe08ffbe, 0x95e4, 0x4be7, 0xbc, 0x73, 0x40, 0x96,	\
 		0x04, 0x4a, 0x38, 0xfc)
 
+#pragma pack(1)
 /*
  * CPER specification (in UEFI specification 2.3 appendix N) requires
  * byte-packed.
  */
-struct __packed cper_mce_record {
+struct cper_mce_record {
 	struct cper_record_header hdr;
 	struct cper_section_descriptor sec_hdr;
 	struct mce mce;
-};
+} __packed;
+/* Reset to default packing */
+#pragma pack()
 
 int apei_write_mce(struct mce *m)
 {
@@ -88,12 +92,10 @@ int apei_write_mce(struct mce *m)
 	return erst_write(&rcd.hdr);
 }
 
-#ifndef NDEBUG /* currently dead code */
-
-ssize_t apei_read_mce(struct mce *m, u64 *record_id)
+size_t apei_read_mce(struct mce *m, u64 *record_id)
 {
 	struct cper_mce_record rcd;
-	ssize_t len;
+	size_t len;
 
 	if (!m || !record_id)
 		return -EINVAL;
@@ -116,14 +118,12 @@ ssize_t apei_read_mce(struct mce *m, u64 *record_id)
 }
 
 /* Check whether there is record in ERST */
-bool apei_check_mce(void)
+int apei_check_mce(void)
 {
-	return erst_get_record_count() > 0;
+	return erst_get_record_count();
 }
 
 int apei_clear_mce(u64 record_id)
 {
 	return erst_clear(record_id);
 }
-
-#endif /* currently dead code */

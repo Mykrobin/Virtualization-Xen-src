@@ -42,8 +42,7 @@ static int libxl__hotplug(libxl__gc *gc, libxl__device *dev, char ***args,
     script = libxl__xs_read(gc, XBT_NULL,
                             GCSPRINTF("%s/%s", be_path, "script"));
     if (!script) {
-        LOGEVD(ERROR, errno, dev->domid,
-               "unable to read script from %s", be_path);
+        LOGEV(ERROR, errno, "unable to read script from %s", be_path);
         rc = ERROR_FAIL;
         goto out;
     }
@@ -65,34 +64,18 @@ int libxl__get_hotplug_script_info(libxl__gc *gc, libxl__device *dev,
                                    libxl__device_action action,
                                    int num_exec)
 {
+    char *disable_udev = libxl__xs_read(gc, XBT_NULL, DISABLE_UDEV_PATH);
     int rc;
+
+    /* Check if we have to run hotplug scripts */
+    if (!disable_udev || num_exec > 0) {
+        rc = 0;
+        goto out;
+    }
 
     switch (dev->backend_kind) {
     case LIBXL__DEVICE_KIND_VBD:
-        if (num_exec != 0) {
-            LOGD(DEBUG, dev->domid,
-                 "num_exec %d, not running hotplug scripts", num_exec);
-            rc = 0;
-            goto out;
-        }
-        rc = libxl__hotplug(gc, dev, args, action);
-        if (!rc) rc = 1;
-        break;
     case LIBXL__DEVICE_KIND_VIF:
-        /*
-         * If domain has a stubdom we don't have to execute hotplug scripts
-         * for emulated interfaces
-         *
-         * NetBSD let QEMU call a script to plug emulated nic, so
-         * only test if num_exec == 0 in that case.
-         */
-        if ((num_exec != 0) ||
-            (libxl_get_stubdom_id(CTX, dev->domid) && num_exec)) {
-            LOGD(DEBUG, dev->domid,
-                 "num_exec %d, not running hotplug scripts", num_exec);
-            rc = 0;
-            goto out;
-        }
         rc = libxl__hotplug(gc, dev, args, action);
         if (!rc) rc = 1;
         break;
@@ -111,16 +94,4 @@ out:
 libxl_device_model_version libxl__default_device_model(libxl__gc *gc)
 {
     return LIBXL_DEVICE_MODEL_VERSION_QEMU_XEN_TRADITIONAL;
-}
-
-int libxl__pci_numdevs(libxl__gc *gc)
-{
-    return ERROR_NI;
-}
-
-int libxl__pci_topology_init(libxl__gc *gc,
-                             physdev_pci_device_t *devs,
-                             int num_devs)
-{
-    return ERROR_NI;
 }

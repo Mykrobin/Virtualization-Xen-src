@@ -7,6 +7,7 @@
  *
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/kernel.h>
@@ -90,11 +91,11 @@ static int __init init_nonfatal_mce_checker(void)
 	struct cpuinfo_x86 *c = &boot_cpu_data;
 
 	/* Check for MCE support */
-	if (!opt_mce || !mce_available(c))
+	if (mce_disabled || !mce_available(c))
 		return -ENODEV;
 
-	if (__get_cpu_var(poll_bankmask) == NULL)
-		return -EINVAL;
+    if ( __get_cpu_var(poll_bankmask) == NULL )
+        return -EINVAL;
 
 	/*
 	 * Check for non-fatal errors every MCE_RATE s

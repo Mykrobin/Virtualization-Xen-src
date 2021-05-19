@@ -16,9 +16,11 @@
  * GNU General Public License for more details.
  * 
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#include <xen/config.h>
 #include <xen/sched.h>
 #include <xen/wait.h>
 #include <xen/errno.h>
@@ -127,37 +129,26 @@ static void __prepare_to_wait(struct waitqueue_vcpu *wqv)
     unsigned long dummy;
     u32 entry_vector = cpu_info->guest_cpu_user_regs.entry_vector;
 
+    cpu_info->guest_cpu_user_regs.entry_vector &= ~TRAP_regs_partial;
     ASSERT(wqv->esp == 0);
 
     /* Save current VCPU affinity; force wakeup on *this* CPU only. */
     wqv->wakeup_cpu = smp_processor_id();
-    cpumask_copy(&wqv->saved_affinity, curr->cpu_hard_affinity);
-    if ( vcpu_set_hard_affinity(curr, cpumask_of(wqv->wakeup_cpu)) )
+    cpumask_copy(&wqv->saved_affinity, curr->cpu_affinity);
+    if ( vcpu_set_affinity(curr, cpumask_of(wqv->wakeup_cpu)) )
     {
         gdprintk(XENLOG_ERR, "Unable to set vcpu affinity\n");
         domain_crash_synchronous();
     }
 
-    /* Hand-rolled setjmp(). */
     asm volatile (
-        "push %%rax; push %%rbx; push %%rdx; push %%rbp;"
-        "push %%r8;  push %%r9;  push %%r10; push %%r11;"
-        "push %%r12; push %%r13; push %%r14; push %%r15;"
-
-        "call 1f;"
-        "1: addq $2f-1b,(%%rsp);"
-        "sub %%esp,%%ecx;"
-        "cmp %3,%%ecx;"
-        "ja 3f;"
-        "mov %%rsp,%%rsi;"
-
-        /* check_wakeup_from_wait() longjmp()'s to this point. */
-        "2: rep movsb;"
-        "mov %%rsp,%%rsi;"
-        "3: pop %%rax;"
-
-        "pop %%r15; pop %%r14; pop %%r13; pop %%r12;"
-        "pop %%r11; pop %%r10; pop %%r9;  pop %%r8;"
+        "push %%rax; push %%rbx; push %%rdx; "
+        "push %%rbp; push %%r8; push %%r9; push %%r10; push %%r11; "
+        "push %%r12; push %%r13; push %%r14; push %%r15; call 1f; "
+        "1: addq $2f-1b,(%%rsp); sub %%esp,%%ecx; cmp %3,%%ecx; ja 3f; "
+        "mov %%rsp,%%rsi; 2: rep movsb; mov %%rsp,%%rsi; 3: pop %%rax; "
+        "pop %%r15; pop %%r14; pop %%r13; pop %%r12; "
+        "pop %%r11; pop %%r10; pop %%r9; pop %%r8; "
         "pop %%rbp; pop %%rdx; pop %%rbx; pop %%rax"
         : "=&S" (wqv->esp), "=&c" (dummy), "=&D" (dummy)
         : "i" (PAGE_SIZE), "0" (0), "1" (cpu_info), "2" (wqv->stack)
@@ -165,7 +156,7 @@ static void __prepare_to_wait(struct waitqueue_vcpu *wqv)
 
     if ( unlikely(wqv->esp == 0) )
     {
-        gdprintk(XENLOG_ERR, "Stack too large in %s\n", __func__);
+        gdprintk(XENLOG_ERR, "Stack too large in %s\n", __FUNCTION__);
         domain_crash_synchronous();
     }
 
@@ -175,7 +166,7 @@ static void __prepare_to_wait(struct waitqueue_vcpu *wqv)
 static void __finish_wait(struct waitqueue_vcpu *wqv)
 {
     wqv->esp = NULL;
-    (void)vcpu_set_hard_affinity(current, &wqv->saved_affinity);
+    (void)vcpu_set_affinity(current, &wqv->saved_affinity);
 }
 
 void check_wakeup_from_wait(void)
@@ -192,8 +183,8 @@ void check_wakeup_from_wait(void)
     {
         /* Re-set VCPU affinity and re-enter the scheduler. */
         struct vcpu *curr = current;
-        cpumask_copy(&wqv->saved_affinity, curr->cpu_hard_affinity);
-        if ( vcpu_set_hard_affinity(curr, cpumask_of(wqv->wakeup_cpu)) )
+        cpumask_copy(&wqv->saved_affinity, curr->cpu_affinity);
+        if ( vcpu_set_affinity(curr, cpumask_of(wqv->wakeup_cpu)) )
         {
             gdprintk(XENLOG_ERR, "Unable to set vcpu affinity\n");
             domain_crash_synchronous();
@@ -201,18 +192,11 @@ void check_wakeup_from_wait(void)
         wait(); /* takes us back into the scheduler */
     }
 
-    /*
-     * Hand-rolled longjmp().  Returns to the pointer on the top of
-     * wqv->stack, and lands on a `rep movs` instruction.  All other GPRs are
-     * restored from the stack, so are available for use here.
-     */
     asm volatile (
-        "mov %1,%%"__OP"sp; INDIRECT_JMP %[ip]"
+        "mov %1,%%"__OP"sp; jmp *(%0)"
         : : "S" (wqv->stack), "D" (wqv->esp),
-          "c" ((char *)get_cpu_info() - (char *)wqv->esp),
-          [ip] "r" (*(unsigned long *)wqv->stack)
+        "c" ((char *)get_cpu_info() - (char *)wqv->esp)
         : "memory" );
-    unreachable();
 }
 
 #else /* !CONFIG_X86 */

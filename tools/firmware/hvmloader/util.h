@@ -3,20 +3,8 @@
 
 #include <stdarg.h>
 #include <stdint.h>
-#include <stddef.h>
-#include <stdbool.h>
 #include <xen/xen.h>
 #include <xen/hvm/hvm_info_table.h>
-#include "e820.h"
-
-/* Request un-prefixed values from errno.h. */
-#define XEN_ERRNO(name, value) name = value,
-enum {
-#include <xen/errno.h>
-};
-
-/* Cause xs_wire.h to give us xsd_errors[]. */
-#define EINVAL EINVAL
 
 #define __STR(...) #__VA_ARGS__
 #define STR(...) __STR(__VA_ARGS__)
@@ -48,12 +36,9 @@ void __bug(char *file, int line) __attribute__((noreturn));
 #define max_t(type,x,y) \
         ({ type __x = (x); type __y = (y); __x > __y ? __x: __y; })
 
-#define MB(mb) (mb##ULL << 20)
-#define GB(gb) (gb##ULL << 30)
-
-static inline int test_bit(unsigned int b, const void *p)
+static inline int test_bit(unsigned int b, void *p)
 {
-    return !!(((const uint8_t *)p)[b>>3] & (1u<<(b&7)));
+    return !!(((uint8_t *)p)[b>>3] & (1u<<(b&7)));
 }
 
 static inline int test_and_clear_bit(int nr, volatile void *addr)
@@ -96,9 +81,9 @@ uint32_t pci_read(uint32_t devfn, uint32_t reg, uint32_t len);
 #define pci_readw(devfn, reg) ((uint16_t)pci_read(devfn, reg, 2))
 #define pci_readl(devfn, reg) ((uint32_t)pci_read(devfn, reg, 4))
 void pci_write(uint32_t devfn, uint32_t reg, uint32_t len, uint32_t val);
-#define pci_writeb(devfn, reg, val) pci_write(devfn, reg, 1, (uint8_t) (val))
-#define pci_writew(devfn, reg, val) pci_write(devfn, reg, 2, (uint16_t)(val))
-#define pci_writel(devfn, reg, val) pci_write(devfn, reg, 4, (uint32_t)(val))
+#define pci_writeb(devfn, reg, val) (pci_write(devfn, reg, 1, (uint8_t) val))
+#define pci_writew(devfn, reg, val) (pci_write(devfn, reg, 2, (uint16_t)val))
+#define pci_writel(devfn, reg, val) (pci_write(devfn, reg, 4, (uint32_t)val))
 
 /* Get a pointer to the shared-info page */
 struct shared_info *get_shared_info(void) __attribute__ ((const));
@@ -161,9 +146,6 @@ static inline void cpu_relax(void)
 struct hvm_info_table *get_hvm_info_table(void) __attribute__ ((const));
 #define hvm_info (get_hvm_info_table())
 
-/* HVM start info */
-extern const struct hvm_start_info *hvm_start_info;
-
 /* String and memory functions */
 int strcmp(const char *cs, const char *ct);
 int strncmp(const char *s1, const char *s2, uint32_t n);
@@ -192,6 +174,7 @@ int printf(const char *fmt, ...) __attribute__ ((format (printf, 1, 2)));
 int vprintf(const char *fmt, va_list ap);
 
 /* Buffer output */
+typedef unsigned long size_t;
 int snprintf(char *buf, size_t size, const char *fmt, ...) __attribute__ ((format (printf, 3, 4)));
 
 /* Populate specified memory hole with RAM. */
@@ -227,23 +210,8 @@ const char *xenstore_read(const char *path, const char *default_resp);
  */
 int xenstore_write(const char *path, const char *value);
 
-
-/* Get a HVM param.
- */
-int hvm_param_get(uint32_t index, uint64_t *value);
-
-/* Set a HVM param.
- */
-int hvm_param_set(uint32_t index, uint64_t value);
-
 /* Setup PCI bus */
 void pci_setup(void);
-
-/* Setup memory map  */
-void memory_map_setup(void);
-
-/* Sync memory map */
-void adjust_memory_map(void);
 
 /* Prepare the 32bit BIOS */
 uint32_t rombios_highbios_setup(void);
@@ -271,20 +239,6 @@ void perform_tests(void);
 #endif
 
 extern char _start[], _end[];
-
-int get_mem_mapping_layout(struct e820entry entries[],
-                           unsigned int *max_entries);
-
-extern struct e820map memory_map;
-bool check_overlap(uint64_t start, uint64_t size,
-                   uint64_t reserved_start, uint64_t reserved_size);
-
-extern const unsigned char dsdt_anycpu_qemu_xen[], dsdt_anycpu[], dsdt_15cpu[];
-extern const int dsdt_anycpu_qemu_xen_len, dsdt_anycpu_len, dsdt_15cpu_len;
-
-struct acpi_config;
-void hvmloader_acpi_build_tables(struct acpi_config *config,
-                                 unsigned int physical);
 
 #endif /* __HVMLOADER_UTIL_H__ */
 

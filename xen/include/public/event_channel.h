@@ -85,7 +85,7 @@ DEFINE_XEN_GUEST_HANDLE(evtchn_port_t);
  * is allocated in <dom> and returned as <port>.
  * NOTES:
  *  1. If the caller is unprivileged then <dom> must be DOMID_SELF.
- *  2. <remote_dom> may be DOMID_SELF, allowing loopback connections.
+ *  2. <rdom> may be DOMID_SELF, allowing loopback connections.
  */
 struct evtchn_alloc_unbound {
     /* IN parameters */
@@ -264,10 +264,6 @@ typedef struct evtchn_unmask evtchn_unmask_t;
  * NOTES:
  *  1. <dom> may be specified as DOMID_SELF.
  *  2. Only a sufficiently-privileged domain may specify other than DOMID_SELF.
- *  3. Destroys all control blocks and event array, resets event channel
- *     operations to 2-level ABI if called with <dom> == DOMID_SELF and FIFO
- *     ABI was used. Guests should not bind events during EVTCHNOP_reset call
- *     as these events are likely to be lost.
  */
 struct evtchn_reset {
     /* IN parameters. */

@@ -10,9 +10,9 @@
  * published by the Free Software Foundation.
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/init.h>
-#include <xen/guest_access.h>
 #include <xen/device_tree.h>
 #include <xen/kernel.h>
 #include <xen/lib.h>
@@ -22,9 +22,10 @@
 #include <xen/string.h>
 #include <xen/cpumask.h>
 #include <xen/ctype.h>
-#include <asm/setup.h>
-#include <xen/err.h>
+#include <xen/lib.h>
+#include <asm/early_printk.h>
 
+struct dt_early_info __initdata early_info;
 const void *device_tree_flattened;
 dt_irq_xlate_func dt_irq_xlate;
 /* Host device tree */
@@ -53,7 +54,21 @@ struct dt_alias_prop {
 
 static LIST_HEAD(aliases_lookup);
 
-#ifdef CONFIG_DEVICE_TREE_DEBUG
+/* Some device tree functions may be called both before and after the
+   console is initialized. */
+#define dt_printk(fmt, ...)                         \
+    do                                              \
+    {                                               \
+        if ( system_state == SYS_STATE_early_boot ) \
+            early_printk(fmt, ## __VA_ARGS__);      \
+        else                                        \
+            printk(fmt, ## __VA_ARGS__);            \
+    } while (0)
+
+// #define DEBUG_DT
+
+#ifdef DEBUG_DT
+# define dt_dprintk(fmt, args...) dt_printk(XENLOG_DEBUG fmt, ##args)
 static void dt_dump_addr(const char *s, const __be32 *addr, int na)
 {
     dt_dprintk("%s", s);
@@ -62,6 +77,7 @@ static void dt_dump_addr(const char *s, const __be32 *addr, int na)
     dt_dprintk("\n");
 }
 #else
+# define dt_dprintk(fmt, args...) do {} while ( 0 )
 static void dt_dump_addr(const char *s, const __be32 *addr, int na) { }
 #endif
 
@@ -84,6 +100,52 @@ struct dt_bus
     int (*translate)(__be32 *addr, u64 offset, int na);
     unsigned int (*get_flags)(const __be32 *addr);
 };
+
+static bool_t __init device_tree_node_matches(const void *fdt, int node,
+                                              const char *match)
+{
+    const char *name;
+    size_t match_len;
+
+    name = fdt_get_name(fdt, node, NULL);
+    match_len = strlen(match);
+
+    /* Match both "match" and "match@..." patterns but not
+       "match-foo". */
+    return strncmp(name, match, match_len) == 0
+        && (name[match_len] == '@' || name[match_len] == '\0');
+}
+
+static bool_t __init device_tree_node_compatible(const void *fdt, int node,
+                                                 const char *match)
+{
+    int len, l;
+    int mlen;
+    const void *prop;
+
+    mlen = strlen(match);
+
+    prop = fdt_getprop(fdt, node, "compatible", &len);
+    if ( prop == NULL )
+        return 0;
+
+    while ( len > 0 ) {
+        if ( !dt_compat_cmp(prop, match) )
+            return 1;
+        l = strlen(prop) + 1;
+        prop += l;
+        len -= l;
+    }
+
+    return 0;
+}
+
+static void __init device_tree_get_reg(const __be32 **cell, u32 address_cells,
+                                       u32 size_cells, u64 *start, u64 *size)
+{
+    *start = dt_next_cell(address_cells, cell);
+    *size = dt_next_cell(size_cells, cell);
+}
 
 void dt_get_range(const __be32 **cell, const struct dt_device_node *np,
                   u64 *address, u64 *size)
@@ -112,11 +174,342 @@ void dt_set_range(__be32 **cellp, const struct dt_device_node *np,
     dt_set_cell(cellp, dt_n_size_cells(np), size);
 }
 
-void dt_child_set_range(__be32 **cellp, const struct dt_device_node *parent,
-                        u64 address, u64 size)
+static u32 __init device_tree_get_u32(const void *fdt, int node,
+                                      const char *prop_name, u32 dflt)
 {
-    dt_set_cell(cellp, dt_child_n_addr_cells(parent), address);
-    dt_set_cell(cellp, dt_child_n_size_cells(parent), size);
+    const struct fdt_property *prop;
+
+    prop = fdt_get_property(fdt, node, prop_name, NULL);
+    if ( !prop || prop->len < sizeof(u32) )
+        return dflt;
+
+    return fdt32_to_cpu(*(uint32_t*)prop->data);
+}
+
+/**
+ * device_tree_for_each_node - iterate over all device tree nodes
+ * @fdt: flat device tree.
+ * @func: function to call for each node.
+ * @data: data to pass to @func.
+ *
+ * Any nodes nested at DEVICE_TREE_MAX_DEPTH or deeper are ignored.
+ *
+ * Returns 0 if all nodes were iterated over successfully.  If @func
+ * returns a value different from 0, that value is returned immediately.
+ */
+static int __init device_tree_for_each_node(const void *fdt,
+                                            device_tree_node_func func,
+                                            void *data)
+{
+    int node;
+    int depth;
+    u32 address_cells[DEVICE_TREE_MAX_DEPTH];
+    u32 size_cells[DEVICE_TREE_MAX_DEPTH];
+    int ret;
+
+    for ( node = 0, depth = 0;
+          node >=0 && depth >= 0;
+          node = fdt_next_node(fdt, node, &depth) )
+    {
+        const char *name = fdt_get_name(fdt, node, NULL);
+
+        if ( depth >= DEVICE_TREE_MAX_DEPTH )
+        {
+            dt_printk("Warning: device tree node `%s' is nested too deep\n",
+                      name);
+            continue;
+        }
+
+        address_cells[depth] = device_tree_get_u32(fdt, node, "#address-cells",
+                                depth > 0 ? address_cells[depth-1] : 0);
+        size_cells[depth] = device_tree_get_u32(fdt, node, "#size-cells",
+                                depth > 0 ? size_cells[depth-1] : 0);
+
+
+        ret = func(fdt, node, name, depth,
+                   address_cells[depth-1], size_cells[depth-1], data);
+        if ( ret != 0 )
+            return ret;
+    }
+    return 0;
+}
+
+/**
+ * device_tree_bootargs - return the bootargs (the Xen command line)
+ * @fdt flat device tree.
+ */
+const char *device_tree_bootargs(const void *fdt)
+{
+    int node;
+    const struct fdt_property *prop;
+
+    node = fdt_path_offset(fdt, "/chosen");
+    if ( node < 0 )
+        return NULL;
+
+    prop = fdt_get_property(fdt, node, "xen,xen-bootargs", NULL);
+    if ( prop == NULL )
+    {
+        struct dt_mb_module *dom0_mod = NULL;
+
+        if ( early_info.modules.nr_mods >= MOD_KERNEL )
+            dom0_mod = &early_info.modules.module[MOD_KERNEL];
+
+        if (fdt_get_property(fdt, node, "xen,dom0-bootargs", NULL) ||
+            ( dom0_mod && dom0_mod->cmdline[0] ) )
+            prop = fdt_get_property(fdt, node, "bootargs", NULL);
+    }
+    if ( prop == NULL )
+        return NULL;
+
+    return prop->data;
+}
+
+static int dump_node(const void *fdt, int node, const char *name, int depth,
+                     u32 address_cells, u32 size_cells, void *data)
+{
+    char prefix[2*DEVICE_TREE_MAX_DEPTH + 1] = "";
+    int i;
+    int prop;
+
+    for ( i = 0; i < depth; i++ )
+        safe_strcat(prefix, "  ");
+
+    if ( name[0] == '\0' )
+        name = "/";
+    dt_printk("%s%s:\n", prefix, name);
+
+    for ( prop = fdt_first_property_offset(fdt, node);
+          prop >= 0;
+          prop = fdt_next_property_offset(fdt, prop) )
+    {
+        const struct fdt_property *p;
+
+        p = fdt_get_property_by_offset(fdt, prop, NULL);
+
+        dt_printk("%s  %s\n", prefix, fdt_string(fdt, fdt32_to_cpu(p->nameoff)));
+    }
+
+    return 0;
+}
+
+/**
+ * device_tree_dump - print a text representation of a device tree
+ * @fdt: flat device tree to print
+ */
+void __init device_tree_dump(const void *fdt)
+{
+    device_tree_for_each_node(fdt, dump_node, NULL);
+}
+
+
+static void __init process_memory_node(const void *fdt, int node,
+                                       const char *name,
+                                       u32 address_cells, u32 size_cells)
+{
+    const struct fdt_property *prop;
+    int i;
+    int banks;
+    const __be32 *cell;
+    paddr_t start, size;
+    u32 reg_cells = address_cells + size_cells;
+
+    if ( address_cells < 1 || size_cells < 1 )
+    {
+        early_printk("fdt: node `%s': invalid #address-cells or #size-cells",
+                     name);
+        return;
+    }
+
+    prop = fdt_get_property(fdt, node, "reg", NULL);
+    if ( !prop )
+    {
+        early_printk("fdt: node `%s': missing `reg' property\n", name);
+        return;
+    }
+
+    cell = (const __be32 *)prop->data;
+    banks = fdt32_to_cpu(prop->len) / (reg_cells * sizeof (u32));
+
+    for ( i = 0; i < banks && early_info.mem.nr_banks < NR_MEM_BANKS; i++ )
+    {
+        device_tree_get_reg(&cell, address_cells, size_cells, &start, &size);
+        early_info.mem.bank[early_info.mem.nr_banks].start = start;
+        early_info.mem.bank[early_info.mem.nr_banks].size = size;
+        early_info.mem.nr_banks++;
+    }
+}
+
+static void __init process_multiboot_node(const void *fdt, int node,
+                                          const char *name,
+                                          u32 address_cells, u32 size_cells)
+{
+    const struct fdt_property *prop;
+    const __be32 *cell;
+    int nr;
+    struct dt_mb_module *mod;
+    int len;
+
+    if ( fdt_node_check_compatible(fdt, node, "xen,linux-zimage") == 0 ||
+         fdt_node_check_compatible(fdt, node, "multiboot,kernel") == 0 )
+        nr = MOD_KERNEL;
+    else if ( fdt_node_check_compatible(fdt, node, "xen,linux-initrd") == 0 ||
+              fdt_node_check_compatible(fdt, node, "multiboot,ramdisk") == 0 )
+        nr = MOD_INITRD;
+    else
+        early_panic("%s not a known xen multiboot type\n", name);
+
+    mod = &early_info.modules.module[nr];
+
+    prop = fdt_get_property(fdt, node, "reg", &len);
+    if ( !prop )
+        early_panic("node %s missing `reg' property\n", name);
+
+    if ( len < dt_cells_to_size(address_cells + size_cells) )
+        early_panic("fdt: node `%s': `reg` property length is too short\n",
+                    name);
+
+    cell = (const __be32 *)prop->data;
+    device_tree_get_reg(&cell, address_cells, size_cells,
+                        &mod->start, &mod->size);
+
+    prop = fdt_get_property(fdt, node, "bootargs", &len);
+    if ( prop )
+    {
+        if ( len > sizeof(mod->cmdline) )
+            early_panic("module %d command line too long\n", nr);
+
+        safe_strcpy(mod->cmdline, prop->data);
+    }
+    else
+        mod->cmdline[0] = 0;
+
+    if ( nr > early_info.modules.nr_mods )
+        early_info.modules.nr_mods = nr;
+}
+
+static void __init process_chosen_node(const void *fdt, int node,
+                                       const char *name,
+                                       u32 address_cells, u32 size_cells)
+{
+    const struct fdt_property *prop;
+    struct dt_mb_module *mod = &early_info.modules.module[MOD_INITRD];
+    paddr_t start, end;
+    int len;
+
+    dt_printk("Checking for initrd in /chosen\n");
+
+    prop = fdt_get_property(fdt, node, "linux,initrd-start", &len);
+    if ( !prop )
+        /* No initrd present. */
+        return;
+    if ( len != sizeof(u32) && len != sizeof(u64) )
+    {
+        dt_printk("linux,initrd-start property has invalid length %d\n", len);
+        return;
+    }
+    start = dt_read_number((void *)&prop->data, dt_size_to_cells(len));
+
+    prop = fdt_get_property(fdt, node, "linux,initrd-end", &len);
+    if ( !prop )
+    {
+        dt_printk("linux,initrd-end not present but -start was\n");
+        return;
+    }
+    if ( len != sizeof(u32) && len != sizeof(u64) )
+    {
+        dt_printk("linux,initrd-end property has invalid length %d\n", len);
+        return;
+    }
+    end = dt_read_number((void *)&prop->data, dt_size_to_cells(len));
+
+    if ( start >= end )
+    {
+        dt_printk("linux,initrd limits invalid: %"PRIpaddr" >= %"PRIpaddr"\n",
+                  start, end);
+        return;
+    }
+
+    dt_printk("Initrd %"PRIpaddr"-%"PRIpaddr"\n", start, end);
+
+    mod->start = start;
+    mod->size = end - start;
+
+    early_info.modules.nr_mods = MAX(MOD_INITRD, early_info.modules.nr_mods);
+}
+
+static int __init early_scan_node(const void *fdt,
+                                  int node, const char *name, int depth,
+                                  u32 address_cells, u32 size_cells,
+                                  void *data)
+{
+    if ( device_tree_node_matches(fdt, node, "memory") )
+        process_memory_node(fdt, node, name, address_cells, size_cells);
+    else if ( device_tree_node_compatible(fdt, node, "xen,multiboot-module" ) ||
+              device_tree_node_compatible(fdt, node, "multiboot,module" ))
+        process_multiboot_node(fdt, node, name, address_cells, size_cells);
+    else if ( depth == 1 && device_tree_node_matches(fdt, node, "chosen") )
+        process_chosen_node(fdt, node, name, address_cells, size_cells);
+
+    return 0;
+}
+
+static void __init early_print_info(void)
+{
+    struct dt_mem_info *mi = &early_info.mem;
+    struct dt_module_info *mods = &early_info.modules;
+    int i, nr_rsvd;
+
+    for ( i = 0; i < mi->nr_banks; i++ )
+        early_printk("RAM: %"PRIpaddr" - %"PRIpaddr"\n",
+                     mi->bank[i].start,
+                     mi->bank[i].start + mi->bank[i].size - 1);
+    early_printk("\n");
+    for ( i = 1 ; i < mods->nr_mods + 1; i++ )
+        early_printk("MODULE[%d]: %"PRIpaddr" - %"PRIpaddr" %s\n",
+                     i,
+                     mods->module[i].start,
+                     mods->module[i].start + mods->module[i].size,
+                     mods->module[i].cmdline);
+    nr_rsvd = fdt_num_mem_rsv(device_tree_flattened);
+    for ( i = 0; i < nr_rsvd; i++ )
+    {
+        paddr_t s, e;
+        if ( fdt_get_mem_rsv(device_tree_flattened, i, &s, &e) < 0 )
+            continue;
+        /* fdt_get_mem_rsv returns length */
+        e += s;
+        early_printk(" RESVD[%d]: %"PRIpaddr" - %"PRIpaddr"\n",
+                     i, s, e);
+    }
+    early_printk("\n");
+}
+
+/**
+ * device_tree_early_init - initialize early info from a DTB
+ * @fdt: flattened device tree binary
+ *
+ * Returns the size of the DTB.
+ */
+size_t __init device_tree_early_init(const void *fdt, paddr_t paddr)
+{
+    struct dt_mb_module *mod;
+    int ret;
+
+    ret = fdt_check_header(fdt);
+    if ( ret < 0 )
+        early_panic("No valid device tree\n");
+
+    mod = &early_info.modules.module[MOD_FDT];
+    mod->start = paddr;
+    mod->size = fdt_totalsize(fdt);
+
+    early_info.modules.nr_mods = max(MOD_FDT, early_info.modules.nr_mods);
+
+    device_tree_for_each_node((void *)fdt, early_scan_node, NULL);
+    early_print_info();
+
+    return fdt_totalsize(fdt);
 }
 
 static void __init *unflatten_dt_alloc(unsigned long *mem, unsigned long size,
@@ -132,8 +525,10 @@ static void __init *unflatten_dt_alloc(unsigned long *mem, unsigned long size,
 }
 
 /* Find a property with a given name for a given node and return it. */
-const struct dt_property *dt_find_property(const struct dt_device_node *np,
-                                           const char *name, u32 *lenp)
+static const struct dt_property *
+dt_find_property(const struct dt_device_node *np,
+                 const char *name,
+                 u32 *lenp)
 {
     const struct dt_property *pp;
 
@@ -281,22 +676,6 @@ struct dt_device_node *dt_find_node_by_path(const char *path)
     return np;
 }
 
-int dt_find_node_by_gpath(XEN_GUEST_HANDLE(char) u_path, uint32_t u_plen,
-                          struct dt_device_node **node)
-{
-    char *path;
-
-    path = safe_copy_string_from_guest(u_path, u_plen, PAGE_SIZE);
-    if ( IS_ERR(path) )
-        return PTR_ERR(path);
-
-    *node = dt_find_node_by_path(path);
-
-    xfree(path);
-
-    return (*node == NULL) ? -ESRCH : 0;
-}
-
 struct dt_device_node *dt_find_node_by_alias(const char *alias)
 {
     const struct dt_alias_prop *app;
@@ -310,15 +689,13 @@ struct dt_device_node *dt_find_node_by_alias(const char *alias)
     return NULL;
 }
 
-const struct dt_device_match *
-dt_match_node(const struct dt_device_match *matches,
-              const struct dt_device_node *node)
+bool_t dt_match_node(const struct dt_device_match *matches,
+                     const struct dt_device_node *node)
 {
     if ( !matches )
-        return NULL;
+        return 0;
 
-    while ( matches->path || matches->type ||
-            matches->compatible || matches->not_available || matches->prop)
+    while ( matches->path || matches->type || matches->compatible )
     {
         bool_t match = 1;
 
@@ -331,18 +708,13 @@ dt_match_node(const struct dt_device_match *matches,
         if ( matches->compatible )
             match &= dt_device_is_compatible(node, matches->compatible);
 
-        if ( matches->not_available )
-            match &= !dt_device_is_available(node);
-
-        if ( matches->prop )
-            match &= dt_find_property(node, matches->prop, NULL) != NULL;
-
         if ( match )
-            return matches;
+            return match;
+
         matches++;
     }
 
-    return NULL;
+    return 0;
 }
 
 const struct dt_device_node *dt_get_parent(const struct dt_device_node *node)
@@ -391,15 +763,13 @@ dt_find_matching_node(struct dt_device_node *from,
     return NULL;
 }
 
-static int __dt_n_addr_cells(const struct dt_device_node *np, bool_t parent)
+int dt_n_addr_cells(const struct dt_device_node *np)
 {
     const __be32 *ip;
 
     do {
-        if ( np->parent && !parent )
+        if ( np->parent )
             np = np->parent;
-        parent = false;
-
         ip = dt_get_property(np, "#address-cells", NULL);
         if ( ip )
             return be32_to_cpup(ip);
@@ -408,15 +778,13 @@ static int __dt_n_addr_cells(const struct dt_device_node *np, bool_t parent)
     return DT_ROOT_NODE_ADDR_CELLS_DEFAULT;
 }
 
-int __dt_n_size_cells(const struct dt_device_node *np, bool_t parent)
+int dt_n_size_cells(const struct dt_device_node *np)
 {
     const __be32 *ip;
 
     do {
-        if ( np->parent && !parent )
+        if ( np->parent )
             np = np->parent;
-        parent = false;
-
         ip = dt_get_property(np, "#size-cells", NULL);
         if ( ip )
             return be32_to_cpup(ip);
@@ -424,46 +792,6 @@ int __dt_n_size_cells(const struct dt_device_node *np, bool_t parent)
     /* No #address-cells property for the root node */
     return DT_ROOT_NODE_SIZE_CELLS_DEFAULT;
 }
-
-int dt_n_addr_cells(const struct dt_device_node *np)
-{
-    return __dt_n_addr_cells(np, false);
-}
-
-int dt_n_size_cells(const struct dt_device_node *np)
-{
-    return __dt_n_size_cells(np, false);
-}
-
-int dt_child_n_addr_cells(const struct dt_device_node *parent)
-{
-    return __dt_n_addr_cells(parent, true);
-}
-
-int dt_child_n_size_cells(const struct dt_device_node *parent)
-{
-    return __dt_n_size_cells(parent, true);
-}
-
-/*
- * These are defined in Linux where much of this code comes from, but
- * are currently unused outside this file in the context of Xen.
- */
-#define IORESOURCE_BITS         0x000000ff      /* Bus-specific bits */
-
-#define IORESOURCE_TYPE_BITS    0x00001f00      /* Resource type */
-#define IORESOURCE_IO           0x00000100      /* PCI/ISA I/O ports */
-#define IORESOURCE_MEM          0x00000200
-#define IORESOURCE_REG          0x00000300      /* Register offsets */
-#define IORESOURCE_IRQ          0x00000400
-#define IORESOURCE_DMA          0x00000800
-#define IORESOURCE_BUS          0x00001000
-
-#define IORESOURCE_PREFETCH     0x00002000      /* No side effects */
-#define IORESOURCE_READONLY     0x00004000
-#define IORESOURCE_CACHEABLE    0x00008000
-#define IORESOURCE_RANGELENGTH  0x00010000
-#define IORESOURCE_SHADOWABLE   0x00020000
 
 /*
  * Default translator (generic bus)
@@ -529,81 +857,9 @@ static int dt_bus_default_translate(__be32 *addr, u64 offset, int na)
 }
 static unsigned int dt_bus_default_get_flags(const __be32 *addr)
 {
-    return IORESOURCE_MEM;
-}
-
-/*
- * PCI bus specific translator
- */
-
-static bool_t dt_bus_pci_match(const struct dt_device_node *np)
-{
-    /*
-     * "pciex" is PCI Express "vci" is for the /chaos bridge on 1st-gen PCI
-     * powermacs "ht" is hypertransport
-     */
-    return !strcmp(np->type, "pci") || !strcmp(np->type, "pciex") ||
-        !strcmp(np->type, "vci") || !strcmp(np->type, "ht");
-}
-
-static void dt_bus_pci_count_cells(const struct dt_device_node *np,
-				   int *addrc, int *sizec)
-{
-    if (addrc)
-        *addrc = 3;
-    if (sizec)
-        *sizec = 2;
-}
-
-static unsigned int dt_bus_pci_get_flags(const __be32 *addr)
-{
-    unsigned int flags = 0;
-    u32 w = be32_to_cpup(addr);
-
-    switch((w >> 24) & 0x03) {
-    case 0x01:
-        flags |= IORESOURCE_IO;
-        break;
-    case 0x02: /* 32 bits */
-    case 0x03: /* 64 bits */
-        flags |= IORESOURCE_MEM;
-        break;
-    }
-    if (w & 0x40000000)
-        flags |= IORESOURCE_PREFETCH;
-    return flags;
-}
-
-static u64 dt_bus_pci_map(__be32 *addr, const __be32 *range, int na, int ns,
-		int pna)
-{
-    u64 cp, s, da;
-    unsigned int af, rf;
-
-    af = dt_bus_pci_get_flags(addr);
-    rf = dt_bus_pci_get_flags(range);
-
-    /* Check address type match */
-    if ((af ^ rf) & (IORESOURCE_MEM | IORESOURCE_IO))
-        return DT_BAD_ADDR;
-
-    /* Read address values, skipping high cell */
-    cp = dt_read_number(range + 1, na - 1);
-    s  = dt_read_number(range + na + pna, ns);
-    da = dt_read_number(addr + 1, na - 1);
-
-    dt_dprintk("DT: PCI map, cp=%llx, s=%llx, da=%llx\n",
-               (unsigned long long)cp, (unsigned long long)s,
-               (unsigned long long)da);
-
-    if (da < cp || da >= (cp + s))
-        return DT_BAD_ADDR;
-    return da - cp;
-}
-
-static int dt_bus_pci_translate(__be32 *addr, u64 offset, int na)
-{
-    return dt_bus_default_translate(addr + 1, offset, na - 1);
+    /* TODO: Return the type of memory (device, ...) for caching
+     * attribute during mapping */
+    return 0;
 }
 
 /*
@@ -611,16 +867,6 @@ static int dt_bus_pci_translate(__be32 *addr, u64 offset, int na)
  */
 static const struct dt_bus dt_busses[] =
 {
-    /* PCI */
-    {
-        .name = "pci",
-        .addresses = "assigned-addresses",
-        .match = dt_bus_pci_match,
-        .count_cells = dt_bus_pci_count_cells,
-        .map = dt_bus_pci_map,
-        .translate = dt_bus_pci_translate,
-        .get_flags = dt_bus_pci_get_flags,
-    },
     /* Default */
     {
         .name = "default",
@@ -645,7 +891,7 @@ static const struct dt_bus *dt_match_bus(const struct dt_device_node *np)
 }
 
 static const __be32 *dt_get_address(const struct dt_device_node *dev,
-                                    unsigned int index, u64 *size,
+                                    int index, u64 *size,
                                     unsigned int *flags)
 {
     const __be32 *prop;
@@ -702,7 +948,7 @@ static int dt_translate_one(const struct dt_device_node *parent,
     ranges = dt_get_property(parent, rprop, &rlen);
     if ( ranges == NULL )
     {
-        printk(XENLOG_ERR "DT: no ranges; cannot translate\n");
+        dt_printk(XENLOG_ERR "DT: no ranges; cannot translate\n");
         return 1;
     }
     if ( rlen == 0 )
@@ -772,7 +1018,7 @@ static u64 __dt_translate_address(const struct dt_device_node *dev,
     bus->count_cells(dev, &na, &ns);
     if ( !DT_CHECK_COUNTS(na, ns) )
     {
-        printk(XENLOG_ERR "dt_parse: Bad cell count for device %s\n",
+        dt_printk(XENLOG_ERR "dt_parse: Bad cell count for device %s\n",
                   dev->full_name);
         goto bail;
     }
@@ -801,7 +1047,7 @@ static u64 __dt_translate_address(const struct dt_device_node *dev,
         pbus = dt_match_bus(parent);
         if ( pbus == NULL )
         {
-            printk("DT: %s is not a valid bus\n", parent->full_name);
+            dt_printk("DT: %s is not a valid bus\n", parent->full_name);
             break;
         }
         pbus->count_cells(dev, &pna, &pns);
@@ -832,7 +1078,7 @@ bail:
 }
 
 /* dt_device_address - Translate device tree address and return it */
-int dt_device_get_address(const struct dt_device_node *dev, unsigned int index,
+int dt_device_get_address(const struct dt_device_node *dev, int index,
                           u64 *addr, u64 *size)
 {
     const __be32 *addrp;
@@ -853,101 +1099,15 @@ int dt_device_get_address(const struct dt_device_node *dev, unsigned int index,
     return 0;
 }
 
-
-int dt_for_each_range(const struct dt_device_node *dev,
-                      int (*cb)(const struct dt_device_node *,
-                                u64 addr, u64 length,
-                                void *),
-                      void *data)
-{
-    const struct dt_device_node *parent = NULL;
-    const struct dt_bus *bus, *pbus;
-    const __be32 *ranges;
-    __be32 addr[DT_MAX_ADDR_CELLS];
-    unsigned int rlen;
-    int na, ns, pna, pns, rone;
-
-    bus = dt_match_bus(dev);
-    if ( !bus )
-        return 0; /* device is not a bus */
-
-    parent = dt_get_parent(dev);
-    if ( parent == NULL )
-        return -EINVAL;
-
-    ranges = dt_get_property(dev, "ranges", &rlen);
-    if ( ranges == NULL )
-    {
-        printk(XENLOG_ERR "DT: no ranges; cannot enumerate %s\n",
-               dev->full_name);
-        return -EINVAL;
-    }
-    if ( rlen == 0 ) /* Nothing to do */
-        return 0;
-
-    bus->count_cells(dev, &na, &ns);
-    if ( !DT_CHECK_COUNTS(na, ns) )
-    {
-        printk(XENLOG_ERR "dt_parse: Bad cell count for device %s\n",
-                  dev->full_name);
-        return -EINVAL;
-    }
-
-    pbus = dt_match_bus(parent);
-    if ( pbus == NULL )
-    {
-        printk("DT: %s is not a valid bus\n", parent->full_name);
-        return -EINVAL;
-    }
-
-    pbus->count_cells(dev, &pna, &pns);
-    if ( !DT_CHECK_COUNTS(pna, pns) )
-    {
-        printk(XENLOG_ERR "dt_parse: Bad cell count for parent %s\n",
-               dev->full_name);
-        return -EINVAL;
-    }
-
-    /* Now walk through the ranges */
-    rlen /= 4;
-    rone = na + pna + ns;
-
-    dt_dprintk("%s: dev=%s, bus=%s, parent=%s, rlen=%d, rone=%d\n",
-               __func__,
-               dt_node_name(dev), bus->name,
-               dt_node_name(parent), rlen, rone);
-
-    for ( ; rlen >= rone; rlen -= rone, ranges += rone )
-    {
-        u64 a, s;
-        int ret;
-
-        memcpy(addr, ranges + na, 4 * pna);
-
-        a = __dt_translate_address(dev, addr, "ranges");
-        s = dt_read_number(ranges + na + pna, ns);
-
-        ret = cb(dev, a, s, data);
-        if ( ret )
-        {
-            dt_dprintk(" -> callback failed=%d\n", ret);
-            return ret;
-        }
-
-    }
-
-    return 0;
-}
-
 /**
  * dt_find_node_by_phandle - Find a node given a phandle
  * @handle: phandle of the node to find
  *
  * Returns a node pointer.
  */
-static struct dt_device_node *dt_find_node_by_phandle(dt_phandle handle)
+static const struct dt_device_node *dt_find_node_by_phandle(dt_phandle handle)
 {
-    struct dt_device_node *np;
+    const struct dt_device_node *np;
 
     dt_for_each_device_node(dt_host, np)
         if ( np->phandle == handle )
@@ -1044,177 +1204,6 @@ unsigned int dt_number_of_address(const struct dt_device_node *dev)
     onesize = na + ns;
 
     return (psize / onesize);
-}
-
-int dt_for_each_irq_map(const struct dt_device_node *dev,
-                        int (*cb)(const struct dt_device_node *,
-                                  const struct dt_irq *,
-                                  void *),
-                        void *data)
-{
-    const struct dt_device_node *ipar, *tnode, *old = NULL;
-    const __be32 *tmp, *imap;
-    u32 intsize = 1, addrsize, pintsize = 0, paddrsize = 0;
-    u32 imaplen;
-    int i, ret;
-
-    struct dt_raw_irq dt_raw_irq;
-    struct dt_irq dt_irq;
-
-    dt_dprintk("%s: par=%s cb=%p data=%p\n", __func__,
-               dev->full_name, cb, data);
-
-    ipar = dev;
-
-    /* First get the #interrupt-cells property of the current cursor
-     * that tells us how to interpret the passed-in intspec. If there
-     * is none, we are nice and just walk up the tree
-     */
-    do {
-        tmp = dt_get_property(ipar, "#interrupt-cells", NULL);
-        if ( tmp != NULL )
-        {
-            intsize = be32_to_cpu(*tmp);
-            break;
-        }
-        tnode = ipar;
-        ipar = dt_irq_find_parent(ipar);
-    } while ( ipar );
-    if ( ipar == NULL )
-    {
-        dt_dprintk(" -> no parent found !\n");
-        goto fail;
-    }
-
-    dt_dprintk("%s: ipar=%s, size=%d\n", __func__, ipar->full_name, intsize);
-
-    if ( intsize > DT_MAX_IRQ_SPEC )
-    {
-        dt_dprintk(" -> too many irq specifier cells\n");
-        goto fail;
-    }
-
-    /* Look for this #address-cells. We have to implement the old linux
-     * trick of looking for the parent here as some device-trees rely on it
-     */
-    old = ipar;
-    do {
-        tmp = dt_get_property(old, "#address-cells", NULL);
-        tnode = dt_get_parent(old);
-        old = tnode;
-    } while ( old && tmp == NULL );
-
-    old = NULL;
-    addrsize = (tmp == NULL) ? 2 : be32_to_cpu(*tmp);
-
-    dt_dprintk(" -> addrsize=%d\n", addrsize);
-
-    /* Now look for an interrupt-map */
-    imap = dt_get_property(dev, "interrupt-map", &imaplen);
-    /* No interrupt-map found. Ignore */
-    if ( imap == NULL )
-    {
-        dt_dprintk(" -> no map, ignoring\n");
-        return 0;
-    }
-    imaplen /= sizeof(u32);
-
-    /* Parse interrupt-map */
-    while ( imaplen > (addrsize + intsize + 1) )
-    {
-        /* skip child unit address and child interrupt specifier */
-        imap += addrsize + intsize;
-        imaplen -= addrsize + intsize;
-
-        /* Get the interrupt parent */
-        ipar = dt_find_node_by_phandle(be32_to_cpup(imap));
-        imap++;
-        --imaplen;
-
-        /* Check if not found */
-        if ( ipar == NULL )
-        {
-            dt_dprintk(" -> imap parent not found !\n");
-            goto fail;
-        }
-
-        dt_dprintk(" -> ipar %s\n", dt_node_name(ipar));
-
-        /* Get #interrupt-cells and #address-cells of new
-         * parent
-         */
-        tmp = dt_get_property(ipar, "#interrupt-cells", NULL);
-        if ( tmp == NULL )
-        {
-            dt_dprintk(" -> parent lacks #interrupt-cells!\n");
-            goto fail;
-        }
-        pintsize = be32_to_cpu(*tmp);
-        tmp = dt_get_property(ipar, "#address-cells", NULL);
-        paddrsize = (tmp == NULL) ? 0 : be32_to_cpu(*tmp);
-
-        dt_dprintk(" -> pintsize=%d, paddrsize=%d\n",
-                   pintsize, paddrsize);
-
-        if ( pintsize > DT_MAX_IRQ_SPEC )
-        {
-            dt_dprintk(" -> too many irq specifier cells in parent\n");
-            goto fail;
-        }
-
-        /* Check for malformed properties */
-        if ( imaplen < (paddrsize + pintsize) )
-            goto fail;
-
-        imap += paddrsize;
-        imaplen -= paddrsize;
-
-        dt_raw_irq.controller = ipar;
-        dt_raw_irq.size = pintsize;
-        for ( i = 0; i < pintsize; i++ )
-            dt_raw_irq.specifier[i] = dt_read_number(imap + i, 1);
-
-        if ( dt_raw_irq.controller != dt_interrupt_controller )
-        {
-            /*
-             * We don't map IRQs connected to secondary IRQ controllers as
-             * these IRQs have no meaning to us until they connect to the
-             * primary controller.
-             *
-             * Secondary IRQ controllers will at some point connect to
-             * the primary controller (possibly via other IRQ controllers).
-             * We map the IRQs at that last connection point.
-             */
-            imap += pintsize;
-            imaplen -= pintsize;
-            dt_dprintk(" -> Skipped IRQ for secondary IRQ controller\n");
-            continue;
-        }
-
-        ret = dt_irq_translate(&dt_raw_irq, &dt_irq);
-        if ( ret )
-        {
-            dt_dprintk(" -> failed to translate IRQ: %d\n", ret);
-            return ret;
-        }
-
-        ret = cb(dev, &dt_irq, data);
-        if ( ret )
-        {
-            dt_dprintk(" -> callback failed=%d\n", ret);
-            return ret;
-        }
-
-        imap += pintsize;
-        imaplen -= pintsize;
-
-        dt_dprintk(" -> imaplen=%d\n", imaplen);
-    }
-
-    return 0;
-
-fail:
-    return -EINVAL;
 }
 
 /**
@@ -1412,8 +1401,7 @@ fail:
     return -EINVAL;
 }
 
-int dt_device_get_raw_irq(const struct dt_device_node *device,
-                          unsigned int index,
+int dt_device_get_raw_irq(const struct dt_device_node *device, int index,
                           struct dt_raw_irq *out_irq)
 {
     const struct dt_device_node *p;
@@ -1421,7 +1409,7 @@ int dt_device_get_raw_irq(const struct dt_device_node *device,
     u32 intsize, intlen;
     int res = -EINVAL;
 
-    dt_dprintk("dt_device_get_raw_irq: dev=%s, index=%u\n",
+    dt_dprintk("dt_device_get_raw_irq: dev=%s, index=%d\n",
                device->full_name, index);
 
     /* Get the interrupts property */
@@ -1465,20 +1453,14 @@ int dt_irq_translate(const struct dt_raw_irq *raw,
                      struct dt_irq *out_irq)
 {
     ASSERT(dt_irq_xlate != NULL);
-    ASSERT(dt_interrupt_controller != NULL);
 
-    /*
-     * TODO: Retrieve the right irq_xlate. This is only works for the primary
-     * interrupt controller.
-     */
-    if ( raw->controller != dt_interrupt_controller )
-        return -EINVAL;
+    /* TODO: Retrieve the right irq_xlate. This is only work for the gic */
 
     return dt_irq_xlate(raw->specifier, raw->size,
                         &out_irq->irq, &out_irq->type);
 }
 
-int dt_device_get_irq(const struct dt_device_node *device, unsigned int index,
+int dt_device_get_irq(const struct dt_device_node *device, int index,
                       struct dt_irq *out_irq)
 {
     struct dt_raw_irq raw;
@@ -1510,159 +1492,6 @@ bool_t dt_device_is_available(const struct dt_device_node *device)
     return 0;
 }
 
-bool_t dt_device_for_passthrough(const struct dt_device_node *device)
-{
-    return (dt_find_property(device, "xen,passthrough", NULL) != NULL);
-
-}
-
-static int __dt_parse_phandle_with_args(const struct dt_device_node *np,
-                                        const char *list_name,
-                                        const char *cells_name,
-                                        int cell_count, int index,
-                                        struct dt_phandle_args *out_args)
-{
-    const __be32 *list, *list_end;
-    int rc = 0, cur_index = 0;
-    u32 size, count = 0;
-    struct dt_device_node *node = NULL;
-    dt_phandle phandle;
-
-    /* Retrieve the phandle list property */
-    list = dt_get_property(np, list_name, &size);
-    if ( !list )
-        return -ENOENT;
-    list_end = list + size / sizeof(*list);
-
-    /* Loop over the phandles until all the requested entry is found */
-    while ( list < list_end )
-    {
-        rc = -EINVAL;
-        count = 0;
-
-        /*
-         * If phandle is 0, then it is an empty entry with no
-         * arguments.  Skip forward to the next entry.
-         * */
-        phandle = be32_to_cpup(list++);
-        if ( phandle )
-        {
-            /*
-             * Find the provider node and parse the #*-cells
-             * property to determine the argument length.
-             *
-             * This is not needed if the cell count is hard-coded
-             * (i.e. cells_name not set, but cell_count is set),
-             * except when we're going to return the found node
-             * below.
-             */
-            if ( cells_name || cur_index == index )
-            {
-                node = dt_find_node_by_phandle(phandle);
-                if ( !node )
-                {
-                    printk(XENLOG_ERR "%s: could not find phandle\n",
-                           np->full_name);
-                    goto err;
-                }
-            }
-
-            if ( cells_name )
-            {
-                if ( !dt_property_read_u32(node, cells_name, &count) )
-                {
-                    printk("%s: could not get %s for %s\n",
-                           np->full_name, cells_name, node->full_name);
-                    goto err;
-                }
-            }
-            else
-                count = cell_count;
-
-            /*
-             * Make sure that the arguments actually fit in the
-             * remaining property data length
-             */
-            if ( list + count > list_end )
-            {
-                printk(XENLOG_ERR "%s: arguments longer than property\n",
-                       np->full_name);
-                goto err;
-            }
-        }
-
-        /*
-         * All of the error cases above bail out of the loop, so at
-         * this point, the parsing is successful. If the requested
-         * index matches, then fill the out_args structure and return,
-         * or return -ENOENT for an empty entry.
-         */
-        rc = -ENOENT;
-        if ( cur_index == index )
-        {
-            if (!phandle)
-                goto err;
-
-            if ( out_args )
-            {
-                int i;
-
-                WARN_ON(count > MAX_PHANDLE_ARGS);
-                if (count > MAX_PHANDLE_ARGS)
-                    count = MAX_PHANDLE_ARGS;
-                out_args->np = node;
-                out_args->args_count = count;
-                for ( i = 0; i < count; i++ )
-                    out_args->args[i] = be32_to_cpup(list++);
-            }
-
-            /* Found it! return success */
-            return 0;
-        }
-
-        node = NULL;
-        list += count;
-        cur_index++;
-    }
-
-    /*
-     * Returning result will be one of:
-     * -ENOENT : index is for empty phandle
-     * -EINVAL : parsing error on data
-     * [1..n]  : Number of phandle (count mode; when index = -1)
-     */
-    rc = index < 0 ? cur_index : -ENOENT;
-err:
-    return rc;
-}
-
-struct dt_device_node *dt_parse_phandle(const struct dt_device_node *np,
-                                        const char *phandle_name, int index)
-{
-    struct dt_phandle_args args;
-
-    if (index < 0)
-        return NULL;
-
-    if (__dt_parse_phandle_with_args(np, phandle_name, NULL, 0,
-                                     index, &args))
-        return NULL;
-
-    return args.np;
-}
-
-
-int dt_parse_phandle_with_args(const struct dt_device_node *np,
-                               const char *list_name,
-                               const char *cells_name, int index,
-                               struct dt_phandle_args *out_args)
-{
-    if ( index < 0 )
-        return -EINVAL;
-    return __dt_parse_phandle_with_args(np, list_name, cells_name, 0,
-                                        index, out_args);
-}
-
 /**
  * unflatten_dt_node - Alloc and populate a device_node from the flat tree
  * @fdt: The parent device tree blob
@@ -1690,7 +1519,7 @@ static unsigned long __init unflatten_dt_node(const void *fdt,
     tag = be32_to_cpup((__be32 *)(*p));
     if ( tag != FDT_BEGIN_NODE )
     {
-        printk(XENLOG_WARNING "Weird tag at start of node: %x\n", tag);
+        dt_printk(XENLOG_WARNING "Weird tag at start of node: %x\n", tag);
         return mem;
     }
     *p += 4;
@@ -1734,10 +1563,6 @@ static unsigned long __init unflatten_dt_node(const void *fdt,
         np->full_name = ((char *)np) + sizeof(struct dt_device_node);
         /* By default dom0 owns the device */
         np->used_by = 0;
-        /* By default the device is not protected */
-        np->is_protected = false;
-        INIT_LIST_HEAD(&np->domain_list);
-
         if ( new_format )
         {
             char *fn = np->full_name;
@@ -1873,9 +1698,6 @@ static unsigned long __init unflatten_dt_node(const void *fdt,
             ((char *)pp->value)[sz - 1] = 0;
             dt_dprintk("fixed up name for %s -> %s\n", pathp,
                        (char *)pp->value);
-            /* Generic device initialization */
-            np->dev.type = DEV_DT;
-            np->dev.of_node = np;
         }
     }
     if ( allnextpp )
@@ -1899,7 +1721,7 @@ static unsigned long __init unflatten_dt_node(const void *fdt,
     }
     if ( tag != FDT_END_NODE )
     {
-        printk(XENLOG_WARNING "Weird tag at end of node: %x\n", tag);
+        dt_printk(XENLOG_WARNING "Weird tag at end of node: %x\n", tag);
         return mem;
     }
 
@@ -1948,10 +1770,10 @@ static void __init __unflatten_device_tree(const void *fdt,
     start = ((unsigned long)fdt) + fdt_off_dt_struct(fdt);
     unflatten_dt_node(fdt, mem, &start, NULL, &allnextp, 0);
     if ( be32_to_cpup((__be32 *)start) != FDT_END )
-        printk(XENLOG_WARNING "Weird tag at end of tree: %08x\n",
+        dt_printk(XENLOG_WARNING "Weird tag at end of tree: %08x\n",
                   *((u32 *)start));
     if ( be32_to_cpu(((__be32 *)mem)[size / 4]) != 0xdeadbeef )
-        printk(XENLOG_WARNING "End of tree marker overwritten: %08x\n",
+        dt_printk(XENLOG_WARNING "End of tree marker overwritten: %08x\n",
                   be32_to_cpu(((__be32 *)mem)[size / 4]));
     *allnextp = NULL;
 

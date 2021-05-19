@@ -57,7 +57,7 @@ void perfc_printall(unsigned char key)
                 for_each_online_cpu ( cpu )
                 {
                     if ( k > 0 && (k % 4) == 0 )
-                        printk("\n%53s", "");
+                        printk("\n%46s", "");
                     printk("  CPU%02u[%10"PRIperfc"u]", cpu, per_cpu(perfcounters, cpu)[j]);
                     ++k;
                 }
@@ -78,7 +78,7 @@ void perfc_printall(unsigned char key)
             printk("TOTAL[%12Lu]", sum);
             if (sum)
             {
-#ifdef CONFIG_PERF_ARRAYS
+#ifdef PERF_ARRAYS
                 for ( k = 0; k < perfc_info[i].nr_elements; k++ )
                 {
                     sum = 0;
@@ -103,7 +103,7 @@ void perfc_printall(unsigned char key)
                     if ( perfc_info[i].type == TYPE_S_ARRAY ) 
                         sum = (perfc_t) sum;
                     if ( k > 0 && (k % 4) == 0 )
-                        printk("\n%53s", "");
+                        printk("\n%46s", "");
                     printk("  CPU%02u[%10Lu]", cpu, sum);
                     ++k;
                 }
@@ -152,7 +152,7 @@ void perfc_reset(unsigned char key)
     arch_perfc_reset();
 }
 
-static struct xen_sysctl_perfc_desc perfc_d[NR_PERFCTRS];
+static xen_sysctl_perfc_desc_t perfc_d[NR_PERFCTRS];
 static xen_sysctl_perfc_val_t *perfc_vals;
 static unsigned int      perfc_nbr_vals;
 static cpumask_t         perfc_cpumap;
@@ -241,7 +241,7 @@ static int perfc_copy_info(XEN_GUEST_HANDLE_64(xen_sysctl_perfc_desc_t) desc,
 }
 
 /* Dom0 control of perf counters */
-int perfc_control(struct xen_sysctl_perfc_op *pc)
+int perfc_control(xen_sysctl_perfc_op_t *pc)
 {
     static DEFINE_SPINLOCK(lock);
     int rc;

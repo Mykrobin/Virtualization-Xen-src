@@ -204,14 +204,7 @@ static void dbs_timer_init(struct cpu_dbs_info_s *dbs_info)
 static void dbs_timer_exit(struct cpu_dbs_info_s *dbs_info)
 {
     dbs_info->enable = 0;
-
-    /*
-     * The timer function may be running (from cpufreq_dbs_timer_resume) -
-     * wait for it to complete.
-     */
-    while ( cmpxchg(&dbs_info->stoppable, 1, 0) < 0 )
-        cpu_relax();
-
+    dbs_info->stoppable = 0;
     kill_timer(&per_cpu(dbs_timer, dbs_info->cpu));
 }
 
@@ -280,10 +273,6 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy, unsigned int event)
         break;
 
     case CPUFREQ_GOV_STOP:
-        if ( !this_dbs_info->enable )
-            /* Already not enabled */
-            break;
-
         dbs_timer_exit(this_dbs_info);
         dbs_enable--;
 
@@ -376,22 +365,23 @@ void cpufreq_dbs_timer_suspend(void)
 
 void cpufreq_dbs_timer_resume(void)
 {
-    unsigned int cpu = smp_processor_id();
-    int8_t *stoppable = &per_cpu(cpu_dbs_info, cpu).stoppable;
+    int cpu;
+    struct timer* t;
+    s_time_t now;
 
-    if ( *stoppable )
+    cpu = smp_processor_id();
+
+    if ( per_cpu(cpu_dbs_info,cpu).stoppable )
     {
-        s_time_t now = NOW();
-        struct timer *t = &per_cpu(dbs_timer, cpu);
-
-        if ( t->expires <= now )
+        now = NOW();
+        t = &per_cpu(dbs_timer, cpu);
+        if (t->expires <= now)
         {
-            if ( !cmpxchg(stoppable, 1, -1) )
-                return;
             t->function(t->data);
-            (void)cmpxchg(stoppable, -1, 1);
         }
         else
-            set_timer(t, align_timer(now, dbs_tuners_ins.sampling_rate));
+        {
+            set_timer(t, align_timer(now , dbs_tuners_ins.sampling_rate));
+        }
     }
 }

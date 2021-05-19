@@ -24,6 +24,7 @@
  * Copyright (c) 2010, DornerWorks, Ltd. <DornerWorks.com>
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
 #include <xen/sched-if.h>
@@ -245,8 +246,9 @@ arinc653_sched_set(
 
     for ( i = 0; i < schedule->num_sched_entries; i++ )
     {
-        /* Check for a valid run time. */
-        if ( schedule->sched_entries[i].runtime <= 0 )
+        /* Check for a valid VCPU ID and run time. */
+        if ( (schedule->sched_entries[i].vcpu_id >= MAX_VIRT_CPUS)
+             || (schedule->sched_entries[i].runtime <= 0) )
             goto fail;
 
         /* Add this entry's run time to total run time. */
@@ -366,10 +368,9 @@ a653sched_init(struct scheduler *ops)
  * @param ops       Pointer to this instance of the scheduler structure
  */
 static void
-a653sched_deinit(struct scheduler *ops)
+a653sched_deinit(const struct scheduler *ops)
 {
     xfree(SCHED_PRIV(ops));
-    ops->sched_data = NULL;
 }
 
 /**
@@ -452,6 +453,62 @@ a653sched_free_vdata(const struct scheduler *ops, void *priv)
 
     xfree(av);
     update_schedule_vcpus(ops);
+}
+
+/**
+ * This function allocates scheduler-specific data for a physical CPU
+ *
+ * We do not actually make use of any per-CPU data but the hypervisor expects
+ * a non-NULL return value
+ *
+ * @param ops       Pointer to this instance of the scheduler structure
+ *
+ * @return          Pointer to the allocated data
+ */
+static void *
+a653sched_alloc_pdata(const struct scheduler *ops, int cpu)
+{
+    /* return a non-NULL value to keep schedule.c happy */
+    return SCHED_PRIV(ops);
+}
+
+/**
+ * This function frees scheduler-specific data for a physical CPU
+ *
+ * @param ops       Pointer to this instance of the scheduler structure
+ */
+static void
+a653sched_free_pdata(const struct scheduler *ops, void *pcpu, int cpu)
+{
+    /* nop */
+}
+
+/**
+ * This function allocates scheduler-specific data for a domain
+ *
+ * We do not actually make use of any per-domain data but the hypervisor
+ * expects a non-NULL return value
+ *
+ * @param ops       Pointer to this instance of the scheduler structure
+ *
+ * @return          Pointer to the allocated data
+ */
+static void *
+a653sched_alloc_domdata(const struct scheduler *ops, struct domain *dom)
+{
+    /* return a non-NULL value to keep schedule.c happy */
+    return SCHED_PRIV(ops);
+}
+
+/**
+ * This function frees scheduler-specific data for a domain
+ *
+ * @param ops       Pointer to this instance of the scheduler structure
+ */
+static void
+a653sched_free_domdata(const struct scheduler *ops, void *data)
+{
+    /* nop */
 }
 
 /**
@@ -611,7 +668,7 @@ a653sched_pick_cpu(const struct scheduler *ops, struct vcpu *vc)
      * If present, prefer vc's current processor, else
      * just find the first valid vcpu .
      */
-    online = cpupool_domain_cpumask(vc->domain);
+    online = cpupool_scheduler_cpumask(vc->domain->cpupool);
 
     cpu = cpumask_first(online);
 
@@ -620,38 +677,6 @@ a653sched_pick_cpu(const struct scheduler *ops, struct vcpu *vc)
         cpu = vc->processor;
 
     return cpu;
-}
-
-/**
- * Xen scheduler callback to change the scheduler of a cpu
- *
- * @param new_ops   Pointer to this instance of the scheduler structure
- * @param cpu       The cpu that is changing scheduler
- * @param pdata     scheduler specific PCPU data (we don't have any)
- * @param vdata     scheduler specific VCPU data of the idle vcpu
- */
-static void
-a653_switch_sched(struct scheduler *new_ops, unsigned int cpu,
-                  void *pdata, void *vdata)
-{
-    struct schedule_data *sd = &per_cpu(schedule_data, cpu);
-    arinc653_vcpu_t *svc = vdata;
-
-    ASSERT(!pdata && svc && is_idle_vcpu(svc->vc));
-
-    idle_vcpu[cpu]->sched_priv = vdata;
-
-    per_cpu(scheduler, cpu) = new_ops;
-    per_cpu(schedule_data, cpu).sched_priv = NULL; /* no pdata */
-
-    /*
-     * (Re?)route the lock to its default location. We actually do not use
-     * it, but if we leave it pointing to where it does now (i.e., the
-     * runqueue lock for this PCPU in the default scheduler), we'd be
-     * causing unnecessary contention on that lock (in cases where it is
-     * shared among multiple PCPUs, like in Credit2 and RTDS).
-     */
-    sd->schedule_lock = &sd->_lock;
 }
 
 /**
@@ -666,7 +691,7 @@ static int
 a653sched_adjust_global(const struct scheduler *ops,
                         struct xen_sysctl_scheduler_op *sc)
 {
-    struct xen_sysctl_arinc653_schedule local_sched;
+    xen_sysctl_arinc653_schedule_t local_sched;
     int rc = -EINVAL;
 
     switch ( sc->cmd )
@@ -681,7 +706,6 @@ a653sched_adjust_global(const struct scheduler *ops,
         rc = arinc653_sched_set(ops, &local_sched);
         break;
     case XEN_SYSCTL_SCHEDOP_getinfo:
-        memset(&local_sched, -1, sizeof(local_sched));
         rc = arinc653_sched_get(ops, &local_sched);
         if ( rc )
             break;
@@ -700,7 +724,7 @@ a653sched_adjust_global(const struct scheduler *ops,
  * callback functions.
  * The symbol must be visible to the rest of Xen at link time.
  */
-static const struct scheduler sched_arinc653_def = {
+const struct scheduler sched_arinc653_def = {
     .name           = "ARINC 653 Scheduler",
     .opt_name       = "arinc653",
     .sched_id       = XEN_SCHEDULER_ARINC653,
@@ -711,6 +735,15 @@ static const struct scheduler sched_arinc653_def = {
 
     .free_vdata     = a653sched_free_vdata,
     .alloc_vdata    = a653sched_alloc_vdata,
+
+    .free_pdata     = a653sched_free_pdata,
+    .alloc_pdata    = a653sched_alloc_pdata,
+
+    .free_domdata   = a653sched_free_domdata,
+    .alloc_domdata  = a653sched_alloc_domdata,
+
+    .init_domain    = NULL,
+    .destroy_domain = NULL,
 
     .insert_vcpu    = NULL,
     .remove_vcpu    = NULL,
@@ -724,8 +757,6 @@ static const struct scheduler sched_arinc653_def = {
 
     .pick_cpu       = a653sched_pick_cpu,
 
-    .switch_sched   = a653_switch_sched,
-
     .adjust         = NULL,
     .adjust_global  = a653sched_adjust_global,
 
@@ -735,8 +766,6 @@ static const struct scheduler sched_arinc653_def = {
     .tick_suspend   = NULL,
     .tick_resume    = NULL,
 };
-
-REGISTER_SCHEDULER(sched_arinc653_def);
 
 /*
  * Local variables:

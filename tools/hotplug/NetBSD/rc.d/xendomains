@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # PROVIDE: xendomains
-# REQUIRE: xencommons
+# REQUIRE: xend
 # KEYWORD: shutdown
 #
 # xendomains		This required variable is a whitespace-separated
@@ -30,11 +30,11 @@
 DIR=$(dirname "$0")
 . "${DIR}/xen-hotplugpath.sh"
 
-LD_LIBRARY_PATH="${libdir}"
+LD_LIBRARY_PATH="${LIBDIR}"
 export LD_LIBRARY_PATH
 
 name="xendomains"
-ctl_command="${sbindir}/xl"
+ctl_command="${SBINDIR}/xl"
 start_cmd="xendomains_start"
 stop_cmd="xendomains_stop"
 list_cmd="xendomains_list"

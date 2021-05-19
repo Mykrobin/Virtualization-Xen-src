@@ -23,16 +23,12 @@ build: $(TEST) $(LVM-OBJS)
 
 install: all
 
-uninstall:
-
 lvm-util: lvm-util.o
 	$(CC) -DLVM_UTIL $(LDFLAGS) -o lvm-util lvm-util.c
 
 clean:
-	rm -rf *.o *.opic *~ $(DEPS_RM) $(IBIN)
+	rm -rf *.o *.opic *~ $(DEPS) $(IBIN)
 
-distclean: clean
+.PHONY: all build clean install lvm-util
 
-.PHONY: all build clean distclean install lvm-util uninstall
-
--include $(DEPS_INCLUDE)
+-include $(DEPS)

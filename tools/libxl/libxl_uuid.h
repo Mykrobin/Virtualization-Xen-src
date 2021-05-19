@@ -21,52 +21,44 @@
                                 uuid[4], uuid[5], uuid[6], uuid[7], \
                                 uuid[8], uuid[9], uuid[10], uuid[11], \
                                 uuid[12], uuid[13], uuid[14], uuid[15]
-#define LIBXL_UUID_BYTES(arg) LIBXL__UUID_BYTES((arg).uuid)
 
-typedef struct {
-    /* UUID as an octet stream in big-endian byte-order. */
-    unsigned char uuid[16];
-} libxl_uuid;
-
-#if defined(LIBXL_API_VERSION) && LIBXL_API_VERSION < 0x040700
 #if defined(__linux__)
 
 #include <uuid/uuid.h>
 #include <stdint.h>
 
-#elif defined(__FreeBSD__) || defined(__NetBSD__)
+typedef struct {
+    uuid_t uuid;
+} libxl_uuid;
+
+#define LIBXL_UUID_BYTES(arg) LIBXL__UUID_BYTES(((uint8_t *)arg.uuid))
+
+#elif defined(__NetBSD__)
 
 #include <uuid.h>
-#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <assert.h>
+
+#define LIBXL_UUID_BYTES(arg) LIBXL__UUID_BYTES(arg.uuid)
+
+typedef struct {
+    uint8_t uuid[16];
+} libxl_uuid;
 
 #else
 
 #error "Please update libxl_uuid.h for your OS"
 
 #endif
-#endif
 
-int libxl_uuid_is_nil(const libxl_uuid *uuid);
+int libxl_uuid_is_nil(libxl_uuid *uuid);
 void libxl_uuid_generate(libxl_uuid *uuid);
 int libxl_uuid_from_string(libxl_uuid *uuid, const char *in);
-void libxl_uuid_copy(libxl_ctx *ctx_opt, libxl_uuid *dst,
-                     const libxl_uuid *src);
-#if defined(LIBXL_API_VERSION) && LIBXL_API_VERSION < 0x040500
-static inline void libxl_uuid_copy_0x040400(libxl_uuid *dst,
-                                            const libxl_uuid *src)
-{
-    libxl_uuid_copy(NULL, dst, src);
-}
-#define libxl_uuid_copy libxl_uuid_copy_0x040400
-#endif
-
+void libxl_uuid_copy(libxl_uuid *dst, const libxl_uuid *src);
 void libxl_uuid_clear(libxl_uuid *uuid);
-int libxl_uuid_compare(const libxl_uuid *uuid1, const libxl_uuid *uuid2);
-const uint8_t *libxl_uuid_bytearray_const(const libxl_uuid *uuid);
+int libxl_uuid_compare(libxl_uuid *uuid1, libxl_uuid *uuid2);
 uint8_t *libxl_uuid_bytearray(libxl_uuid *uuid);
 
 #endif /* __LIBXL_UUID_H__ */

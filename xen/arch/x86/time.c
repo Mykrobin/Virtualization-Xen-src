@@ -9,16 +9,17 @@
  * Copyright (c) 1991, 1992, 1995  Linus Torvalds
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/event.h>
 #include <xen/sched.h>
 #include <xen/lib.h>
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/time.h>
 #include <xen/timer.h>
 #include <xen/smp.h>
 #include <xen/irq.h>
-#include <xen/pci_ids.h>
 #include <xen/softirq.h>
 #include <xen/efi.h>
 #include <xen/cpuidle.h>
@@ -30,13 +31,13 @@
 #include <asm/mpspec.h>
 #include <asm/processor.h>
 #include <asm/fixmap.h>
-#include <asm/guest.h>
 #include <asm/mc146818rtc.h>
 #include <asm/div64.h>
 #include <asm/acpi.h>
 #include <asm/hpet.h>
 #include <io_ports.h>
 #include <asm/setup.h> /* for early_time_init */
+#include <asm/hvm/svm/svm.h> /* for cpu_has_tsc_ratio */
 #include <public/arch-x86/cpuid.h>
 
 /* opt_clocksource: Force clocksource to one of: pit, hpet, acpi. */
@@ -46,15 +47,13 @@ string_param("clocksource", opt_clocksource);
 unsigned long __read_mostly cpu_khz;  /* CPU clock frequency in kHz. */
 DEFINE_SPINLOCK(rtc_lock);
 unsigned long pit0_ticks;
-
-struct cpu_time_stamp {
-    u64 local_tsc;
-    s_time_t local_stime;
-    s_time_t master_stime;
-};
+static u32 wc_sec, wc_nsec; /* UTC time at last 'time update'. */
+static DEFINE_SPINLOCK(wc_lock);
 
 struct cpu_time {
-    struct cpu_time_stamp stamp;
+    u64 local_tsc_stamp;
+    s_time_t stime_local_stamp;
+    s_time_t stime_master_stamp;
     struct time_scale tsc_scale;
 };
 
@@ -63,7 +62,7 @@ struct platform_timesource {
     char *name;
     u64 frequency;
     u64 (*read_counter)(void);
-    s64 (*init)(struct platform_timesource *);
+    int (*init)(struct platform_timesource *);
     void (*resume)(struct platform_timesource *);
     int counter_bits;
 };
@@ -84,10 +83,7 @@ static struct timer calibration_timer;
 static DEFINE_SPINLOCK(pit_lock);
 static u16 pit_stamp16;
 static u32 pit_stamp32;
-static bool __read_mostly using_pit;
-
-/* Boot timestamp, filled in head.S */
-u64 __initdata boot_tsc_stamp;
+static bool_t __read_mostly using_pit;
 
 /*
  * 32-bit division of integer dividend and integer divisor yielding
@@ -122,7 +118,7 @@ static inline u32 mul_frac(u32 multiplicand, u32 multiplier)
  * Scale a 64-bit delta by scaling and multiplying by a 32-bit fraction,
  * yielding a 64-bit result.
  */
-u64 scale_delta(u64 delta, const struct time_scale *scale)
+static inline u64 scale_delta(u64 delta, struct time_scale *scale)
 {
     u64 product;
 
@@ -179,7 +175,7 @@ static void smp_send_timer_broadcast_ipi(void)
 
     if ( cpumask_test_cpu(cpu, &mask) )
     {
-        __cpumask_clear_cpu(cpu, &mask);
+        cpumask_clear_cpu(cpu, &mask);
         raise_softirq(TIMER_SOFTIRQ);
     }
 
@@ -197,7 +193,7 @@ static void timer_interrupt(int irq, void *dev_id, struct cpu_user_regs *regs)
         return;
 
     /* Only for start-of-day interruopt tests in io_apic.c. */
-    pit0_ticks++;
+    (*(volatile unsigned long *)&pit0_ticks)++;
 
     /* Rough hack to allow accurate timers to sort-of-work with no APIC. */
     if ( !cpu_has_apic )
@@ -228,21 +224,52 @@ static struct irqaction __read_mostly irq0 = {
     timer_interrupt, "timer", NULL
 };
 
+/* ------ Calibrate the TSC ------- 
+ * Return processor ticks per second / CALIBRATE_FRAC.
+ */
+
 #define CLOCK_TICK_RATE 1193182 /* system crystal frequency (Hz) */
 #define CALIBRATE_FRAC  20      /* calibrate over 50ms */
-#define CALIBRATE_VALUE(freq) (((freq) + CALIBRATE_FRAC / 2) / CALIBRATE_FRAC)
+#define CALIBRATE_LATCH ((CLOCK_TICK_RATE+(CALIBRATE_FRAC/2))/CALIBRATE_FRAC)
 
-static void preinit_pit(void)
+static u64 init_pit_and_calibrate_tsc(void)
 {
+    u64 start, end;
+    unsigned long count;
+
     /* Set PIT channel 0 to HZ Hz. */
 #define LATCH (((CLOCK_TICK_RATE)+(HZ/2))/HZ)
     outb_p(0x34, PIT_MODE);        /* binary, mode 2, LSB/MSB, ch 0 */
     outb_p(LATCH & 0xff, PIT_CH0); /* LSB */
     outb(LATCH >> 8, PIT_CH0);     /* MSB */
-#undef LATCH
+
+    /* Set the Gate high, disable speaker */
+    outb((inb(0x61) & ~0x02) | 0x01, 0x61);
+
+    /*
+     * Now let's take care of CTC channel 2
+     *
+     * Set the Gate high, program CTC channel 2 for mode 0, (interrupt on
+     * terminal count mode), binary count, load 5 * LATCH count, (LSB and MSB)
+     * to begin countdown.
+     */
+    outb(0xb0, PIT_MODE);           /* binary, mode 0, LSB/MSB, Ch 2 */
+    outb(CALIBRATE_LATCH & 0xff, PIT_CH2); /* LSB of count */
+    outb(CALIBRATE_LATCH >> 8, PIT_CH2);   /* MSB of count */
+
+    rdtscll(start);
+    for ( count = 0; (inb(0x61) & 0x20) == 0; count++ )
+        continue;
+    rdtscll(end);
+
+    /* Error if the CTC doesn't behave itself. */
+    if ( count == 0 )
+        return 0;
+
+    return ((end - start) * (u64)CALIBRATE_FRAC);
 }
 
-void set_time_scale(struct time_scale *ts, u64 ticks_per_sec)
+static void set_time_scale(struct time_scale *ts, u64 ticks_per_sec)
 {
     u64 tps64 = ticks_per_sec;
     u32 tps32;
@@ -300,49 +327,10 @@ static u64 read_pit_count(void)
     return count32;
 }
 
-static s64 __init init_pit(struct platform_timesource *pts)
+static int __init init_pit(struct platform_timesource *pts)
 {
-    u8 portb = inb(0x61);
-    u64 start, end;
-    unsigned long count;
-
-    using_pit = true;
-
-    /* Set the Gate high, disable speaker. */
-    outb((portb & ~0x02) | 0x01, 0x61);
-
-    /*
-     * Now let's take care of CTC channel 2: mode 0, (interrupt on
-     * terminal count mode), binary count, load CALIBRATE_LATCH count,
-     * (LSB and MSB) to begin countdown.
-     */
-#define CALIBRATE_LATCH CALIBRATE_VALUE(CLOCK_TICK_RATE)
-    outb(0xb0, PIT_MODE);                  /* binary, mode 0, LSB/MSB, Ch 2 */
-    outb(CALIBRATE_LATCH & 0xff, PIT_CH2); /* LSB of count */
-    outb(CALIBRATE_LATCH >> 8, PIT_CH2);   /* MSB of count */
-#undef CALIBRATE_LATCH
-
-    start = rdtsc_ordered();
-    for ( count = 0; !(inb(0x61) & 0x20); ++count )
-        continue;
-    end = rdtsc_ordered();
-
-    /* Set the Gate low, disable speaker. */
-    outb(portb & ~0x03, 0x61);
-
-    /* Error if the CTC doesn't behave itself. */
-    if ( count == 0 )
-        return 0;
-
-    return (end - start) * CALIBRATE_FRAC;
-}
-
-static void resume_pit(struct platform_timesource *pts)
-{
-    /* Set CTC channel 2 to mode 0 again; initial value does not matter. */
-    outb(0xb0, PIT_MODE); /* binary, mode 0, LSB/MSB, Ch 2 */
-    outb(0, PIT_CH2);     /* LSB of count */
-    outb(0, PIT_CH2);     /* MSB of count */
+    using_pit = 1;
+    return 1;
 }
 
 static struct platform_timesource __initdata plt_pit =
@@ -352,8 +340,7 @@ static struct platform_timesource __initdata plt_pit =
     .frequency = CLOCK_TICK_RATE,
     .read_counter = read_pit_count,
     .counter_bits = 32,
-    .init = init_pit,
-    .resume = resume_pit,
+    .init = init_pit
 };
 
 /************************************************************
@@ -365,55 +352,15 @@ static u64 read_hpet_count(void)
     return hpet_read32(HPET_COUNTER);
 }
 
-static int64_t __init init_hpet(struct platform_timesource *pts)
+static int __init init_hpet(struct platform_timesource *pts)
 {
-    uint64_t hpet_rate, start;
-    uint32_t count, target;
+    u64 hpet_rate = hpet_setup();
 
-    if ( hpet_address && strcmp(opt_clocksource, pts->id) &&
-         cpuidle_using_deep_cstate() )
-    {
-        if ( pci_conf_read16(0, 0, 0x1f, 0,
-                             PCI_VENDOR_ID) == PCI_VENDOR_ID_INTEL )
-            switch ( pci_conf_read16(0, 0, 0x1f, 0, PCI_DEVICE_ID) )
-            {
-            /* HPET on Bay Trail platforms will halt in deep C states. */
-            case 0x0f1c:
-            /* HPET on Cherry Trail platforms will halt in deep C states. */
-            case 0x229c:
-                hpet_address = 0;
-                break;
-            }
-
-        /*
-         * Some Coffee Lake platforms have a skewed HPET timer once the SoCs
-         * entered PC10.
-         */
-        if ( pci_conf_read16(0, 0, 0, 0,
-                             PCI_VENDOR_ID) == PCI_VENDOR_ID_INTEL &&
-             pci_conf_read16(0, 0, 0, 0,
-                             PCI_DEVICE_ID) == 0x3ec4 )
-            hpet_address = 0;
-
-        if ( !hpet_address )
-            printk("Disabling HPET for being unreliable\n");
-    }
-
-    if ( (hpet_rate = hpet_setup()) == 0 )
+    if ( hpet_rate == 0 )
         return 0;
 
     pts->frequency = hpet_rate;
-
-    count = hpet_read32(HPET_COUNTER);
-    start = rdtsc_ordered();
-    target = count + CALIBRATE_VALUE(hpet_rate);
-    if ( target < count )
-        while ( hpet_read32(HPET_COUNTER) >= count )
-            continue;
-    while ( hpet_read32(HPET_COUNTER) < target )
-        continue;
-
-    return (rdtsc_ordered() - start) * CALIBRATE_FRAC;
+    return 1;
 }
 
 static void resume_hpet(struct platform_timesource *pts)
@@ -436,7 +383,6 @@ static struct platform_timesource __initdata plt_hpet =
  */
 
 u32 __read_mostly pmtmr_ioport;
-unsigned int __initdata pmtmr_width;
 
 /* ACPI PM timer ticks at 3.579545 MHz. */
 #define ACPI_PM_FREQUENCY 3579545
@@ -446,30 +392,12 @@ static u64 read_pmtimer_count(void)
     return inl(pmtmr_ioport);
 }
 
-static s64 __init init_pmtimer(struct platform_timesource *pts)
+static int __init init_pmtimer(struct platform_timesource *pts)
 {
-    u64 start;
-    u32 count, target, mask = 0xffffff;
-
-    if ( !pmtmr_ioport || !pmtmr_width )
+    if ( pmtmr_ioport == 0 )
         return 0;
 
-    if ( pmtmr_width == 32 )
-    {
-        pts->counter_bits = 32;
-        mask = 0xffffffff;
-    }
-
-    count = inl(pmtmr_ioport) & mask;
-    start = rdtsc_ordered();
-    target = count + CALIBRATE_VALUE(ACPI_PM_FREQUENCY);
-    if ( target < count )
-        while ( (inl(pmtmr_ioport) & mask) >= count )
-            continue;
-    while ( (inl(pmtmr_ioport) & mask) < target )
-        continue;
-
-    return (rdtsc_ordered() - start) * CALIBRATE_FRAC;
+    return 1;
 }
 
 static struct platform_timesource __initdata plt_pmtimer =
@@ -502,144 +430,6 @@ uint64_t ns_to_acpi_pm_tick(uint64_t ns)
 {
     return scale_delta(ns, &pmt_scale_r);
 }
-
-/************************************************************
- * PLATFORM TIMER 4: TSC
- */
-static unsigned int __initdata tsc_flags;
-
-/* TSC is reliable across sockets */
-#define TSC_RELIABLE_SOCKET (1 << 0)
-
-/*
- * Called in verify_tsc_reliability() under reliable TSC conditions
- * thus reusing all the checks already performed there.
- */
-static s64 __init init_tsc(struct platform_timesource *pts)
-{
-    u64 ret = pts->frequency;
-
-    if ( nr_cpu_ids != num_present_cpus() )
-    {
-        printk(XENLOG_WARNING "TSC: CPU Hotplug intended\n");
-        ret = 0;
-    }
-
-    if ( nr_sockets > 1 && !(tsc_flags & TSC_RELIABLE_SOCKET) )
-    {
-        printk(XENLOG_WARNING "TSC: Not invariant across sockets\n");
-        ret = 0;
-    }
-
-    if ( !ret )
-        printk(XENLOG_DEBUG "TSC: Not setting it as clocksource\n");
-
-    return ret;
-}
-
-static u64 read_tsc(void)
-{
-    return rdtsc_ordered();
-}
-
-static struct platform_timesource __initdata plt_tsc =
-{
-    .id = "tsc",
-    .name = "TSC",
-    .read_counter = read_tsc,
-    /*
-     * Calculations for platform timer overflow assume u64 boundary.
-     * Hence we set to less than 64, such that the TSC wraparound is
-     * correctly checked and handled.
-     */
-    .counter_bits = 63,
-    .init = init_tsc,
-};
-
-#ifdef CONFIG_XEN_GUEST
-/************************************************************
- * PLATFORM TIMER 5: XEN PV CLOCK SOURCE
- *
- * Xen clock source is a variant of TSC source.
- */
-
-static uint64_t xen_timer_cpu_frequency(void)
-{
-    struct vcpu_time_info *info = &this_cpu(vcpu_info)->time;
-    uint64_t freq;
-
-    freq = 1000000000ULL << 32;
-    do_div(freq, info->tsc_to_system_mul);
-    if ( info->tsc_shift < 0 )
-        freq <<= -info->tsc_shift;
-    else
-        freq >>= info->tsc_shift;
-
-    return freq;
-}
-
-static int64_t __init init_xen_timer(struct platform_timesource *pts)
-{
-    if ( !xen_guest )
-        return 0;
-
-    pts->frequency = xen_timer_cpu_frequency();
-
-    return pts->frequency;
-}
-
-static always_inline uint64_t read_cycle(const struct vcpu_time_info *info,
-                                         uint64_t tsc)
-{
-    uint64_t delta = tsc - info->tsc_timestamp;
-    struct time_scale ts = {
-        .shift    = info->tsc_shift,
-        .mul_frac = info->tsc_to_system_mul,
-    };
-    uint64_t offset = scale_delta(delta, &ts);
-
-    return info->system_time + offset;
-}
-
-static uint64_t read_xen_timer(void)
-{
-    struct vcpu_time_info *info = &this_cpu(vcpu_info)->time;
-    uint32_t version;
-    uint64_t ret;
-    uint64_t last;
-    static uint64_t last_value;
-
-    do {
-        version = info->version & ~1;
-        /* Make sure version is read before the data */
-        smp_rmb();
-
-        ret = read_cycle(info, rdtsc_ordered());
-        /* Ignore fancy flags for now */
-
-        /* Make sure version is reread after the data */
-        smp_rmb();
-    } while ( unlikely(version != info->version) );
-
-    /* Maintain a monotonic global value */
-    do {
-        last = read_atomic(&last_value);
-        if ( ret < last )
-            return last;
-    } while ( unlikely(cmpxchg(&last_value, last, ret) != last) );
-
-    return ret;
-}
-
-static struct platform_timesource __initdata plt_xen_timer =
-{
-    .id = "xen",
-    .name = "XEN PV CLOCK",
-    .read_counter = read_xen_timer,
-    .init = init_xen_timer,
-    .counter_bits = 63,
-};
-#endif
 
 /************************************************************
  * GENERIC PLATFORM TIMER INFRASTRUCTURE
@@ -693,8 +483,7 @@ static void plt_overflow(void *unused)
     }
     if ( i != 0 )
     {
-        static bool warned_once;
-
+        static bool_t warned_once;
         if ( !test_and_set_bool(warned_once) )
             printk("Platform timer appears to have unexpectedly wrapped "
                    "%u%s times.\n", i, (i == 10) ? " or more" : "");
@@ -705,21 +494,17 @@ static void plt_overflow(void *unused)
     set_timer(&plt_overflow_timer, NOW() + plt_overflow_period);
 }
 
-static s_time_t read_platform_stime(u64 *stamp)
+static s_time_t read_platform_stime(void)
 {
-    u64 plt_counter, count;
+    u64 count;
     s_time_t stime;
 
     ASSERT(!local_irq_is_enabled());
 
     spin_lock(&platform_timer_lock);
-    plt_counter = plt_src.read_counter();
-    count = plt_stamp64 + ((plt_counter - plt_stamp) & plt_mask);
+    count = plt_stamp64 + ((plt_src.read_counter() - plt_stamp) & plt_mask);
     stime = __read_platform_stime(count);
     spin_unlock(&platform_timer_lock);
-
-    if ( unlikely(stamp) )
-        *stamp = plt_counter;
 
     return stime;
 }
@@ -748,65 +533,23 @@ static void resume_platform_timer(void)
     plt_stamp = plt_src.read_counter();
 }
 
-static void __init reset_platform_timer(void)
-{
-    /* Deactivate any timers running */
-    kill_timer(&plt_overflow_timer);
-    kill_timer(&calibration_timer);
-
-    /* Reset counters and stamps */
-    spin_lock_irq(&platform_timer_lock);
-    plt_stamp = 0;
-    plt_stamp64 = 0;
-    platform_timer_stamp = 0;
-    stime_platform_stamp = 0;
-    spin_unlock_irq(&platform_timer_lock);
-}
-
-static s64 __init try_platform_timer(struct platform_timesource *pts)
-{
-    s64 rc = pts->init(pts);
-
-    if ( rc <= 0 )
-        return rc;
-
-    /* We have a platform timesource already so reset it */
-    if ( plt_src.counter_bits != 0 )
-        reset_platform_timer();
-
-    plt_mask = (u64)~0ull >> (64 - pts->counter_bits);
-
-    set_time_scale(&plt_scale, pts->frequency);
-
-    plt_overflow_period = scale_delta(
-        1ull << (pts->counter_bits - 1), &plt_scale);
-    plt_src = *pts;
-
-    return rc;
-}
-
-static u64 __init init_platform_timer(void)
+static void __init init_platform_timer(void)
 {
     static struct platform_timesource * __initdata plt_timers[] = {
-#ifdef CONFIG_XEN_GUEST
-        &plt_xen_timer,
-#endif
         &plt_hpet, &plt_pmtimer, &plt_pit
     };
 
     struct platform_timesource *pts = NULL;
-    unsigned int i;
-    s64 rc = -1;
+    int i, rc = -1;
 
-    /* clocksource=tsc is initialized via __initcalls (when CPUs are up). */
-    if ( (opt_clocksource[0] != '\0') && strcmp(opt_clocksource, "tsc") )
+    if ( opt_clocksource[0] != '\0' )
     {
         for ( i = 0; i < ARRAY_SIZE(plt_timers); i++ )
         {
             pts = plt_timers[i];
             if ( !strcmp(opt_clocksource, pts->id) )
             {
-                rc = try_platform_timer(pts);
+                rc = pts->init(pts);
                 break;
             }
         }
@@ -822,18 +565,28 @@ static u64 __init init_platform_timer(void)
         for ( i = 0; i < ARRAY_SIZE(plt_timers); i++ )
         {
             pts = plt_timers[i];
-            if ( (rc = try_platform_timer(pts)) > 0 )
+            if ( (rc = pts->init(pts)) > 0 )
                 break;
         }
     }
 
-    if ( rc <= 0 )
-        panic("Unable to find usable platform timer");
+    BUG_ON(rc <= 0);
+
+    plt_mask = (u64)~0ull >> (64 - pts->counter_bits);
+
+    set_time_scale(&plt_scale, pts->frequency);
+
+    plt_overflow_period = scale_delta(
+        1ull << (pts->counter_bits-1), &plt_scale);
+    init_timer(&plt_overflow_timer, plt_overflow, NULL, 0);
+    plt_src = *pts;
+    plt_overflow(NULL);
+
+    platform_timer_stamp = plt_stamp64;
+    stime_platform_stamp = NOW();
 
     printk("Platform timer is %s %s\n",
            freq_string(pts->frequency), pts->name);
-
-    return rc;
 }
 
 u64 stime2tsc(s_time_t stime)
@@ -845,11 +598,11 @@ u64 stime2tsc(s_time_t stime)
     t = &this_cpu(cpu_time);
     sys_to_tsc = scale_reciprocal(t->tsc_scale);
 
-    stime_delta = stime - t->stamp.local_stime;
+    stime_delta = stime - t->stime_local_stamp;
     if ( stime_delta < 0 )
         stime_delta = 0;
 
-    return t->stamp.local_tsc + scale_delta(stime_delta, &sys_to_tsc);
+    return t->local_tsc_stamp + scale_delta(stime_delta, &sys_to_tsc);
 }
 
 void cstate_restore_tsc(void)
@@ -857,7 +610,7 @@ void cstate_restore_tsc(void)
     if ( boot_cpu_has(X86_FEATURE_NONSTOP_TSC) )
         return;
 
-    write_tsc(stime2tsc(read_platform_stime(NULL)));
+    write_tsc(stime2tsc(read_platform_stime()));
 }
 
 /***************************************************************************
@@ -898,149 +651,79 @@ mktime (unsigned int year, unsigned int mon,
         )*60 + sec; /* finally seconds */
 }
 
-struct rtc_time {
-    unsigned int year, mon, day, hour, min, sec;
-};
-
-static void __get_cmos_time(struct rtc_time *rtc)
+static unsigned long __get_cmos_time(void)
 {
-    rtc->sec  = CMOS_READ(RTC_SECONDS);
-    rtc->min  = CMOS_READ(RTC_MINUTES);
-    rtc->hour = CMOS_READ(RTC_HOURS);
-    rtc->day  = CMOS_READ(RTC_DAY_OF_MONTH);
-    rtc->mon  = CMOS_READ(RTC_MONTH);
-    rtc->year = CMOS_READ(RTC_YEAR);
+    unsigned int year, mon, day, hour, min, sec;
+
+    sec  = CMOS_READ(RTC_SECONDS);
+    min  = CMOS_READ(RTC_MINUTES);
+    hour = CMOS_READ(RTC_HOURS);
+    day  = CMOS_READ(RTC_DAY_OF_MONTH);
+    mon  = CMOS_READ(RTC_MONTH);
+    year = CMOS_READ(RTC_YEAR);
     
-    if ( RTC_ALWAYS_BCD || !(CMOS_READ(RTC_CONTROL) & RTC_DM_BINARY) )
+    if ( !(CMOS_READ(RTC_CONTROL) & RTC_DM_BINARY) || RTC_ALWAYS_BCD )
     {
-        BCD_TO_BIN(rtc->sec);
-        BCD_TO_BIN(rtc->min);
-        BCD_TO_BIN(rtc->hour);
-        BCD_TO_BIN(rtc->day);
-        BCD_TO_BIN(rtc->mon);
-        BCD_TO_BIN(rtc->year);
+        BCD_TO_BIN(sec);
+        BCD_TO_BIN(min);
+        BCD_TO_BIN(hour);
+        BCD_TO_BIN(day);
+        BCD_TO_BIN(mon);
+        BCD_TO_BIN(year);
     }
 
-    if ( (rtc->year += 1900) < 1970 )
-        rtc->year += 100;
+    if ( (year += 1900) < 1970 )
+        year += 100;
+
+    return mktime(year, mon, day, hour, min, sec);
 }
 
 static unsigned long get_cmos_time(void)
 {
     unsigned long res, flags;
-    struct rtc_time rtc;
-    unsigned int seconds = 60;
-    static bool __read_mostly cmos_rtc_probe;
-    boolean_param("cmos-rtc-probe", cmos_rtc_probe);
+    int i;
 
-    if ( efi_enabled(EFI_RS) )
+    if ( efi_enabled )
     {
         res = efi_get_time();
         if ( res )
             return res;
     }
 
-    if ( likely(!(acpi_gbl_FADT.boot_flags & ACPI_FADT_NO_CMOS_RTC)) )
-        cmos_rtc_probe = false;
-    else if ( system_state < SYS_STATE_smp_boot && !cmos_rtc_probe )
-        panic("System with no CMOS RTC advertised must be booted from EFI"
-              " (or with command line option \"cmos-rtc-probe\")");
+    if ( unlikely(acpi_gbl_FADT.boot_flags & ACPI_FADT_NO_CMOS_RTC) )
+        panic("System without CMOS RTC must be booted from EFI");
 
-    for ( ; ; )
-    {
-        s_time_t start, t1, t2;
+    spin_lock_irqsave(&rtc_lock, flags);
 
-        spin_lock_irqsave(&rtc_lock, flags);
-
-        /* read RTC exactly on falling edge of update flag */
-        start = NOW();
-        do { /* may take up to 1 second... */
-            t1 = NOW() - start;
-        } while ( !(CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP) &&
-                  t1 <= SECONDS(1) );
-
-        start = NOW();
-        do { /* must try at least 2.228 ms */
-            t2 = NOW() - start;
-        } while ( (CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP) &&
-                  t2 < MILLISECS(3) );
-
-        __get_cmos_time(&rtc);
-
-        spin_unlock_irqrestore(&rtc_lock, flags);
-
-        if ( likely(!cmos_rtc_probe) ||
-             t1 > SECONDS(1) || t2 >= MILLISECS(3) ||
-             rtc.sec >= 60 || rtc.min >= 60 || rtc.hour >= 24 ||
-             !rtc.day || rtc.day > 31 ||
-             !rtc.mon || rtc.mon > 12 )
+    /* read RTC exactly on falling edge of update flag */
+    for ( i = 0 ; i < 1000000 ; i++ ) /* may take up to 1 second... */
+        if ( (CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP) )
+            break;
+    for ( i = 0 ; i < 1000000 ; i++ ) /* must try at least 2.228 ms */
+        if ( !(CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP) )
             break;
 
-        if ( seconds < 60 )
-        {
-            if ( rtc.sec != seconds )
-                cmos_rtc_probe = false;
-            break;
-        }
+    res = __get_cmos_time();
 
-        process_pending_softirqs();
-
-        seconds = rtc.sec;
-    }
-
-    if ( unlikely(cmos_rtc_probe) )
-        panic("No CMOS RTC found - system must be booted from EFI");
-
-    return mktime(rtc.year, rtc.mon, rtc.day, rtc.hour, rtc.min, rtc.sec);
-}
-
-static unsigned long get_wallclock_time(void)
-{
-#ifdef CONFIG_XEN_GUEST
-    if ( xen_guest )
-    {
-        struct shared_info *sh_info = XEN_shared_info;
-        uint32_t wc_version;
-        uint64_t wc_sec;
-
-        do {
-            wc_version = sh_info->wc_version & ~1;
-            smp_rmb();
-
-            wc_sec  = sh_info->wc_sec;
-            smp_rmb();
-        } while ( wc_version != sh_info->wc_version );
-
-        return wc_sec + read_xen_timer() / 1000000000;
-    }
-#endif
-
-    return get_cmos_time();
+    spin_unlock_irqrestore(&rtc_lock, flags);
+    return res;
 }
 
 /***************************************************************************
  * System Time
  ***************************************************************************/
 
-s_time_t get_s_time_fixed(u64 at_tsc)
+s_time_t get_s_time(void)
 {
-    const struct cpu_time *t = &this_cpu(cpu_time);
+    struct cpu_time *t = &this_cpu(cpu_time);
     u64 tsc, delta;
     s_time_t now;
 
-    if ( at_tsc )
-        tsc = at_tsc;
-    else
-        tsc = rdtsc_ordered();
-    delta = tsc - t->stamp.local_tsc;
-    now = t->stamp.local_stime + scale_delta(delta, &t->tsc_scale);
+    rdtscll(tsc);
+    delta = tsc - t->local_tsc_stamp;
+    now = t->stime_local_stamp + scale_delta(delta, &t->tsc_scale);
 
     return now;
-}
-
-s_time_t get_s_time()
-{
-    return get_s_time_fixed(0);
 }
 
 uint64_t tsc_ticks2ns(uint64_t ticks)
@@ -1050,12 +733,16 @@ uint64_t tsc_ticks2ns(uint64_t ticks)
     return scale_delta(ticks, &t->tsc_scale);
 }
 
+/* Explicitly OR with 1 just in case version number gets out of sync. */
+#define version_update_begin(v) (((v)+1)|1)
+#define version_update_end(v)   ((v)+1)
+
 static void __update_vcpu_system_time(struct vcpu *v, int force)
 {
-    const struct cpu_time *t;
-    struct vcpu_time_info *u, _u = {};
+    struct cpu_time       *t;
+    struct vcpu_time_info *u, _u;
     struct domain *d = v->domain;
-    s_time_t tsc_stamp;
+    s_time_t tsc_stamp = 0;
 
     if ( v->vcpu_info == NULL )
         return;
@@ -1065,11 +752,11 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
 
     if ( d->arch.vtsc )
     {
-        s_time_t stime = t->stamp.local_stime;
+        s_time_t stime = t->stime_local_stamp;
 
         if ( is_hvm_domain(d) )
         {
-            struct pl_time *pl = v->domain->arch.hvm_domain.pl_time;
+            struct pl_time *pl = &v->domain->arch.hvm_domain.pl_time;
 
             stime += pl->stime_offset + v->arch.hvm_vcpu.stime_offset;
             if ( stime >= 0 )
@@ -1079,37 +766,28 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
         }
         else
             tsc_stamp = gtime_to_gtsc(d, stime);
+    }
+    else
+    {
+        tsc_stamp = t->local_tsc_stamp;
+    }
 
+    memset(&_u, 0, sizeof(_u));
+
+    if ( d->arch.vtsc )
+    {
+        _u.tsc_timestamp     = tsc_stamp;
+        _u.system_time       = t->stime_local_stamp;
         _u.tsc_to_system_mul = d->arch.vtsc_to_ns.mul_frac;
         _u.tsc_shift         = d->arch.vtsc_to_ns.shift;
     }
     else
     {
-        if ( is_hvm_domain(d) && hvm_tsc_scaling_supported )
-        {
-            tsc_stamp            = hvm_scale_tsc(d, t->stamp.local_tsc);
-            _u.tsc_to_system_mul = d->arch.vtsc_to_ns.mul_frac;
-            _u.tsc_shift         = d->arch.vtsc_to_ns.shift;
-        }
-        else
-        {
-            tsc_stamp            = t->stamp.local_tsc;
-            _u.tsc_to_system_mul = t->tsc_scale.mul_frac;
-            _u.tsc_shift         = t->tsc_scale.shift;
-        }
+        _u.tsc_timestamp     = t->local_tsc_stamp;
+        _u.system_time       = t->stime_local_stamp;
+        _u.tsc_to_system_mul = t->tsc_scale.mul_frac;
+        _u.tsc_shift         = (s8)t->tsc_scale.shift;
     }
-
-    _u.tsc_timestamp = tsc_stamp;
-    _u.system_time   = t->stamp.local_stime;
-
-    /*
-     * It's expected that domains cope with this bit changing on every
-     * pvclock read to check whether they can resort solely on this tuple
-     * or if it further requires monotonicity checks with other vcpus.
-     */
-    if ( clocksource_is_tsc() )
-        _u.flags |= XEN_PVCLOCK_TSC_STABLE_BIT;
-
     if ( is_hvm_domain(d) )
         _u.tsc_timestamp += v->arch.hvm_vcpu.cache_tsc_offset;
 
@@ -1120,10 +798,10 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
 
     /* 1. Update guest kernel version. */
     _u.version = u->version = version_update_begin(u->version);
-    smp_wmb();
+    wmb();
     /* 2. Update all other guest kernel fields. */
     *u = _u;
-    smp_wmb();
+    wmb();
     /* 3. Update guest kernel version. */
     u->version = version_update_end(u->version);
 
@@ -1132,34 +810,26 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
         v->arch.pv_vcpu.pending_system_time = _u;
 }
 
-bool update_secondary_system_time(struct vcpu *v,
-                                  struct vcpu_time_info *u)
+bool_t update_secondary_system_time(const struct vcpu *v,
+                                    struct vcpu_time_info *u)
 {
     XEN_GUEST_HANDLE(vcpu_time_info_t) user_u = v->arch.time_info_guest;
-    struct guest_memory_policy policy = { .nested_guest_mode = false };
 
     if ( guest_handle_is_null(user_u) )
-        return true;
-
-    update_guest_memory_policy(v, &policy);
+        return 1;
 
     /* 1. Update userspace version. */
     if ( __copy_field_to_guest(user_u, u, version) == sizeof(u->version) )
-    {
-        update_guest_memory_policy(v, &policy);
-        return false;
-    }
-    smp_wmb();
+        return 0;
+    wmb();
     /* 2. Update all other userspace fields. */
     __copy_to_guest(user_u, u, 1);
-    smp_wmb();
+    wmb();
     /* 3. Update userspace version. */
     u->version = version_update_end(u->version);
     __copy_field_to_guest(user_u, u, version);
 
-    update_guest_memory_policy(v, &policy);
-
-    return true;
+    return 1;
 }
 
 void update_vcpu_system_time(struct vcpu *v)
@@ -1170,6 +840,25 @@ void update_vcpu_system_time(struct vcpu *v)
 void force_update_vcpu_system_time(struct vcpu *v)
 {
     __update_vcpu_system_time(v, 1);
+}
+
+void update_domain_wallclock_time(struct domain *d)
+{
+    uint32_t *wc_version;
+
+    spin_lock(&wc_lock);
+
+    wc_version = &shared_info(d, wc_version);
+    *wc_version = version_update_begin(*wc_version);
+    wmb();
+
+    shared_info(d, wc_sec)  = wc_sec + d->time_offset_seconds;
+    shared_info(d, wc_nsec) = wc_nsec;
+
+    wmb();
+    *wc_version = version_update_end(*wc_version);
+
+    spin_unlock(&wc_lock);
 }
 
 static void update_domain_rtc(void)
@@ -1185,7 +874,7 @@ static void update_domain_rtc(void)
     rcu_read_unlock(&domlist_read_lock);
 }
 
-void domain_set_time_offset(struct domain *d, int64_t time_offset_seconds)
+void domain_set_time_offset(struct domain *d, int32_t time_offset_seconds)
 {
     d->time_offset_seconds = time_offset_seconds;
     if ( is_hvm_domain(d) )
@@ -1208,12 +897,12 @@ int cpu_frequency_change(u64 freq)
 
     local_irq_disable();
     /* Platform time /first/, as we may be delayed by platform_timer_lock. */
-    t->stamp.master_stime = read_platform_stime(NULL);
-    curr_tsc = rdtsc_ordered();
+    t->stime_master_stamp = read_platform_stime();
     /* TSC-extrapolated time may be bogus after frequency change. */
-    /*t->stamp.local_stime = get_s_time_fixed(curr_tsc);*/
-    t->stamp.local_stime = t->stamp.master_stime;
-    t->stamp.local_tsc = curr_tsc;
+    /*t->stime_local_stamp = get_s_time();*/
+    t->stime_local_stamp = t->stime_master_stamp;
+    rdtscll(curr_tsc);
+    t->local_tsc_stamp = curr_tsc;
     set_time_scale(&t->tsc_scale, freq);
     local_irq_enable();
 
@@ -1229,20 +918,50 @@ int cpu_frequency_change(u64 freq)
     return 0;
 }
 
+/* Set clock to <secs,usecs> after 00:00:00 UTC, 1 January, 1970. */
+void do_settime(unsigned long secs, unsigned long nsecs, u64 system_time_base)
+{
+    u64 x;
+    u32 y, _wc_sec, _wc_nsec;
+    struct domain *d;
+
+    x = (secs * 1000000000ULL) + (u64)nsecs - system_time_base;
+    y = do_div(x, 1000000000);
+
+    spin_lock(&wc_lock);
+    wc_sec  = _wc_sec  = (u32)x;
+    wc_nsec = _wc_nsec = (u32)y;
+    spin_unlock(&wc_lock);
+
+    rcu_read_lock(&domlist_read_lock);
+    for_each_domain ( d )
+        update_domain_wallclock_time(d);
+    rcu_read_unlock(&domlist_read_lock);
+}
+
 /* Per-CPU communication between rendezvous IRQ and softirq handler. */
-static DEFINE_PER_CPU(struct cpu_time_stamp, cpu_calibration);
+struct cpu_calibration {
+    u64 local_tsc_stamp;
+    s_time_t stime_local_stamp;
+    s_time_t stime_master_stamp;
+};
+static DEFINE_PER_CPU(struct cpu_calibration, cpu_calibration);
 
 /* Softirq handler for per-CPU time calibration. */
 static void local_time_calibration(void)
 {
     struct cpu_time *t = &this_cpu(cpu_time);
-    const struct cpu_time_stamp *c = &this_cpu(cpu_calibration);
+    struct cpu_calibration *c = &this_cpu(cpu_calibration);
 
     /*
-     * System (extrapolated from local and master oscillators) and TSC
-     * timestamps, taken during this calibration and the previous one.
+     * System timestamps, extrapolated from local and master oscillators,
+     * taken during this calibration and the previous calibration.
      */
-    struct cpu_time_stamp prev, curr;
+    s_time_t prev_local_stime, curr_local_stime;
+    s_time_t prev_master_stime, curr_master_stime;
+
+    /* TSC timestamps taken during this calibration and prev calibration. */
+    u64 prev_tsc, curr_tsc;
 
     /*
      * System time and TSC ticks elapsed during the previous calibration
@@ -1250,6 +969,9 @@ static void local_time_calibration(void)
      */
     u64 stime_elapsed64, tsc_elapsed64;
     u32 stime_elapsed32, tsc_elapsed32;
+
+    /* The accumulated error in the local estimate. */
+    u64 local_stime_err;
 
     /* Error correction to slow down a fast local clock. */
     u32 error_factor = 0;
@@ -1264,34 +986,40 @@ static void local_time_calibration(void)
     {
         /* Atomically read cpu_calibration struct and write cpu_time struct. */
         local_irq_disable();
-        t->stamp = *c;
+        t->local_tsc_stamp    = c->local_tsc_stamp;
+        t->stime_local_stamp  = c->stime_master_stamp;
+        t->stime_master_stamp = c->stime_master_stamp;
         local_irq_enable();
         update_vcpu_system_time(current);
         goto out;
     }
 
-    prev = t->stamp;
+    prev_tsc          = t->local_tsc_stamp;
+    prev_local_stime  = t->stime_local_stamp;
+    prev_master_stime = t->stime_master_stamp;
 
     /* Disabling IRQs ensures we atomically read cpu_calibration struct. */
     local_irq_disable();
-    curr = *c;
+    curr_tsc          = c->local_tsc_stamp;
+    curr_local_stime  = c->stime_local_stamp;
+    curr_master_stime = c->stime_master_stamp;
     local_irq_enable();
 
 #if 0
     printk("PRE%d: tsc=%"PRIu64" stime=%"PRIu64" master=%"PRIu64"\n",
-           smp_processor_id(), prev.local_tsc, prev.local_stime, prev.master_stime);
+           smp_processor_id(), prev_tsc, prev_local_stime, prev_master_stime);
     printk("CUR%d: tsc=%"PRIu64" stime=%"PRIu64" master=%"PRIu64
            " -> %"PRId64"\n",
-           smp_processor_id(), curr.local_tsc, curr.local_stime, curr.master_stime,
-           curr.master_stime - curr.local_stime);
+           smp_processor_id(), curr_tsc, curr_local_stime, curr_master_stime,
+           curr_master_stime - curr_local_stime);
 #endif
 
     /* Local time warps forward if it lags behind master time. */
-    if ( curr.local_stime < curr.master_stime )
-        curr.local_stime = curr.master_stime;
+    if ( curr_local_stime < curr_master_stime )
+        curr_local_stime = curr_master_stime;
 
-    stime_elapsed64 = curr.master_stime - prev.master_stime;
-    tsc_elapsed64   = curr.local_tsc - prev.local_tsc;
+    stime_elapsed64 = curr_master_stime - prev_master_stime;
+    tsc_elapsed64   = curr_tsc - prev_tsc;
 
     /*
      * Weirdness can happen if we lose sync with the platform timer.
@@ -1305,10 +1033,9 @@ static void local_time_calibration(void)
      * clock (slow clocks are warped forwards). The scale factor is clamped
      * to >= 0.5.
      */
-    if ( curr.local_stime != curr.master_stime )
+    if ( curr_local_stime != curr_master_stime )
     {
-        u64 local_stime_err = curr.local_stime - curr.master_stime;
-
+        local_stime_err = curr_local_stime - curr_master_stime;
         if ( local_stime_err > EPOCH )
             local_stime_err = EPOCH;
         error_factor = div_frac(EPOCH, EPOCH + (u32)local_stime_err);
@@ -1361,7 +1088,9 @@ static void local_time_calibration(void)
     local_irq_disable();
     t->tsc_scale.mul_frac = calibration_mul_frac;
     t->tsc_scale.shift    = tsc_shift;
-    t->stamp              = curr;
+    t->local_tsc_stamp    = curr_tsc;
+    t->stime_local_stamp  = curr_local_stime;
+    t->stime_master_stamp = curr_master_stime;
     local_irq_enable();
 
     update_vcpu_system_time(current);
@@ -1384,13 +1113,16 @@ static void local_time_calibration(void)
  */
 static void check_tsc_warp(unsigned long tsc_khz, unsigned long *max_warp)
 {
+#define rdtsc_barrier() mb()
     static DEFINE_SPINLOCK(sync_lock);
     static cycles_t last_tsc;
 
     cycles_t start, now, prev, end;
     int i;
 
-    start = rdtsc_ordered();
+    rdtsc_barrier();
+    start = get_cycles();
+    rdtsc_barrier();
 
     /* The measurement runs for 20 msecs: */
     end = start + tsc_khz * 20ULL;
@@ -1405,7 +1137,9 @@ static void check_tsc_warp(unsigned long tsc_khz, unsigned long *max_warp)
          */
         spin_lock(&sync_lock);
         prev = last_tsc;
-        now = rdtsc_ordered();
+        rdtsc_barrier();
+        now = get_cycles();
+        rdtsc_barrier();
         last_tsc = now;
         spin_unlock(&sync_lock);
 
@@ -1444,7 +1178,7 @@ static void tsc_check_slave(void *unused)
     unsigned int cpu = smp_processor_id();
     local_irq_disable();
     while ( !cpumask_test_cpu(cpu, &tsc_check_cpumask) )
-        cpu_relax();
+        mb();
     check_tsc_warp(cpu_khz, &tsc_max_warp);
     cpumask_clear_cpu(cpu, &tsc_check_cpumask);
     local_irq_enable();
@@ -1481,18 +1215,6 @@ struct calibration_rendezvous {
     u64 master_tsc_stamp;
 };
 
-static void
-time_calibration_rendezvous_tail(const struct calibration_rendezvous *r)
-{
-    struct cpu_time_stamp *c = &this_cpu(cpu_calibration);
-
-    c->local_tsc    = rdtsc_ordered();
-    c->local_stime  = get_s_time_fixed(c->local_tsc);
-    c->master_stime = r->master_stime;
-
-    raise_softirq(TIME_CALIBRATE_SOFTIRQ);
-}
-
 /*
  * Keep TSCs in sync when they run at the same rate, but may stop in
  * deep-sleep C states.
@@ -1500,6 +1222,7 @@ time_calibration_rendezvous_tail(const struct calibration_rendezvous *r)
 static void time_calibration_tsc_rendezvous(void *_r)
 {
     int i;
+    struct cpu_calibration *c = &this_cpu(cpu_calibration);
     struct calibration_rendezvous *r = _r;
     unsigned int total_cpus = cpumask_weight(&r->cpu_calibration_map);
 
@@ -1509,12 +1232,12 @@ static void time_calibration_tsc_rendezvous(void *_r)
         if ( smp_processor_id() == 0 )
         {
             while ( atomic_read(&r->semaphore) != (total_cpus - 1) )
-                cpu_relax();
+                mb();
 
             if ( r->master_stime == 0 )
             {
-                r->master_stime = read_platform_stime(NULL);
-                r->master_tsc_stamp = rdtsc_ordered();
+                r->master_stime = read_platform_stime();
+                rdtscll(r->master_tsc_stamp);
             }
             atomic_inc(&r->semaphore);
 
@@ -1522,30 +1245,35 @@ static void time_calibration_tsc_rendezvous(void *_r)
                 write_tsc(r->master_tsc_stamp);
 
             while ( atomic_read(&r->semaphore) != (2*total_cpus - 1) )
-                cpu_relax();
+                mb();
             atomic_set(&r->semaphore, 0);
         }
         else
         {
             atomic_inc(&r->semaphore);
             while ( atomic_read(&r->semaphore) < total_cpus )
-                cpu_relax();
+                mb();
 
             if ( i == 0 )
                 write_tsc(r->master_tsc_stamp);
 
             atomic_inc(&r->semaphore);
             while ( atomic_read(&r->semaphore) > total_cpus )
-                cpu_relax();
+                mb();
         }
     }
 
-    time_calibration_rendezvous_tail(r);
+    rdtscll(c->local_tsc_stamp);
+    c->stime_local_stamp = get_s_time();
+    c->stime_master_stamp = r->master_stime;
+
+    raise_softirq(TIME_CALIBRATE_SOFTIRQ);
 }
 
 /* Ordinary rendezvous function which does not modify TSC values. */
 static void time_calibration_std_rendezvous(void *_r)
 {
+    struct cpu_calibration *c = &this_cpu(cpu_calibration);
     struct calibration_rendezvous *r = _r;
     unsigned int total_cpus = cpumask_weight(&r->cpu_calibration_map);
 
@@ -1553,8 +1281,8 @@ static void time_calibration_std_rendezvous(void *_r)
     {
         while ( atomic_read(&r->semaphore) != (total_cpus - 1) )
             cpu_relax();
-        r->master_stime = read_platform_stime(NULL);
-        smp_wmb(); /* write r->master_stime /then/ signal */
+        r->master_stime = read_platform_stime();
+        mb(); /* write r->master_stime /then/ signal */
         atomic_inc(&r->semaphore);
     }
     else
@@ -1562,24 +1290,12 @@ static void time_calibration_std_rendezvous(void *_r)
         atomic_inc(&r->semaphore);
         while ( atomic_read(&r->semaphore) != total_cpus )
             cpu_relax();
-        smp_rmb(); /* receive signal /then/ read r->master_stime */
+        mb(); /* receive signal /then/ read r->master_stime */
     }
 
-    time_calibration_rendezvous_tail(r);
-}
-
-/*
- * Rendezvous function used when clocksource is TSC and
- * no CPU hotplug will be performed.
- */
-static void time_calibration_nop_rendezvous(void *rv)
-{
-    const struct calibration_rendezvous *r = rv;
-    struct cpu_time_stamp *c = &this_cpu(cpu_calibration);
-
-    c->local_tsc    = r->master_tsc_stamp;
-    c->local_stime  = r->master_stime;
-    c->master_stime = r->master_stime;
+    rdtscll(c->local_tsc_stamp);
+    c->stime_local_stamp = get_s_time();
+    c->stime_master_stamp = r->master_stime;
 
     raise_softirq(TIME_CALIBRATE_SOFTIRQ);
 }
@@ -1593,13 +1309,6 @@ static void time_calibration(void *unused)
         .semaphore = ATOMIC_INIT(0)
     };
 
-    if ( clocksource_is_tsc() )
-    {
-        local_irq_disable();
-        r.master_stime = read_platform_stime(&r.master_tsc_stamp);
-        local_irq_enable();
-    }
-
     cpumask_copy(&r.cpu_calibration_map, &cpu_online_map);
 
     /* @wait=1 because we must wait for all cpus before freeing @r. */
@@ -1608,50 +1317,22 @@ static void time_calibration(void *unused)
                      &r, 1);
 }
 
-static struct cpu_time_stamp ap_bringup_ref;
-
-void time_latch_stamps(void)
-{
-    unsigned long flags;
-
-    local_irq_save(flags);
-    ap_bringup_ref.master_stime = read_platform_stime(NULL);
-    ap_bringup_ref.local_tsc = rdtsc_ordered();
-    local_irq_restore(flags);
-
-    ap_bringup_ref.local_stime = get_s_time_fixed(ap_bringup_ref.local_tsc);
-}
-
 void init_percpu_time(void)
 {
     struct cpu_time *t = &this_cpu(cpu_time);
     unsigned long flags;
-    u64 tsc;
     s_time_t now;
 
     /* Initial estimate for TSC rate. */
-    t->tsc_scale = per_cpu(cpu_time, 0).tsc_scale;
+    this_cpu(cpu_time).tsc_scale = per_cpu(cpu_time, 0).tsc_scale;
 
     local_irq_save(flags);
-    now = read_platform_stime(NULL);
-    tsc = rdtsc_ordered();
+    rdtscll(t->local_tsc_stamp);
+    now = read_platform_stime();
     local_irq_restore(flags);
 
-    t->stamp.master_stime = now;
-    /*
-     * To avoid a discontinuity (TSC and platform clock can't be expected
-     * to be in perfect sync), initialization here needs to match up with
-     * local_time_calibration()'s decision whether to use its fast path.
-     */
-    if ( boot_cpu_has(X86_FEATURE_CONSTANT_TSC) )
-    {
-        if ( system_state < SYS_STATE_smp_boot )
-            now = get_s_time_fixed(tsc);
-        else
-            now += ap_bringup_ref.local_stime - ap_bringup_ref.master_stime;
-    }
-    t->stamp.local_tsc   = tsc;
-    t->stamp.local_stime = now;
+    t->stime_master_stamp = now;
+    t->stime_local_stamp  = now;
 }
 
 /*
@@ -1675,13 +1356,13 @@ static void __init tsc_check_writability(void)
     if ( boot_cpu_has(X86_FEATURE_TSC_RELIABLE) )
         return;
 
-    tsc = rdtsc();
+    rdtscll(tsc);
     if ( wrmsr_safe(MSR_IA32_TSC, 0) == 0 )
     {
-        uint64_t tmp, tmp2 = rdtsc();
-
+        uint64_t tmp, tmp2;
+        rdtscll(tmp2);
         write_tsc(tsc | (1ULL << 32));
-        tmp = rdtsc();
+        rdtscll(tmp);
         if ( ABS((s64)tmp - (s64)tmp2) < (1LL << 31) )
             what = "only partially";
     }
@@ -1711,32 +1392,7 @@ static void __init tsc_check_writability(void)
         cpuidle_disable_deep_cstate();
 
     /* synchronize_tsc_slave() must do nothing */
-    disable_tsc_sync = true;
-}
-
-static void __init reset_percpu_time(void *unused)
-{
-    struct cpu_time *t = &this_cpu(cpu_time);
-
-    t->stamp.local_tsc = boot_tsc_stamp;
-    t->stamp.local_stime = 0;
-    t->stamp.local_stime = get_s_time_fixed(boot_tsc_stamp);
-    t->stamp.master_stime = t->stamp.local_stime;
-}
-
-static void __init try_platform_timer_tail(bool late)
-{
-    init_timer(&plt_overflow_timer, plt_overflow, NULL, 0);
-    plt_overflow(NULL);
-
-    platform_timer_stamp = plt_stamp64;
-    stime_platform_stamp = NOW();
-
-    if ( !late )
-        init_percpu_time();
-
-    init_timer(&calibration_timer, time_calibration, NULL, 0);
-    set_timer(&calibration_timer, NOW() + EPOCH);
+    disable_tsc_sync = 1;
 }
 
 /* Late init function, after all cpus have booted */
@@ -1753,53 +1409,11 @@ static int __init verify_tsc_reliability(void)
         tsc_check_reliability();
         if ( tsc_max_warp )
         {
-            printk("TSC warp detected, disabling TSC_RELIABLE\n");
+            printk("%s: TSC warp detected, disabling TSC_RELIABLE\n",
+                   __func__);
             setup_clear_cpu_cap(X86_FEATURE_TSC_RELIABLE);
         }
-        else if ( !strcmp(opt_clocksource, "tsc") &&
-                  (try_platform_timer(&plt_tsc) > 0) )
-        {
-            /*
-             * Platform timer has changed and CPU time will only be updated
-             * after we set again the calibration timer, which means we need to
-             * seed again each local CPU time. At this stage TSC is known to be
-             * reliable i.e. monotonically increasing across all CPUs so this
-             * lets us remove the skew between platform timer and TSC, since
-             * these are now effectively the same.
-             */
-            on_selected_cpus(&cpu_online_map, reset_percpu_time, NULL, 1);
-
-            /*
-             * We won't do CPU Hotplug and TSC clocksource is being used which
-             * means we have a reliable TSC, plus we don't sync with any other
-             * clocksource so no need for rendezvous.
-             */
-            time_calibration_rendezvous_fn = time_calibration_nop_rendezvous;
-
-            /* Finish platform timer switch. */
-            try_platform_timer_tail(true);
-
-            printk("Switched to Platform timer %s TSC\n",
-                   freq_string(plt_src.frequency));
-            return 0;
-        }
     }
-
-    /*
-     * Re-run the TSC writability check if it didn't run to completion, as
-     * X86_FEATURE_TSC_RELIABLE may have been cleared by now. This is needed
-     * for determining which rendezvous function to use (below).
-     */
-    if ( !disable_tsc_sync )
-        tsc_check_writability();
-
-    /*
-     * While with constant-rate TSCs the scale factor can be shared, when TSCs
-     * are not marked as 'reliable', re-sync during rendezvous.
-     */
-    if ( boot_cpu_has(X86_FEATURE_CONSTANT_TSC) &&
-         !boot_cpu_has(X86_FEATURE_TSC_RELIABLE) )
-        time_calibration_rendezvous_fn = time_calibration_tsc_rendezvous;
 
     return 0;
 }
@@ -1810,13 +1424,28 @@ int __init init_xen_time(void)
 {
     tsc_check_writability();
 
+    /* If we have constant-rate TSCs then scale factor can be shared. */
+    if ( boot_cpu_has(X86_FEATURE_CONSTANT_TSC) )
+    {
+        /* If TSCs are not marked as 'reliable', re-sync during rendezvous. */
+        if ( !boot_cpu_has(X86_FEATURE_TSC_RELIABLE) )
+            time_calibration_rendezvous_fn = time_calibration_tsc_rendezvous;
+    }
+
     open_softirq(TIME_CALIBRATE_SOFTIRQ, local_time_calibration);
 
-    /* NB. get_wallclock_time() can take over one second to execute. */
-    do_settime(get_wallclock_time(), 0, NOW());
+    /* System time (get_s_time()) starts ticking from now. */
+    rdtscll(this_cpu(cpu_time).local_tsc_stamp);
 
-    /* Finish platform timer initialization. */
-    try_platform_timer_tail(false);
+    /* NB. get_cmos_time() can take over one second to execute. */
+    do_settime(get_cmos_time(), 0, NOW());
+
+    init_platform_timer();
+
+    init_percpu_time();
+
+    init_timer(&calibration_timer, time_calibration, NULL, 0);
+    set_timer(&calibration_timer, NOW() + EPOCH);
 
     return 0;
 }
@@ -1825,22 +1454,16 @@ int __init init_xen_time(void)
 /* Early init function. */
 void __init early_time_init(void)
 {
-    struct cpu_time *t = &this_cpu(cpu_time);
-    u64 tmp;
+    u64 tmp = init_pit_and_calibrate_tsc();
 
-    preinit_pit();
-    tmp = init_platform_timer();
-    plt_tsc.frequency = tmp;
-
-    set_time_scale(&t->tsc_scale, tmp);
-    t->stamp.local_tsc = boot_tsc_stamp;
+    set_time_scale(&this_cpu(cpu_time).tsc_scale, tmp);
 
     do_div(tmp, 1000);
     cpu_khz = (unsigned long)tmp;
     printk("Detected %lu.%03lu MHz processor.\n", 
            cpu_khz / 1000, cpu_khz % 1000);
 
-    setup_irq(0, 0, &irq0);
+    setup_irq(0, &irq0);
 }
 
 /* keep pit enabled for pit_broadcast working while cpuidle enabled */
@@ -1916,6 +1539,25 @@ void send_timer_event(struct vcpu *v)
     send_guest_vcpu_virq(v, VIRQ_TIMER);
 }
 
+/* Return secs after 00:00:00 localtime, 1 January, 1970. */
+unsigned long get_localtime(struct domain *d)
+{
+    return wc_sec + (wc_nsec + NOW()) / 1000000000ULL 
+        + d->time_offset_seconds;
+}
+
+/* Return microsecs after 00:00:00 localtime, 1 January, 1970. */
+uint64_t get_localtime_us(struct domain *d)
+{
+    return ((wc_sec + d->time_offset_seconds) * 1000000000ULL
+        + wc_nsec + NOW()) / 1000UL;
+}
+
+unsigned long get_sec(void)
+{
+    return wc_sec + (wc_nsec + NOW()) / 1000000000ULL;
+}
+
 /* "cmos_utc_offset" is the difference between UTC time and CMOS time. */
 static long cmos_utc_offset; /* in seconds */
 
@@ -1923,8 +1565,8 @@ int time_suspend(void)
 {
     if ( smp_processor_id() == 0 )
     {
-        cmos_utc_offset = -get_wallclock_time();
-        cmos_utc_offset += get_sec();
+        cmos_utc_offset = -get_cmos_time();
+        cmos_utc_offset += (wc_sec + (wc_nsec + NOW()) / 1000000000ULL);
         kill_timer(&calibration_timer);
 
         /* Sync platform timer stamps. */
@@ -1939,7 +1581,7 @@ int time_suspend(void)
 
 int time_resume(void)
 {
-    preinit_pit();
+    init_pit_and_calibrate_tsc();
 
     resume_platform_timer();
 
@@ -1950,7 +1592,7 @@ int time_resume(void)
 
     set_timer(&calibration_timer, NOW() + EPOCH);
 
-    do_settime(get_wallclock_time() + cmos_utc_offset, 0, NOW());
+    do_settime(get_cmos_time() + cmos_utc_offset, 0, NOW());
 
     update_vcpu_system_time(current);
 
@@ -1959,7 +1601,7 @@ int time_resume(void)
     return 0;
 }
 
-int hwdom_pit_access(struct ioreq *ioreq)
+int dom0_pit_access(struct ioreq *ioreq)
 {
     /* Is Xen using Channel 2? Then disallow direct dom0 access. */
     if ( using_pit )
@@ -2004,6 +1646,18 @@ int hwdom_pit_access(struct ioreq *ioreq)
     return 0;
 }
 
+struct tm wallclock_time(void)
+{
+    uint64_t seconds;
+
+    if ( !wc_sec )
+        return (struct tm) { 0 };
+
+    seconds = NOW() + (wc_sec * 1000000000ull) + wc_nsec;
+    do_div(seconds, 1000000000);
+    return gmtime(seconds);
+}
+
 /*
  * PV SoftTSC Emulation.
  */
@@ -2011,9 +1665,8 @@ int hwdom_pit_access(struct ioreq *ioreq)
 /*
  * tsc=unstable: Override all tests; assume TSC is unreliable.
  * tsc=skewed: Assume TSCs are individually reliable, but skewed across CPUs.
- * tsc=stable:socket: Assume TSCs are reliable across sockets.
  */
-static int __init tsc_parse(const char *s)
+static void __init tsc_parse(const char *s)
 {
     if ( !strcmp(s, "unstable") )
     {
@@ -2022,25 +1675,16 @@ static int __init tsc_parse(const char *s)
         setup_clear_cpu_cap(X86_FEATURE_TSC_RELIABLE);
     }
     else if ( !strcmp(s, "skewed") )
+    {
         setup_clear_cpu_cap(X86_FEATURE_TSC_RELIABLE);
-    else if ( !strcmp(s, "stable:socket") )
-        tsc_flags |= TSC_RELIABLE_SOCKET;
-    else
-        return -EINVAL;
-
-    return 0;
+    }
 }
 custom_param("tsc", tsc_parse);
 
 u64 gtime_to_gtsc(struct domain *d, u64 time)
 {
     if ( !is_hvm_domain(d) )
-    {
-        if ( time < d->arch.vtsc_offset )
-            return -scale_delta(d->arch.vtsc_offset - time,
-                                &d->arch.ns_to_vtsc);
-        time -= d->arch.vtsc_offset;
-    }
+        time = max_t(s64, time - d->arch.vtsc_offset, 0);
     return scale_delta(time, &d->arch.ns_to_vtsc);
 }
 
@@ -2053,19 +1697,17 @@ u64 gtsc_to_gtime(struct domain *d, u64 tsc)
     return time;
 }
 
-uint64_t pv_soft_rdtsc(const struct vcpu *v, const struct cpu_user_regs *regs)
+void pv_soft_rdtsc(struct vcpu *v, struct cpu_user_regs *regs, int rdtscp)
 {
     s_time_t now = get_s_time();
     struct domain *d = v->domain;
 
     spin_lock(&d->arch.vtsc_lock);
 
-#if !defined(NDEBUG) || defined(CONFIG_PERF_COUNTERS)
     if ( guest_kernel_mode(v, regs) )
         d->arch.vtsc_kerncount++;
     else
         d->arch.vtsc_usercount++;
-#endif
 
     if ( (int64_t)(now - d->arch.vtsc_last) > 0 )
         d->arch.vtsc_last = now;
@@ -2074,17 +1716,56 @@ uint64_t pv_soft_rdtsc(const struct vcpu *v, const struct cpu_user_regs *regs)
 
     spin_unlock(&d->arch.vtsc_lock);
 
-    return gtime_to_gtsc(d, now);
-}
+    now = gtime_to_gtsc(d, now);
 
-bool clocksource_is_tsc(void)
-{
-    return plt_src.read_counter == read_tsc;
+    regs->eax = (uint32_t)now;
+    regs->edx = (uint32_t)(now >> 32);
+
+    if ( rdtscp )
+         regs->ecx =
+             (d->arch.tsc_mode == TSC_MODE_PVRDTSCP) ? d->arch.incarnation : 0;
 }
 
 int host_tsc_is_safe(void)
 {
     return boot_cpu_has(X86_FEATURE_TSC_RELIABLE);
+}
+
+void cpuid_time_leaf(uint32_t sub_idx, uint32_t *eax, uint32_t *ebx,
+                      uint32_t *ecx, uint32_t *edx)
+{
+    struct domain *d = current->domain;
+    uint64_t offset;
+
+    switch ( sub_idx )
+    {
+    case 0: /* features */
+        *eax = ( ( (!!d->arch.vtsc) << 0 ) |
+                 ( (!!host_tsc_is_safe()) << 1 ) |
+                 ( (!!boot_cpu_has(X86_FEATURE_RDTSCP)) << 2 ) |
+               0 );
+        *ebx = d->arch.tsc_mode;
+        *ecx = d->arch.tsc_khz;
+        *edx = d->arch.incarnation;
+        break;
+    case 1: /* scale and offset */
+        if ( !d->arch.vtsc )
+            offset = d->arch.vtsc_offset;
+        else
+            /* offset already applied to value returned by virtual rdtscp */
+            offset = 0;
+        *eax = (uint32_t)offset;
+        *ebx = (uint32_t)(offset >> 32);
+        *ecx = d->arch.vtsc_to_ns.mul_frac;
+        *edx = (s8)d->arch.vtsc_to_ns.shift;
+        break;
+    case 2: /* physical cpu_khz */
+        *eax = cpu_khz;
+        *ebx = *ecx = *edx = 0;
+        break;
+    default:
+        *eax = *ebx = *ecx = *edx = 0;
+    }
 }
 
 /*
@@ -2095,44 +1776,45 @@ void tsc_get_info(struct domain *d, uint32_t *tsc_mode,
                   uint64_t *elapsed_nsec, uint32_t *gtsc_khz,
                   uint32_t *incarnation)
 {
-    bool enable_tsc_scaling = is_hvm_domain(d) &&
-                              hvm_tsc_scaling_supported && !d->arch.vtsc;
-
     *incarnation = d->arch.incarnation;
     *tsc_mode = d->arch.tsc_mode;
 
     switch ( *tsc_mode )
     {
-        uint64_t tsc;
-
     case TSC_MODE_NEVER_EMULATE:
-        *elapsed_nsec = *gtsc_khz = 0;
+        *elapsed_nsec =  *gtsc_khz = 0;
         break;
+    case TSC_MODE_ALWAYS_EMULATE:
+        *elapsed_nsec = get_s_time() - d->arch.vtsc_offset;
+        *gtsc_khz =  d->arch.tsc_khz;
+         break;
     case TSC_MODE_DEFAULT:
         if ( d->arch.vtsc )
         {
-    case TSC_MODE_ALWAYS_EMULATE:
             *elapsed_nsec = get_s_time() - d->arch.vtsc_offset;
-            *gtsc_khz = d->arch.tsc_khz;
-            break;
+            *gtsc_khz =  d->arch.tsc_khz;
         }
-        tsc = rdtsc();
-        *elapsed_nsec = scale_delta(tsc, &d->arch.vtsc_to_ns);
-        *gtsc_khz = enable_tsc_scaling ? d->arch.tsc_khz : cpu_khz;
+        else
+        {
+            uint64_t tsc = 0;
+            rdtscll(tsc);
+            *elapsed_nsec = scale_delta(tsc,&d->arch.vtsc_to_ns);
+            *gtsc_khz =  cpu_khz;
+        }
         break;
     case TSC_MODE_PVRDTSCP:
         if ( d->arch.vtsc )
         {
             *elapsed_nsec = get_s_time() - d->arch.vtsc_offset;
-            *gtsc_khz = cpu_khz;
+            *gtsc_khz =  cpu_khz;
         }
         else
         {
-            tsc = rdtsc();
-            *elapsed_nsec = scale_delta(tsc, &this_cpu(cpu_time).tsc_scale) -
-                            d->arch.vtsc_offset;
-            *gtsc_khz = enable_tsc_scaling ? d->arch.tsc_khz
-                                           : 0 /* ignored by tsc_set_info */;
+            uint64_t tsc = 0;
+            rdtscll(tsc);
+            *elapsed_nsec = (scale_delta(tsc,&d->arch.vtsc_to_ns) -
+                             d->arch.vtsc_offset);
+            *gtsc_khz = 0; /* ignored by tsc_set_info */
         }
         break;
     }
@@ -2153,49 +1835,74 @@ void tsc_set_info(struct domain *d,
                   uint32_t tsc_mode, uint64_t elapsed_nsec,
                   uint32_t gtsc_khz, uint32_t incarnation)
 {
-    ASSERT(!is_system_domain(d));
-
-    if ( is_hardware_domain(d) )
+    if ( is_idle_domain(d) || (d->domain_id == 0) )
     {
         d->arch.vtsc = 0;
         return;
     }
+    if ( is_pvh_domain(d) )
+    {
+        /*
+         * PVH fixme: support more tsc modes.
+         *
+         * NB: The reason this is disabled here appears to be with
+         * additional support required to do the PV RDTSC emulation.
+         * Since we're no longer taking the PV emulation path for
+         * anything, we may be able to remove this restriction.
+         *
+         * pvhfixme: Experiments show that "default" works for PVH,
+         * but "always_emulate" does not for some reason.  Figure out
+         * why.
+         */
+        switch ( tsc_mode )
+        {
+        case TSC_MODE_NEVER_EMULATE:
+            break;
+        default:
+            printk(XENLOG_WARNING
+                   "PVH currently does not support tsc emulation. Setting timer_mode = never_emulate\n");
+            /* FALLTHRU */
+        case TSC_MODE_DEFAULT:
+            tsc_mode = TSC_MODE_NEVER_EMULATE;
+            break;
+        }
+    }
 
     switch ( d->arch.tsc_mode = tsc_mode )
     {
-        bool enable_tsc_scaling;
-
-    case TSC_MODE_DEFAULT:
-    case TSC_MODE_ALWAYS_EMULATE:
-        d->arch.vtsc_offset = get_s_time() - elapsed_nsec;
-        d->arch.tsc_khz = gtsc_khz ?: cpu_khz;
-        set_time_scale(&d->arch.vtsc_to_ns, d->arch.tsc_khz * 1000);
-
-        /*
-         * In default mode use native TSC if the host has safe TSC and
-         * host and guest frequencies are the same (either "naturally" or
-         * - for HVM/PVH - via TSC scaling).
-         * When a guest is created, gtsc_khz is passed in as zero, making
-         * d->arch.tsc_khz == cpu_khz. Thus no need to check incarnation.
-         */
-        if ( tsc_mode == TSC_MODE_DEFAULT && host_tsc_is_safe() &&
-             (d->arch.tsc_khz == cpu_khz ||
-              (is_hvm_domain(d) &&
-               hvm_get_tsc_scaling_ratio(d->arch.tsc_khz))) )
-        {
     case TSC_MODE_NEVER_EMULATE:
-            d->arch.vtsc = 0;
-            break;
-        }
+        d->arch.vtsc = 0;
+        break;
+    case TSC_MODE_ALWAYS_EMULATE:
         d->arch.vtsc = 1;
+        d->arch.vtsc_offset = get_s_time() - elapsed_nsec;
+        d->arch.tsc_khz = gtsc_khz ? gtsc_khz : cpu_khz;
+        set_time_scale(&d->arch.vtsc_to_ns, d->arch.tsc_khz * 1000 );
         d->arch.ns_to_vtsc = scale_reciprocal(d->arch.vtsc_to_ns);
         break;
+    case TSC_MODE_DEFAULT:
+        d->arch.vtsc = 1;
+        d->arch.vtsc_offset = get_s_time() - elapsed_nsec;
+        d->arch.tsc_khz = gtsc_khz ? gtsc_khz : cpu_khz;
+        set_time_scale(&d->arch.vtsc_to_ns, d->arch.tsc_khz * 1000 );
+        /*
+         * Use native TSC if the host has safe TSC and:
+         *  HVM/PVH: host and guest frequencies are the same (either
+         *           "naturally" or via TSC scaling)
+         *  PV: guest has not migrated yet (and thus arch.tsc_khz == cpu_khz)
+         */
+        if ( host_tsc_is_safe() &&
+             ((has_hvm_container_domain(d) &&
+               (d->arch.tsc_khz == cpu_khz || cpu_has_tsc_ratio)) ||
+              incarnation == 0) )
+            d->arch.vtsc = 0;
+        else 
+            d->arch.ns_to_vtsc = scale_reciprocal(d->arch.vtsc_to_ns);
+        break;
     case TSC_MODE_PVRDTSCP:
-        d->arch.vtsc = !boot_cpu_has(X86_FEATURE_RDTSCP) ||
-                       !host_tsc_is_safe();
-        enable_tsc_scaling = is_hvm_domain(d) && !d->arch.vtsc &&
-                             hvm_get_tsc_scaling_ratio(gtsc_khz ?: cpu_khz);
-        d->arch.tsc_khz = (enable_tsc_scaling && gtsc_khz) ? gtsc_khz : cpu_khz;
+        d->arch.vtsc =  boot_cpu_has(X86_FEATURE_RDTSCP) &&
+                        host_tsc_is_safe() ?  0 : 1;
+        d->arch.tsc_khz = cpu_khz;
         set_time_scale(&d->arch.vtsc_to_ns, d->arch.tsc_khz * 1000 );
         d->arch.ns_to_vtsc = scale_reciprocal(d->arch.vtsc_to_ns);
         if ( d->arch.vtsc )
@@ -2203,38 +1910,16 @@ void tsc_set_info(struct domain *d,
         else {
             /* when using native TSC, offset is nsec relative to power-on
              * of physical machine */
-            d->arch.vtsc_offset = scale_delta(rdtsc(),
-                                              &this_cpu(cpu_time).tsc_scale) -
+            uint64_t tsc = 0;
+            rdtscll(tsc);
+            d->arch.vtsc_offset = scale_delta(tsc,&d->arch.vtsc_to_ns) -
                                   elapsed_nsec;
         }
         break;
     }
     d->arch.incarnation = incarnation + 1;
-    if ( is_hvm_domain(d) )
-    {
-        if ( hvm_tsc_scaling_supported && !d->arch.vtsc )
-            d->arch.hvm_domain.tsc_scaling_ratio =
-                hvm_get_tsc_scaling_ratio(d->arch.tsc_khz);
-
+    if ( has_hvm_container_domain(d) )
         hvm_set_rdtsc_exiting(d, d->arch.vtsc);
-        if ( d->vcpu && d->vcpu[0] && incarnation == 0 )
-        {
-            /*
-             * set_tsc_offset() is called from hvm_vcpu_initialise() before
-             * tsc_set_info(). New vtsc mode may require recomputing TSC
-             * offset.
-             * We only need to do this for BSP during initial boot. APs will
-             * call set_tsc_offset() later from hvm_vcpu_reset_state() and they
-             * will sync their TSC to BSP's sync_tsc.
-             */
-            d->arch.hvm_domain.sync_tsc = rdtsc();
-            hvm_funcs.set_tsc_offset(d->vcpu[0],
-                                     d->vcpu[0]->arch.hvm_vcpu.cache_tsc_offset,
-                                     d->arch.hvm_domain.sync_tsc);
-        }
-    }
-
-    recalculate_cpuid_policy(d);
 }
 
 /* vtsc may incur measurable performance degradation, diagnose with this */
@@ -2260,7 +1945,7 @@ static void dump_softtsc(unsigned char key)
                "warp=%lu (count=%lu)\n", tsc_max_warp, tsc_check_count);
     for_each_domain ( d )
     {
-        if ( is_hardware_domain(d) && d->arch.tsc_mode == TSC_MODE_DEFAULT )
+        if ( d->domain_id == 0 && d->arch.tsc_mode == TSC_MODE_DEFAULT )
             continue;
         printk("dom%u%s: mode=%d",d->domain_id,
                 is_hvm_domain(d) ? "(hvm)" : "", d->arch.tsc_mode);
@@ -2270,12 +1955,17 @@ static void dump_softtsc(unsigned char key)
             printk(",khz=%"PRIu32, d->arch.tsc_khz);
         if ( d->arch.incarnation )
             printk(",inc=%"PRIu32, d->arch.incarnation);
-#if !defined(NDEBUG) || defined(CONFIG_PERF_COUNTERS)
-        if ( d->arch.vtsc_kerncount | d->arch.vtsc_usercount )
-            printk(",vtsc count: %"PRIu64" kernel,%"PRIu64" user",
+        if ( !(d->arch.vtsc_kerncount | d->arch.vtsc_usercount) )
+        {
+            printk("\n");
+            continue;
+        }
+        if ( is_hvm_domain(d) )
+            printk(",vtsc count: %"PRIu64" total\n",
+                   d->arch.vtsc_kerncount);
+        else
+            printk(",vtsc count: %"PRIu64" kernel, %"PRIu64" user\n",
                    d->arch.vtsc_kerncount, d->arch.vtsc_usercount);
-#endif
-        printk("\n");
         domcnt++;
     }
 
@@ -2283,9 +1973,15 @@ static void dump_softtsc(unsigned char key)
             printk("No domains have emulated TSC\n");
 }
 
+static struct keyhandler dump_softtsc_keyhandler = {
+    .diagnostic = 1,
+    .u.fn = dump_softtsc,
+    .desc = "dump softtsc stats"
+};
+
 static int __init setup_dump_softtsc(void)
 {
-    register_keyhandler('s', dump_softtsc, "dump softtsc stats", 1);
+    register_keyhandler('s', &dump_softtsc_keyhandler);
     return 0;
 }
 __initcall(setup_dump_softtsc);

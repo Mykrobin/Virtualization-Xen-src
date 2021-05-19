@@ -12,13 +12,13 @@
  * Author: Allen Kay <allen.m.kay@intel.com> -  adapted to xen from Linux
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/acpi.h>
 #include <xen/xmalloc.h>
 #include <xen/pci.h>
 #include <xen/pci_regs.h>
-#include <xen/pci_ids.h>
 #include <asm/e820.h>
 #include <asm/msr.h>
 #include <asm/msr-index.h>
@@ -28,36 +28,22 @@
 
 unsigned int pci_probe = PCI_PROBE_CONF1 | PCI_PROBE_MMCONF;
 
-static int __init parse_mmcfg(const char *s)
+static void __init parse_mmcfg(char *s)
 {
-    const char *ss;
-    int rc = 0;
+    char *ss;
 
     do {
         ss = strchr(s, ',');
-        if ( !ss )
-            ss = strchr(s, '\0');
+        if ( ss )
+            *ss = '\0';
 
-        switch ( parse_bool(s, ss) )
-        {
-        case 0:
+        if ( !parse_bool(s) )
             pci_probe &= ~PCI_PROBE_MMCONF;
-            break;
-        case 1:
-            break;
-        default:
-            if ( !cmdline_strcmp(s, "amd_fam10") ||
-                 !cmdline_strcmp(s, "amd-fam10") )
-                pci_probe |= PCI_CHECK_ENABLE_AMD_MMCONF;
-            else
-                rc = -EINVAL;
-            break;
-        }
+        else if ( !strcmp(s, "amd_fam10") || !strcmp(s, "amd-fam10") )
+            pci_probe |= PCI_CHECK_ENABLE_AMD_MMCONF;
 
         s = ss + 1;
-    } while ( *ss );
-
-    return rc;
+    } while ( ss );
 }
 custom_param("mmcfg", parse_mmcfg);
 
@@ -195,10 +181,10 @@ static const char __init *pci_mmcfg_nvidia_mcp55(void)
     int bus, i;
 
     static const u32 extcfg_regnum      = 0x90;
-    static const u32 extcfg_enable_mask = 1u << 31;
-    static const u32 extcfg_start_mask  = 0xffu << 16;
+    static const u32 extcfg_enable_mask = 1<<31;
+    static const u32 extcfg_start_mask  = 0xff<<16;
     static const int extcfg_start_shift = 16;
-    static const u32 extcfg_size_mask   = 3u << 28;
+    static const u32 extcfg_size_mask   = 0x3<<28;
     static const int extcfg_size_shift  = 28;
     static const int extcfg_sizebus[]   = {0xff, 0x7f, 0x3f, 0x1f};
     static const u32 extcfg_base_mask[] = {0x7ff8, 0x7ffc, 0x7ffe, 0x7fff};

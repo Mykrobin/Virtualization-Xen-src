@@ -10,13 +10,14 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
 
 #include <asm/processor.h>
 
-void identify_cpu(struct cpuinfo_arm *c)
+void __cpuinit identify_cpu(struct cpuinfo_arm *c)
 {
         c->midr.bits = READ_SYSREG32(MIDR_EL1);
         c->mpidr.bits = READ_SYSREG(MPIDR_EL1);

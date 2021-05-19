@@ -59,7 +59,7 @@ typedef enum mctelem_class {
 	MC_NONURGENT
 } mctelem_class_t;
 
-extern void mctelem_init(unsigned int);
+extern void mctelem_init(int);
 extern mctelem_cookie_t mctelem_reserve(mctelem_class_t);
 extern void *mctelem_dataptr(mctelem_cookie_t);
 extern void mctelem_commit(mctelem_cookie_t);
@@ -67,10 +67,9 @@ extern void mctelem_dismiss(mctelem_cookie_t);
 extern mctelem_cookie_t mctelem_consume_oldest_begin(mctelem_class_t);
 extern void mctelem_consume_oldest_end(mctelem_cookie_t);
 extern void mctelem_ack(mctelem_class_t, mctelem_cookie_t);
-extern void mctelem_defer(mctelem_cookie_t, bool lmce);
+extern void mctelem_defer(mctelem_cookie_t);
 extern void mctelem_process_deferred(unsigned int,
-                                     int (*)(mctelem_cookie_t), bool lmce);
-bool mctelem_has_deferred(unsigned int);
-bool mctelem_has_deferred_lmce(unsigned int cpu);
+    int (*)(mctelem_cookie_t));
+int mctelem_has_deferred(unsigned int);
 
 #endif

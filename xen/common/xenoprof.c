@@ -19,10 +19,6 @@
 #include <xsm/xsm.h>
 #include <xen/hypercall.h>
 
-/* Override macros from asm/page.h to make them work with mfn_t */
-#undef virt_to_mfn
-#define virt_to_mfn(va) _mfn(__virt_to_mfn(va))
-
 /* Limit amount of pages used for shared buffer (per domain) */
 #define MAX_OPROF_SHARED_PAGES 32
 
@@ -54,16 +50,16 @@ static u64 passive_samples;
 static u64 idle_samples;
 static u64 others_samples;
 
-int acquire_pmu_ownership(int pmu_ownership)
+int acquire_pmu_ownership(int pmu_ownship)
 {
     spin_lock(&pmu_owner_lock);
     if ( pmu_owner == PMU_OWNER_NONE )
     {
-        pmu_owner = pmu_ownership;
+        pmu_owner = pmu_ownship;
         goto out;
     }
 
-    if ( pmu_owner == pmu_ownership )
+    if ( pmu_owner == pmu_ownship )
         goto out;
 
     spin_unlock(&pmu_owner_lock);
@@ -75,10 +71,10 @@ int acquire_pmu_ownership(int pmu_ownership)
     return 1;
 }
 
-void release_pmu_ownership(int pmu_ownership)
+void release_pmu_ownship(int pmu_ownship)
 {
     spin_lock(&pmu_owner_lock);
-    if ( pmu_ownership == PMU_OWNER_HVM )
+    if ( pmu_ownship == PMU_OWNER_HVM )
         pmu_hvm_refcount--;
     if ( !pmu_hvm_refcount )
         pmu_owner = PMU_OWNER_NONE;
@@ -138,26 +134,25 @@ static void xenoprof_reset_buf(struct domain *d)
 }
 
 static int
-share_xenoprof_page_with_guest(struct domain *d, mfn_t mfn, int npages)
+share_xenoprof_page_with_guest(struct domain *d, unsigned long mfn, int npages)
 {
     int i;
 
     /* Check if previous page owner has released the page. */
     for ( i = 0; i < npages; i++ )
     {
-        struct page_info *page = mfn_to_page(mfn_add(mfn, i));
-
+        struct page_info *page = mfn_to_page(mfn + i);
         if ( (page->count_info & (PGC_allocated|PGC_count_mask)) != 0 )
         {
             printk(XENLOG_G_INFO "dom%d mfn %#lx page->count_info %#lx\n",
-                   d->domain_id, mfn_x(mfn_add(mfn, i)), page->count_info);
+                   d->domain_id, mfn + i, page->count_info);
             return -EBUSY;
         }
         page_set_owner(page, NULL);
     }
 
     for ( i = 0; i < npages; i++ )
-        share_xen_page_with_guest(mfn_to_page(mfn_add(mfn, i)), d, SHARE_rw);
+        share_xen_page_with_guest(mfn_to_page(mfn + i), d, XENSHARE_writable);
 
     return 0;
 }
@@ -166,12 +161,11 @@ static void
 unshare_xenoprof_page_with_guest(struct xenoprof *x)
 {
     int i, npages = x->npages;
-    mfn_t mfn = virt_to_mfn(x->rawbuf);
+    unsigned long mfn = virt_to_mfn(x->rawbuf);
 
     for ( i = 0; i < npages; i++ )
     {
-        struct page_info *page = mfn_to_page(mfn_add(mfn, i));
-
+        struct page_info *page = mfn_to_page(mfn + i);
         BUG_ON(page_get_owner(page) != current->domain);
         if ( test_and_clear_bit(_PGC_allocated, &page->count_info) )
             put_page(page);
@@ -183,14 +177,11 @@ xenoprof_shared_gmfn_with_guest(
     struct domain *d, unsigned long maddr, unsigned long gmaddr, int npages)
 {
     int i;
-
+    
     for ( i = 0; i < npages; i++, maddr += PAGE_SIZE, gmaddr += PAGE_SIZE )
     {
         BUG_ON(page_get_owner(maddr_to_page(maddr)) != d);
-        if ( i == 0 )
-            gdprintk(XENLOG_WARNING,
-                     "xenoprof unsupported with autotranslated guests\n");
-
+        xenoprof_shared_gmfn(d, gmaddr, maddr);
     }
 }
 
@@ -228,7 +219,7 @@ static int alloc_xenoprof_struct(
     bufsize = sizeof(struct xenoprof_buf);
     i = sizeof(struct event_log);
 #ifdef CONFIG_COMPAT
-    d->xenoprof->is_compat = is_pv_32bit_domain(is_passive ? hardware_domain : d);
+    d->xenoprof->is_compat = is_pv_32on64_domain(is_passive ? dom0 : d);
     if ( XENOPROF_COMPAT(d->xenoprof) )
     {
         bufsize = sizeof(struct compat_oprof_buf);
@@ -612,15 +603,9 @@ static int xenoprof_op_init(XEN_GUEST_HANDLE_PARAM(void) arg)
                                    xenoprof_init.cpu_type)) )
         return ret;
 
-    /* Only the hardware domain may become the primary profiler here because
-     * there is currently no cleanup of xenoprof_primary_profiler or associated
-     * profiling state when the primary profiling domain is shut down or
-     * crashes.  Once a better cleanup method is present, it will be possible to
-     * allow another domain to be the primary profiler.
-     */
     xenoprof_init.is_primary = 
         ((xenoprof_primary_profiler == d) ||
-         ((xenoprof_primary_profiler == NULL) && is_hardware_domain(d)));
+         ((xenoprof_primary_profiler == NULL) && (d->domain_id == 0)));
     if ( xenoprof_init.is_primary )
         xenoprof_primary_profiler = current->domain;
 
@@ -856,7 +841,7 @@ ret_t do_xenoprof_op(int op, XEN_GUEST_HANDLE_PARAM(void) arg)
             break;
         x = current->domain->xenoprof;
         unshare_xenoprof_page_with_guest(x);
-        release_pmu_ownership(PMU_OWNER_XENOPROF);
+        release_pmu_ownship(PMU_OWNER_XENOPROF);
         break;
     }
 

@@ -13,10 +13,12 @@
     GNU General Public License for more details.
 
     You should have received a copy of the GNU General Public License
-    along with this program; If not, see <http://www.gnu.org/licenses/>.
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 #include <sys/types.h>
 #include <sys/mman.h>
+#include <xenctrl.h>
 #include "xenstored_core.h"
 #include <xen/grant_table.h>
 
@@ -49,12 +51,12 @@ evtchn_port_t xenbus_evtchn(void)
 
 void *xenbus_map(void)
 {
-	return xengnttab_map_grant_ref(*xgt_handle, xenbus_master_domid(),
+	return xc_gnttab_map_grant_ref(*xcg_handle, 0,
 			GNTTAB_RESERVED_XENSTORE, PROT_READ|PROT_WRITE);
 }
 
 void unmap_xenbus(void *interface)
 {
-	xengnttab_unmap(*xgt_handle, interface, 1);
+	xc_gnttab_munmap(*xcg_handle, interface, 1);
 }
 

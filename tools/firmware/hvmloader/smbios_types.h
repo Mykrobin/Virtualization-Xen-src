@@ -12,7 +12,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  * Copyright (C) IBM Corporation, 2006
  *
@@ -92,13 +93,6 @@ struct smbios_type_2 {
     uint8_t serial_number_str;
 } __attribute__ ((packed));
 
-/* System Enclosure - Contained Elements */
-struct smbios_contained_element {
-        uint8_t type;
-        uint8_t minimum;
-        uint8_t maximum;
-} __attribute__ ((packed));
-
 /* SMBIOS type 3 - System Enclosure */
 struct smbios_type_3 {
     struct smbios_structure_header header;
@@ -111,12 +105,6 @@ struct smbios_type_3 {
     uint8_t power_supply_state;
     uint8_t thermal_state;
     uint8_t security_status;
-    uint32_t oem_specific;
-    uint8_t height;
-    uint8_t number_of_power_cords;
-    uint8_t contained_element_count;
-    uint8_t contained_element_length;
-    struct smbios_contained_element contained_elements[];
 } __attribute__ ((packed));
 
 /* SMBIOS type 4 - Processor Information */
@@ -134,12 +122,6 @@ struct smbios_type_4 {
     uint16_t current_speed;
     uint8_t status;
     uint8_t upgrade;
-    uint16_t l1_cache_handle;
-    uint16_t l2_cache_handle;
-    uint16_t l3_cache_handle;
-    uint8_t serial_number_str;
-    uint8_t asset_tag_str;
-    uint8_t part_number_str;
 } __attribute__ ((packed));
 
 /* SMBIOS type 11 - OEM Strings */
@@ -177,11 +159,6 @@ struct smbios_type_17 {
     uint8_t bank_locator_str;
     uint8_t memory_type;
     uint16_t type_detail;
-    uint16_t speed;
-    uint8_t manufacturer_str;
-    uint8_t serial_number_str;
-    uint8_t asset_tag_str;
-    uint8_t part_number_str;
 } __attribute__ ((packed));
 
 /* SMBIOS type 19 - Memory Array Mapped Address */

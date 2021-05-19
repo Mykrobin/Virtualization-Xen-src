@@ -16,7 +16,8 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  *
@@ -189,32 +190,6 @@ void __init acpi_table_print_madt_entry(struct acpi_subtable_header *header)
 		}
 		break;
 
-	case ACPI_MADT_TYPE_GENERIC_INTERRUPT:
-		{
-			struct acpi_madt_generic_interrupt *p =
-				container_of(header, struct acpi_madt_generic_interrupt, header);
-
-			printk(KERN_DEBUG PREFIX
-			       "GICC (acpi_id[0x%04x] address[0x%"PRIx64"] MPIDR[0x%"PRIx64"] %s)\n",
-			       p->uid, p->base_address,
-			       p->arm_mpidr,
-			       (p->flags & ACPI_MADT_ENABLED) ? "enabled" : "disabled");
-
-		}
-		break;
-
-	case ACPI_MADT_TYPE_GENERIC_DISTRIBUTOR:
-		{
-			struct acpi_madt_generic_distributor *p =
-				container_of(header, struct acpi_madt_generic_distributor, header);
-
-			printk(KERN_DEBUG PREFIX
-			       "GIC Distributor (gic_id[0x%04x] address[0x%"PRIx64"] gsi_base[%d])\n",
-			       p->gic_id, p->base_address,
-			       p->global_irq_base);
-		}
-		break;
-
 	default:
 		printk(KERN_WARNING PREFIX
 		       "Found unsupported MADT entry (type = %#x)\n",
@@ -223,84 +198,26 @@ void __init acpi_table_print_madt_entry(struct acpi_subtable_header *header)
 	}
 }
 
-static struct acpi_subtable_header * __init
-acpi_get_entry(const char *id, unsigned long table_size,
-	       const struct acpi_table_header *table_header,
-	       enum acpi_madt_type entry_id, unsigned int entry_index)
-{
-	struct acpi_subtable_header *entry;
-	int count = 0;
-	unsigned long table_end;
-
-	if (!table_size)
-		return NULL;
-
-	if (!table_header) {
-		printk(KERN_WARNING PREFIX "%4.4s not present\n", id);
-		return NULL;
-	}
-
-	table_end = (unsigned long)table_header + table_header->length;
-
-	/* Parse all entries looking for a match. */
-	entry = (void *)table_header + table_size;
-
-	while ((unsigned long)(entry + 1) < table_end) {
-		if (entry->length < sizeof(*entry)) {
-			printk(KERN_ERR PREFIX "[%4.4s:%#x] Invalid length\n",
-			       id, entry_id);
-			return NULL;
-		}
-
-		if (entry->type == entry_id) {
-			if (count == entry_index)
-				return entry;
-			count++;
-		}
-
-		entry = (void *)entry + entry->length;
-	}
-
-	return NULL;
-}
-
-struct acpi_subtable_header * __init
-acpi_table_get_entry_madt(enum acpi_madt_type entry_id,
-			  unsigned int entry_index)
-{
-	struct acpi_table_header *table_header;
-	acpi_status status;
-
-	status = acpi_get_table(ACPI_SIG_MADT, acpi_apic_instance,
-				&table_header);
-	if (ACPI_FAILURE(status)) {
-		printk(KERN_WARNING PREFIX "%4.4s not present\n",
-		       ACPI_SIG_MADT);
-		return NULL;
-	}
-
-	return acpi_get_entry(ACPI_SIG_MADT, sizeof(struct acpi_table_madt),
-			      table_header, entry_id, entry_index);
-}
 
 int __init
-acpi_parse_entries(char *id, unsigned long table_size,
-		   acpi_table_entry_handler handler,
-		   struct acpi_table_header *table_header,
-		   int entry_id, unsigned int max_entries)
+acpi_table_parse_entries(char *id,
+			     unsigned long table_size,
+			     int entry_id,
+			     acpi_table_entry_handler handler,
+			     unsigned int max_entries)
 {
+	struct acpi_table_header *table_header = NULL;
 	struct acpi_subtable_header *entry;
-	int count = 0;
+	unsigned int count = 0;
 	unsigned long table_end;
 
-	if (acpi_disabled)
-		return -ENODEV;
-
-	if (!id || !handler)
+	if (!handler)
 		return -EINVAL;
 
-	if (!table_size)
-		return -EINVAL;
+	if (strncmp(id, ACPI_SIG_MADT, 4) == 0)
+		acpi_get_table(id, acpi_apic_instance, &table_header);
+	else
+		acpi_get_table(id, 0, &table_header);
 
 	if (!table_header) {
 		printk(KERN_WARNING PREFIX "%4.4s not present\n", id);
@@ -323,52 +240,19 @@ acpi_parse_entries(char *id, unsigned long table_size,
 		}
 
 		if (entry->type == entry_id
-		    && (!max_entries || count < max_entries)) {
+		    && (!max_entries || count++ < max_entries))
 			if (handler(entry, table_end))
 				return -EINVAL;
-
-			count++;
-		}
 
 		entry = (struct acpi_subtable_header *)
 		    ((unsigned long)entry + entry->length);
 	}
-
 	if (max_entries && count > max_entries) {
 		printk(KERN_WARNING PREFIX "[%4.4s:%#x] ignored %i entries of "
 		       "%i found\n", id, entry_id, count - max_entries, count);
 	}
 
 	return count;
-}
-
-int __init
-acpi_table_parse_entries(char *id,
-			 unsigned long table_size,
-			 int entry_id,
-			 acpi_table_entry_handler handler,
-			 unsigned int max_entries)
-{
-	struct acpi_table_header *table_header = NULL;
-	u32 instance = 0;
-
-	if (acpi_disabled)
-		return -ENODEV;
-
-	if (!id || !handler)
-		return -EINVAL;
-
-	if (!strncmp(id, ACPI_SIG_MADT, 4))
-		instance = acpi_apic_instance;
-
-	acpi_get_table(id, instance, &table_header);
-	if (!table_header) {
-		printk(KERN_WARNING PREFIX "%4.4s not present\n", id);
-		return -ENODEV;
-	}
-
-	return acpi_parse_entries(id, table_size, handler, table_header,
-				  entry_id, max_entries);
 }
 
 int __init
@@ -393,9 +277,6 @@ int __init acpi_table_parse(char *id, acpi_table_handler handler)
 {
 	struct acpi_table_header *table = NULL;
 
-	if (acpi_disabled)
-		return -ENODEV;
-
 	if (!handler)
 		return -EINVAL;
 
@@ -407,7 +288,7 @@ int __init acpi_table_parse(char *id, acpi_table_handler handler)
 	if (table) {
 		return handler(table);
 	} else
-		return -ENODEV;
+		return 1;
 }
 
 /* 
@@ -446,25 +327,19 @@ static void __init check_multiple_madt(void)
 
 int __init acpi_table_init(void)
 {
-	acpi_status status;
-
-	status = acpi_initialize_tables(NULL, ACPI_MAX_TABLES, 0);
-	if (ACPI_FAILURE(status))
-		return -EINVAL;
-
+	acpi_initialize_tables(NULL, ACPI_MAX_TABLES, 0);
 	check_multiple_madt();
 	return 0;
 }
 
-static int __init acpi_parse_apic_instance(const char *str)
+static int __init acpi_parse_apic_instance(char *str)
 {
-	const char *q;
 
-	acpi_apic_instance = simple_strtoul(str, &q, 0);
+	acpi_apic_instance = simple_strtoul(str, NULL, 0);
 
 	printk(KERN_NOTICE PREFIX "Shall use APIC/MADT table %d\n",
 	       acpi_apic_instance);
 
-	return *q ? -EINVAL : 0;
+	return 0;
 }
 custom_param("acpi_apic_instance", acpi_parse_apic_instance);

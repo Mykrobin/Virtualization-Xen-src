@@ -12,9 +12,7 @@ SUBDIRS-$(CONFIG_Linux) += drivers
 SUBDIRS-$(CONFIG_Linux) += control
 
 clean:
-	rm -rf *.a *.so *.o *.rpm $(LIB) *~ $(DEPS_RM) TAGS
+	rm -rf *.a *.so *.o *.rpm $(LIB) *~ $(DEPS) TAGS
 
-distclean: clean
-
-.PHONY: all clean install distclean uninstall
-all clean install distclean uninstall: %: subdirs-%
+.PHONY: all clean install
+all clean install: %: subdirs-%

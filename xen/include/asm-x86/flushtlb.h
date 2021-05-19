@@ -10,7 +10,7 @@
 #ifndef __FLUSHTLB_H__
 #define __FLUSHTLB_H__
 
-#include <xen/mm.h>
+#include <xen/config.h>
 #include <xen/percpu.h>
 #include <xen/smp.h>
 #include <xen/types.h>
@@ -22,20 +22,6 @@ extern u32 tlbflush_clock;
 DECLARE_PER_CPU(u32, tlbflush_time);
 
 #define tlbflush_current_time() tlbflush_clock
-
-static inline void page_set_tlbflush_timestamp(struct page_info *page)
-{
-    /*
-     * Prevent storing a stale time stamp, which could happen if an update
-     * to tlbflush_clock plus a subsequent flush IPI happen between the
-     * reading of tlbflush_clock and the writing of the struct page_info
-     * field.
-     */
-    ASSERT(local_irq_is_enabled());
-    local_irq_disable();
-    page->tlbflush_timestamp = tlbflush_current_time();
-    local_irq_enable();
-}
 
 /*
  * @cpu_stamp is the timestamp at last TLB flush for the CPU we are testing.
@@ -63,14 +49,13 @@ static inline int NEED_FLUSH(u32 cpu_stamp, u32 lastuse_stamp)
  * Filter the given set of CPUs, removing those that definitely flushed their
  * TLB since @page_timestamp.
  */
-static inline void tlbflush_filter(cpumask_t *mask, uint32_t page_timestamp)
-{
-    unsigned int cpu;
-
-    for_each_cpu ( cpu, mask )
-        if ( !NEED_FLUSH(per_cpu(tlbflush_time, cpu), page_timestamp) )
-            __cpumask_clear_cpu(cpu, mask);
-}
+#define tlbflush_filter(mask, page_timestamp)                           \
+do {                                                                    \
+    unsigned int cpu;                                                   \
+    for_each_cpu ( cpu, &(mask) )                                       \
+        if ( !NEED_FLUSH(per_cpu(tlbflush_time, cpu), page_timestamp) ) \
+            cpumask_clear_cpu(cpu, &(mask));                            \
+} while ( 0 )
 
 void new_tlbflush_clock_period(void);
 
@@ -84,7 +69,7 @@ static inline unsigned long read_cr3(void)
 }
 
 /* Write pagetable base and implicitly tick the tlbflush clock. */
-void switch_cr3_cr4(unsigned long cr3, unsigned long cr4);
+void write_cr3(unsigned long cr3);
 
 /* flush_* flag fields: */
  /*
@@ -99,15 +84,9 @@ void switch_cr3_cr4(unsigned long cr3, unsigned long cr4);
 #define FLUSH_TLB_GLOBAL 0x200
  /* Flush data caches */
 #define FLUSH_CACHE      0x400
- /* VA for the flush has a valid mapping */
-#define FLUSH_VA_VALID   0x800
- /* Flush CPU state */
-#define FLUSH_VCPU_STATE 0x1000
- /* Flush the per-cpu root page table */
-#define FLUSH_ROOT_PGTBL 0x2000
 
 /* Flush local TLBs/caches. */
-unsigned int flush_area_local(const void *va, unsigned int flags);
+void flush_area_local(const void *va, unsigned int flags);
 #define flush_local(flags) flush_area_local(NULL, flags)
 
 /* Flush specified CPUs' TLBs/caches */
@@ -135,28 +114,5 @@ void flush_area_mask(const cpumask_t *, const void *va, unsigned int flags);
     flush_tlb_mask(&cpu_online_map)
 #define flush_tlb_one_all(v)                    \
     flush_tlb_one_mask(&cpu_online_map, v)
-
-#define flush_root_pgtbl_domain(d)                                       \
-{                                                                        \
-    if ( is_pv_domain(d) && (d)->arch.pv_domain.xpti )                   \
-        flush_mask((d)->dirty_cpumask, FLUSH_ROOT_PGTBL);                \
-}
-
-static inline void flush_page_to_ram(unsigned long mfn, bool sync_icache) {}
-static inline int invalidate_dcache_va_range(const void *p,
-                                             unsigned long size)
-{ return -EOPNOTSUPP; }
-static inline int clean_and_invalidate_dcache_va_range(const void *p,
-                                                       unsigned long size)
-{
-    unsigned int order = get_order_from_bytes(size);
-    /* sub-page granularity support needs to be added if necessary */
-    flush_area_local(p, FLUSH_CACHE|FLUSH_ORDER(order));
-    return 0;
-}
-static inline int clean_dcache_va_range(const void *p, unsigned long size)
-{
-    return clean_and_invalidate_dcache_va_range(p, size);
-}
 
 #endif /* __FLUSHTLB_H__ */

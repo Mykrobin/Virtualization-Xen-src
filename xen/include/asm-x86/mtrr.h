@@ -1,7 +1,8 @@
 #ifndef __ASM_X86_MTRR_H__
 #define __ASM_X86_MTRR_H__
 
-#include <xen/mm.h>
+#include <xen/config.h>
+#include <asm/mm.h>
 
 /* These are the region types. They match the architectural specification. */
 #define MTRR_TYPE_UNCACHABLE 0
@@ -19,6 +20,7 @@
 enum {
     PAT_TYPE_UNCACHABLE=0,
     PAT_TYPE_WRCOMB=1,
+    PAT_TYPE_RESERVED=2,
     PAT_TYPE_WRTHROUGH=4,
     PAT_TYPE_WRPROT=5,
     PAT_TYPE_WRBACK=6,
@@ -31,14 +33,6 @@ enum {
 /* In the Intel processor's MTRR interface, the MTRR type is always held in
    an 8 bit field: */
 typedef u8 mtrr_type;
-
-#define MTRR_PHYSMASK_VALID_BIT  11
-#define MTRR_PHYSMASK_VALID      (1 << MTRR_PHYSMASK_VALID_BIT)
-#define MTRR_PHYSMASK_SHIFT      12
-#define MTRR_PHYSBASE_TYPE_MASK  0xff
-#define MTRR_PHYSBASE_SHIFT      12
-/* Number of variable range MSR pairs we emulate for HVM guests: */
-#define MTRR_VCNT                8
 
 struct mtrr_var_range {
 	uint64_t base;
@@ -71,9 +65,8 @@ extern int mtrr_del_page(int reg, unsigned long base, unsigned long size);
 extern void mtrr_centaur_report_mcr(int mcr, u32 lo, u32 hi);
 extern u32 get_pat_flags(struct vcpu *v, u32 gl1e_flags, paddr_t gpaddr,
                   paddr_t spaddr, uint8_t gmtrr_mtype);
-extern int epte_get_entry_emt(struct domain *, unsigned long gfn, mfn_t mfn,
-                              unsigned int order, uint8_t *ipat,
-                              bool_t direct_mmio);
+extern uint8_t epte_get_entry_emt(struct domain *d, unsigned long gfn,
+                                  mfn_t mfn, uint8_t *ipat, bool_t direct_mmio);
 extern void ept_change_entry_emt_with_range(
     struct domain *d, unsigned long start_gfn, unsigned long end_gfn);
 extern unsigned char pat_type_2_pte_flags(unsigned char pat_type);
@@ -82,16 +75,15 @@ extern void mtrr_aps_sync_begin(void);
 extern void mtrr_aps_sync_end(void);
 extern void mtrr_bp_restore(void);
 
-extern bool_t mtrr_var_range_msr_set(struct domain *, struct mtrr_state *,
-                                     uint32_t msr, uint64_t msr_content);
-extern bool_t mtrr_fix_range_msr_set(struct domain *, struct mtrr_state *,
-                                     uint32_t row, uint64_t msr_content);
-extern bool_t mtrr_def_type_msr_set(struct domain *, struct mtrr_state *,
-                                    uint64_t msr_content);
-extern void memory_type_changed(struct domain *);
+extern bool_t mtrr_var_range_msr_set(
+    struct domain *d, struct mtrr_state *m,
+    uint32_t msr, uint64_t msr_content);
+extern bool_t mtrr_fix_range_msr_set(struct mtrr_state *v,
+				uint32_t row, uint64_t msr_content);
+extern bool_t mtrr_def_type_msr_set(struct mtrr_state *v, uint64_t msr_content);
 extern bool_t pat_msr_set(uint64_t *pat, uint64_t msr);
 
-bool_t is_var_mtrr_overlapped(const struct mtrr_state *m);
-bool mtrr_pat_not_equal(const struct vcpu *vd, const struct vcpu *vs);
+bool_t is_var_mtrr_overlapped(struct mtrr_state *m);
+bool_t mtrr_pat_not_equal(struct vcpu *vd, struct vcpu *vs);
 
 #endif /* __ASM_X86_MTRR_H__ */

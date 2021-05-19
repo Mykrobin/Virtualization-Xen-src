@@ -15,7 +15,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <xen/kernel.h>
@@ -92,7 +93,7 @@ static void __iomem *__init apei_range_map(paddr_t paddr, unsigned long size)
 		apei_range_nr++;
 	}
 
-	return fix_to_virt(FIX_APEI_RANGE_BASE + start_nr);
+	return (void __iomem *)fix_to_virt(FIX_APEI_RANGE_BASE + start_nr);
 }
 
 /*

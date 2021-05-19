@@ -13,7 +13,8 @@
  *  GNU General Public License for more details.
  * 
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <sys/types.h>
@@ -28,8 +29,6 @@
 #include <syslog.h>
 
 #include <xenstore.h>
-
-#include "_paths.h"
 
 #define DEVTYPE_UNKNOWN 0
 #define DEVTYPE_VIF 1
@@ -46,10 +45,10 @@
 #define VBD_SCRIPT XEN_SCRIPT_DIR"/block"
 #endif
 #ifndef LOG_FILE
-#define LOG_FILE XEN_LOG_DIR "xenbackendd.log"
+#define LOG_FILE "/var/log/xen/xenbackendd.log"
 #endif
 #ifndef PID_FILE
-#define PID_FILE XEN_RUN_DIR "xenbackendd.pid"
+#define PID_FILE "/var/run/xenbackendd.pid"
 #endif
 
 

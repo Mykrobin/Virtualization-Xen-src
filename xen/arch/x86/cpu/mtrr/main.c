@@ -14,7 +14,8 @@
     Library General Public License for more details.
 
     You should have received a copy of the GNU Library General Public
-    License along with this library; If not, see <http://www.gnu.org/licenses/>.
+    License along with this library; if not, write to the Free
+    Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
     Richard Gooch may be reached by email at  rgooch@atnf.csiro.au
     The postal address is:
@@ -30,11 +31,11 @@
     System Programming Guide; Section 9.11. (1997 edition - PPro).
 */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/smp.h>
 #include <xen/spinlock.h>
-#include <asm/atomic.h>
 #include <asm/mtrr.h>
 #include <asm/uaccess.h>
 #include <asm/processor.h>
@@ -90,10 +91,10 @@ static void __init set_num_var_ranges(void)
 	unsigned long config = 0;
 
 	if (use_intel()) {
-		rdmsrl(MSR_MTRRcap, config);
+		rdmsrl(MTRRcap_MSR, config);
 	} else if (is_cpu(AMD))
 		config = 2;
-	else if (is_cpu(CENTAUR))
+	else if (is_cpu(CYRIX) || is_cpu(CENTAUR))
 		config = 8;
 	num_var_ranges = config & 0xff;
 }
@@ -331,7 +332,7 @@ int mtrr_add_page(unsigned long base, unsigned long size,
 	if ((type == MTRR_TYPE_WRCOMB) && !have_wrcomb()) {
 		printk(KERN_WARNING
 		       "mtrr: your processor doesn't support write-combining\n");
-		return -EOPNOTSUPP;
+		return -ENOSYS;
 	}
 
 	if (!size) {

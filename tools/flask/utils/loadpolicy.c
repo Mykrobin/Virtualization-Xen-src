@@ -61,7 +61,7 @@ int main (int argCnt, const char *args[])
 
 #ifdef USE_MMAP
     polMem = mmap(NULL, info.st_size, PROT_READ, MAP_SHARED, polFd, 0);
-    if ( polMem == MAP_FAILED )
+    if ( !polMem )
     {
         fprintf(stderr, "Error occurred mapping policy file in memory: %s\n",
                 strerror(errno));
@@ -115,7 +115,7 @@ done:
         if ( ret < 0 )
             fprintf(stderr, "Unable to unmap policy memory: %s\n", strerror(errno));
     }
-    if ( polFd >= 0 )
+    if ( polFd )
         close(polFd);
     if ( xch )
         xc_interface_close(xch);

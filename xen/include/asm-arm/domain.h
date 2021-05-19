@@ -1,38 +1,93 @@
 #ifndef __ASM_DOMAIN_H__
 #define __ASM_DOMAIN_H__
 
+#include <xen/config.h>
 #include <xen/cache.h>
 #include <xen/sched.h>
 #include <asm/page.h>
 #include <asm/p2m.h>
 #include <asm/vfp.h>
-#include <asm/mmio.h>
-#include <asm/gic.h>
-#include <asm/vgic.h>
 #include <public/hvm/params.h>
 #include <xen/serial.h>
-#include <xen/rbtree.h>
-#include <asm-arm/vpl011.h>
+
+/* Represents state corresponding to a block of 32 interrupts */
+struct vgic_irq_rank {
+    spinlock_t lock; /* Covers access to all other members of this struct */
+    uint32_t ienable, iactive, ipend, pendsgi;
+    uint32_t icfg[2];
+    uint32_t ipriority[8];
+    uint32_t itargets[8];
+};
+
+struct pending_irq
+{
+    int irq;
+    /*
+     * The following two states track the lifecycle of the guest irq.
+     * However because we are not sure and we don't want to track
+     * whether an irq added to an LR register is PENDING or ACTIVE, the
+     * following states are just an approximation.
+     *
+     * GIC_IRQ_GUEST_PENDING: the irq is asserted
+     *
+     * GIC_IRQ_GUEST_VISIBLE: the irq has been added to an LR register,
+     * therefore the guest is aware of it. From the guest point of view
+     * the irq can be pending (if the guest has not acked the irq yet)
+     * or active (after acking the irq).
+     *
+     * In order for the state machine to be fully accurate, for level
+     * interrupts, we should keep the GIC_IRQ_GUEST_PENDING state until
+     * the guest deactivates the irq. However because we are not sure
+     * when that happens, we simply remove the GIC_IRQ_GUEST_PENDING
+     * state when we add the irq to an LR register. We add it back when
+     * we receive another interrupt notification.
+     * Therefore it is possible to set GIC_IRQ_GUEST_PENDING while the
+     * irq is GIC_IRQ_GUEST_VISIBLE. We could also change the state of
+     * the guest irq in the LR register from active to active and
+     * pending, but for simplicity we simply inject a second irq after
+     * the guest EOIs the first one.
+     *
+     *
+     * An additional state is used to keep track of whether the guest
+     * irq is enabled at the vgicd level:
+     *
+     * GIC_IRQ_GUEST_ENABLED: the guest IRQ is enabled at the VGICD
+     * level (GICD_ICENABLER/GICD_ISENABLER).
+     *
+     */
+#define GIC_IRQ_GUEST_PENDING  0
+#define GIC_IRQ_GUEST_VISIBLE  1
+#define GIC_IRQ_GUEST_ENABLED  2
+    unsigned long status;
+    struct irq_desc *desc; /* only set it the irq corresponds to a physical irq */
+    uint8_t priority;
+    /* inflight is used to append instances of pending_irq to
+     * vgic.inflight_irqs */
+    struct list_head inflight;
+    /* lr_queue is used to append instances of pending_irq to
+     * gic.lr_pending */
+    struct list_head lr_queue;
+};
 
 struct hvm_domain
 {
     uint64_t              params[HVM_NR_PARAMS];
-};
+}  __cacheline_aligned;
 
 #ifdef CONFIG_ARM_64
 enum domain_type {
-    DOMAIN_32BIT,
-    DOMAIN_64BIT,
+    DOMAIN_PV32,
+    DOMAIN_PV64,
 };
-#define is_32bit_domain(d) ((d)->arch.type == DOMAIN_32BIT)
-#define is_64bit_domain(d) ((d)->arch.type == DOMAIN_64BIT)
+#define is_pv32_domain(d) ((d)->arch.type == DOMAIN_PV32)
+#define is_pv64_domain(d) ((d)->arch.type == DOMAIN_PV64)
 #else
-#define is_32bit_domain(d) (1)
-#define is_64bit_domain(d) (0)
+#define is_pv32_domain(d) (1)
+#define is_pv64_domain(d) (0)
 #endif
 
 extern int dom0_11_mapping;
-#define is_domain_direct_mapped(d) ((d) == hardware_domain && dom0_11_mapping)
+#define is_domain_direct_mapped(d) ((d) == dom0 && dom0_11_mapping)
 
 struct vtimer {
         struct vcpu *v;
@@ -50,10 +105,10 @@ struct arch_domain
 
     /* Virtual MMU */
     struct p2m_domain p2m;
+    uint64_t vttbr;
 
     struct hvm_domain hvm_domain;
-
-    struct vmmio vmmio;
+    xen_pfn_t *grant_table_gpfn;
 
     /* Continuable domain_relinquish_resources(). */
     enum {
@@ -64,6 +119,9 @@ struct arch_domain
         RELMEM_done,
     } relmem;
 
+    /* Virtual CPUID */
+    uint32_t vpidr;
+
     struct {
         uint64_t offset;
     } phys_timer_base;
@@ -71,7 +129,29 @@ struct arch_domain
         uint64_t offset;
     } virt_timer_base;
 
-    struct vgic_dist vgic;
+    struct {
+        /*
+         * Covers access to other members of this struct _except_ for
+         * shared_irqs where each member contains its own locking.
+         *
+         * If both class of lock is required then this lock must be
+         * taken first. If multiple rank locks are required (including
+         * the per-vcpu private_irqs rank) then they must be taken in
+         * rank order.
+         */
+        spinlock_t lock;
+        int ctlr;
+        int nr_lines; /* Number of SPIs */
+        struct vgic_irq_rank *shared_irqs;
+        /*
+         * SPIs are domain global, SGIs and PPIs are per-VCPU and stored in
+         * struct arch_vcpu.
+         */
+        struct pending_irq *pending_irqs;
+        /* Base address for guest GIC */
+        paddr_t dbase; /* Distributor base address */
+        paddr_t cbase; /* CPU base address */
+    } vgic;
 
     struct vuart {
 #define VUART_BUF_SIZE 128
@@ -82,21 +162,6 @@ struct arch_domain
     } vuart;
 
     unsigned int evtchn_irq;
-#ifdef CONFIG_ACPI
-    void *efi_acpi_table;
-    paddr_t efi_acpi_gpa;
-    paddr_t efi_acpi_len;
-#endif
-
-    /* Monitor options */
-    struct {
-        uint8_t privileged_call_enabled : 1;
-    } monitor;
-
-#ifdef CONFIG_SBSA_VUART_CONSOLE
-    struct vpl011 vpl011;
-#endif
-
 }  __cacheline_aligned;
 
 struct arch_vcpu
@@ -163,17 +228,13 @@ struct arch_vcpu
 #endif
 
     /* Control Registers */
-    register_t sctlr;
-    uint32_t actlr;
+    uint32_t actlr, sctlr;
     uint32_t cpacr;
 
     uint32_t contextidr;
     register_t tpidr_el0;
     register_t tpidr_el1;
     register_t tpidrro_el0;
-
-    /* HYP configuration */
-    register_t hcr_el2;
 
     uint32_t teecr, teehbr; /* ThumbEE, 32-bit guests only */
 #ifdef CONFIG_ARM_32
@@ -191,79 +252,46 @@ struct arch_vcpu
     uint32_t csselr;
     register_t vmpidr;
 
-    /* Holds gic context data */
-    union gic_state_data gic;
+    uint32_t gic_hcr, gic_vmcr, gic_apr;
+    uint32_t gic_lr[64];
+    uint64_t event_mask;
     uint64_t lr_mask;
 
-    struct vgic_cpu vgic;
+    struct {
+        /*
+         * SGIs and PPIs are per-VCPU, SPIs are domain global and in
+         * struct arch_domain.
+         */
+        struct pending_irq pending_irqs[32];
+        struct vgic_irq_rank private_irqs;
+
+        /* This list is ordered by IRQ priority and it is used to keep
+         * track of the IRQs that the VGIC injected into the guest.
+         * Depending on the availability of LR registers, the IRQs might
+         * actually be in an LR, and therefore injected into the guest,
+         * or queued in gic.lr_pending.
+         * As soon as an IRQ is EOI'd by the guest and removed from the
+         * corresponding LR it is also removed from this list. */
+        struct list_head inflight_irqs;
+        /* lr_pending is used to queue IRQs (struct pending_irq) that the
+         * vgic tried to inject in the guest (calling gic_set_guest_irq) but
+         * no LRs were available at the time.
+         * As soon as an LR is freed we remove the first IRQ from this
+         * list and write it to the LR register.
+         * lr_pending is a subset of vgic.inflight_irqs. */
+        struct list_head lr_pending;
+        spinlock_t lock;
+    } vgic;
 
     /* Timer registers  */
     uint32_t cntkctl;
 
     struct vtimer phys_timer;
     struct vtimer virt_timer;
-    bool   vtimer_initialized;
 }  __cacheline_aligned;
 
 void vcpu_show_execution_state(struct vcpu *);
 void vcpu_show_registers(const struct vcpu *);
-void vcpu_switch_to_aarch64_mode(struct vcpu *);
-
-/* On ARM, the number of VCPUs is limited by the type of GIC emulated. */
-static inline unsigned int domain_max_vcpus(const struct domain *d)
-{
-    return vgic_max_vcpus(d);
-}
-
-/*
- * Due to the restriction of GICv3, the number of vCPUs in AFF0 is
- * limited to 16, thus only the first 4 bits of AFF0 are legal. We will
- * use the first 2 affinity levels here, expanding the number of vCPU up
- * to 4096(==16*256), which is more than the PEs that GIC-500 supports.
- *
- * Since we don't save information of vCPU's topology (affinity) in
- * vMPIDR at the moment, we map the vcpuid to the vMPIDR linearly.
- */
-static inline unsigned int vaffinity_to_vcpuid(register_t vaff)
-{
-    unsigned int vcpuid;
-
-    vaff &= MPIDR_HWID_MASK;
-
-    vcpuid = MPIDR_AFFINITY_LEVEL(vaff, 0);
-    vcpuid |= MPIDR_AFFINITY_LEVEL(vaff, 1) << 4;
-
-    return vcpuid;
-}
-
-static inline register_t vcpuid_to_vaffinity(unsigned int vcpuid)
-{
-    register_t vaff;
-
-    /*
-     * Right now only AFF0 and AFF1 are supported in virtual affinity.
-     * Since only the first 4 bits in AFF0 are used in GICv3, the
-     * available bits are 12 (4+8).
-     */
-    BUILD_BUG_ON(!(MAX_VIRT_CPUS < ((1 << 12))));
-
-    vaff = (vcpuid & 0x0f) << MPIDR_LEVEL_SHIFT(0);
-    vaff |= ((vcpuid >> 4) & MPIDR_LEVEL_MASK) << MPIDR_LEVEL_SHIFT(1);
-
-    return vaff;
-}
-
-static inline struct vcpu_guest_context *alloc_vcpu_guest_context(void)
-{
-    return xmalloc(struct vcpu_guest_context);
-}
-
-static inline void free_vcpu_guest_context(struct vcpu_guest_context *vgc)
-{
-    xfree(vgc);
-}
-
-static inline void arch_vcpu_block(struct vcpu *v) {}
 
 #endif /* __ASM_DOMAIN_H__ */
 

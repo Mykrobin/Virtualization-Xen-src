@@ -22,7 +22,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <xen/kernel.h>
@@ -382,26 +383,21 @@ static int erst_get_erange(struct erst_erange *range)
 	return 0;
 }
 
-#ifndef NDEBUG /* currently dead code */
-
-static ssize_t __erst_get_record_count(void)
+static size_t __erst_get_record_count(void)
 {
 	struct apei_exec_context ctx;
 	int rc;
-	u64 output;
-	ssize_t count;
 
 	erst_exec_ctx_init(&ctx);
 	rc = apei_exec_run(&ctx, ACPI_ERST_GET_RECORD_COUNT);
 	if (rc)
 		return rc;
-	count = output = apei_exec_ctx_get_output(&ctx);
-	return count >= 0 && count == output ? count : -ERANGE;
+	return apei_exec_ctx_get_output(&ctx);
 }
 
-ssize_t erst_get_record_count(void)
+size_t erst_get_record_count(void)
 {
-	ssize_t count;
+	size_t count;
 	unsigned long flags;
 
 	if (!erst_enabled)
@@ -448,8 +444,6 @@ int erst_get_next_record_id(u64 *record_id)
 	return rc;
 }
 
-#endif /* currently dead code */
-
 static int __erst_write_to_storage(u64 offset)
 {
 	struct apei_exec_context ctx;
@@ -488,8 +482,6 @@ static int __erst_write_to_storage(u64 offset)
 
 	return erst_errno(val);
 }
-
-#ifndef NDEBUG /* currently dead code */
 
 static int __erst_read_from_storage(u64 record_id, u64 offset)
 {
@@ -573,16 +565,12 @@ static int __erst_clear_from_storage(u64 record_id)
 	return erst_errno(val);
 }
 
-#endif /* currently dead code */
-
 /* NVRAM ERST Error Log Address Range is not supported yet */
 static int __erst_write_to_nvram(const struct cper_record_header *record)
 {
 	/* do not print message, because printk is not safe for NMI */
 	return -ENOSYS;
 }
-
-#ifndef NDEBUG /* currently dead code */
 
 static int __erst_read_to_erange_from_nvram(u64 record_id, u64 *offset)
 {
@@ -597,8 +585,6 @@ static int __erst_clear_from_nvram(u64 record_id)
 		"NVRAM ERST Log Address Range is not implemented yet\n");
 	return -ENOSYS;
 }
-
-#endif /* currently dead code */
 
 int erst_write(const struct cper_record_header *record)
 {
@@ -639,8 +625,6 @@ int erst_write(const struct cper_record_header *record)
 	return rc;
 }
 
-#ifndef NDEBUG /* currently dead code */
-
 static int __erst_read_to_erange(u64 record_id, u64 *offset)
 {
 	int rc;
@@ -657,24 +641,20 @@ static int __erst_read_to_erange(u64 record_id, u64 *offset)
 	return 0;
 }
 
-static ssize_t __erst_read(u64 record_id, struct cper_record_header *record,
+static size_t __erst_read(u64 record_id, struct cper_record_header *record,
 			   size_t buflen)
 {
 	int rc;
-	u64 offset;
-	ssize_t len;
+	u64 offset, len = 0;
 	struct cper_record_header *rcd_tmp;
 
 	rc = __erst_read_to_erange(record_id, &offset);
 	if (rc)
 		return rc;
 	rcd_tmp = erst_erange.vaddr + offset;
-	if (rcd_tmp->record_length > buflen)
-		return -ENOBUFS;
 	len = rcd_tmp->record_length;
-	if (len < 0)
-		return -ERANGE;
-	memcpy(record, rcd_tmp, len);
+	if (len <= buflen)
+		memcpy(record, rcd_tmp, len);
 
 	return len;
 }
@@ -684,10 +664,10 @@ static ssize_t __erst_read(u64 record_id, struct cper_record_header *record,
  * else if return value < 0, something goes wrong,
  * else everything is OK, and return value is record length
  */
-ssize_t erst_read(u64 record_id, struct cper_record_header *record,
+size_t erst_read(u64 record_id, struct cper_record_header *record,
 		  size_t buflen)
 {
-	ssize_t len;
+	size_t len;
 	unsigned long flags;
 
 	if (!erst_enabled)
@@ -705,10 +685,10 @@ ssize_t erst_read(u64 record_id, struct cper_record_header *record,
  * else if return value < 0, something goes wrong,
  * else everything is OK, and return value is record length
  */
-ssize_t erst_read_next(struct cper_record_header *record, size_t buflen)
+size_t erst_read_next(struct cper_record_header *record, size_t buflen)
 {
 	int rc;
-	ssize_t len;
+	size_t len;
 	unsigned long flags;
 	u64 record_id;
 
@@ -750,8 +730,6 @@ int erst_clear(u64 record_id)
 
 	return rc;
 }
-
-#endif /* currently dead code */
 
 static int __init erst_check_table(struct acpi_table_erst *erst_tab)
 {
@@ -799,7 +777,7 @@ int __init erst_init(void)
 		printk(KERN_WARNING "Failed to get ERST table: %s\n", msg);
 		return -EINVAL;
 	}
-	map_pages_to_xen((unsigned long)__va(erst_addr), maddr_to_mfn(erst_addr),
+	map_pages_to_xen((unsigned long)__va(erst_addr), PFN_DOWN(erst_addr),
 			 PFN_UP(erst_addr + erst_len) - PFN_DOWN(erst_addr),
 			 PAGE_HYPERVISOR);
 	erst_tab = __va(erst_addr);

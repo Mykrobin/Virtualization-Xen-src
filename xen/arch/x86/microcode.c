@@ -21,6 +21,7 @@
  * 2 of the License, or (at your option) any later version.
  */
 
+#include <xen/config.h>
 #include <xen/cpu.h>
 #include <xen/lib.h>
 #include <xen/kernel.h>
@@ -40,8 +41,10 @@
 #include <asm/microcode.h>
 
 static module_t __initdata ucode_mod;
+static void *(*__initdata ucode_mod_map)(const module_t *);
 static signed int __initdata ucode_mod_idx;
 static bool_t __initdata ucode_mod_forced;
+static cpumask_t __initdata init_mask;
 
 /*
  * If we scan the initramfs.cpio for the early microcode code
@@ -72,19 +75,15 @@ void __init microcode_set_module(unsigned int idx)
  * If the EFI has forced which of the multiboot payloads is to be used,
  * no parsing will be attempted.
  */
-static int __init parse_ucode(const char *s)
+static void __init parse_ucode(char *s)
 {
-    const char *q = NULL;
-
     if ( ucode_mod_forced ) /* Forced by EFI */
-       return 0;
+       return;
 
     if ( !strncmp(s, "scan", 4) )
         ucode_scan = 1;
     else
-        ucode_mod_idx = simple_strtol(s, &q, 0);
-
-    return (q && *q) ? -EINVAL : 0;
+        ucode_mod_idx = simple_strtol(s, NULL, 0);
 }
 custom_param("ucode", parse_ucode);
 
@@ -95,7 +94,8 @@ custom_param("ucode", parse_ucode);
 
 void __init microcode_scan_module(
     unsigned long *module_map,
-    const multiboot_info_t *mbi)
+    const multiboot_info_t *mbi,
+    void *(*bootmap)(const module_t *))
 {
     module_t *mod = (module_t *)__va(mbi->mods_addr);
     uint64_t *_blob_start;
@@ -124,7 +124,7 @@ void __init microcode_scan_module(
         if ( !test_bit(i, module_map) )
             continue;
 
-        _blob_start = bootstrap_map(&mod[i]);
+        _blob_start = bootmap(&mod[i]);
         _blob_size = mod[i].mod_end;
         if ( !_blob_start )
         {
@@ -155,17 +155,18 @@ void __init microcode_scan_module(
                 else
                     memcpy(ucode_blob.data, cd.data, cd.size);
         }
-        bootstrap_map(NULL);
+        bootmap(NULL);
         if ( cd.data )
             break;
     }
     return;
 err:
-    bootstrap_map(NULL);
+    bootmap(NULL);
 }
 void __init microcode_grab_module(
     unsigned long *module_map,
-    const multiboot_info_t *mbi)
+    const multiboot_info_t *mbi,
+    void *(*map)(const module_t *))
 {
     module_t *mod = (module_t *)__va(mbi->mods_addr);
 
@@ -175,9 +176,10 @@ void __init microcode_grab_module(
          !__test_and_clear_bit(ucode_mod_idx, module_map) )
         goto scan;
     ucode_mod = mod[ucode_mod_idx];
+    ucode_mod_map = map;
 scan:
     if ( ucode_scan )
-        microcode_scan_module(module_map, mbi);
+        microcode_scan_module(module_map, mbi, map);
 }
 
 const struct microcode_ops *microcode_ops;
@@ -193,7 +195,7 @@ struct microcode_info {
     char buffer[1];
 };
 
-static void __microcode_fini_cpu(unsigned int cpu)
+static void __microcode_fini_cpu(int cpu)
 {
     struct ucode_cpu_info *uci = &per_cpu(ucode_cpu_info, cpu);
 
@@ -201,14 +203,14 @@ static void __microcode_fini_cpu(unsigned int cpu)
     memset(uci, 0, sizeof(*uci));
 }
 
-static void microcode_fini_cpu(unsigned int cpu)
+static void microcode_fini_cpu(int cpu)
 {
     spin_lock(&microcode_mutex);
     __microcode_fini_cpu(cpu);
     spin_unlock(&microcode_mutex);
 }
 
-int microcode_resume_cpu(unsigned int cpu)
+int microcode_resume_cpu(int cpu)
 {
     int err;
     struct ucode_cpu_info *uci = &per_cpu(ucode_cpu_info, cpu);
@@ -340,23 +342,50 @@ int microcode_update(XEN_GUEST_HANDLE_PARAM(const_void) buf, unsigned long len)
     return continue_hypercall_on_cpu(info->cpu, do_microcode_update, info);
 }
 
+static void __init _do_microcode_update(unsigned long data)
+{
+    void *_data = (void *)data;
+    size_t len = ucode_blob.size ? ucode_blob.size : ucode_mod.mod_end;
+
+    microcode_update_cpu(_data, len);
+    cpumask_set_cpu(smp_processor_id(), &init_mask);
+}
+
 static int __init microcode_init(void)
 {
-    /*
-     * At this point, all CPUs should have updated their microcode
-     * via the early_microcode_* paths so free the microcode blob.
-     */
+    void *data;
+    static struct tasklet __initdata tasklet;
+    unsigned int cpu;
+
+    if ( !microcode_ops )
+        return 0;
+
+    if ( !ucode_mod.mod_end && !ucode_blob.size )
+        return 0;
+
+    data = ucode_blob.size ? ucode_blob.data : ucode_mod_map(&ucode_mod);
+
+    if ( !data )
+        return -ENOMEM;
+
+    if ( microcode_ops->start_update && microcode_ops->start_update() != 0 )
+        goto out;
+
+    softirq_tasklet_init(&tasklet, _do_microcode_update, (unsigned long)data);
+
+    for_each_online_cpu ( cpu )
+    {
+        tasklet_schedule_on_cpu(&tasklet, cpu);
+        do {
+            process_pending_softirqs();
+        } while ( !cpumask_test_cpu(cpu, &init_mask) );
+    }
+
+out:
     if ( ucode_blob.size )
-    {
-        xfree(ucode_blob.data);
-        ucode_blob.size = 0;
-        ucode_blob.data = NULL;
-    }
-    else if ( ucode_mod.mod_end )
-    {
-        bootstrap_map(NULL);
-        ucode_mod.mod_end = 0;
-    }
+        xfree(data);
+    else
+        ucode_mod_map(NULL);
 
     return 0;
 }
@@ -381,67 +410,50 @@ static struct notifier_block microcode_percpu_nfb = {
     .notifier_call = microcode_percpu_callback,
 };
 
-int __init early_microcode_update_cpu(bool start_update)
+static int __init microcode_presmp_init(void)
 {
-    unsigned int cpu = smp_processor_id();
-    struct ucode_cpu_info *uci = &per_cpu(ucode_cpu_info, cpu);
-    int rc = 0;
-    void *data = NULL;
-    size_t len;
-
-    if ( !microcode_ops )
-        return -ENOSYS;
-
-    if ( ucode_blob.size )
-    {
-        len = ucode_blob.size;
-        data = ucode_blob.data;
-    }
-    else if ( ucode_mod.mod_end )
-    {
-        len = ucode_mod.mod_end;
-        data = bootstrap_map(&ucode_mod);
-    }
-
-    microcode_ops->collect_cpu_info(cpu, &uci->cpu_sig);
-
-    if ( data )
-    {
-        if ( start_update && microcode_ops->start_update )
-            rc = microcode_ops->start_update();
-
-        if ( rc )
-            return rc;
-
-        return microcode_update_cpu(data, len);
-    }
-    else
-        return -ENOMEM;
-}
-
-int __init early_microcode_init(void)
-{
-    unsigned int cpu = smp_processor_id();
-    struct ucode_cpu_info *uci = &per_cpu(ucode_cpu_info, cpu);
-    int rc;
-
-    rc = microcode_init_intel();
-    if ( rc )
-        return rc;
-
-    rc = microcode_init_amd();
-    if ( rc )
-        return rc;
-
     if ( microcode_ops )
     {
-        microcode_ops->collect_cpu_info(cpu, &uci->cpu_sig);
-
         if ( ucode_mod.mod_end || ucode_blob.size )
-            rc = early_microcode_update_cpu(true);
+        {
+            void *data;
+            size_t len;
+            int rc = 0;
+
+            if ( ucode_blob.size )
+            {
+                len = ucode_blob.size;
+                data = ucode_blob.data;
+            }
+            else
+            {
+                len = ucode_mod.mod_end;
+                data = ucode_mod_map(&ucode_mod);
+            }
+            if ( data )
+                rc = microcode_update_cpu(data, len);
+            else
+                rc = -ENOMEM;
+
+            if ( !ucode_blob.size )
+                ucode_mod_map(NULL);
+
+            if ( rc )
+            {
+                if ( ucode_blob.size )
+                {
+                    xfree(ucode_blob.data);
+                    ucode_blob.size = 0;
+                    ucode_blob.data = NULL;
+                }
+                else
+                    ucode_mod.mod_end = 0;
+            }
+        }
 
         register_cpu_notifier(&microcode_percpu_nfb);
     }
 
-    return rc;
+    return 0;
 }
+presmp_initcall(microcode_presmp_init);

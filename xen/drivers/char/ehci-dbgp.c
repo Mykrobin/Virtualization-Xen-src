@@ -5,6 +5,7 @@
  * Linux; see the Linux source for authorship and copyrights.
  */
 
+#include <xen/config.h>
 #include <xen/console.h>
 #include <xen/delay.h>
 #include <xen/errno.h>
@@ -250,25 +251,25 @@ struct ehci_dbg_port {
  * For most devices, interfaces don't coordinate with each other, so
  * such requests may be made at any time.
  */
-struct __packed usb_ctrlrequest {
+struct usb_ctrlrequest {
     u8 bRequestType;
     u8 bRequest;
     __le16 wValue;
     __le16 wIndex;
     __le16 wLength;
-};
+} __attribute__ ((packed));
 
 /* USB_DT_DEBUG: for special highspeed devices, replacing serial console */
 
 #define USB_DT_DEBUG    0x0a
 
-struct __packed usb_debug_descriptor {
+struct usb_debug_descriptor {
     u8 bLength;
     u8 bDescriptorType;
     /* bulk endpoints with 8 byte maxpacket */
     u8 bDebugInEndpoint;
     u8 bDebugOutEndpoint;
-};
+} __attribute__((packed));
 
 #define USB_DEBUG_DEVNUM 127
 
@@ -1327,7 +1328,7 @@ static void __init ehci_dbgp_init_preirq(struct serial_port *port)
      * than enough.  1k is the biggest that was seen.
      */
     set_fixmap_nocache(FIX_EHCI_DBGP, dbgp->bar_val);
-    ehci_bar = fix_to_virt(FIX_EHCI_DBGP);
+    ehci_bar = (void __iomem *)fix_to_virt(FIX_EHCI_DBGP);
     ehci_bar += dbgp->bar_val & ~PAGE_MASK;
     dbgp_printk("ehci_bar: %p\n", ehci_bar);
 

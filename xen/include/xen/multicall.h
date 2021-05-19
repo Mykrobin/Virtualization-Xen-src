@@ -6,12 +6,15 @@
 #define __XEN_MULTICALL_H__
 
 #include <xen/percpu.h>
+#include <asm/multicall.h>
 #ifdef CONFIG_COMPAT
 #include <compat/xen.h>
 #endif
 
 #define _MCSF_in_multicall   0
+#define _MCSF_call_preempted 1
 #define MCSF_in_multicall    (1<<_MCSF_in_multicall)
+#define MCSF_call_preempted  (1<<_MCSF_call_preempted)
 struct mc_state {
     unsigned long flags;
     union {
@@ -21,11 +24,5 @@ struct mc_state {
 #endif
     };
 };
-
-enum mc_disposition {
-    mc_continue,
-    mc_exit,
-    mc_preempt,
-} arch_do_multicall_call(struct mc_state *mc);
 
 #endif /* __XEN_MULTICALL_H__ */

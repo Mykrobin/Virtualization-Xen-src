@@ -53,7 +53,6 @@ static struct kexec_image *kexec_image[KEXEC_IMAGE_NR];
 #define KEXEC_FLAG_DEFAULT_POS   (KEXEC_IMAGE_NR + 0)
 #define KEXEC_FLAG_CRASH_POS     (KEXEC_IMAGE_NR + 1)
 #define KEXEC_FLAG_IN_PROGRESS   (KEXEC_IMAGE_NR + 2)
-#define KEXEC_FLAG_IN_HYPERCALL  (KEXEC_IMAGE_NR + 3)
 
 static unsigned long kexec_flags = 0; /* the lowest bits are for KEXEC_IMAGE... */
 
@@ -61,7 +60,6 @@ static unsigned char vmcoreinfo_data[VMCOREINFO_BYTES];
 static size_t vmcoreinfo_size = 0;
 
 xen_kexec_reserve_t kexec_crash_area;
-paddr_t __initdata kexec_crash_area_limit = ~(paddr_t)0;
 static struct {
     u64 start, end;
     unsigned long size;
@@ -80,7 +78,7 @@ static paddr_t __initdata crashinfo_maxaddr = 4ULL << 30;
 
 /* = log base 2 of crashinfo_maxaddr after checking for sanity. Default to
  * larger than the entire physical address space. */
-unsigned int __initdata crashinfo_maxaddr_bits = 64;
+paddr_t crashinfo_maxaddr_bits = 64;
 
 /* Pointers to keep track of the crash heap region. */
 static void *crash_heap_current = NULL, *crash_heap_end = NULL;
@@ -88,7 +86,7 @@ static void *crash_heap_current = NULL, *crash_heap_end = NULL;
 /*
  * Parse command lines in the format
  *
- *   crashkernel=<ramsize-range>:<size>[,...][{@,<,below=}<address>]
+ *   crashkernel=<ramsize-range>:<size>[,...][@<offset>]
  *
  * with <ramsize-range> being of form
  *
@@ -96,16 +94,11 @@ static void *crash_heap_current = NULL, *crash_heap_end = NULL;
  *
  * as well as the legacy ones in the format
  *
- *   crashkernel=<size>[{@,<}<address>]
- *   crashkernel=<size>,below=address
- *
- * < and below are synonyomous, the latter being useful for grub2 systems
- * which would otherwise require escaping of the < option
+ *   crashkernel=<size>[@<offset>]
  */
-static int __init parse_crashkernel(const char *str)
+static void __init parse_crashkernel(const char *str)
 {
     const char *cur;
-    int rc = 0;
 
     if ( strchr(str, ':' ) )
     {
@@ -116,8 +109,7 @@ static int __init parse_crashkernel(const char *str)
             {
                 printk(XENLOG_WARNING "crashkernel: too many ranges\n");
                 cur = NULL;
-                str = strpbrk(str, "@,<");
-                rc = -EINVAL;
+                str = strchr(str, '@');
                 break;
             }
 
@@ -128,7 +120,6 @@ static int __init parse_crashkernel(const char *str)
             if ( *str != '-' )
             {
                 printk(XENLOG_WARNING "crashkernel: '-' expected\n");
-                rc = -EINVAL;
                 break;
             }
 
@@ -140,7 +131,6 @@ static int __init parse_crashkernel(const char *str)
                 if ( ranges[idx].end <= ranges[idx].start )
                 {
                     printk(XENLOG_WARNING "crashkernel: end <= start\n");
-                    rc = -EINVAL;
                     break;
                 }
             }
@@ -150,7 +140,6 @@ static int __init parse_crashkernel(const char *str)
             if ( *str != ':' )
             {
                 printk(XENLOG_WARNING "crashkernel: ':' expected\n");
-                rc = -EINVAL;
                 break;
             }
 
@@ -165,27 +154,10 @@ static int __init parse_crashkernel(const char *str)
     }
     else
         kexec_crash_area.size = parse_size_and_unit(cur = str, &str);
-    if ( cur != str )
-    {
-        if ( *str == '@' )
-            kexec_crash_area.start = parse_size_and_unit(cur = str + 1, &str);
-        else if ( *str == '<' )
-            kexec_crash_area_limit = parse_size_and_unit(cur = str + 1, &str);
-        else if ( !strncmp(str, ",below=", 7) )
-            kexec_crash_area_limit = parse_size_and_unit(cur = str + 7, &str);
-        else
-        {
-            printk(XENLOG_WARNING "crashkernel: '%s' ignored\n", str);
-            rc = -EINVAL;
-        }
-    }
-    if ( cur && cur == str )
-    {
+    if ( cur != str && *str == '@' )
+        kexec_crash_area.start = parse_size_and_unit(cur = str + 1, &str);
+    if ( cur == str )
         printk(XENLOG_WARNING "crashkernel: memory value expected\n");
-        rc = -EINVAL;
-    }
-
-    return rc;
 }
 custom_param("crashkernel", parse_crashkernel);
 
@@ -199,7 +171,7 @@ custom_param("crashkernel", parse_crashkernel);
  * - all will allocate additional structures such as domain and vcpu structs
  *       low so the crash kernel can perform an extended analysis of state.
  */
-static int __init parse_low_crashinfo(const char *str)
+static void __init parse_low_crashinfo(const char * str)
 {
 
     if ( !strlen(str) )
@@ -215,10 +187,7 @@ static int __init parse_low_crashinfo(const char *str)
     {
         printk("Unknown low_crashinfo parameter '%s'.  Defaulting to min.\n", str);
         low_crashinfo_mode = LOW_CRASHINFO_MIN;
-        return -EINVAL;
     }
-
-    return 0;
 }
 custom_param("low_crashinfo", parse_low_crashinfo);
 
@@ -228,25 +197,19 @@ custom_param("low_crashinfo", parse_low_crashinfo);
  *
  * <addr> will be rounded down to the nearest power of two.  Defaults to 64G
  */
-static int __init parse_crashinfo_maxaddr(const char *str)
+static void __init parse_crashinfo_maxaddr(const char * str)
 {
     u64 addr;
-    const char *q;
 
     /* if low_crashinfo_mode is unset, default to min. */
     if ( low_crashinfo_mode == LOW_CRASHINFO_INVALID )
         low_crashinfo_mode = LOW_CRASHINFO_MIN;
 
-    if ( (addr = parse_size_and_unit(str, &q)) )
+    if ( (addr = parse_size_and_unit(str, NULL)) )
         crashinfo_maxaddr = addr;
     else
-    {
         printk("Unable to parse crashinfo_maxaddr. Defaulting to %"PRIpaddr"\n",
                crashinfo_maxaddr);
-        return -EINVAL;
-    }
-
-    return *q ? -EINVAL : 0;
 }
 custom_param("crashinfo_maxaddr", parse_crashinfo_maxaddr);
 
@@ -411,6 +374,11 @@ static void do_crashdump_trigger(unsigned char key)
     printk(" * no crash kernel loaded!\n");
 }
 
+static struct keyhandler crashdump_trigger_keyhandler = {
+    .u.fn = do_crashdump_trigger,
+    .desc = "trigger a crashdump"
+};
+
 static void setup_note(Elf_Note *n, const char *name, int type, int descsz)
 {
     int l = strlen(name) + 1;
@@ -486,7 +454,8 @@ static int kexec_init_cpu_notes(const unsigned long cpu)
         spin_unlock(&crash_notes_lock);
         /* Always return ok, because whether we successfully allocated or not,
          * another CPU has successfully allocated. */
-        xfree(note);
+        if ( note )
+            xfree(note);
     }
     else
     {
@@ -563,7 +532,7 @@ void __init kexec_early_calculations(void)
         low_crashinfo_mode = LOW_CRASHINFO_NONE;
 
     if ( low_crashinfo_mode > LOW_CRASHINFO_NONE )
-        crashinfo_maxaddr_bits = fls64(crashinfo_maxaddr) - 1;
+        crashinfo_maxaddr_bits = fls(crashinfo_maxaddr) - 1;
 }
 
 static int __init kexec_init(void)
@@ -603,7 +572,7 @@ static int __init kexec_init(void)
     if ( ! crash_notes )
         return -ENOMEM;
 
-    register_keyhandler('C', do_crashdump_trigger, "trigger a crashdump", 0);
+    register_keyhandler('C', &crashdump_trigger_keyhandler);
 
     cpu_callback(&cpu_nfb, CPU_UP_PREPARE, cpu);
     register_cpu_notifier(&cpu_nfb);
@@ -694,8 +663,8 @@ static int kexec_get_range(XEN_GUEST_HANDLE_PARAM(void) uarg)
 
     ret = kexec_get_range_internal(&range);
 
-    if ( ret == 0 && unlikely(__copy_to_guest(uarg, &range, 1)) )
-        ret = -EFAULT;
+    if ( ret == 0 && unlikely(copy_to_guest(uarg, &range, 1)) )
+        return -EFAULT;
 
     return ret;
 }
@@ -718,11 +687,10 @@ static int kexec_get_range_compat(XEN_GUEST_HANDLE_PARAM(void) uarg)
     if ( (range.start | range.size) & ~(unsigned long)(~0u) )
         return -ERANGE;
 
-    if ( ret == 0 )
-    {
+    if ( ret == 0 ) {
         XLAT_kexec_range(&compat_range, &range);
-        if ( unlikely(__copy_to_guest(uarg, &compat_range, 1)) )
-             ret = -EFAULT;
+        if ( unlikely(copy_to_guest(uarg, &compat_range, 1)) )
+             return -EFAULT;
     }
 
     return ret;
@@ -848,6 +816,7 @@ static int kexec_exec(XEN_GUEST_HANDLE_PARAM(void) uarg)
 static int kexec_swap_images(int type, struct kexec_image *new,
                              struct kexec_image **old)
 {
+    static DEFINE_SPINLOCK(kexec_lock);
     int base, bit, pos;
     int new_slot, old_slot;
 
@@ -859,19 +828,23 @@ static int kexec_swap_images(int type, struct kexec_image *new,
     if ( kexec_load_get_bits(type, &base, &bit) )
         return -EINVAL;
 
-    ASSERT(test_bit(KEXEC_FLAG_IN_HYPERCALL, &kexec_flags));
+    spin_lock(&kexec_lock);
 
     pos = (test_bit(bit, &kexec_flags) != 0);
     old_slot = base + pos;
     new_slot = base + !pos;
 
-    kexec_image[new_slot] = new;
     if ( new )
+    {
+        kexec_image[new_slot] = new;
         set_bit(new_slot, &kexec_flags);
+    }
     change_bit(bit, &kexec_flags);
 
     clear_bit(old_slot, &kexec_flags);
     *old = kexec_image[old_slot];
+
+    spin_unlock(&kexec_lock);
 
     return 0;
 }
@@ -899,17 +872,17 @@ static int kexec_load_slot(struct kexec_image *kimage)
 static uint16_t kexec_load_v1_arch(void)
 {
 #ifdef CONFIG_X86
-    return is_pv_32bit_domain(hardware_domain) ? EM_386 : EM_X86_64;
+    return is_pv_32on64_domain(dom0) ? EM_386 : EM_X86_64;
 #else
     return EM_NONE;
 #endif
 }
 
-static int kexec_segments_add_segment(unsigned int *nr_segments,
-                                      xen_kexec_segment_t *segments,
-                                      mfn_t mfn)
+static int kexec_segments_add_segment(
+    unsigned int *nr_segments, xen_kexec_segment_t *segments,
+    unsigned long mfn)
 {
-    paddr_t maddr = mfn_to_maddr(mfn);
+    paddr_t maddr = (paddr_t)mfn << PAGE_SHIFT;
     unsigned int n = *nr_segments;
 
     /* Need a new segment? */
@@ -930,7 +903,7 @@ static int kexec_segments_add_segment(unsigned int *nr_segments,
     return 0;
 }
 
-static int kexec_segments_from_ind_page(mfn_t mfn,
+static int kexec_segments_from_ind_page(unsigned long mfn,
                                         unsigned int *nr_segments,
                                         xen_kexec_segment_t *segments,
                                         bool_t compat)
@@ -990,7 +963,7 @@ static int kexec_do_load_v1(xen_kexec_load_v1_t *load, int compat)
     xen_kexec_segment_t *segments;
     uint16_t arch;
     unsigned int nr_segments = 0;
-    mfn_t ind_mfn = maddr_to_mfn(load->image.indirection_page);
+    unsigned long ind_mfn = load->image.indirection_page >> PAGE_SHIFT;
     int ret;
 
     arch = kexec_load_v1_arch();
@@ -1193,22 +1166,6 @@ static int kexec_unload(XEN_GUEST_HANDLE_PARAM(void) uarg)
     return kexec_do_unload(&unload);
 }
 
-static int kexec_status(XEN_GUEST_HANDLE_PARAM(void) uarg)
-{
-    xen_kexec_status_t status;
-    int base, bit;
-
-    if ( unlikely(copy_from_guest(&status, uarg, 1)) )
-        return -EFAULT;
-
-    /* No need to check KEXEC_FLAG_IN_PROGRESS. */
-
-    if ( kexec_load_get_bits(status.type, &base, &bit) )
-        return -EINVAL;
-
-    return !!test_bit(bit, &kexec_flags);
-}
-
 static int do_kexec_op_internal(unsigned long op,
                                 XEN_GUEST_HANDLE_PARAM(void) uarg,
                                 bool_t compat)
@@ -1218,9 +1175,6 @@ static int do_kexec_op_internal(unsigned long op,
     ret = xsm_kexec(XSM_PRIV);
     if ( ret )
         return ret;
-
-    if ( test_and_set_bit(KEXEC_FLAG_IN_HYPERCALL, &kexec_flags) )
-        return hypercall_create_continuation(__HYPERVISOR_kexec_op, "lh", op, uarg);
 
     switch ( op )
     {
@@ -1251,12 +1205,7 @@ static int do_kexec_op_internal(unsigned long op,
     case KEXEC_CMD_kexec_unload:
         ret = kexec_unload(uarg);
         break;
-    case KEXEC_CMD_kexec_status:
-        ret = kexec_status(uarg);
-        break;
     }
-
-    clear_bit(KEXEC_FLAG_IN_HYPERCALL, &kexec_flags);
 
     return ret;
 }

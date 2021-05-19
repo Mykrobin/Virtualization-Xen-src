@@ -14,7 +14,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 #ifndef _ASM_X86_64_AMD_IOMMU_H
 #define _ASM_X86_64_AMD_IOMMU_H
@@ -104,8 +105,6 @@ struct amd_iommu {
     uint64_t exclusion_limit;
 
     int enabled;
-
-    struct list_head ats_devices;
 };
 
 struct ivrs_mappings {
@@ -128,7 +127,6 @@ struct ivrs_mappings {
 };
 
 extern unsigned int ivrs_bdf_entries;
-extern u8 ivhd_type;
 
 struct ivrs_mappings *get_ivrs_mappings(u16 seg);
 int iterate_ivrs_mappings(int (*)(u16 seg, struct ivrs_mappings *));

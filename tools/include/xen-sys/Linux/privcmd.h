@@ -1,7 +1,7 @@
 /******************************************************************************
  * privcmd.h
  * 
- * Interface to /dev/xen/privcmd.
+ * Interface to /proc/xen/privcmd.
  * 
  * Copyright (c) 2003-2005, K A Fraser
  * 
@@ -75,26 +75,6 @@ typedef struct privcmd_mmapbatch_v2 {
 	int __user *err;  /* array of error codes */
 } privcmd_mmapbatch_v2_t;
 
-typedef struct privcmd_dm_op_buf {
-	void __user *uptr;
-	size_t size;
-} privcmd_dm_op_buf_t;
-
-typedef struct privcmd_dm_op {
-	domid_t dom;
-	__u16 num;
-	const privcmd_dm_op_buf_t __user *ubufs;
-} privcmd_dm_op_t;
-
-typedef struct privcmd_mmap_resource {
-	domid_t dom;
-	__u32 type;
-	__u32 id;
-	__u32 idx;
-	__u64 num;
-	__u64 addr;
-} privcmd_mmap_resource_t;
-
 /*
  * @cmd: IOCTL_PRIVCMD_HYPERCALL
  * @arg: &privcmd_hypercall_t
@@ -108,11 +88,5 @@ typedef struct privcmd_mmap_resource {
 	_IOC(_IOC_NONE, 'P', 3, sizeof(privcmd_mmapbatch_t))
 #define IOCTL_PRIVCMD_MMAPBATCH_V2				\
 	_IOC(_IOC_NONE, 'P', 4, sizeof(privcmd_mmapbatch_v2_t))
-#define IOCTL_PRIVCMD_DM_OP					\
-	_IOC(_IOC_NONE, 'P', 5, sizeof(privcmd_dm_op_t))
-#define IOCTL_PRIVCMD_RESTRICT					\
-	_IOC(_IOC_NONE, 'P', 6, sizeof(domid_t))
-#define IOCTL_PRIVCMD_MMAP_RESOURCE				\
-	_IOC(_IOC_NONE, 'P', 7, sizeof(privcmd_mmap_resource_t))
 
 #endif /* __LINUX_PUBLIC_PRIVCMD_H__ */

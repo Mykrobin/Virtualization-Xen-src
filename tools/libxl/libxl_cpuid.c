@@ -14,11 +14,6 @@
 
 #include "libxl_internal.h"
 
-int libxl__cpuid_policy_is_empty(libxl_cpuid_policy_list *pl)
-{
-    return !libxl_cpuid_policy_list_length(pl);
-}
-
 void libxl_cpuid_dispose(libxl_cpuid_policy_list *p_cpuid_list)
 {
     int i, j;
@@ -28,13 +23,9 @@ void libxl_cpuid_dispose(libxl_cpuid_policy_list *p_cpuid_list)
         return;
     for (i = 0; cpuid_list[i].input[0] != XEN_CPUID_INPUT_UNUSED; i++) {
         for (j = 0; j < 4; j++)
-            if (cpuid_list[i].policy[j] != NULL) {
+            if (cpuid_list[i].policy[j] != NULL)
                 free(cpuid_list[i].policy[j]);
-                cpuid_list[i].policy[j] = NULL;
-            }
     }
-    free(cpuid_list);
-    *p_cpuid_list = NULL;
     return;
 }
 
@@ -89,166 +80,106 @@ static libxl_cpuid_policy_list cpuid_find_match(libxl_cpuid_policy_list *list,
 int libxl_cpuid_parse_config(libxl_cpuid_policy_list *cpuid, const char* str)
 {
 #define NA XEN_CPUID_INPUT_UNUSED
-    static const struct cpuid_flags cpuid_flags[] = {
+    struct cpuid_flags cpuid_flags[] = {
         {"maxleaf",      0x00000000, NA, CPUID_REG_EAX,  0, 32},
       /* the following two entries are subject to tweaking later in the code */
-        {"stepping",     0x00000001, NA, CPUID_REG_EAX,  0,  4},
-        {"model",        0x00000001, NA, CPUID_REG_EAX,  4,  8},
         {"family",       0x00000001, NA, CPUID_REG_EAX,  8,  8},
-
-        {"brandid",      0x00000001, NA, CPUID_REG_EBX,  0,  8},
-        {"clflush",      0x00000001, NA, CPUID_REG_EBX,  8,  8},
-        {"proccount",    0x00000001, NA, CPUID_REG_EBX, 16,  8},
+        {"model",        0x00000001, NA, CPUID_REG_EAX,  4,  8},
+        {"stepping",     0x00000001, NA, CPUID_REG_EAX,  0,  4},
         {"localapicid",  0x00000001, NA, CPUID_REG_EBX, 24,  8},
-
-        {"sse3",         0x00000001, NA, CPUID_REG_ECX,  0,  1},
-        {"pclmulqdq",    0x00000001, NA, CPUID_REG_ECX,  1,  1},
-        {"dtes64",       0x00000001, NA, CPUID_REG_ECX,  2,  1},
-        {"monitor",      0x00000001, NA, CPUID_REG_ECX,  3,  1},
-        {"dscpl",        0x00000001, NA, CPUID_REG_ECX,  4,  1},
-        {"vmx",          0x00000001, NA, CPUID_REG_ECX,  5,  1},
-        {"smx",          0x00000001, NA, CPUID_REG_ECX,  6,  1},
-        {"est",          0x00000001, NA, CPUID_REG_ECX,  7,  1},
-        {"tm2",          0x00000001, NA, CPUID_REG_ECX,  8,  1},
-        {"ssse3",        0x00000001, NA, CPUID_REG_ECX,  9,  1},
-        {"cntxid",       0x00000001, NA, CPUID_REG_ECX, 10,  1},
-        {"fma",          0x00000001, NA, CPUID_REG_ECX, 12,  1},
-        {"cmpxchg16",    0x00000001, NA, CPUID_REG_ECX, 13,  1},
-        {"xtpr",         0x00000001, NA, CPUID_REG_ECX, 14,  1},
-        {"pdcm",         0x00000001, NA, CPUID_REG_ECX, 15,  1},
-        {"pcid",         0x00000001, NA, CPUID_REG_ECX, 17,  1},
-        {"dca",          0x00000001, NA, CPUID_REG_ECX, 18,  1},
-        /* Linux uses sse4_{1,2}.  Keep sse4.{1,2} for compatibility */
-        {"sse4_1",       0x00000001, NA, CPUID_REG_ECX, 19,  1},
-        {"sse4.1",       0x00000001, NA, CPUID_REG_ECX, 19,  1},
-        {"sse4_2",       0x00000001, NA, CPUID_REG_ECX, 20,  1},
-        {"sse4.2",       0x00000001, NA, CPUID_REG_ECX, 20,  1},
-        {"x2apic",       0x00000001, NA, CPUID_REG_ECX, 21,  1},
-        {"movbe",        0x00000001, NA, CPUID_REG_ECX, 22,  1},
-        {"popcnt",       0x00000001, NA, CPUID_REG_ECX, 23,  1},
-        {"tsc-deadline", 0x00000001, NA, CPUID_REG_ECX, 24,  1},
-        {"aes",          0x00000001, NA, CPUID_REG_ECX, 25,  1},
-        {"xsave",        0x00000001, NA, CPUID_REG_ECX, 26,  1},
-        {"osxsave",      0x00000001, NA, CPUID_REG_ECX, 27,  1},
-        {"avx",          0x00000001, NA, CPUID_REG_ECX, 28,  1},
-        {"f16c",         0x00000001, NA, CPUID_REG_ECX, 29,  1},
-        {"rdrand",       0x00000001, NA, CPUID_REG_ECX, 30,  1},
+        {"proccount",    0x00000001, NA, CPUID_REG_EBX, 16,  8},
+        {"clflush",      0x00000001, NA, CPUID_REG_EBX,  8,  8},
+        {"brandid",      0x00000001, NA, CPUID_REG_EBX,  0,  8},
         {"hypervisor",   0x00000001, NA, CPUID_REG_ECX, 31,  1},
-
-        {"fpu",          0x00000001, NA, CPUID_REG_EDX,  0,  1},
-        {"vme",          0x00000001, NA, CPUID_REG_EDX,  1,  1},
-        {"de",           0x00000001, NA, CPUID_REG_EDX,  2,  1},
-        {"pse",          0x00000001, NA, CPUID_REG_EDX,  3,  1},
-        {"tsc",          0x00000001, NA, CPUID_REG_EDX,  4,  1},
-        {"msr",          0x00000001, NA, CPUID_REG_EDX,  5,  1},
-        {"pae",          0x00000001, NA, CPUID_REG_EDX,  6,  1},
-        {"mce",          0x00000001, NA, CPUID_REG_EDX,  7,  1},
-        {"cmpxchg8",     0x00000001, NA, CPUID_REG_EDX,  8,  1},
-        {"apic",         0x00000001, NA, CPUID_REG_EDX,  9,  1},
-        {"sysenter",     0x00000001, NA, CPUID_REG_EDX, 11,  1},
-        {"mtrr",         0x00000001, NA, CPUID_REG_EDX, 12,  1},
-        {"pge",          0x00000001, NA, CPUID_REG_EDX, 13,  1},
-        {"mca",          0x00000001, NA, CPUID_REG_EDX, 14,  1},
-        {"cmov",         0x00000001, NA, CPUID_REG_EDX, 15,  1},
-        {"pat",          0x00000001, NA, CPUID_REG_EDX, 16,  1},
-        {"pse36",        0x00000001, NA, CPUID_REG_EDX, 17,  1},
-        {"psn",          0x00000001, NA, CPUID_REG_EDX, 18,  1},
-        {"clfsh",        0x00000001, NA, CPUID_REG_EDX, 19,  1},
-        {"ds",           0x00000001, NA, CPUID_REG_EDX, 21,  1},
-        {"acpi",         0x00000001, NA, CPUID_REG_EDX, 22,  1},
-        {"mmx",          0x00000001, NA, CPUID_REG_EDX, 23,  1},
-        {"fxsr",         0x00000001, NA, CPUID_REG_EDX, 24,  1},
-        {"sse",          0x00000001, NA, CPUID_REG_EDX, 25,  1},
-        {"sse2",         0x00000001, NA, CPUID_REG_EDX, 26,  1},
-        {"ss",           0x00000001, NA, CPUID_REG_EDX, 27,  1},
-        {"htt",          0x00000001, NA, CPUID_REG_EDX, 28,  1},
-        {"tm",           0x00000001, NA, CPUID_REG_EDX, 29,  1},
-        {"ia64",         0x00000001, NA, CPUID_REG_EDX, 30,  1},
+        {"f16c",         0x00000001, NA, CPUID_REG_ECX, 29,  1},
+        {"avx",          0x00000001, NA, CPUID_REG_ECX, 28,  1},
+        {"osxsave",      0x00000001, NA, CPUID_REG_ECX, 27,  1},
+        {"xsave",        0x00000001, NA, CPUID_REG_ECX, 26,  1},
+        {"aes",          0x00000001, NA, CPUID_REG_ECX, 25,  1},
+        {"popcnt",       0x00000001, NA, CPUID_REG_ECX, 23,  1},
+        {"movbe",        0x00000001, NA, CPUID_REG_ECX, 22,  1},
+        {"x2apic",       0x00000001, NA, CPUID_REG_ECX, 21,  1},
+        /* Linux uses sse4_{1,2}.  Keep sse4.{1,2} for compatibility */
+        {"sse4.2",       0x00000001, NA, CPUID_REG_ECX, 20,  1},
+        {"sse4_2",       0x00000001, NA, CPUID_REG_ECX, 20,  1},
+        {"sse4.1",       0x00000001, NA, CPUID_REG_ECX, 19,  1},
+        {"sse4_1",       0x00000001, NA, CPUID_REG_ECX, 19,  1},
+        {"dca",          0x00000001, NA, CPUID_REG_ECX, 18,  1},
+        {"pdcm",         0x00000001, NA, CPUID_REG_ECX, 15,  1},
+        {"xtpr",         0x00000001, NA, CPUID_REG_ECX, 14,  1},
+        {"cmpxchg16",    0x00000001, NA, CPUID_REG_ECX, 13,  1},
+        {"cntxid",       0x00000001, NA, CPUID_REG_ECX, 10,  1},
+        {"ssse3",        0x00000001, NA, CPUID_REG_ECX,  9,  1},
+        {"tm2",          0x00000001, NA, CPUID_REG_ECX,  8,  1},
+        {"est",          0x00000001, NA, CPUID_REG_ECX,  7,  1},
+        {"smx",          0x00000001, NA, CPUID_REG_ECX,  6,  1},
+        {"vmx",          0x00000001, NA, CPUID_REG_ECX,  5,  1},
+        {"dscpl",        0x00000001, NA, CPUID_REG_ECX,  4,  1},
+        {"monitor",      0x00000001, NA, CPUID_REG_ECX,  3,  1},
+        {"dtes64",       0x00000001, NA, CPUID_REG_ECX,  2,  1},
+        {"pclmulqdq",    0x00000001, NA, CPUID_REG_ECX,  1,  1},
+        {"sse3",         0x00000001, NA, CPUID_REG_ECX,  0,  1},
         {"pbe",          0x00000001, NA, CPUID_REG_EDX, 31,  1},
-
-        {"arat",         0x00000006, NA, CPUID_REG_EAX,  2,  1},
-
-        {"fsgsbase",     0x00000007,  0, CPUID_REG_EBX,  0,  1},
-        {"tsc_adjust",   0x00000007,  0, CPUID_REG_EBX,  1,  1},
-        {"bmi1",         0x00000007,  0, CPUID_REG_EBX,  3,  1},
-        {"hle",          0x00000007,  0, CPUID_REG_EBX,  4,  1},
-        {"avx2",         0x00000007,  0, CPUID_REG_EBX,  5,  1},
-        {"smep",         0x00000007,  0, CPUID_REG_EBX,  7,  1},
-        {"bmi2",         0x00000007,  0, CPUID_REG_EBX,  8,  1},
-        {"erms",         0x00000007,  0, CPUID_REG_EBX,  9,  1},
-        {"invpcid",      0x00000007,  0, CPUID_REG_EBX, 10,  1},
-        {"rtm",          0x00000007,  0, CPUID_REG_EBX, 11,  1},
-        {"cmt",          0x00000007,  0, CPUID_REG_EBX, 12,  1},
-        {"mpx",          0x00000007,  0, CPUID_REG_EBX, 14,  1},
-        {"avx512f",      0x00000007,  0, CPUID_REG_EBX, 16,  1},
-        {"avx512dq",     0x00000007,  0, CPUID_REG_EBX, 17,  1},
-        {"rdseed",       0x00000007,  0, CPUID_REG_EBX, 18,  1},
-        {"adx",          0x00000007,  0, CPUID_REG_EBX, 19,  1},
-        {"smap",         0x00000007,  0, CPUID_REG_EBX, 20,  1},
-        {"avx512ifma",   0x00000007,  0, CPUID_REG_EBX, 21,  1},
-        {"clflushopt",   0x00000007,  0, CPUID_REG_EBX, 23,  1},
-        {"clwb",         0x00000007,  0, CPUID_REG_EBX, 24,  1},
-        {"avx512pf",     0x00000007,  0, CPUID_REG_EBX, 26,  1},
-        {"avx512er",     0x00000007,  0, CPUID_REG_EBX, 27,  1},
-        {"avx512cd",     0x00000007,  0, CPUID_REG_EBX, 28,  1},
-        {"sha",          0x00000007,  0, CPUID_REG_EBX, 29,  1},
-        {"avx512bw",     0x00000007,  0, CPUID_REG_EBX, 30,  1},
-        {"avx512vl",     0x00000007,  0, CPUID_REG_EBX, 31,  1},
-
-        {"avx512vbmi",   0x00000007,  0, CPUID_REG_ECX,  1,  1},
-        {"umip",         0x00000007,  0, CPUID_REG_ECX,  2,  1},
-        {"pku",          0x00000007,  0, CPUID_REG_ECX,  3,  1},
-        {"ospke",        0x00000007,  0, CPUID_REG_ECX,  4,  1},
-
-        {"avx512-4vnniw",0x00000007,  0, CPUID_REG_EDX,  2,  1},
-        {"avx512-4fmaps",0x00000007,  0, CPUID_REG_EDX,  3,  1},
-        {"md-clear",     0x00000007,  0, CPUID_REG_EDX, 10,  1},
-        {"ibrsb",        0x00000007,  0, CPUID_REG_EDX, 26,  1},
-        {"stibp",        0x00000007,  0, CPUID_REG_EDX, 27,  1},
-        {"l1d-flush",    0x00000007,  0, CPUID_REG_EDX, 28,  1},
-        {"arch-caps",    0x00000007,  0, CPUID_REG_EDX, 29,  1},
-        {"ssbd",         0x00000007,  0, CPUID_REG_EDX, 31,  1},
-
-        {"lahfsahf",     0x80000001, NA, CPUID_REG_ECX,  0,  1},
-        {"cmplegacy",    0x80000001, NA, CPUID_REG_ECX,  1,  1},
-        {"svm",          0x80000001, NA, CPUID_REG_ECX,  2,  1},
-        {"extapic",      0x80000001, NA, CPUID_REG_ECX,  3,  1},
-        {"altmovcr8",    0x80000001, NA, CPUID_REG_ECX,  4,  1},
-        {"abm",          0x80000001, NA, CPUID_REG_ECX,  5,  1},
-        {"sse4a",        0x80000001, NA, CPUID_REG_ECX,  6,  1},
-        {"misalignsse",  0x80000001, NA, CPUID_REG_ECX,  7,  1},
-        {"3dnowprefetch",0x80000001, NA, CPUID_REG_ECX,  8,  1},
-        {"osvw",         0x80000001, NA, CPUID_REG_ECX,  9,  1},
-        {"ibs",          0x80000001, NA, CPUID_REG_ECX, 10,  1},
-        {"xop",          0x80000001, NA, CPUID_REG_ECX, 11,  1},
-        {"skinit",       0x80000001, NA, CPUID_REG_ECX, 12,  1},
-        {"wdt",          0x80000001, NA, CPUID_REG_ECX, 13,  1},
-        {"lwp",          0x80000001, NA, CPUID_REG_ECX, 15,  1},
-        {"fma4",         0x80000001, NA, CPUID_REG_ECX, 16,  1},
-        {"nodeid",       0x80000001, NA, CPUID_REG_ECX, 19,  1},
-        {"tbm",          0x80000001, NA, CPUID_REG_ECX, 21,  1},
+        {"ia64",         0x00000001, NA, CPUID_REG_EDX, 30,  1},
+        {"tm",           0x00000001, NA, CPUID_REG_EDX, 29,  1},
+        {"htt",          0x00000001, NA, CPUID_REG_EDX, 28,  1},
+        {"ss",           0x00000001, NA, CPUID_REG_EDX, 27,  1},
+        {"sse2",         0x00000001, NA, CPUID_REG_EDX, 26,  1},
+        {"sse",          0x00000001, NA, CPUID_REG_EDX, 25,  1},
+        {"fxsr",         0x00000001, NA, CPUID_REG_EDX, 24,  1},
+        {"mmx",          0x00000001, NA, CPUID_REG_EDX, 23,  1},
+        {"acpi",         0x00000001, NA, CPUID_REG_EDX, 22,  1},
+        {"ds",           0x00000001, NA, CPUID_REG_EDX, 21,  1},
+        {"clfsh",        0x00000001, NA, CPUID_REG_EDX, 19,  1},
+        {"psn",          0x00000001, NA, CPUID_REG_EDX, 18,  1},
+        {"pse36",        0x00000001, NA, CPUID_REG_EDX, 17,  1},
+        {"pat",          0x00000001, NA, CPUID_REG_EDX, 16,  1},
+        {"cmov",         0x00000001, NA, CPUID_REG_EDX, 15,  1},
+        {"mca",          0x00000001, NA, CPUID_REG_EDX, 14,  1},
+        {"pge",          0x00000001, NA, CPUID_REG_EDX, 13,  1},
+        {"mtrr",         0x00000001, NA, CPUID_REG_EDX, 12,  1},
+        {"sysenter",     0x00000001, NA, CPUID_REG_EDX, 11,  1},
+        {"apic",         0x00000001, NA, CPUID_REG_EDX,  9,  1},
+        {"cmpxchg8",     0x00000001, NA, CPUID_REG_EDX,  8,  1},
+        {"mce",          0x00000001, NA, CPUID_REG_EDX,  7,  1},
+        {"pae",          0x00000001, NA, CPUID_REG_EDX,  6,  1},
+        {"msr",          0x00000001, NA, CPUID_REG_EDX,  5,  1},
+        {"tsc",          0x00000001, NA, CPUID_REG_EDX,  4,  1},
+        {"pse",          0x00000001, NA, CPUID_REG_EDX,  3,  1},
+        {"de",           0x00000001, NA, CPUID_REG_EDX,  2,  1},
+        {"vme",          0x00000001, NA, CPUID_REG_EDX,  1,  1},
+        {"fpu",          0x00000001, NA, CPUID_REG_EDX,  0,  1},
         {"topoext",      0x80000001, NA, CPUID_REG_ECX, 22,  1},
-        {"perfctr_core", 0x80000001, NA, CPUID_REG_ECX, 23,  1},
-        {"perfctr_nb",   0x80000001, NA, CPUID_REG_ECX, 24,  1},
-
-        {"syscall",      0x80000001, NA, CPUID_REG_EDX, 11,  1},
-        {"nx",           0x80000001, NA, CPUID_REG_EDX, 20,  1},
-        {"mmxext",       0x80000001, NA, CPUID_REG_EDX, 22,  1},
-        {"ffxsr",        0x80000001, NA, CPUID_REG_EDX, 25,  1},
-        {"page1gb",      0x80000001, NA, CPUID_REG_EDX, 26,  1},
-        {"rdtscp",       0x80000001, NA, CPUID_REG_EDX, 27,  1},
-        {"lm",           0x80000001, NA, CPUID_REG_EDX, 29,  1},
-        {"3dnowext",     0x80000001, NA, CPUID_REG_EDX, 30,  1},
+        {"tbm",          0x80000001, NA, CPUID_REG_ECX, 21,  1},
+        {"nodeid",       0x80000001, NA, CPUID_REG_ECX, 19,  1},
+        {"fma4",         0x80000001, NA, CPUID_REG_ECX, 16,  1},
+        {"lwp",          0x80000001, NA, CPUID_REG_ECX, 15,  1},
+        {"wdt",          0x80000001, NA, CPUID_REG_ECX, 13,  1},
+        {"skinit",       0x80000001, NA, CPUID_REG_ECX, 12,  1},
+        {"xop",          0x80000001, NA, CPUID_REG_ECX, 11,  1},
+        {"ibs",          0x80000001, NA, CPUID_REG_ECX, 10,  1},
+        {"osvw",         0x80000001, NA, CPUID_REG_ECX, 10,  1},
+        {"3dnowprefetch",0x80000001, NA, CPUID_REG_ECX,  8,  1},
+        {"misalignsse",  0x80000001, NA, CPUID_REG_ECX,  7,  1},
+        {"sse4a",        0x80000001, NA, CPUID_REG_ECX,  6,  1},
+        {"abm",          0x80000001, NA, CPUID_REG_ECX,  5,  1},
+        {"altmovcr8",    0x80000001, NA, CPUID_REG_ECX,  4,  1},
+        {"extapic",      0x80000001, NA, CPUID_REG_ECX,  3,  1},
+        {"svm",          0x80000001, NA, CPUID_REG_ECX,  2,  1},
+        {"cmplegacy",    0x80000001, NA, CPUID_REG_ECX,  1,  1},
+        {"lahfsahf",     0x80000001, NA, CPUID_REG_ECX,  0,  1},
         {"3dnow",        0x80000001, NA, CPUID_REG_EDX, 31,  1},
-
+        {"3dnowext",     0x80000001, NA, CPUID_REG_EDX, 30,  1},
+        {"lm",           0x80000001, NA, CPUID_REG_EDX, 29,  1},
+        {"rdtscp",       0x80000001, NA, CPUID_REG_EDX, 27,  1},
+        {"page1gb",      0x80000001, NA, CPUID_REG_EDX, 26,  1},
+        {"ffxsr",        0x80000001, NA, CPUID_REG_EDX, 25,  1},
+        {"mmxext",       0x80000001, NA, CPUID_REG_EDX, 22,  1},
+        {"nx",           0x80000001, NA, CPUID_REG_EDX, 20,  1},
+        {"syscall",      0x80000001, NA, CPUID_REG_EDX, 11,  1},
         {"procpkg",      0x00000004,  0, CPUID_REG_EAX, 26,  6},
-
-        {"invtsc",       0x80000007, NA, CPUID_REG_EDX,  8,  1},
-
-        {"ibpb",         0x80000008, NA, CPUID_REG_EBX, 12,  1},
-        {"nc",           0x80000008, NA, CPUID_REG_ECX,  0,  8},
         {"apicidsize",   0x80000008, NA, CPUID_REG_ECX, 12,  4},
-
+        {"nc",           0x80000008, NA, CPUID_REG_ECX,  0,  8},
         {"svm_npt",      0x8000000a, NA, CPUID_REG_EDX,  0,  1},
         {"svm_lbrv",     0x8000000a, NA, CPUID_REG_EDX,  1,  1},
         {"svm_nrips",    0x8000000a, NA, CPUID_REG_EDX,  3,  1},
@@ -257,14 +188,12 @@ int libxl_cpuid_parse_config(libxl_cpuid_policy_list *cpuid, const char* str)
         {"svm_decode",   0x8000000a, NA, CPUID_REG_EDX,  7,  1},
         {"svm_pausefilt",0x8000000a, NA, CPUID_REG_EDX, 10,  1},
 
-        {"maxhvleaf",    0x40000000, NA, CPUID_REG_EAX,  0,  8},
-
         {NULL, 0, NA, CPUID_REG_INV, 0, 0}
     };
 #undef NA
     char *sep, *val, *endptr;
     int i;
-    const struct cpuid_flags *flag;
+    struct cpuid_flags *flag;
     struct libxl__cpuid_policy *entry;
     unsigned long num;
     char flags[33], *resstr;
@@ -284,6 +213,9 @@ int libxl_cpuid_parse_config(libxl_cpuid_policy_list *cpuid, const char* str)
     }
     entry = cpuid_find_match(cpuid, flag->leaf, flag->subleaf);
     resstr = entry->policy[flag->reg - 1];
+    if (resstr == NULL) {
+        resstr = strdup("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+    }
     num = strtoull(val, &endptr, 0);
     flags[flag->length] = 0;
     if (endptr != val) {
@@ -300,11 +232,6 @@ int libxl_cpuid_parse_config(libxl_cpuid_policy_list *cpuid, const char* str)
             return 3;
         }
     }
-
-    if (resstr == NULL) {
-        resstr = strdup("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
-    }
-
     /* the family and model entry is potentially split up across
      * two fields in Fn0000_0001_EAX, so handle them here separately.
      */
@@ -395,7 +322,7 @@ int libxl_cpuid_parse_config_xend(libxl_cpuid_policy_list *cpuid,
 
 void libxl_cpuid_apply_policy(libxl_ctx *ctx, uint32_t domid)
 {
-    xc_cpuid_apply_policy(ctx->xch, domid, NULL, 0);
+    xc_cpuid_apply_policy(ctx->xch, domid);
 }
 
 void libxl_cpuid_set(libxl_ctx *ctx, uint32_t domid,
@@ -409,28 +336,28 @@ void libxl_cpuid_set(libxl_ctx *ctx, uint32_t domid,
                      (const char**)(cpuid[i].policy), cpuid_res);
 }
 
-static const char *input_names[2] = { "leaf", "subleaf" };
-static const char *policy_names[4] = { "eax", "ebx", "ecx", "edx" };
-/*
- * Aiming for:
- * [
- *     { 'leaf':    'val-eax',
- *       'subleaf': 'val-ecx',
- *       'eax':     'filter',
- *       'ebx':     'filter',
- *       'ecx':     'filter',
- *       'edx':     'filter' },
- *     { 'leaf':    'val-eax', ..., 'eax': 'filter', ... },
- *     ... etc ...
- * ]
- */
-
 yajl_gen_status libxl_cpuid_policy_list_gen_json(yajl_gen hand,
                                 libxl_cpuid_policy_list *pcpuid)
 {
     libxl_cpuid_policy_list cpuid = *pcpuid;
     yajl_gen_status s;
+    const char *input_names[2] = { "leaf", "subleaf" };
+    const char *policy_names[4] = { "eax", "ebx", "ecx", "edx" };
     int i, j;
+
+    /*
+     * Aiming for:
+     * [
+     *     { 'leaf':    'val-eax',
+     *       'subleaf': 'val-ecx',
+     *       'eax':     'filter',
+     *       'ebx':     'filter',
+     *       'ecx':     'filter',
+     *       'edx':     'filter' },
+     *     { 'leaf':    'val-eax', ..., 'eax': 'filter', ... },
+     *     ... etc ...
+     * ]
+     */
 
     s = yajl_gen_array_open(hand);
     if (s != yajl_gen_status_ok) goto out;
@@ -467,109 +394,6 @@ empty:
     s = yajl_gen_array_close(hand);
 out:
     return s;
-}
-
-int libxl__cpuid_policy_list_parse_json(libxl__gc *gc,
-                                        const libxl__json_object *o,
-                                        libxl_cpuid_policy_list *p)
-{
-    int i, size;
-    libxl_cpuid_policy_list l;
-    flexarray_t *array;
-
-    if (!libxl__json_object_is_array(o))
-        return ERROR_FAIL;
-
-    array = libxl__json_object_get_array(o);
-    if (!array->count)
-        return 0;
-
-    size = array->count;
-    /* need one extra slot as sentinel */
-    l = *p = libxl__calloc(NOGC, size + 1, sizeof(libxl_cpuid_policy));
-
-    l[size].input[0] = XEN_CPUID_INPUT_UNUSED;
-    l[size].input[1] = XEN_CPUID_INPUT_UNUSED;
-
-    for (i = 0; i < size; i++) {
-        const libxl__json_object *t;
-        int j;
-
-        if (flexarray_get(array, i, (void**)&t) != 0)
-            return ERROR_FAIL;
-
-        if (!libxl__json_object_is_map(t))
-            return ERROR_FAIL;
-
-        for (j = 0; j < ARRAY_SIZE(l[0].input); j++) {
-            const libxl__json_object *r;
-
-            r = libxl__json_map_get(input_names[j], t, JSON_INTEGER);
-            if (!r)
-                l[i].input[j] = XEN_CPUID_INPUT_UNUSED;
-            else
-                l[i].input[j] = libxl__json_object_get_integer(r);
-        }
-
-        for (j = 0; j < ARRAY_SIZE(l[0].policy); j++) {
-            const libxl__json_object *r;
-
-            r = libxl__json_map_get(policy_names[j], t, JSON_STRING);
-            if (!r)
-                l[i].policy[j] = NULL;
-            else
-                l[i].policy[j] =
-                    libxl__strdup(NOGC, libxl__json_object_get_string(r));
-        }
-    }
-
-    return 0;
-}
-
-int libxl_cpuid_policy_list_length(const libxl_cpuid_policy_list *pl)
-{
-    int i = 0;
-    libxl_cpuid_policy_list l = *pl;
-
-    if (l) {
-        while (l[i].input[0] != XEN_CPUID_INPUT_UNUSED)
-            i++;
-    }
-
-    return i;
-}
-
-void libxl_cpuid_policy_list_copy(libxl_ctx *ctx,
-                                  libxl_cpuid_policy_list *dst,
-                                  const libxl_cpuid_policy_list *src)
-{
-    GC_INIT(ctx);
-    int i, j, len;
-
-    if (*src == NULL) {
-        *dst = NULL;
-        goto out;
-    }
-
-    len = libxl_cpuid_policy_list_length(src);
-    /* one extra slot for sentinel */
-    *dst = libxl__calloc(NOGC, len + 1, sizeof(libxl_cpuid_policy));
-    (*dst)[len].input[0] = XEN_CPUID_INPUT_UNUSED;
-    (*dst)[len].input[1] = XEN_CPUID_INPUT_UNUSED;
-
-    for (i = 0; i < len; i++) {
-        for (j = 0; j < 2; j++)
-            (*dst)[i].input[j] = (*src)[i].input[j];
-        for (j = 0; j < 4; j++)
-            if ((*src)[i].policy[j])
-                (*dst)[i].policy[j] =
-                    libxl__strdup(NOGC, (*src)[i].policy[j]);
-            else
-                (*dst)[i].policy[j] = NULL;
-    }
-
-out:
-    GC_FREE;
 }
 
 /*

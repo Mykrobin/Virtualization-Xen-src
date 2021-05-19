@@ -147,7 +147,7 @@ let monitor_paths xsh l time callback =
 	end;
 	unwatch ()
 
-let daemon_socket = Paths.xen_run_stored ^ "/socket"
+let daemon_socket = "/var/run/xenstored/socket"
 
 (** Throws this rather than a miscellaneous Unix.connect failed *)
 exception Failed_to_connect
@@ -162,13 +162,7 @@ let daemon_open () =
 	with _ -> raise Failed_to_connect
 
 let domain_open () =
-	let path = try
-		let devpath = "/dev/xen/xenbus" in
-		Unix.access devpath [ Unix.F_OK ];
-		devpath
-	with Unix.Unix_error(_, _, _) ->
-		"/proc/xen/xenbus" in
-
+	let path = "/proc/xen/xenbus" in
 	let fd = Unix.openfile path [ Unix.O_RDWR ] 0o550 in
 	Unix.set_close_on_exec fd;
 	make fd

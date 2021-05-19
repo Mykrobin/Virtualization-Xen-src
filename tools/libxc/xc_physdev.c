@@ -17,7 +17,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
 #include "xc_private.h"
@@ -34,7 +35,7 @@ int xc_physdev_pci_access_modify(xc_interface *xch,
 }
 
 int xc_physdev_map_pirq(xc_interface *xch,
-                        uint32_t domid,
+                        int domid,
                         int index,
                         int *pirq)
 {
@@ -42,10 +43,8 @@ int xc_physdev_map_pirq(xc_interface *xch,
     struct physdev_map_pirq map;
 
     if ( !pirq )
-    {
-        errno = EINVAL;
-        return -1;
-    }
+        return -EINVAL;
+
     memset(&map, 0, sizeof(struct physdev_map_pirq));
     map.domid = domid;
     map.type = MAP_PIRQ_TYPE_GSI;
@@ -61,7 +60,7 @@ int xc_physdev_map_pirq(xc_interface *xch,
 }
 
 int xc_physdev_map_pirq_msi(xc_interface *xch,
-                            uint32_t domid,
+                            int domid,
                             int index,
                             int *pirq,
                             int devfn,
@@ -73,10 +72,8 @@ int xc_physdev_map_pirq_msi(xc_interface *xch,
     struct physdev_map_pirq map;
 
     if ( !pirq )
-    {
-        errno = EINVAL;
-        return -1;
-    }
+        return -EINVAL;
+
     memset(&map, 0, sizeof(struct physdev_map_pirq));
     map.domid = domid;
     map.type = MAP_PIRQ_TYPE_MSI;
@@ -96,7 +93,7 @@ int xc_physdev_map_pirq_msi(xc_interface *xch,
 }
 
 int xc_physdev_unmap_pirq(xc_interface *xch,
-                          uint32_t domid,
+                          int domid,
                           int pirq)
 {
     int rc;

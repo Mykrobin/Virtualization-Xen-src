@@ -17,55 +17,11 @@
 #include <xen/hypercall.h>
 #include <xsm/xsm.h>
 
-#ifdef CONFIG_XSM
-
-#ifdef CONFIG_MULTIBOOT
-#include <asm/setup.h>
-#endif
-
-#ifdef CONFIG_HAS_DEVICE_TREE
-#include <asm/setup.h>
-#endif
+#ifdef XSM_ENABLE
 
 #define XSM_FRAMEWORK_VERSION    "1.0.0"
 
 struct xsm_operations *xsm_ops;
-
-enum xsm_bootparam {
-    XSM_BOOTPARAM_DUMMY,
-    XSM_BOOTPARAM_FLASK,
-    XSM_BOOTPARAM_SILO,
-};
-
-static enum xsm_bootparam __initdata xsm_bootparam =
-#if defined(CONFIG_XSM_FLASK_DEFAULT)
-    XSM_BOOTPARAM_FLASK;
-#elif defined(CONFIG_XSM_SILO_DEFAULT)
-    XSM_BOOTPARAM_SILO;
-#else
-    XSM_BOOTPARAM_DUMMY;
-#endif
-
-static int __init parse_xsm_param(const char *s)
-{
-    int rc = 0;
-
-    if ( !strcmp(s, "dummy") )
-        xsm_bootparam = XSM_BOOTPARAM_DUMMY;
-#ifdef CONFIG_FLASK
-    else if ( !strcmp(s, "flask") )
-        xsm_bootparam = XSM_BOOTPARAM_FLASK;
-#endif
-#ifdef CONFIG_SILO
-    else if ( !strcmp(s, "silo") )
-        xsm_bootparam = XSM_BOOTPARAM_SILO;
-#endif
-    else
-        rc = -EINVAL;
-
-    return rc;
-}
-custom_param("xsm", parse_xsm_param);
 
 static inline int verify(struct xsm_operations *ops)
 {
@@ -76,129 +32,56 @@ static inline int verify(struct xsm_operations *ops)
     return 0;
 }
 
-static int __init xsm_core_init(const void *policy_buffer, size_t policy_size)
+static void __init do_xsm_initcalls(void)
 {
-#ifdef CONFIG_XSM_POLICY
-    if ( policy_size == 0 )
+    xsm_initcall_t *call;
+    call = __xsm_initcall_start;
+    while ( call < __xsm_initcall_end )
     {
-        policy_buffer = xsm_init_policy;
-        policy_size = xsm_init_policy_size;
+        (*call) ();
+        call++;
     }
-#endif
+}
+
+int __init xsm_init(unsigned long *module_map, const multiboot_info_t *mbi,
+                    void *(*bootstrap_map)(const module_t *))
+{
+    int ret = 0;
+
+    printk("XSM Framework v" XSM_FRAMEWORK_VERSION " initialized\n");
+
+    if ( XSM_MAGIC )
+    {
+        ret = xsm_policy_init(module_map, mbi, bootstrap_map);
+        if ( ret )
+        {
+            bootstrap_map(NULL);
+            printk("%s: Error initializing policy.\n", __FUNCTION__);
+            return -EINVAL;
+        }
+    }
 
     if ( verify(&dummy_xsm_ops) )
     {
-        printk(XENLOG_ERR "Could not verify dummy_xsm_ops structure\n");
+        bootstrap_map(NULL);
+        printk("%s could not verify "
+               "dummy_xsm_ops structure.\n", __FUNCTION__);
         return -EIO;
     }
 
     xsm_ops = &dummy_xsm_ops;
-
-    switch ( xsm_bootparam )
-    {
-    case XSM_BOOTPARAM_DUMMY:
-        break;
-
-    case XSM_BOOTPARAM_FLASK:
-        flask_init(policy_buffer, policy_size);
-        break;
-
-    case XSM_BOOTPARAM_SILO:
-        silo_init();
-        break;
-
-    default:
-        ASSERT_UNREACHABLE();
-        break;
-    }
-
-    return 0;
-}
-
-#ifdef CONFIG_MULTIBOOT
-int __init xsm_multiboot_init(unsigned long *module_map,
-                              const multiboot_info_t *mbi)
-{
-    int ret = 0;
-    void *policy_buffer = NULL;
-    size_t policy_size = 0;
-
-    printk("XSM Framework v" XSM_FRAMEWORK_VERSION " initialized\n");
-
-    if ( XSM_MAGIC )
-    {
-        ret = xsm_multiboot_policy_init(module_map, mbi,
-                                        &policy_buffer, &policy_size);
-        if ( ret )
-        {
-            bootstrap_map(NULL);
-            printk(XENLOG_ERR "Error %d initializing XSM policy\n", ret);
-            return -EINVAL;
-        }
-    }
-
-    ret = xsm_core_init(policy_buffer, policy_size);
+    do_xsm_initcalls();
     bootstrap_map(NULL);
 
     return 0;
 }
-#endif
 
-#ifdef CONFIG_HAS_DEVICE_TREE
-int __init xsm_dt_init(void)
-{
-    int ret = 0;
-    void *policy_buffer = NULL;
-    size_t policy_size = 0;
-
-    printk("XSM Framework v" XSM_FRAMEWORK_VERSION " initialized\n");
-
-    if ( XSM_MAGIC )
-    {
-        ret = xsm_dt_policy_init(&policy_buffer, &policy_size);
-        if ( ret )
-        {
-            printk(XENLOG_ERR "Error %d initializing XSM policy\n", ret);
-            return -EINVAL;
-        }
-    }
-
-    ret = xsm_core_init(policy_buffer, policy_size);
-
-    xfree(policy_buffer);
-
-    return ret ?: (xsm_bootparam == XSM_BOOTPARAM_SILO);
-}
-
-/**
- * has_xsm_magic - Check XSM Magic of the module header by phy address
- * A XSM module has a special header
- * ------------------------------------------------
- * uint magic | uint target_len | uchar target[8] |
- * 0xf97cff8c |        8        |    "XenFlask"   |
- * ------------------------------------------------
- * 0xf97cff8c is policy magic number (XSM_MAGIC).
- * Here we only check the "magic" of the module.
- */
-bool __init has_xsm_magic(paddr_t start)
-{
-    xsm_magic_t magic;
-
-    if ( XSM_MAGIC )
-    {
-        copy_from_paddr(&magic, start, sizeof(magic) );
-        return ( magic == XSM_MAGIC );
-    }
-
-    return false;
-}
-#endif
-
-int __init register_xsm(struct xsm_operations *ops)
+int register_xsm(struct xsm_operations *ops)
 {
     if ( verify(ops) )
     {
-        printk(XENLOG_ERR "Could not verify xsm_operations structure\n");
+        printk("%s could not verify "
+               "security_operations structure.\n", __FUNCTION__);
         return -EINVAL;
     }
 
@@ -210,6 +93,22 @@ int __init register_xsm(struct xsm_operations *ops)
     return 0;
 }
 
+
+int unregister_xsm(struct xsm_operations *ops)
+{
+    if ( ops != xsm_ops )
+    {
+        printk("%s: trying to unregister "
+               "a security_opts structure that is not "
+               "registered, failing.\n", __FUNCTION__);
+        return -EINVAL;
+    }
+
+    xsm_ops = &dummy_xsm_ops;
+
+    return 0;
+}
+
 #endif
 
 long do_xsm_op (XEN_GUEST_HANDLE_PARAM(xsm_op_t) op)
@@ -217,9 +116,4 @@ long do_xsm_op (XEN_GUEST_HANDLE_PARAM(xsm_op_t) op)
     return xsm_do_xsm_op(op);
 }
 
-#ifdef CONFIG_COMPAT
-int compat_xsm_op (XEN_GUEST_HANDLE_PARAM(xsm_op_t) op)
-{
-    return xsm_do_compat_op(op);
-}
-#endif
+

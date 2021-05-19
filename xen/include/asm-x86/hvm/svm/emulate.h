@@ -13,7 +13,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #ifndef __ASM_X86_HVM_SVM_EMULATE_H__
@@ -30,7 +31,6 @@ enum instruction_index {
     INSTR_HLT,
     INSTR_INT3,
     INSTR_RDTSC,
-    INSTR_RDTSCP,
     INSTR_PAUSE,
     INSTR_XSETBV,
     INSTR_VMRUN,
@@ -39,7 +39,6 @@ enum instruction_index {
     INSTR_STGI,
     INSTR_CLGI,
     INSTR_INVLPGA,
-    INSTR_ICEBP,
     INSTR_MAX_COUNT /* Must be last - Number of instructions supported */
 };
 
@@ -53,8 +52,6 @@ static inline int __get_instruction_length(
 {
     return __get_instruction_length_from_list(v, &instr, 1);
 }
-
-unsigned int svm_get_task_switch_insn_len(void);
 
 #endif /* __ASM_X86_HVM_SVM_EMULATE_H__ */
 

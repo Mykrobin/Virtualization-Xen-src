@@ -41,6 +41,7 @@
  * POSSIBILITY OF SUCH DAMAGES.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <acpi/acpi.h>
 

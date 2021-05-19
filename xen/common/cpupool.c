@@ -17,7 +17,6 @@
 #include <xen/percpu.h>
 #include <xen/sched.h>
 #include <xen/sched-if.h>
-#include <xen/keyhandler.h>
 #include <xen/cpu.h>
 
 #define for_each_cpupool(ptr)    \
@@ -232,9 +231,6 @@ static int cpupool_move_domain_locked(struct domain *d, struct cpupool *c)
 {
     int ret;
 
-    if ( unlikely(d->cpupool == c) )
-        return 0;
-
     d->cpupool->n_dom--;
     ret = sched_move_domain(d, c);
     if ( ret )
@@ -264,13 +260,19 @@ int cpupool_move_domain(struct domain *d, struct cpupool *c)
 static int cpupool_assign_cpu_locked(struct cpupool *c, unsigned int cpu)
 {
     int ret;
+    struct cpupool *old;
     struct domain *d;
 
     if ( (cpupool_moving_cpu == cpu) && (c != cpupool_cpu_moving) )
-        return -EADDRNOTAVAIL;
+        return -EBUSY;
+    old = per_cpu(cpupool, cpu);
+    per_cpu(cpupool, cpu) = c;
     ret = schedule_cpu_switch(cpu, c);
     if ( ret )
+    {
+        per_cpu(cpupool, cpu) = old;
         return ret;
+    }
 
     cpumask_clear_cpu(cpu, &cpupool_free_cpus);
     if (cpupool_moving_cpu == cpu)
@@ -294,53 +296,28 @@ static int cpupool_assign_cpu_locked(struct cpupool *c, unsigned int cpu)
 static long cpupool_unassign_cpu_helper(void *info)
 {
     int cpu = cpupool_moving_cpu;
-    struct cpupool *c = info;
-    struct domain *d;
     long ret;
 
     cpupool_dprintk("cpupool_unassign_cpu(pool=%d,cpu=%d)\n",
                     cpupool_cpu_moving->cpupool_id, cpu);
 
     spin_lock(&cpupool_lock);
-    if ( c != cpupool_cpu_moving )
-    {
-        ret = -EADDRNOTAVAIL;
-        goto out;
-    }
-
-    /*
-     * We need this for scanning the domain list, both in
-     * cpu_disable_scheduler(), and at the bottom of this function.
-     */
-    rcu_read_lock(&domlist_read_lock);
     ret = cpu_disable_scheduler(cpu);
     cpumask_set_cpu(cpu, &cpupool_free_cpus);
-
-    /*
-     * cpu_disable_scheduler() returning an error doesn't require resetting
-     * cpupool_free_cpus' cpu bit. All error cases should be of temporary
-     * nature and tools will retry the operation. Even if the number of
-     * retries may be limited, the in-between state can easily be repaired
-     * by adding the cpu to the cpupool again.
-     */
     if ( !ret )
     {
         ret = schedule_cpu_switch(cpu, NULL);
         if ( ret )
-            cpumask_clear_cpu(cpu, &cpupool_free_cpus);
-        else
         {
-            cpupool_moving_cpu = -1;
-            cpupool_put(cpupool_cpu_moving);
-            cpupool_cpu_moving = NULL;
+            cpumask_clear_cpu(cpu, &cpupool_free_cpus);
+            goto out;
         }
+        per_cpu(cpupool, cpu) = NULL;
+        cpupool_moving_cpu = -1;
+        cpupool_put(cpupool_cpu_moving);
+        cpupool_cpu_moving = NULL;
     }
 
-    for_each_domain_in_cpupool(d, c)
-    {
-        domain_update_node_affinity(d);
-    }
-    rcu_read_unlock(&domlist_read_lock);
 out:
     spin_unlock(&cpupool_lock);
     cpupool_dprintk("cpupool_unassign_cpu ret=%ld\n", ret);
@@ -359,7 +336,7 @@ out:
  * - last cpu and still active domains in cpupool
  * - cpu just being unplugged
  */
-static int cpupool_unassign_cpu(struct cpupool *c, unsigned int cpu)
+int cpupool_unassign_cpu(struct cpupool *c, unsigned int cpu)
 {
     int work_cpu;
     int ret;
@@ -369,7 +346,7 @@ static int cpupool_unassign_cpu(struct cpupool *c, unsigned int cpu)
                     c->cpupool_id, cpu);
 
     spin_lock(&cpupool_lock);
-    ret = -EADDRNOTAVAIL;
+    ret = -EBUSY;
     if ( (cpupool_moving_cpu != -1) && (cpu != cpupool_moving_cpu) )
         goto out;
     if ( cpumask_test_cpu(cpu, &cpupool_locked_cpus) )
@@ -490,7 +467,7 @@ static int cpupool_cpu_add(unsigned int cpu)
     cpumask_clear_cpu(cpu, &cpupool_locked_cpus);
     cpumask_set_cpu(cpu, &cpupool_free_cpus);
 
-    if ( system_state == SYS_STATE_suspend || system_state == SYS_STATE_resume )
+    if ( system_state == SYS_STATE_resume )
     {
         struct cpupool **c;
 
@@ -522,7 +499,6 @@ static int cpupool_cpu_add(unsigned int cpu)
          * (or unplugging would have failed) and that is the default behavior
          * anyway.
          */
-        per_cpu(cpupool, cpu) = NULL;
         ret = cpupool_assign_cpu_locked(cpupool0, cpu);
     }
  out:
@@ -541,7 +517,7 @@ static int cpupool_cpu_add(unsigned int cpu)
  */
 static int cpupool_cpu_remove(unsigned int cpu)
 {
-    int ret = -ENODEV;
+    int ret = -EBUSY;
 
     spin_lock(&cpupool_lock);
     if ( system_state == SYS_STATE_suspend )
@@ -651,7 +627,7 @@ int cpupool_do_sysctl(struct xen_sysctl_cpupool_op *op)
         ret = -EINVAL;
         if ( cpu >= nr_cpu_ids )
             goto addcpu_out;
-        ret = -ENODEV;
+        ret = -EBUSY;
         if ( !cpumask_test_cpu(cpu, &cpupool_free_cpus) )
             goto addcpu_out;
         c = cpupool_find_by_id(op->cpupool_id);
@@ -732,12 +708,6 @@ int cpupool_do_sysctl(struct xen_sysctl_cpupool_op *op)
     return ret;
 }
 
-static void print_cpumap(const char *str, const cpumask_t *map)
-{
-    cpulist_scnprintf(keyhandler_scratch, sizeof(keyhandler_scratch), map);
-    printk("%s: %s\n", str, keyhandler_scratch);
-}
-
 void dump_runq(unsigned char key)
 {
     unsigned long    flags;
@@ -749,19 +719,14 @@ void dump_runq(unsigned char key)
 
     printk("sched_smt_power_savings: %s\n",
             sched_smt_power_savings? "enabled":"disabled");
-    printk("NOW=%"PRI_stime"\n", now);
+    printk("NOW=0x%08X%08X\n",  (u32)(now>>32), (u32)now);
 
-    print_cpumap("Online Cpus", &cpu_online_map);
-    if ( !cpumask_empty(&cpupool_free_cpus) )
-    {
-        print_cpumap("Free Cpus", &cpupool_free_cpus);
-        schedule_dump(NULL);
-    }
+    printk("Idle cpupool:\n");
+    schedule_dump(NULL);
 
     for_each_cpupool(c)
     {
         printk("Cpupool %d:\n", (*c)->cpupool_id);
-        print_cpumap("Cpus", (*c)->cpu_valid);
         schedule_dump(*c);
     }
 

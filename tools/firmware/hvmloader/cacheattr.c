@@ -16,7 +16,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #include "util.h"
@@ -96,33 +97,20 @@ void cacheattr_init(void)
     nr_var_ranges = (uint8_t)mtrr_cap;
     if ( nr_var_ranges != 0 )
     {
-        uint64_t base = pci_mem_start, size;
+        unsigned long base = pci_mem_start, size;
+        int i;
 
-        for ( i = 0; !(base >> 32) && (i < nr_var_ranges); i++ )
+        for ( i = 0; (base != pci_mem_end) && (i < nr_var_ranges); i++ )
         {
             size = PAGE_SIZE;
             while ( !(base & size) )
                 size <<= 1;
-            while ( ((base + size) < base) || ((base + size - 1) >> 32) )
+            while ( ((base + size) < base) || ((base + size) > pci_mem_end) )
                 size >>= 1;
 
             wrmsr(MSR_MTRRphysBase(i), base);
-            wrmsr(MSR_MTRRphysMask(i), (~(size - 1) & addr_mask) | (1u << 11));
-
-            base += size;
-        }
-
-        for ( base = pci_hi_mem_start;
-              (base != pci_hi_mem_end) && (i < nr_var_ranges); i++ )
-        {
-            size = PAGE_SIZE;
-            while ( !(base & size) )
-                size <<= 1;
-            while ( (base + size < base) || (base + size > pci_hi_mem_end) )
-                size >>= 1;
-
-            wrmsr(MSR_MTRRphysBase(i), base);
-            wrmsr(MSR_MTRRphysMask(i), (~(size - 1) & addr_mask) | (1u << 11));
+            wrmsr(MSR_MTRRphysMask(i),
+                  (~(uint64_t)(size-1) & addr_mask) | (1u << 11));
 
             base += size;
         }

@@ -456,9 +456,6 @@ int __cpufreq_set_policy(struct cpufreq_policy *data,
 
     data->min = policy->min;
     data->max = policy->max;
-    data->limits = policy->limits;
-    if (cpufreq_driver->setpolicy)
-        return cpufreq_driver->setpolicy(data);
 
     if (policy->governor != data->governor) {
         /* save old, working values */

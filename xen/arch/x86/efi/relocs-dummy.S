@@ -1,3 +1,4 @@
+#include <xen/config.h>
 
 	.section .reloc, "a", @progbits
 	.balign 4

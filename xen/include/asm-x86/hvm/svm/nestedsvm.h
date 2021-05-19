@@ -12,7 +12,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  */
 #ifndef __ASM_X86_HVM_SVM_NESTEDSVM_H__
@@ -46,8 +47,8 @@ struct nestedsvm {
     uint32_t ns_general1_intercepts;
     uint32_t ns_general2_intercepts;
 
-    /* Cached real lbr and other virtual extentions of the l2 guest */
-    virt_ext_t ns_virt_ext;
+    /* Cached real lbr of the l2 guest */
+    lbrctrl_t ns_lbr_control;
 
     /* Cached real MSR permission bitmaps of the l2 guest */
     unsigned long *ns_cached_msrpm;
@@ -104,17 +105,23 @@ nestedsvm_vmexit_n2n1(struct vcpu *v, struct cpu_user_regs *regs);
 enum nestedhvm_vmexits
 nestedsvm_check_intercepts(struct vcpu *v, struct cpu_user_regs *regs,
     uint64_t exitcode);
-void svm_nested_features_on_efer_update(struct vcpu *v);
 
 /* Interface methods */
 void nsvm_vcpu_destroy(struct vcpu *v);
 int nsvm_vcpu_initialise(struct vcpu *v);
 int nsvm_vcpu_reset(struct vcpu *v);
+int nsvm_vcpu_hostrestore(struct vcpu *v, struct cpu_user_regs *regs);
 int nsvm_vcpu_vmrun(struct vcpu *v, struct cpu_user_regs *regs);
-int nsvm_vcpu_vmexit_event(struct vcpu *v, const struct x86_event *event);
+int nsvm_vcpu_vmexit_inject(struct vcpu *v, struct cpu_user_regs *regs,
+    uint64_t exitcode);
+int nsvm_vcpu_vmexit_trap(struct vcpu *v, struct hvm_trap *trap);
+uint64_t nsvm_vcpu_guestcr3(struct vcpu *v);
 uint64_t nsvm_vcpu_hostcr3(struct vcpu *v);
-bool_t nsvm_vmcb_guest_intercepts_event(
-    struct vcpu *v, unsigned int vector, int errcode);
+uint32_t nsvm_vcpu_asid(struct vcpu *v);
+int nsvm_vmcb_guest_intercepts_exitcode(struct vcpu *v,
+    struct cpu_user_regs *regs, uint64_t exitcode);
+int nsvm_vmcb_guest_intercepts_trap(struct vcpu *v, unsigned int trapnr,
+                                    int errcode);
 bool_t nsvm_vmcb_hap_enabled(struct vcpu *v);
 enum hvm_intblk nsvm_intr_blocked(struct vcpu *v);
 

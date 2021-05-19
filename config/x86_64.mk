@@ -2,6 +2,8 @@ CONFIG_X86 := y
 CONFIG_X86_64 := y
 CONFIG_X86_$(XEN_OS) := y
 
+CONFIG_COMPAT := y
+CONFIG_HVM := y
 CONFIG_MIGRATE := y
 CONFIG_XCUTILS := y
 
@@ -23,5 +25,3 @@ else
 LDFLAGS_DIRECT += -melf_x86_64
 endif
 endif
-
-IOEMU_CPU_ARCH ?= x86_64

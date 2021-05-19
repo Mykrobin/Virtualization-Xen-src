@@ -124,8 +124,10 @@ void libxl_event_register_callbacks(libxl_ctx *ctx,
    * different parameters, as the application likes; the most recent
    * call determines the libxl behaviour.  However it is NOT safe to
    * call _register_callbacks concurrently with, or reentrantly from,
-   * any other libxl function, nor while any event-generation
-   * facilities are enabled.
+   * any other libxl function.
+   *
+   * Calls to _register_callbacks do not affect events which have
+   * already occurred.
    */
 
 
@@ -179,9 +181,9 @@ typedef struct libxl__evgen_domain_death libxl_evgen_domain_death;
 int libxl_evenable_domain_death(libxl_ctx *ctx, uint32_t domid,
                          libxl_ev_user, libxl_evgen_domain_death **evgen_out);
 void libxl_evdisable_domain_death(libxl_ctx *ctx, libxl_evgen_domain_death*);
-  /* Arranges for the generation of DOMAIN_SHUTDOWN and DOMAIN_DEATH
+  /* Arranges for the generation of DOMAIN_SHUTDOWN and DOMAIN_DESTROY
    * events.  A domain which is destroyed before it shuts down
-   * may generate only a DEATH event.
+   * may generate only a DESTROY event.
    */
 
 typedef struct libxl__evgen_disk_eject libxl_evgen_disk_eject;
@@ -213,7 +215,7 @@ void libxl_evdisable_disk_eject(libxl_ctx *ctx, libxl_evgen_disk_eject*);
  *      libxl_osevent_afterpoll(...);
  *      for (;;) {
  *          r = libxl_event_check(...);
- *          if (r==ERROR_NOT_READY) break;
+ *          if (r==LIBXL_NOT_READY) break;
  *          if (r) goto error_out;
  *          do something with the event;
  *      }

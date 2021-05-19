@@ -14,16 +14,17 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
-#include <xen/vm_event.h>
-#include <xen/event.h>
-#include <public/vm_event.h>
 #include <asm/domain.h>
 #include <asm/page.h>
 #include <asm/paging.h>
 #include <asm/p2m.h>
+#include <asm/mem_event.h>
+#include <public/mem_event.h>
 #include <asm/mem_sharing.h>
+#include <xen/event.h>
 #include <asm/hap.h>
 #include <asm/hvm/support.h>
 
@@ -33,6 +34,10 @@
 
 #include <asm/hvm/vmx/vmx.h>
 #include <asm/hvm/vmx/vvmx.h>
+
+/* EPT always use 4-level paging structure */
+#define GUEST_PAGING_LEVELS 4
+#include <asm/guest_pt.h>
 
 /* Must reserved bits in all level entries  */
 #define EPT_MUST_RSV_BITS (((1ull << PADDR_BITS) - 1) & \
@@ -173,7 +178,7 @@ nept_walk_tables(struct vcpu *v, unsigned long l2ga, ept_walk_t *gw)
             goto map_err;
         gw->lxe[lvl] = lxp[ept_lvl_table_offset(l2ga, lvl)];
         unmap_domain_page(lxp);
-        put_page(mfn_to_page(lxmfn));
+        put_page(mfn_to_page(mfn_x(lxmfn)));
 
         if ( nept_non_present_check(gw->lxe[lvl]) )
             goto non_present;
@@ -208,7 +213,7 @@ done:
     goto out;
 
 map_err:
-    if ( rc == PFEC_page_paged )
+    if ( rc == _PAGE_PAGED )
     {
         ret = EPT_TRANSLATE_RETRY;
         goto out;
@@ -236,7 +241,7 @@ int nept_translate_l2ga(struct vcpu *v, paddr_t l2ga,
     ept_walk_t gw;
     rwx_acc &= EPTE_RWX_MASK;
 
-    *l1gfn = gfn_x(INVALID_GFN);
+    *l1gfn = INVALID_GFN;
 
     rc = nept_walk_tables(v, l2ga, &gw);
     switch ( rc )

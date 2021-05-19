@@ -7,6 +7,7 @@
  * copied from Linux
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/acpi.h>
@@ -125,22 +126,42 @@ static void __iomem *mcfg_ioremap(const struct acpi_mcfg_allocation *cfg,
         return NULL;
 
     if (map_pages_to_xen(virt,
-                         mfn_add(maddr_to_mfn(cfg->address),
-                                 (cfg->start_bus_number << (20 - PAGE_SHIFT))),
-                         PFN_DOWN(size), prot))
+                         (cfg->address >> PAGE_SHIFT) +
+                         (cfg->start_bus_number << (20 - PAGE_SHIFT)),
+                         size >> PAGE_SHIFT, prot))
         return NULL;
 
     return (void __iomem *) virt;
 }
 
+void arch_pci_ro_device(int seg, int bdf)
+{
+    unsigned int idx, bus = PCI_BUS(bdf);
+
+    for (idx = 0; idx < pci_mmcfg_config_num; ++idx) {
+        const struct acpi_mcfg_allocation *cfg = pci_mmcfg_virt[idx].cfg;
+        unsigned long mfn = (cfg->address >> PAGE_SHIFT) + bdf;
+
+        if (!pci_mmcfg_virt[idx].virt || cfg->pci_segment != seg ||
+            cfg->start_bus_number > bus || cfg->end_bus_number < bus)
+            continue;
+
+        if (rangeset_add_singleton(mmio_ro_ranges, mfn))
+            printk(XENLOG_ERR
+                   "%04x:%02x:%02x.%u: could not mark MCFG (mfn %#lx) read-only\n",
+                   cfg->pci_segment, bus, PCI_SLOT(bdf), PCI_FUNC(bdf),
+                   mfn);
+    }
+}
+
 int pci_mmcfg_arch_enable(unsigned int idx)
 {
     const typeof(pci_mmcfg_config[0]) *cfg = pci_mmcfg_virt[idx].cfg;
-    unsigned long start_mfn, end_mfn;
+    const unsigned long *ro_map = pci_get_ro_map(cfg->pci_segment);
 
     if (pci_mmcfg_virt[idx].virt)
         return 0;
-    pci_mmcfg_virt[idx].virt = mcfg_ioremap(cfg, idx, PAGE_HYPERVISOR_UC);
+    pci_mmcfg_virt[idx].virt = mcfg_ioremap(cfg, idx, PAGE_HYPERVISOR_NOCACHE);
     if (!pci_mmcfg_virt[idx].virt) {
         printk(KERN_ERR "PCI: Cannot map MCFG aperture for segment %04x\n",
                cfg->pci_segment);
@@ -148,15 +169,16 @@ int pci_mmcfg_arch_enable(unsigned int idx)
     }
     printk(KERN_INFO "PCI: Using MCFG for segment %04x bus %02x-%02x\n",
            cfg->pci_segment, cfg->start_bus_number, cfg->end_bus_number);
+    if (ro_map) {
+        unsigned int bdf = PCI_BDF(cfg->start_bus_number, 0, 0);
+        unsigned int end = PCI_BDF(cfg->end_bus_number, -1, -1);
 
-    start_mfn = PFN_DOWN(cfg->address) + PCI_BDF(cfg->start_bus_number, 0, 0);
-    end_mfn = PFN_DOWN(cfg->address) + PCI_BDF(cfg->end_bus_number, ~0, ~0);
-    if ( rangeset_add_range(mmio_ro_ranges, start_mfn, end_mfn) )
-        printk(XENLOG_ERR
-               "%04x:%02x-%02x: could not mark MCFG (mfns %lx-%lx) read-only\n",
-               cfg->pci_segment, cfg->start_bus_number, cfg->end_bus_number,
-               start_mfn, end_mfn);
-
+        while ((bdf = find_next_bit(ro_map, end + 1, bdf)) <= end) {
+            arch_pci_ro_device(cfg->pci_segment, bdf);
+            if (bdf++ == end)
+                break;
+        }
+    }
     return 0;
 }
 
@@ -173,38 +195,6 @@ void pci_mmcfg_arch_disable(unsigned int idx)
     mcfg_ioremap(cfg, idx, 0);
     printk(KERN_WARNING "PCI: Not using MCFG for segment %04x bus %02x-%02x\n",
            cfg->pci_segment, cfg->start_bus_number, cfg->end_bus_number);
-}
-
-bool_t pci_mmcfg_decode(unsigned long mfn, unsigned int *seg,
-                        unsigned int *bdf)
-{
-    unsigned int idx;
-
-    for (idx = 0; idx < pci_mmcfg_config_num; ++idx) {
-        const struct acpi_mcfg_allocation *cfg = pci_mmcfg_virt[idx].cfg;
-
-        if (pci_mmcfg_virt[idx].virt &&
-            mfn >= PFN_DOWN(cfg->address) + PCI_BDF(cfg->start_bus_number,
-                                                    0, 0) &&
-            mfn <= PFN_DOWN(cfg->address) + PCI_BDF(cfg->end_bus_number,
-                                                    ~0, ~0)) {
-            *seg = cfg->pci_segment;
-            *bdf = mfn - PFN_DOWN(cfg->address);
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-bool_t pci_ro_mmcfg_decode(unsigned long mfn, unsigned int *seg,
-                           unsigned int *bdf)
-{
-    const unsigned long *ro_map;
-
-    return pci_mmcfg_decode(mfn, seg, bdf) &&
-           ((ro_map = pci_get_ro_map(*seg)) == NULL ||
-             !test_bit(*bdf, ro_map));
 }
 
 int __init pci_mmcfg_arch_init(void)
