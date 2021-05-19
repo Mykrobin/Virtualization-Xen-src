@@ -18,8 +18,29 @@ struct mp_config_table;
 struct mpc_config_processor;
 
 struct genapic { 
-	const char *name;
-	int (*probe)(void);
+	char *name; 
+	int (*probe)(void); 
+
+	int (*apic_id_registered)(void);
+	cpumask_t (*target_cpus)(void);
+	int int_delivery_mode;
+	int int_dest_mode; 
+	int ESR_DISABLE;
+	int apic_destination_logical;
+	unsigned long (*check_apicid_used)(physid_mask_t bitmap, int apicid);
+	unsigned long (*check_apicid_present)(int apicid); 
+	int no_balance_irq;
+	void (*init_apic_ldr)(void);
+	physid_mask_t (*ioapic_phys_id_map)(physid_mask_t map);
+
+	void (*clustered_apic_check)(void);
+	int (*apicid_to_node)(int logical_apicid); 
+	int (*cpu_to_logical_apicid)(int cpu);
+	int (*cpu_present_to_apicid)(int mps_cpu);
+	physid_mask_t (*apicid_to_cpu_present)(int phys_apicid);
+	int (*check_phys_apicid_present)(int boot_cpu_physical_apicid);
+	void (*enable_apic_mode)(void);
+	u32 (*phys_pkg_id)(u32 cpuid_apic, int index_msb);
 
 	/* When one of the next two hooks returns 1 the genapic
 	   is switched to this. Essentially they are additional probe 
@@ -28,59 +49,48 @@ struct genapic {
 			      char *productid);
 	int (*acpi_madt_oem_check)(char *oem_id, char *oem_table_id);
 
-	/* Interrupt delivery parameters ('physical' vs. 'logical flat'). */
-	int int_delivery_mode;
-	int int_dest_mode;
-	void (*init_apic_ldr)(void);
-	void (*clustered_apic_check)(void);
-	const cpumask_t *(*vector_allocation_cpumask)(int cpu);
-	unsigned int (*cpu_mask_to_apicid)(const cpumask_t *cpumask);
-	void (*send_IPI_mask)(const cpumask_t *mask, int vector);
-    void (*send_IPI_self)(uint8_t vector);
-};
+	unsigned (*get_apic_id)(unsigned long x);
+	unsigned int (*cpu_mask_to_apicid)(cpumask_t cpumask);
+	
+	/* ipi */
+	void (*send_IPI_mask)(cpumask_t mask, int vector);
+	void (*send_IPI_allbutself)(int vector);
+	void (*send_IPI_all)(int vector);
+}; 
 
 #define APICFUNC(x) .x = x
 
-#define APIC_INIT(aname, aprobe) \
+#define APIC_INIT(aname, aprobe) { \
 	.name = aname, \
 	.probe = aprobe, \
+	.int_delivery_mode = INT_DELIVERY_MODE, \
+	.int_dest_mode = INT_DEST_MODE, \
+	.no_balance_irq = NO_BALANCE_IRQ, \
+	.ESR_DISABLE = esr_disable, \
+	.apic_destination_logical = APIC_DEST_LOGICAL, \
+	APICFUNC(apic_id_registered), \
+	APICFUNC(target_cpus), \
+	APICFUNC(check_apicid_used), \
+	APICFUNC(check_apicid_present), \
+	APICFUNC(init_apic_ldr), \
+	APICFUNC(ioapic_phys_id_map), \
+	APICFUNC(clustered_apic_check), \
+	APICFUNC(apicid_to_node), \
+	APICFUNC(cpu_to_logical_apicid), \
+	APICFUNC(cpu_present_to_apicid), \
+	APICFUNC(apicid_to_cpu_present), \
+	APICFUNC(check_phys_apicid_present), \
 	APICFUNC(mps_oem_check), \
-	APICFUNC(acpi_madt_oem_check)
+	APICFUNC(get_apic_id), \
+	APICFUNC(cpu_mask_to_apicid), \
+	APICFUNC(acpi_madt_oem_check), \
+	APICFUNC(send_IPI_mask), \
+	APICFUNC(send_IPI_allbutself), \
+	APICFUNC(send_IPI_all), \
+	APICFUNC(enable_apic_mode), \
+	APICFUNC(phys_pkg_id), \
+	}
 
-extern struct genapic genapic;
-extern const struct genapic apic_default;
-extern const struct genapic apic_bigsmp;
-
-void send_IPI_self_legacy(uint8_t vector);
-
-void init_apic_ldr_flat(void);
-void clustered_apic_check_flat(void);
-unsigned int cpu_mask_to_apicid_flat(const cpumask_t *cpumask);
-void send_IPI_mask_flat(const cpumask_t *mask, int vector);
-const cpumask_t *vector_allocation_cpumask_flat(int cpu);
-#define GENAPIC_FLAT \
-	.int_delivery_mode = dest_LowestPrio, \
-	.int_dest_mode = 1 /* logical delivery */, \
-	.init_apic_ldr = init_apic_ldr_flat, \
-	.clustered_apic_check = clustered_apic_check_flat, \
-	.vector_allocation_cpumask = vector_allocation_cpumask_flat, \
-	.cpu_mask_to_apicid = cpu_mask_to_apicid_flat, \
-	.send_IPI_mask = send_IPI_mask_flat, \
-	.send_IPI_self = send_IPI_self_legacy
-
-void init_apic_ldr_phys(void);
-void clustered_apic_check_phys(void);
-unsigned int cpu_mask_to_apicid_phys(const cpumask_t *cpumask);
-void send_IPI_mask_phys(const cpumask_t *mask, int vector);
-const cpumask_t *vector_allocation_cpumask_phys(int cpu);
-#define GENAPIC_PHYS \
-	.int_delivery_mode = dest_Fixed, \
-	.int_dest_mode = 0 /* physical delivery */, \
-	.init_apic_ldr = init_apic_ldr_phys, \
-	.clustered_apic_check = clustered_apic_check_phys, \
-	.vector_allocation_cpumask = vector_allocation_cpumask_phys, \
-	.cpu_mask_to_apicid = cpu_mask_to_apicid_phys, \
-	.send_IPI_mask = send_IPI_mask_phys, \
-	.send_IPI_self = send_IPI_self_legacy
+extern struct genapic *genapic;
 
 #endif

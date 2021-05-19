@@ -18,7 +18,8 @@
  * GNU General Public License for more details.
  * 
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 /*
@@ -37,15 +38,10 @@
 #include <xen/spinlock.h>
 #include <xen/serial.h>
 #include <xen/irq.h>
-#include <xen/watchdog.h>
 #include <asm/debugger.h>
 #include <xen/init.h>
-#include <xen/param.h>
 #include <xen/smp.h>
 #include <xen/console.h>
-#include <xen/errno.h>
-#include <xen/delay.h>
-#include <asm/byteorder.h>
 
 /* Printk isn't particularly safe just after we've trapped to the
    debugger. so avoid it. */
@@ -54,32 +50,19 @@
 
 #define GDB_RETRY_MAX   10
 
-struct gdb_cpu_info
-{
-    atomic_t paused;
-    atomic_t ack;
-};
-
-static struct gdb_cpu_info gdb_cpu[NR_CPUS];
-static atomic_t gdb_smp_paused_count;
-
-static void gdb_smp_pause(void);
-static void gdb_smp_resume(void);
-
-static char __initdata opt_gdb[30];
+static char opt_gdb[30] = "none";
 string_param("gdb", opt_gdb);
 
-static void gdbstub_console_puts(const char *str, size_t nr);
-
 /* value <-> char (de)serialzers */
-static char
+char
 hex2char(unsigned long x)
 {
     const char array[] = "0123456789abcdef";
+
     return array[x & 15];
 }
 
-static unsigned int
+int
 char2hex(unsigned char c)
 {
     if ( (c >= '0') && (c <= '9') )
@@ -93,13 +76,13 @@ char2hex(unsigned char c)
     return -1;
 }
 
-static unsigned char
+char
 str2hex(const char *str)
 {
     return (char2hex(str[0]) << 4) | char2hex(str[1]);
 }
 
-static unsigned long
+unsigned long
 str2ulong(const char *str, unsigned long bytes)
 {
     unsigned long x = 0;
@@ -111,28 +94,6 @@ str2ulong(const char *str, unsigned long bytes)
         x += char2hex(*str);
         ++str;
         ++i;
-    }
-
-    return x;
-}
-
-static unsigned long
-str_to_native_ulong(const char *str)
-{
-    unsigned long x = 0, i = 0;
-
-    while ( *str && (i < BYTES_PER_LONG) )
-    {
-#ifdef __BIG_ENDIAN
-        x <<= 8;
-        x += str2hex(str);
-#elif defined(__LITTLE_ENDIAN)
-        x += (unsigned long)str2hex(str) << (i*8);
-#else
-# error unknown endian
-#endif
-        str += 2;
-        i++;
     }
 
     return x;
@@ -251,7 +212,8 @@ void
 gdb_write_to_packet_hex(unsigned long x, int int_size, struct gdb_context *ctx)
 {
     char buf[sizeof(unsigned long) * 2 + 1];
-    int i, width = int_size * 2;
+    int i = sizeof(unsigned long) * 2;
+    int width = int_size * 2;
 
     buf[sizeof(unsigned long) * 2] = 0;
 
@@ -263,13 +225,11 @@ gdb_write_to_packet_hex(unsigned long x, int int_size, struct gdb_context *ctx)
     case sizeof(u64):
         break;
     default:
-        dbg_printk("WARNING: %s x: %#lx int_size: %d\n",
+        dbg_printk("WARNING: %s x: 0x%lx int_size: %d\n",
                    __func__, x, int_size);
         break;
     }
 
-#ifdef __BIG_ENDIAN
-    i = sizeof(unsigned long) * 2
     do {
         buf[--i] = hex2char(x & 15);
         x >>= 4;
@@ -279,18 +239,6 @@ gdb_write_to_packet_hex(unsigned long x, int int_size, struct gdb_context *ctx)
         buf[--i] = '0';
 
     gdb_write_to_packet(&buf[i], width, ctx);
-#elif defined(__LITTLE_ENDIAN)
-    i = 0;
-    while ( i < width )
-    {
-        buf[i++] = hex2char(x>>4);
-        buf[i++] = hex2char(x);
-        x >>= 8;
-    }
-    gdb_write_to_packet(buf, width, ctx);
-#else
-# error unknown endian
-#endif
 }
 
 static int
@@ -317,7 +265,7 @@ gdb_send_packet(struct gdb_context *ctx)
     char buf[3];
     int count;
 
-    snprintf(buf, sizeof(buf), "%.02x\n", ctx->out_csum);
+    sprintf(buf, "%.02x\n", ctx->out_csum);
 
     gdb_write_to_packet_char('#', ctx);
     gdb_write_to_packet(buf, 2, ctx);
@@ -409,32 +357,13 @@ gdb_cmd_write_mem(unsigned long addr, unsigned long length,
     gdb_send_packet(ctx);
 }
 
-static void
-gdbstub_attach(struct gdb_context *ctx)
-{
-    if ( ctx->currently_attached )
-        return;    
-    ctx->currently_attached = 1;
-    ctx->console_steal_id = console_steal(ctx->serhnd, gdbstub_console_puts);
-}
-
-static void
-gdbstub_detach(struct gdb_context *ctx)
-{
-    if ( !ctx->currently_attached )
-        return;
-    ctx->currently_attached = 0;
-    console_giveback(ctx->console_steal_id);
-}
-
 /* command dispatcher */
 static int 
 process_command(struct cpu_user_regs *regs, struct gdb_context *ctx)
 {
-    const char *ptr;
-    unsigned long addr, length, val;
+    char *ptr;
+    unsigned long addr, length;
     int resume = 0;
-    unsigned long type = GDB_CONTINUE;
 
     /* XXX check ctx->in_bytes >= 2 or similar. */
 
@@ -497,40 +426,30 @@ process_command(struct cpu_user_regs *regs, struct gdb_context *ctx)
         }
         gdb_arch_read_reg(addr, regs, ctx);
         break;
-    case 'P': /* write register */
-        addr = simple_strtoul(ctx->in_buf + 1, &ptr, 16);
-        if ( ptr == (ctx->in_buf + 1) )
-        {
-            gdb_send_reply("E03", ctx);
-            return 0;
-        }
-        if ( ptr[0] != '=' )
-        {
-            gdb_send_reply("E04", ctx);
-            return 0;
-        }
-        ptr++;
-        val = str_to_native_ulong(ptr);
-        gdb_arch_write_reg(addr, val, regs, ctx);
-        break;
     case 'D':
-    case 'k':
-        gdbstub_detach(ctx);
+        ctx->currently_attached = 0;
         gdb_send_reply("OK", ctx);
+        /* fall through */
+    case 'k':
         ctx->connected = 0;
-        resume = 1;
-        break;
+        /* fall through */
     case 's': /* Single step */
-        type = GDB_STEP;
     case 'c': /* Resume at current address */
-        addr = ~((unsigned long)0);
-
-        if ( ctx->in_buf[1] )
+    {
+        unsigned long addr = ~((unsigned long)0);
+        unsigned long type = GDB_CONTINUE;
+        if ( ctx->in_buf[0] == 's' )
+            type = GDB_STEP;
+        if ( ((ctx->in_buf[0] == 's') || (ctx->in_buf[0] == 'c')) &&
+             ctx->in_buf[1] )
             addr = str2ulong(&ctx->in_buf[1], sizeof(unsigned long));
-        gdbstub_attach(ctx);
+        if ( ctx->in_buf[0] != 'D' )
+            ctx->currently_attached = 1;
         resume = 1;
         gdb_arch_resume(regs, addr, type, ctx);
         break;
+    }
+
     default:
         gdb_send_reply("", ctx);
         break;
@@ -540,40 +459,29 @@ process_command(struct cpu_user_regs *regs, struct gdb_context *ctx)
 
 static struct gdb_context
 __gdb_ctx = {
-    .serhnd  = -1,
-    .running = ATOMIC_INIT(1),
-    .signum  = 1
+    .serhnd             = -1,
+    .currently_attached = 0,
+    .running            = ATOMIC_INIT(1),
+    .connected          = 0,
+    .signum             = 1,
+    .in_bytes           = 0,
+    .out_offset         = 0,
+    .out_csum           = 0,
 };
 static struct gdb_context *gdb_ctx = &__gdb_ctx;
-
-static void
-gdbstub_console_puts(const char *str, size_t nr)
-{
-    const char *p;
-
-    gdb_start_packet(gdb_ctx);
-    gdb_write_to_packet_char('O', gdb_ctx);
-
-    for ( p = str; nr > 0; p++, nr-- )
-    {
-        gdb_write_to_packet_char(hex2char((*p>>4) & 0x0f), gdb_ctx );
-        gdb_write_to_packet_char(hex2char((*p) & 0x0f), gdb_ctx );
-    }
-
-    gdb_send_packet(gdb_ctx);
-}
 
 /* trap handler: main entry point */
 int 
 __trap_to_gdb(struct cpu_user_regs *regs, unsigned long cookie)
 {
-    int rc = 0;
+    int resume = 0;
+    int r;
     unsigned long flags;
 
     if ( gdb_ctx->serhnd < 0 )
     {
-        printk("Debugging connection not set up.\n");
-        return -EBUSY;
+        dbg_printk("Debugger not ready yet.\n");
+        return 0;
     }
 
     /* We rely on our caller to ensure we're only on one processor
@@ -592,7 +500,7 @@ __trap_to_gdb(struct cpu_user_regs *regs, unsigned long cookie)
     {
         printk("WARNING WARNING WARNING: Avoiding recursive gdb.\n");
         atomic_inc(&gdb_ctx->running);
-        return -EBUSY;
+        return 0;
     }
 
     if ( !gdb_ctx->connected )
@@ -602,16 +510,21 @@ __trap_to_gdb(struct cpu_user_regs *regs, unsigned long cookie)
         gdb_ctx->connected = 1;
     }
 
-    gdb_smp_pause();
+    smp_send_stop();
 
+    /* Try to make things a little more stable by disabling
+       interrupts while we're here. */
     local_irq_save(flags);
 
     watchdog_disable();
     console_start_sync();
 
+    /* Shouldn't really do this, but otherwise we stop for no
+       obvious reason, which is Bad */
+    printk("Waiting for GDB to attach...\n");
+
     gdb_arch_enter(regs);
     gdb_ctx->signum = gdb_arch_signal_num(regs, cookie);
-
     /* If gdb is already attached, tell it we've stopped again. */
     if ( gdb_ctx->currently_attached )
     {
@@ -619,16 +532,19 @@ __trap_to_gdb(struct cpu_user_regs *regs, unsigned long cookie)
         gdb_cmd_signum(gdb_ctx);
     }
 
-    do {
-        if ( receive_command(gdb_ctx) < 0 )
+    while ( resume == 0 )
+    {
+        r = receive_command(gdb_ctx);
+        if ( r < 0 )
         {
-            dbg_printk("Error in GDB session...\n");
-            rc = -EIO;
-            break;
+            dbg_printk("GDB disappeared, trying to resume Xen...\n");
+            resume = 1;
         }
-    } while ( process_command(regs, gdb_ctx) == 0 );
-
-    gdb_smp_resume();
+        else
+        {
+            resume = process_command(regs, gdb_ctx);
+        }
+    }
 
     gdb_arch_exit(regs);
     console_end_sync();
@@ -637,111 +553,22 @@ __trap_to_gdb(struct cpu_user_regs *regs, unsigned long cookie)
 
     local_irq_restore(flags);
 
-    return rc;
-}
-
-static int __init initialise_gdb(void)
-{
-    if ( *opt_gdb == '\0' )
-        return 0;
-
-    gdb_ctx->serhnd = serial_parse_handle(opt_gdb);
-    if ( gdb_ctx->serhnd == -1 )
-    {
-        printk("Bad gdb= option '%s'\n", opt_gdb);
-        return 0;
-    }
-
-    serial_start_sync(gdb_ctx->serhnd);
-
-    printk("GDB stub initialised.\n");
-
     return 0;
 }
-presmp_initcall(initialise_gdb);
 
-static void gdb_pause_this_cpu(void *unused)
+void
+initialise_gdb(void)
 {
-    unsigned long flags;
-
-    local_irq_save(flags);
-
-    atomic_set(&gdb_cpu[smp_processor_id()].ack, 1);
-    atomic_inc(&gdb_smp_paused_count);
-
-    while ( atomic_read(&gdb_cpu[smp_processor_id()].paused) )
-        mdelay(1);
-
-    atomic_dec(&gdb_smp_paused_count);
-    atomic_set(&gdb_cpu[smp_processor_id()].ack, 0);
-
-    /* Restore interrupts */
-    local_irq_restore(flags);
-}
-
-static void gdb_smp_pause(void)
-{
-    int timeout = 100;
-    int cpu;
-
-    for_each_online_cpu(cpu)
-    {
-        atomic_set(&gdb_cpu[cpu].ack, 0);
-        atomic_set(&gdb_cpu[cpu].paused, 1);
-    }
-
-    atomic_set(&gdb_smp_paused_count, 0);
-
-    smp_call_function(gdb_pause_this_cpu, NULL, /* dont wait! */0);
-
-    /* Wait 100ms for all other CPUs to enter pause loop */
-    while ( (atomic_read(&gdb_smp_paused_count) < (num_online_cpus() - 1)) 
-            && (timeout-- > 0) )
-        mdelay(1);
-
-    if ( atomic_read(&gdb_smp_paused_count) < (num_online_cpus() - 1) )
-    {
-        printk("GDB: Not all CPUs have paused, missing CPUs ");
-        for_each_online_cpu(cpu)
-        {
-            if ( (cpu != smp_processor_id()) &&
-                 !atomic_read(&gdb_cpu[cpu].ack) )
-                printk("%d ", cpu);
-        }
-        printk("\n");
-    }
-}
-
-static void gdb_smp_resume(void)
-{
-    int cpu;
-    int timeout = 100;
-
-    for_each_online_cpu(cpu)
-        atomic_set(&gdb_cpu[cpu].paused, 0);
-
-    /* Make sure all CPUs resume */
-    while ( (atomic_read(&gdb_smp_paused_count) > 0)
-            && (timeout-- > 0) )
-        mdelay(1);
-
-    if ( atomic_read(&gdb_smp_paused_count) > 0 )
-    {
-        printk("GDB: Not all CPUs have resumed execution, missing CPUs ");
-        for_each_online_cpu(cpu)
-        {
-            if ( (cpu != smp_processor_id()) &&
-                 atomic_read(&gdb_cpu[cpu].ack) )
-                printk("%d ", cpu);
-        }
-        printk("\n");
-    }
+    gdb_ctx->serhnd = serial_parse_handle(opt_gdb);
+    if ( gdb_ctx->serhnd != -1 )
+        printk("GDB stub initialised.\n");
+    serial_start_sync(gdb_ctx->serhnd);
 }
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * End:

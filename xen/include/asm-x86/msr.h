@@ -1,17 +1,7 @@
 #ifndef __ASM_MSR_H
 #define __ASM_MSR_H
 
-#include "msr-index.h"
-
-#include <xen/types.h>
-#include <xen/percpu.h>
-#include <xen/errno.h>
-
-#include <xen/lib/x86/msr.h>
-
-#include <asm/asm_defns.h>
-#include <asm/cpufeature.h>
-#include <asm/processor.h>
+#ifndef __ASSEMBLY__
 
 #define rdmsr(msr,val1,val2) \
      __asm__ __volatile__("rdmsr" \
@@ -23,7 +13,7 @@
 			    : "=a" (a__), "=d" (b__) \
 			    : "c" (msr)); \
        val = a__ | ((u64)b__<<32); \
-} while(0)
+} while(0); 
 
 #define wrmsr(msr,val1,val2) \
      __asm__ __volatile__("wrmsr" \
@@ -39,343 +29,304 @@ static inline void wrmsrl(unsigned int msr, __u64 val)
 }
 
 /* rdmsr with exception handling */
-#define rdmsr_safe(msr,val) ({\
-    int rc_; \
-    uint32_t lo_, hi_; \
+#define rdmsr_safe(msr,val1,val2) ({\
+    int _rc; \
     __asm__ __volatile__( \
         "1: rdmsr\n2:\n" \
         ".section .fixup,\"ax\"\n" \
-        "3: xorl %0,%0\n; xorl %1,%1\n" \
-        "   movl %5,%2\n; jmp 2b\n" \
+        "3: movl %5,%2\n; jmp 2b\n" \
         ".previous\n" \
-        _ASM_EXTABLE(1b, 3b) \
-        : "=a" (lo_), "=d" (hi_), "=&r" (rc_) \
+        ".section __ex_table,\"a\"\n" \
+        "   "__FIXUP_ALIGN"\n" \
+        "   "__FIXUP_WORD" 1b,3b\n" \
+        ".previous\n" \
+        : "=a" (val1), "=d" (val2), "=&r" (_rc) \
         : "c" (msr), "2" (0), "i" (-EFAULT)); \
-    val = lo_ | ((uint64_t)hi_ << 32); \
-    rc_; })
+    _rc; })
 
 /* wrmsr with exception handling */
-static inline int wrmsr_safe(unsigned int msr, uint64_t val)
-{
-    int rc;
-    uint32_t lo, hi;
-    lo = (uint32_t)val;
-    hi = (uint32_t)(val >> 32);
+#define wrmsr_safe(msr,val1,val2) ({\
+    int _rc; \
+    __asm__ __volatile__( \
+        "1: wrmsr\n2:\n" \
+        ".section .fixup,\"ax\"\n" \
+        "3: movl %5,%0\n; jmp 2b\n" \
+        ".previous\n" \
+        ".section __ex_table,\"a\"\n" \
+        "   "__FIXUP_ALIGN"\n" \
+        "   "__FIXUP_WORD" 1b,3b\n" \
+        ".previous\n" \
+        : "=&r" (_rc) \
+        : "c" (msr), "a" (val1), "d" (val2), "0" (0), "i" (-EFAULT)); \
+    _rc; })
 
-    __asm__ __volatile__(
-        "1: wrmsr\n2:\n"
-        ".section .fixup,\"ax\"\n"
-        "3: movl %5,%0\n; jmp 2b\n"
-        ".previous\n"
-        _ASM_EXTABLE(1b, 3b)
-        : "=&r" (rc)
-        : "c" (msr), "a" (lo), "d" (hi), "0" (0), "i" (-EFAULT));
-    return rc;
-}
+#define rdtsc(low,high) \
+     __asm__ __volatile__("rdtsc" : "=a" (low), "=d" (high))
 
-static inline uint64_t msr_fold(const struct cpu_user_regs *regs)
-{
-    return (regs->rdx << 32) | regs->eax;
-}
+#define rdtscl(low) \
+     __asm__ __volatile__("rdtsc" : "=a" (low) : : "edx")
 
-static inline void msr_split(struct cpu_user_regs *regs, uint64_t val)
-{
-    regs->rdx = val >> 32;
-    regs->rax = (uint32_t)val;
-}
+#if defined(__i386__)
+#define rdtscll(val) \
+     __asm__ __volatile__("rdtsc" : "=A" (val))
+#elif defined(__x86_64__)
+#define rdtscll(val) do { \
+     unsigned int a,d; \
+     asm volatile("rdtsc" : "=a" (a), "=d" (d)); \
+     (val) = ((unsigned long)a) | (((unsigned long)d)<<32); \
+} while(0)
+#endif
 
-static inline uint64_t rdtsc(void)
-{
-    uint32_t low, high;
-
-    __asm__ __volatile__("rdtsc" : "=a" (low), "=d" (high));
-
-    return ((uint64_t)high << 32) | low;
-}
-
-static inline uint64_t rdtsc_ordered(void)
-{
-	/*
-	 * The RDTSC instruction is not ordered relative to memory access.
-	 * The Intel SDM and the AMD APM are both vague on this point, but
-	 * empirically an RDTSC instruction can be speculatively executed
-	 * before prior loads.  An RDTSC immediately after an appropriate
-	 * barrier appears to be ordered as a normal load, that is, it
-	 * provides the same ordering guarantees as reading from a global
-	 * memory location that some other imaginary CPU is updating
-	 * continuously with a time stamp.
-	 */
-	alternative("lfence", "mfence", X86_FEATURE_MFENCE_RDTSC);
-	return rdtsc();
-}
-
-#define __write_tsc(val) wrmsrl(MSR_IA32_TSC, val)
-#define write_tsc(val) ({                                       \
-    /* Reliable TSCs are in lockstep across all CPUs. We should \
-     * never write to them. */                                  \
-    ASSERT(!boot_cpu_has(X86_FEATURE_TSC_RELIABLE));            \
-    __write_tsc(val);                                           \
-})
+#define write_tsc(val1,val2) wrmsr(0x10, val1, val2)
 
 #define rdpmc(counter,low,high) \
      __asm__ __volatile__("rdpmc" \
 			  : "=a" (low), "=d" (high) \
 			  : "c" (counter))
 
-/*
- * On hardware supporting FSGSBASE, the value loaded into hardware is the
- * guest kernel's choice for 64bit PV guests (Xen's choice for Idle, HVM and
- * 32bit PV).
- *
- * Therefore, the {RD,WR}{FS,GS}BASE instructions are only safe to use if
- * %cr4.fsgsbase is set.
- */
-static inline unsigned long __rdfsbase(void)
-{
-    unsigned long base;
+#endif /* !__ASSEMBLY__ */
 
-#ifdef HAVE_AS_FSGSBASE
-    asm volatile ( "rdfsbase %0" : "=r" (base) );
-#else
-    asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xc0" : "=a" (base) );
-#endif
+/* symbolic names for some interesting MSRs */
+/* Intel defined MSRs. */
+#define MSR_IA32_P5_MC_ADDR		0
+#define MSR_IA32_P5_MC_TYPE		1
+#define MSR_IA32_TIME_STAMP_COUNTER     0x10
+#define MSR_IA32_PLATFORM_ID		0x17
+#define MSR_IA32_EBL_CR_POWERON		0x2a
 
-    return base;
-}
+#define MSR_IA32_APICBASE		0x1b
+#define MSR_IA32_APICBASE_BSP		(1<<8)
+#define MSR_IA32_APICBASE_ENABLE	(1<<11)
+#define MSR_IA32_APICBASE_BASE		(0xfffff<<12)
 
-static inline unsigned long __rdgsbase(void)
-{
-    unsigned long base;
+#define MSR_IA32_UCODE_WRITE		0x79
+#define MSR_IA32_UCODE_REV		0x8b
 
-#ifdef HAVE_AS_FSGSBASE
-    asm volatile ( "rdgsbase %0" : "=r" (base) );
-#else
-    asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xc8" : "=a" (base) );
-#endif
+#define MSR_P6_PERFCTR0      0xc1
+#define MSR_P6_PERFCTR1      0xc2
 
-    return base;
-}
+/* MSRs & bits used for VMX enabling */
+#define MSR_IA32_VMX_BASIC_MSR                  0x480
+#define MSR_IA32_VMX_PINBASED_CTLS_MSR          0x481
+#define MSR_IA32_VMX_PROCBASED_CTLS_MSR         0x482
+#define MSR_IA32_VMX_EXIT_CTLS_MSR              0x483
+#define MSR_IA32_VMX_ENTRY_CTLS_MSR             0x484
+#define MSR_IA32_VMX_MISC_MSR                   0x485
+#define IA32_FEATURE_CONTROL_MSR                0x3a
+#define IA32_FEATURE_CONTROL_MSR_LOCK           0x1
+#define IA32_FEATURE_CONTROL_MSR_ENABLE_VMXON   0x4
 
-static inline void __wrfsbase(unsigned long base)
-{
-#ifdef HAVE_AS_FSGSBASE
-    asm volatile ( "wrfsbase %0" :: "r" (base) );
-#else
-    asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xd0" :: "a" (base) );
-#endif
-}
+/* AMD/K8 specific MSRs */ 
+#define MSR_EFER 0xc0000080		/* extended feature register */
+#define MSR_STAR 0xc0000081		/* legacy mode SYSCALL target */
+#define MSR_LSTAR 0xc0000082 		/* long mode SYSCALL target */
+#define MSR_CSTAR 0xc0000083		/* compatibility mode SYSCALL target */
+#define MSR_SYSCALL_MASK 0xc0000084	/* EFLAGS mask for syscall */
+#define MSR_FS_BASE 0xc0000100		/* 64bit GS base */
+#define MSR_GS_BASE 0xc0000101		/* 64bit FS base */
+#define MSR_SHADOW_GS_BASE  0xc0000102	/* SwapGS GS shadow */ 
+/* EFER bits: */ 
+#define _EFER_SCE 0  /* SYSCALL/SYSRET */
+#define _EFER_LME 8  /* Long mode enable */
+#define _EFER_LMA 10 /* Long mode active (read-only) */
+#define _EFER_NX 11  /* No execute enable */
+#define _EFER_SVME 12
 
-static inline void __wrgsbase(unsigned long base)
-{
-#ifdef HAVE_AS_FSGSBASE
-    asm volatile ( "wrgsbase %0" :: "r" (base) );
-#else
-    asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xd8" :: "a" (base) );
-#endif
-}
+#define EFER_SCE (1<<_EFER_SCE)
+#define EFER_LME (1<<_EFER_LME)
+#define EFER_LMA (1<<_EFER_LMA)
+#define EFER_NX (1<<_EFER_NX)
+#define EFER_SVME (1<<_EFER_SVME)
 
-static inline unsigned long read_fs_base(void)
-{
-    unsigned long base;
+/* Intel MSRs. Some also available on other CPUs */
+#define MSR_IA32_PLATFORM_ID	0x17
 
-    if ( read_cr4() & X86_CR4_FSGSBASE )
-        return __rdfsbase();
+#define MSR_MTRRcap		0x0fe
+#define MSR_IA32_BBL_CR_CTL        0x119
 
-    rdmsrl(MSR_FS_BASE, base);
+#define MSR_IA32_SYSENTER_CS		0x174
+#define MSR_IA32_SYSENTER_ESP		0x175
+#define MSR_IA32_SYSENTER_EIP		0x176
 
-    return base;
-}
+#define MSR_IA32_MCG_CAP		0x179
+#define MSR_IA32_MCG_STATUS		0x17a
+#define MSR_IA32_MCG_CTL		0x17b
 
-static inline unsigned long read_gs_base(void)
-{
-    unsigned long base;
+/* P4/Xeon+ specific */
+#define MSR_IA32_MCG_EAX		0x180
+#define MSR_IA32_MCG_EBX		0x181
+#define MSR_IA32_MCG_ECX		0x182
+#define MSR_IA32_MCG_EDX		0x183
+#define MSR_IA32_MCG_ESI		0x184
+#define MSR_IA32_MCG_EDI		0x185
+#define MSR_IA32_MCG_EBP		0x186
+#define MSR_IA32_MCG_ESP		0x187
+#define MSR_IA32_MCG_EFLAGS		0x188
+#define MSR_IA32_MCG_EIP		0x189
+#define MSR_IA32_MCG_RESERVED		0x18A
 
-    if ( read_cr4() & X86_CR4_FSGSBASE )
-        return __rdgsbase();
+#define MSR_P6_EVNTSEL0			0x186
+#define MSR_P6_EVNTSEL1			0x187
 
-    rdmsrl(MSR_GS_BASE, base);
+#define MSR_IA32_PERF_STATUS		0x198
+#define MSR_IA32_PERF_CTL		0x199
 
-    return base;
-}
+#define MSR_IA32_THERM_CONTROL		0x19a
+#define MSR_IA32_THERM_INTERRUPT	0x19b
+#define MSR_IA32_THERM_STATUS		0x19c
+#define MSR_IA32_MISC_ENABLE		0x1a0
 
-static inline unsigned long read_gs_shadow(void)
-{
-    unsigned long base;
+#define MSR_IA32_MISC_ENABLE_PERF_AVAIL   (1<<7)
+#define MSR_IA32_MISC_ENABLE_BTS_UNAVAIL  (1<<11)
+#define MSR_IA32_MISC_ENABLE_PEBS_UNAVAIL (1<<12)
 
-    if ( read_cr4() & X86_CR4_FSGSBASE )
-    {
-        asm volatile ( "swapgs" );
-        base = __rdgsbase();
-        asm volatile ( "swapgs" );
-    }
-    else
-        rdmsrl(MSR_SHADOW_GS_BASE, base);
+#define MSR_IA32_DEBUGCTLMSR		0x1d9
+#define MSR_IA32_LASTBRANCHFROMIP	0x1db
+#define MSR_IA32_LASTBRANCHTOIP		0x1dc
+#define MSR_IA32_LASTINTFROMIP		0x1dd
+#define MSR_IA32_LASTINTTOIP		0x1de
 
-    return base;
-}
+#define MSR_IA32_MC0_CTL		0x400
+#define MSR_IA32_MC0_STATUS		0x401
+#define MSR_IA32_MC0_ADDR		0x402
+#define MSR_IA32_MC0_MISC		0x403
 
-static inline void write_fs_base(unsigned long base)
-{
-    if ( read_cr4() & X86_CR4_FSGSBASE )
-        __wrfsbase(base);
-    else
-        wrmsrl(MSR_FS_BASE, base);
-}
+/* Pentium IV performance counter MSRs */
+#define MSR_P4_BPU_PERFCTR0 		0x300
+#define MSR_P4_BPU_PERFCTR1 		0x301
+#define MSR_P4_BPU_PERFCTR2 		0x302
+#define MSR_P4_BPU_PERFCTR3 		0x303
+#define MSR_P4_MS_PERFCTR0 		0x304
+#define MSR_P4_MS_PERFCTR1 		0x305
+#define MSR_P4_MS_PERFCTR2 		0x306
+#define MSR_P4_MS_PERFCTR3 		0x307
+#define MSR_P4_FLAME_PERFCTR0 		0x308
+#define MSR_P4_FLAME_PERFCTR1 		0x309
+#define MSR_P4_FLAME_PERFCTR2 		0x30a
+#define MSR_P4_FLAME_PERFCTR3 		0x30b
+#define MSR_P4_IQ_PERFCTR0 		0x30c
+#define MSR_P4_IQ_PERFCTR1 		0x30d
+#define MSR_P4_IQ_PERFCTR2 		0x30e
+#define MSR_P4_IQ_PERFCTR3 		0x30f
+#define MSR_P4_IQ_PERFCTR4 		0x310
+#define MSR_P4_IQ_PERFCTR5 		0x311
+#define MSR_P4_BPU_CCCR0 		0x360
+#define MSR_P4_BPU_CCCR1 		0x361
+#define MSR_P4_BPU_CCCR2 		0x362
+#define MSR_P4_BPU_CCCR3 		0x363
+#define MSR_P4_MS_CCCR0 		0x364
+#define MSR_P4_MS_CCCR1 		0x365
+#define MSR_P4_MS_CCCR2 		0x366
+#define MSR_P4_MS_CCCR3 		0x367
+#define MSR_P4_FLAME_CCCR0 		0x368
+#define MSR_P4_FLAME_CCCR1 		0x369
+#define MSR_P4_FLAME_CCCR2 		0x36a
+#define MSR_P4_FLAME_CCCR3 		0x36b
+#define MSR_P4_IQ_CCCR0 		0x36c
+#define MSR_P4_IQ_CCCR1 		0x36d
+#define MSR_P4_IQ_CCCR2 		0x36e
+#define MSR_P4_IQ_CCCR3 		0x36f
+#define MSR_P4_IQ_CCCR4 		0x370
+#define MSR_P4_IQ_CCCR5 		0x371
+#define MSR_P4_ALF_ESCR0 		0x3ca
+#define MSR_P4_ALF_ESCR1 		0x3cb
+#define MSR_P4_BPU_ESCR0 		0x3b2
+#define MSR_P4_BPU_ESCR1 		0x3b3
+#define MSR_P4_BSU_ESCR0 		0x3a0
+#define MSR_P4_BSU_ESCR1 		0x3a1
+#define MSR_P4_CRU_ESCR0 		0x3b8
+#define MSR_P4_CRU_ESCR1 		0x3b9
+#define MSR_P4_CRU_ESCR2 		0x3cc
+#define MSR_P4_CRU_ESCR3 		0x3cd
+#define MSR_P4_CRU_ESCR4 		0x3e0
+#define MSR_P4_CRU_ESCR5 		0x3e1
+#define MSR_P4_DAC_ESCR0 		0x3a8
+#define MSR_P4_DAC_ESCR1 		0x3a9
+#define MSR_P4_FIRM_ESCR0 		0x3a4
+#define MSR_P4_FIRM_ESCR1 		0x3a5
+#define MSR_P4_FLAME_ESCR0 		0x3a6
+#define MSR_P4_FLAME_ESCR1 		0x3a7
+#define MSR_P4_FSB_ESCR0 		0x3a2
+#define MSR_P4_FSB_ESCR1 		0x3a3
+#define MSR_P4_IQ_ESCR0 		0x3ba
+#define MSR_P4_IQ_ESCR1 		0x3bb
+#define MSR_P4_IS_ESCR0 		0x3b4
+#define MSR_P4_IS_ESCR1 		0x3b5
+#define MSR_P4_ITLB_ESCR0 		0x3b6
+#define MSR_P4_ITLB_ESCR1 		0x3b7
+#define MSR_P4_IX_ESCR0 		0x3c8
+#define MSR_P4_IX_ESCR1 		0x3c9
+#define MSR_P4_MOB_ESCR0 		0x3aa
+#define MSR_P4_MOB_ESCR1 		0x3ab
+#define MSR_P4_MS_ESCR0 		0x3c0
+#define MSR_P4_MS_ESCR1 		0x3c1
+#define MSR_P4_PMH_ESCR0 		0x3ac
+#define MSR_P4_PMH_ESCR1 		0x3ad
+#define MSR_P4_RAT_ESCR0 		0x3bc
+#define MSR_P4_RAT_ESCR1 		0x3bd
+#define MSR_P4_SAAT_ESCR0 		0x3ae
+#define MSR_P4_SAAT_ESCR1 		0x3af
+#define MSR_P4_SSU_ESCR0 		0x3be
+#define MSR_P4_SSU_ESCR1 		0x3bf    /* guess: not defined in manual */
+#define MSR_P4_TBPU_ESCR0 		0x3c2
+#define MSR_P4_TBPU_ESCR1 		0x3c3
+#define MSR_P4_TC_ESCR0 		0x3c4
+#define MSR_P4_TC_ESCR1 		0x3c5
+#define MSR_P4_U2L_ESCR0 		0x3b0
+#define MSR_P4_U2L_ESCR1 		0x3b1
 
-static inline void write_gs_base(unsigned long base)
-{
-    if ( read_cr4() & X86_CR4_FSGSBASE )
-        __wrgsbase(base);
-    else
-        wrmsrl(MSR_GS_BASE, base);
-}
+#define MSR_K6_EFER			0xC0000080
+#define MSR_K6_STAR			0xC0000081
+#define MSR_K6_WHCR			0xC0000082
+#define MSR_K6_UWCCR			0xC0000085
+#define MSR_K6_EPMR			0xC0000086
+#define MSR_K6_PSOR			0xC0000087
+#define MSR_K6_PFIR			0xC0000088
 
-static inline void write_gs_shadow(unsigned long base)
-{
-    if ( read_cr4() & X86_CR4_FSGSBASE )
-    {
-        asm volatile ( "swapgs\n\t"
-#ifdef HAVE_AS_FSGSBASE
-                       "wrgsbase %0\n\t"
-                       "swapgs"
-                       :: "r" (base) );
-#else
-                       ".byte 0xf3, 0x48, 0x0f, 0xae, 0xd8\n\t"
-                       "swapgs"
-                       :: "a" (base) );
-#endif
-    }
-    else
-        wrmsrl(MSR_SHADOW_GS_BASE, base);
-}
+#define MSR_K7_EVNTSEL0			0xC0010000
+#define MSR_K7_EVNTSEL1			0xC0010001
+#define MSR_K7_EVNTSEL2			0xC0010002
+#define MSR_K7_EVNTSEL3			0xC0010003
+#define MSR_K7_PERFCTR0			0xC0010004
+#define MSR_K7_PERFCTR1			0xC0010005
+#define MSR_K7_PERFCTR2			0xC0010006
+#define MSR_K7_PERFCTR3			0xC0010007
+#define MSR_K7_HWCR			0xC0010015
+#define MSR_K7_CLK_CTL			0xC001001b
+#define MSR_K7_FID_VID_CTL		0xC0010041
+#define MSR_K7_FID_VID_STATUS		0xC0010042
 
-DECLARE_PER_CPU(uint64_t, efer);
-static inline uint64_t read_efer(void)
-{
-    return this_cpu(efer);
-}
+#define MSR_K8_TOP_MEM1			0xC001001A
+#define MSR_K8_TOP_MEM2			0xC001001D
+#define MSR_K8_VM_HSAVE_PA		0xC0010117
+#define MSR_K8_SYSCFG			0xC0000010	
 
-static inline void write_efer(uint64_t val)
-{
-    this_cpu(efer) = val;
-    wrmsrl(MSR_EFER, val);
-}
+/* Centaur-Hauls/IDT defined MSRs. */
+#define MSR_IDT_FCR1			0x107
+#define MSR_IDT_FCR2			0x108
+#define MSR_IDT_FCR3			0x109
+#define MSR_IDT_FCR4			0x10a
 
-extern unsigned int ler_msr;
+#define MSR_IDT_MCR0			0x110
+#define MSR_IDT_MCR1			0x111
+#define MSR_IDT_MCR2			0x112
+#define MSR_IDT_MCR3			0x113
+#define MSR_IDT_MCR4			0x114
+#define MSR_IDT_MCR5			0x115
+#define MSR_IDT_MCR6			0x116
+#define MSR_IDT_MCR7			0x117
+#define MSR_IDT_MCR_CTRL		0x120
 
-DECLARE_PER_CPU(uint32_t, tsc_aux);
+/* VIA Cyrix defined MSRs*/
+#define MSR_VIA_FCR			0x1107
+#define MSR_VIA_LONGHAUL		0x110a
+#define MSR_VIA_RNG			0x110b
+#define MSR_VIA_BCR2			0x1147
 
-/* Lazy update of MSR_TSC_AUX */
-static inline void wrmsr_tsc_aux(uint32_t val)
-{
-    uint32_t *this_tsc_aux = &this_cpu(tsc_aux);
-
-    if ( *this_tsc_aux != val )
-    {
-        wrmsr(MSR_TSC_AUX, val, 0);
-        *this_tsc_aux = val;
-    }
-}
-
-extern struct msr_policy     raw_msr_policy,
-                            host_msr_policy,
-                          pv_max_msr_policy,
-                          pv_def_msr_policy,
-                         hvm_max_msr_policy,
-                         hvm_def_msr_policy;
-
-/* Container object for per-vCPU MSRs */
-struct vcpu_msrs
-{
-    /* 0x00000048 - MSR_SPEC_CTRL */
-    struct {
-        uint32_t raw;
-    } spec_ctrl;
-
-    /*
-     * 0x00000140 - MSR_INTEL_MISC_FEATURES_ENABLES
-     *
-     * This MSR is non-architectural, but for simplicy we allow it to be read
-     * unconditionally.  The CPUID Faulting bit is the only writeable bit, and
-     * only if enumerated by MSR_PLATFORM_INFO.
-     */
-    union {
-        uint32_t raw;
-        struct {
-            bool cpuid_faulting:1;
-        };
-    } misc_features_enables;
-
-    /*
-     * 0x00000560 ... 57x - MSR_RTIT_*
-     *
-     * "Real Time Instruction Trace", now called Processor Trace.
-     *
-     * These MSRs are not exposed to guests.  They are controlled by Xen
-     * behind the scenes, when vmtrace is enabled for the domain.
-     *
-     * MSR_RTIT_OUTPUT_BASE not stored here.  It is fixed per vcpu, and
-     * derived from v->vmtrace.buf.
-     */
-    struct {
-        /*
-         * Placed in the MSR load/save lists.  Only modified by hypercall in
-         * the common case.
-         */
-        uint64_t ctl;
-
-        /*
-         * Updated by hardware in non-root mode.  Synchronised here on vcpu
-         * context switch.
-         */
-        uint64_t status;
-        union {
-            uint64_t output_mask;
-            struct {
-                uint32_t output_limit;
-                uint32_t output_offset;
-            };
-        };
-    } rtit;
-
-    /* 0x00000da0 - MSR_IA32_XSS */
-    struct {
-        uint64_t raw;
-    } xss;
-
-    /*
-     * 0xc0000103 - MSR_TSC_AUX
-     *
-     * Value is guest chosen, and always loaded in vcpu context.  Guests have
-     * no direct MSR access, and the value is accessible to userspace with the
-     * RDTSCP and RDPID instructions.
-     */
-    uint32_t tsc_aux;
-
-    /*
-     * 0xc00110{27,19-1b} MSR_AMD64_DR{0-3}_ADDRESS_MASK
-     *
-     * Loaded into hardware for guests which have active %dr7 settings.
-     * Furthermore, HVM guests are offered direct access, meaning that the
-     * values here may be stale in current context.
-     */
-    uint32_t dr_mask[4];
-};
-
-void init_guest_msr_policy(void);
-int init_domain_msr_policy(struct domain *d);
-int init_vcpu_msr_policy(struct vcpu *v);
-
-/*
- * Below functions can return X86EMUL_UNHANDLEABLE which means that MSR is
- * not (yet) handled by it and must be processed by legacy handlers. Such
- * behaviour is needed for transition period until all rd/wrmsr are handled
- * by the new MSR infrastructure.
- *
- * These functions are also used by the migration logic, so need to cope with
- * being used outside of v's context.
- */
-int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val);
-int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val);
+/* Transmeta defined MSRs */
+#define MSR_TMTA_LONGRUN_CTRL		0x80868010
+#define MSR_TMTA_LONGRUN_FLAGS		0x80868011
+#define MSR_TMTA_LRTI_READOUT		0x80868018
+#define MSR_TMTA_LRTI_VOLT_MHZ		0x8086801a
 
 #endif /* __ASM_MSR_H */

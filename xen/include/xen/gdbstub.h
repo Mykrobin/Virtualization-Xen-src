@@ -14,21 +14,27 @@
  * GNU General Public License for more details.
  * 
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #ifndef __XEN_GDBSTUB_H__
 #define __XEN_GDBSTUB_H__
 
-#include <xen/page-size.h>
 #include <asm/atomic.h>
+#include <asm/page.h>
 
-#ifdef CONFIG_CRASH_DEBUG
+#ifdef CRASH_DEBUG
+
+/* value <-> char (de)serialzers for arch specific gdb backends */
+char hex2char(unsigned long x); 
+int char2hex(unsigned char c); 
+char str2hex(const char *str); 
+unsigned long str2ulong(const char *str, unsigned long bytes); 
 
 struct gdb_context {
-    int                 serhnd;           /* handle on our serial line */
-    int                 console_steal_id; /* handle on stolen console */
-    bool_t              currently_attached;
+    int                 serhnd;
+    int                 currently_attached:1;
     atomic_t            running;
     unsigned long       connected;
     u8                  signum;
@@ -46,8 +52,7 @@ void gdb_write_to_packet(
     const char *buf, int count, struct gdb_context *ctx);
 void gdb_write_to_packet_hex(
     unsigned long x, int int_size, struct gdb_context *ctx);
-    /* ... writes in target native byte order as required by gdb spec. */
-void gdb_send_packet(struct gdb_context *ctx);
+void gdb_send_packet(struct gdb_context *ctx); 
 void gdb_send_reply(const char *buf, struct gdb_context *ctx);
 
 /* gdb stub trap handler: entry point */
@@ -62,9 +67,6 @@ void gdb_arch_write_reg_array(
     struct cpu_user_regs *regs, const char* buf, struct gdb_context *ctx);
 void gdb_arch_read_reg(
     unsigned long regnum, struct cpu_user_regs *regs, struct gdb_context *ctx);
-void gdb_arch_write_reg(
-    unsigned long regnum, unsigned long val, struct cpu_user_regs *regs, 
-    struct gdb_context *ctx);
 unsigned int gdb_arch_copy_from_user(
     void *dest, const void *src, unsigned len);
 unsigned int gdb_arch_copy_to_user(
@@ -87,6 +89,12 @@ void gdb_arch_exit(struct cpu_user_regs *regs);
 #define SIGALRM         14
 #define SIGTERM         15
 
+void initialise_gdb(void);
+
+#else
+
+#define initialise_gdb() ((void)0)
+
 #endif
 
 #endif /* __XEN_GDBSTUB_H__ */
@@ -94,7 +102,7 @@ void gdb_arch_exit(struct cpu_user_regs *regs);
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * End:

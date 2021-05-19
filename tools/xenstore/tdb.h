@@ -1,8 +1,6 @@
 #ifndef __TDB_H__
 #define __TDB_H__
 
-#include "utils.h"
-
 /* 
    Unix SMB/CIFS implementation.
 
@@ -25,7 +23,8 @@
    Lesser General Public License for more details.
 
    You should have received a copy of the GNU Lesser General Public
-   License along with this library; If not, see <http://www.gnu.org/licenses/>.
+   License along with this library; if not, write to the Free Software
+   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #ifdef  __cplusplus
@@ -86,6 +85,10 @@ struct tdb_traverse_lock {
 	uint32_t hash;
 };
 
+#ifndef PRINTF_ATTRIBUTE
+#define PRINTF_ATTRIBUTE(a,b)
+#endif
+
 /* this is the context structure that is returned from a db open */
 typedef struct tdb_context {
 	char *name; /* the name of the database */
@@ -110,20 +113,42 @@ typedef int (*tdb_traverse_func)(TDB_CONTEXT *, TDB_DATA, TDB_DATA, void *);
 typedef void (*tdb_log_func)(TDB_CONTEXT *, int , const char *, ...);
 typedef uint32_t (*tdb_hash_func)(TDB_DATA *key);
 
+TDB_CONTEXT *tdb_open(const char *name, int hash_size, int tdb_flags,
+		      int open_flags, mode_t mode);
 TDB_CONTEXT *tdb_open_ex(const char *name, int hash_size, int tdb_flags,
 			 int open_flags, mode_t mode,
 			 tdb_log_func log_fn,
 			 tdb_hash_func hash_fn);
 
+int tdb_reopen(TDB_CONTEXT *tdb);
+int tdb_reopen_all(void);
+void tdb_logging_function(TDB_CONTEXT *tdb, tdb_log_func);
 enum TDB_ERROR tdb_error(TDB_CONTEXT *tdb);
 const char *tdb_errorstr(TDB_CONTEXT *tdb);
 TDB_DATA tdb_fetch(TDB_CONTEXT *tdb, TDB_DATA key);
 int tdb_delete(TDB_CONTEXT *tdb, TDB_DATA key);
 int tdb_store(TDB_CONTEXT *tdb, TDB_DATA key, TDB_DATA dbuf, int flag);
+int tdb_append(TDB_CONTEXT *tdb, TDB_DATA key, TDB_DATA new_dbuf);
 int tdb_close(TDB_CONTEXT *tdb);
 TDB_DATA tdb_firstkey(TDB_CONTEXT *tdb);
 TDB_DATA tdb_nextkey(TDB_CONTEXT *tdb, TDB_DATA key);
 int tdb_traverse(TDB_CONTEXT *tdb, tdb_traverse_func fn, void *);
+int tdb_exists(TDB_CONTEXT *tdb, TDB_DATA key);
+int tdb_lockall(TDB_CONTEXT *tdb);
+void tdb_unlockall(TDB_CONTEXT *tdb);
+
+/* Low level locking functions: use with care */
+int tdb_chainlock(TDB_CONTEXT *tdb, TDB_DATA key);
+int tdb_chainunlock(TDB_CONTEXT *tdb, TDB_DATA key);
+int tdb_chainlock_read(TDB_CONTEXT *tdb, TDB_DATA key);
+int tdb_chainunlock_read(TDB_CONTEXT *tdb, TDB_DATA key);
+TDB_CONTEXT *tdb_copy(TDB_CONTEXT *tdb, const char *outfile);
+
+/* Debug functions. Not used in production. */
+void tdb_dump_all(TDB_CONTEXT *tdb);
+int tdb_printfreelist(TDB_CONTEXT *tdb);
+
+extern TDB_DATA tdb_null;
 
 #ifdef  __cplusplus
 }

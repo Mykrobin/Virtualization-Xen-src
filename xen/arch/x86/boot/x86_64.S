@@ -1,9 +1,139 @@
-        .text
-        .code64
+#include <xen/config.h>
+#include <public/xen.h>
+#include <asm/asm_defns.h>
+#include <asm/desc.h>
+#include <asm/page.h>
+#include <asm/msr.h>
 
-ENTRY(__high_start)
-        /* Install relocated data selectors. */
-        lgdt    boot_gdtr(%rip)
+#define  SECONDARY_CPU_FLAG 0xA5A5A5A5
+                
+        .text
+        .code32
+
+ENTRY(start)
+ENTRY(stext)
+ENTRY(_stext)
+        jmp __start
+
+        .org    0x004
+/*** MULTIBOOT HEADER ****/
+        /* Magic number indicating a Multiboot header. */
+        .long   0x1BADB002
+        /* Flags to bootloader (see Multiboot spec). */
+        .long   0x00000003
+        /* Checksum: must be the negated sum of the first two fields. */
+        .long   -0x1BADB005
+
+        .org    0x010
+        .asciz "ERR: Not a 64-bit CPU!"
+        .org    0x028
+        .asciz "ERR: Not a Multiboot bootloader!"
+bad_cpu:
+        mov     $0x100010,%esi # Error message
+        jmp     print_err
+not_multiboot:
+        mov     $0x100028,%esi # Error message
+print_err:
+        mov     $0xB8000,%edi  # VGA framebuffer
+1:      mov     (%esi),%bl
+        test    %bl,%bl        # Terminate on '\0' sentinel
+2:      je      2b
+        mov     $0x3f8+5,%dx   # UART Line Status Register
+3:      in      %dx,%al
+        test    $0x20,%al      # Test THR Empty flag
+        je      3b
+        mov     $0x3f8+0,%dx   # UART Transmit Holding Register
+        mov     %bl,%al
+        out     %al,%dx        # Send a character over the serial line
+        movsb                  # Write a character to the VGA framebuffer
+        mov     $7,%al
+        stosb                  # Write an attribute to the VGA framebuffer
+        jmp     1b
+
+__start:
+        cld
+        cli
+
+        /* Set up a few descriptors: on entry only CS is guaranteed good. */
+        lgdt    %cs:0x100306        # nopaging_gdt_descr
+        mov     $(__HYPERVISOR_DS32),%ecx
+        mov     %ecx,%ds
+        mov     %ecx,%es
+
+        cmp     $(SECONDARY_CPU_FLAG),%ebx
+        je      skip_boot_checks
+
+        /* Check for Multiboot bootloader */
+        cmp     $0x2BADB002,%eax
+        jne     not_multiboot
+
+        /* Save the Multiboot info structure for later use. */
+        mov     %ebx,0x100300       # multiboot_ptr
+
+        /* We begin by interrogating the CPU for the presence of long mode. */
+        mov     $0x80000000,%eax
+        cpuid
+        cmp     $0x80000000,%eax    # any function > 0x80000000?
+        jbe     bad_cpu
+        mov     $0x80000001,%eax
+        cpuid
+        bt      $29,%edx            # Long mode feature?
+        jnc     bad_cpu
+        mov     %edx,0x100310       # cpuid_ext_features
+skip_boot_checks:
+
+        /* Set up FPU. */
+        fninit
+        
+        /* Enable PAE in CR4. */
+        mov     $0x20,%ecx # X86_CR4_PAE
+        mov     %ecx,%cr4
+
+        /* Load pagetable base register. */
+        mov     $0x102000,%eax   /* idle_pg_table */
+        mov     %eax,%cr3
+
+        /* Set up EFER (Extended Feature Enable Register). */
+        movl    $MSR_EFER,%ecx
+        rdmsr
+        btsl    $_EFER_LME,%eax /* Long Mode      */
+        btsl    $_EFER_SCE,%eax /* SYSCALL/SYSRET */
+        mov     0x100310,%edi
+        btl     $20,%edi        /* CPUID 0x80000001, EDX[20] */
+        jnc     1f
+        btsl    $_EFER_NX,%eax  /* No-Execute     */
+1:      wrmsr
+
+        mov     $0x80050033,%eax /* hi-to-lo: PG,AM,WP,NE,ET,MP,PE */
+        mov     %eax,%cr0
+        jmp     1f
+
+1:      /* Now in compatibility mode. Long-jump into 64-bit mode. */
+        ljmp    $(__HYPERVISOR_CS64),$0x100200
+        
+        .code64
+        .org    0x0200
+
+        /* Install relocated selectors (FS/GS unused). */
+        lgdt    gdt_descr(%rip)
+
+        /* Enable full CR4 features. */
+        mov     mmu_cr4_features(%rip),%rcx
+        mov     %rcx,%cr4
+
+        mov     stack_start(%rip),%rsp
+        or      $(STACK_SIZE-CPUINFO_sizeof),%rsp
+
+        /* Reset EFLAGS (subsumes CLI and CLD). */
+        pushq   $0
+        popf
+
+        /* Jump to high mappings. */
+        mov     high_start(%rip),%rax
+        push    %rax
+        ret
+__high_start:
+        
         mov     $(__HYPERVISOR_DS64),%ecx
         mov     %ecx,%ds
         mov     %ecx,%es
@@ -11,192 +141,133 @@ ENTRY(__high_start)
         mov     %ecx,%gs
         mov     %ecx,%ss
 
-        /* Enable minimal CR4 features. */
-        mov     $XEN_MINIMAL_CR4,%rcx
-        mov     %rcx,%cr4
+        lidt    idt_descr(%rip)
 
-        mov     stack_start(%rip),%rsp
+        cmp     $(SECONDARY_CPU_FLAG),%ebx
+        je      start_secondary
 
-        /* Reset EFLAGS (subsumes CLI and CLD). */
-        pushq   $0
-        popf
+        /* Initialize BSS (no nasty surprises!) */
+        lea     __bss_start(%rip),%rdi
+        lea     _end(%rip),%rcx
+        sub     %rdi,%rcx
+        xor     %rax,%rax
+        rep     stosb
 
-        /* Reload code selector. */
-        pushq   $__HYPERVISOR_CS
-        leaq    1f(%rip),%rax
-        pushq   %rax
-        lretq
-1:
-        test    %ebx,%ebx
-        jz      .L_bsp
+        /* Initialise IDT with simple error defaults. */
+        leaq    ignore_int(%rip),%rcx
+        movl    %ecx,%eax
+        andl    $0xFFFF0000,%eax
+        orl     $0x00008E00,%eax
+        shlq    $32,%rax
+        movl    %ecx,%edx
+        andl    $0x0000FFFF,%edx
+        orl     $(__HYPERVISOR_CS64<<16),%edx
+        orq     %rdx,%rax
+        shrq    $32,%rcx
+        movl    %ecx,%edx
+        leaq    idt_table(%rip),%rdi
+        movl    $256,%ecx
+1:      movq    %rax,(%rdi)
+        movq    %rdx,8(%rdi)
+        addq    $16,%rdi
+        loop    1b
 
-        /* APs.  Set up shadow stacks before entering C. */
-#ifdef CONFIG_XEN_SHSTK
-        testl   $cpufeat_mask(X86_FEATURE_XEN_SHSTK), \
-                CPUINFO_FEATURE_OFFSET(X86_FEATURE_XEN_SHSTK) + boot_cpu_data(%rip)
-        je      .L_ap_shstk_done
-
-        /* Set up MSR_S_CET. */
-        mov     $MSR_S_CET, %ecx
-        xor     %edx, %edx
-        mov     $CET_SHSTK_EN | CET_WRSS_EN, %eax
-        wrmsr
-
-        /* Derive MSR_PL0_SSP from %rsp (token written when stack is allocated). */
-        mov     $MSR_PL0_SSP, %ecx
-        mov     %rsp, %rdx
-        shr     $32, %rdx
-        mov     %esp, %eax
-        and     $~(STACK_SIZE - 1), %eax
-        or      $(PRIMARY_SHSTK_SLOT + 1) * PAGE_SIZE - 8, %eax
-        wrmsr
-
-        /* Enable CET.  MSR_INTERRUPT_SSP_TABLE is set up later in load_system_tables(). */
-        mov     $XEN_MINIMAL_CR4 | X86_CR4_CET, %ecx
-        mov     %rcx, %cr4
-        setssbsy
-#endif
-
-.L_ap_shstk_done:
-        call    start_secondary
-        BUG     /* start_secondary() shouldn't return. */
-
-.L_bsp:
-        /* Pass off the Multiboot info structure to C land (if applicable). */
+        /* Pass off the Multiboot info structure to C land. */
         mov     multiboot_ptr(%rip),%edi
+        lea     start-0x100000(%rip),%rax
+        add     %rax,%rdi
         call    __start_xen
-        BUG     /* __start_xen() shouldn't return. */
+        ud2     /* Force a panic (invalid opcode). */
 
-        .data
-        .align 8
-multiboot_ptr:
+/* This is the default interrupt handler. */
+int_msg:
+        .asciz "Unknown interrupt\n"
+ignore_int:
+        cld
+        leaq    int_msg(%rip),%rdi
+        xorl    %eax,%eax
+        call    printf
+1:      jmp     1b
+
+
+/*** DESCRIPTOR TABLES ***/
+
+.globl idt
+.globl gdt        
+
+        .org    0x300
+        .code32
+
+multiboot_ptr:        /* 0x300 */
         .long   0
 
-GLOBAL(stack_start)
-        .quad   cpu0_stack + STACK_SIZE - CPUINFO_sizeof
+        .word   0
+nopaging_gdt_descr:   /* 0x306 */
+        .word   LAST_RESERVED_GDT_BYTE
+        .quad   gdt_table - FIRST_RESERVED_GDT_BYTE - __PAGE_OFFSET
 
-        .section .data.page_aligned, "aw", @progbits
-        .align PAGE_SIZE, 0
-/*
- * Mapping of first 2 megabytes of memory. This is mapped with 4kB mappings
- * to avoid type conflicts with fixed-range MTRRs covering the lowest megabyte
- * of physical memory. In any case the VGA hole should be mapped with type UC.
- * Uses 1x 4k page.
- */
-l1_directmap:
-        pfn = 0
-        .rept L1_PAGETABLE_ENTRIES
-        /* VGA hole (0xa0000-0xc0000) should be mapped UC-. */
-        .if pfn >= 0xa0 && pfn < 0xc0
-        .quad (pfn << PAGE_SHIFT) | __PAGE_HYPERVISOR_UCMINUS | _PAGE_GLOBAL | MAP_SMALL_PAGES
+cpuid_ext_features:   /* 0x310 */
+        .long   0
+        
+        .word   0
+gdt_descr:
+        .word   LAST_RESERVED_GDT_BYTE
+gdt:
+        .quad   gdt_table - FIRST_RESERVED_GDT_BYTE
+
+        .word   0,0,0
+idt_descr:
+        .word   256*16-1
+idt:
+        .quad   idt_table
+
+ENTRY(stack_start)
+        .quad   cpu0_stack
+
+high_start:
+        .quad   __high_start
+
+        .org    0x1000
+ENTRY(gdt_table)
+        .quad 0x0000000000000000     /* unused */
+        .quad 0x00cf9a000000ffff     /* 0xe008 ring 0 code, compatibility */
+        .quad 0x00af9a000000ffff     /* 0xe010 ring 0 code, 64-bit mode   */
+        .quad 0x00cf92000000ffff     /* 0xe018 ring 0 data                */
+        .quad 0x00cffa000000ffff     /* 0xe023 ring 3 code, compatibility */
+        .quad 0x00cff2000000ffff     /* 0xe02b ring 3 data                */
+        .quad 0x00affa000000ffff     /* 0xe033 ring 3 code, 64-bit mode   */
+        .quad 0x0000000000000000     /* unused                            */
+        .fill 4*NR_CPUS,8,0          /* space for TSS and LDT per CPU     */
+
+/* Initial PML4 -- level-4 page table. */
+        .org 0x2000
+ENTRY(idle_pg_table)
+ENTRY(idle_pg_table_4)
+        .quad idle_pg_table_l3 - __PAGE_OFFSET + 7 # PML4[0]
+        .fill 261,8,0
+        .quad idle_pg_table_l3 - __PAGE_OFFSET + 7 # PML4[262]
+
+/* Initial PDP -- level-3 page table. */
+        .org 0x3000
+ENTRY(idle_pg_table_l3)
+        .quad idle_pg_table_l2 - __PAGE_OFFSET + 7
+
+/* Initial PDE -- level-2 page table. Maps first 64MB physical memory. */
+        .org 0x4000
+ENTRY(idle_pg_table_l2)
+        .macro identmap from=0, count=32
+        .if \count-1
+        identmap "(\from+0)","(\count/2)"
+        identmap "(\from+(0x200000*(\count/2)))","(\count/2)"
         .else
-        .quad (pfn << PAGE_SHIFT) | PAGE_HYPERVISOR_RWX | MAP_SMALL_PAGES
+        .quad 0x00000000000001e3 + \from
         .endif
-        pfn = pfn + 1
-        .endr
-        .size l1_directmap, . - l1_directmap
+        .endm
+        identmap
 
-/*
- * __page_tables_{start,end} cover the range of pagetables which need
- * relocating as Xen moves around physical memory.  i.e. each sym_offs()
- * reference to a different pagetable in the Xen image.
- */
-GLOBAL(__page_tables_start)
+        .org 0x4000 + PAGE_SIZE
+        .code64
 
-/*
- * Space for 4G worth of 2M mappings, first 2M actually mapped via
- * l1_directmap[].  Uses 4x 4k pages.
- */
-GLOBAL(l2_directmap)
-        .quad sym_offs(l1_directmap) + __PAGE_HYPERVISOR
-        .fill 4 * L2_PAGETABLE_ENTRIES - 1, 8, 0
-        .size l2_directmap, . - l2_directmap
-
-/*
- * L2 mapping the Xen text/data/bss region, constructed dynamically.
- * Executable fixmap is hooked up statically.
- * Uses 1x 4k page.
- */
-GLOBAL(l2_xenmap)
-        idx = 0
-        .rept L2_PAGETABLE_ENTRIES
-        .if idx == l2_table_offset(FIXADDR_X_TOP - 1)
-        .quad sym_offs(l1_fixmap_x) + __PAGE_HYPERVISOR
-        .else
-        .quad 0
-        .endif
-        idx = idx + 1
-        .endr
-        .size l2_xenmap, . - l2_xenmap
-
-/* L2 mapping the fixmap.  Uses 1x 4k page. */
-l2_fixmap:
-        idx = 0
-        .rept L2_PAGETABLE_ENTRIES
-        .if idx == l2_table_offset(FIXADDR_TOP - 1)
-        .quad sym_offs(l1_fixmap) + __PAGE_HYPERVISOR
-        .else
-        .quad 0
-        .endif
-        idx = idx + 1
-        .endr
-        .size l2_fixmap, . - l2_fixmap
-
-/* Direct map, initially covering the 4 l2_directmap tables.  Uses 1x 4k page. */
-l3_directmap:
-        idx = 0
-        .rept 4
-        .quad sym_offs(l2_directmap) + (idx << PAGE_SHIFT) + __PAGE_HYPERVISOR
-        idx = idx + 1
-        .endr
-        .fill L3_PAGETABLE_ENTRIES - 4, 8, 0
-        .size l3_directmap, . - l3_directmap
-
-/* L3 mapping the fixmap.  Uses 1x 4k page. */
-l3_xenmap:
-        idx = 0
-        .rept L3_PAGETABLE_ENTRIES
-        .if idx == l3_table_offset(XEN_VIRT_START)
-        .quad sym_offs(l2_xenmap) + __PAGE_HYPERVISOR
-        .elseif idx == l3_table_offset(FIXADDR_TOP - 1)
-        .quad sym_offs(l2_fixmap) + __PAGE_HYPERVISOR
-        .else
-        .quad 0
-        .endif
-        idx = idx + 1
-        .endr
-        .size l3_xenmap, . - l3_xenmap
-
-/* Top-level master (and idle-domain) page directory. */
-GLOBAL(idle_pg_table)
-        .quad sym_offs(l3_bootmap) + __PAGE_HYPERVISOR
-        idx = 1
-        .rept L4_PAGETABLE_ENTRIES - 1
-        .if idx == l4_table_offset(DIRECTMAP_VIRT_START)
-        .quad sym_offs(l3_directmap) + __PAGE_HYPERVISOR
-        .elseif idx == l4_table_offset(XEN_VIRT_START)
-        .quad sym_offs(l3_xenmap) + __PAGE_HYPERVISOR
-        .else
-        .quad 0
-        .endif
-        idx = idx + 1
-        .endr
-        .size idle_pg_table, . - idle_pg_table
-
-GLOBAL(__page_tables_end)
-
-/* Init pagetables. Enough page directories to map into 4GB. */
-        .section .init.data, "aw", @progbits
-        .align PAGE_SIZE, 0
-
-l1_bootmap:
-        .fill L1_PAGETABLE_ENTRIES, 8, 0
-        .size l1_bootmap, . - l1_bootmap
-
-GLOBAL(l2_bootmap)
-        .fill 4 * L2_PAGETABLE_ENTRIES, 8, 0
-        .size l2_bootmap, . - l2_bootmap
-
-GLOBAL(l3_bootmap)
-        .fill L3_PAGETABLE_ENTRIES, 8, 0
-        .size l3_bootmap, . - l3_bootmap
+.section ".bss.stack_aligned","w"
+ENTRY(cpu0_stack)
+        .fill STACK_SIZE,1,0

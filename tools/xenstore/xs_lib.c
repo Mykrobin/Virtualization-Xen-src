@@ -13,28 +13,29 @@
     Lesser General Public License for more details.
 
     You should have received a copy of the GNU Lesser General Public
-    License along with this library; If not, see <http://www.gnu.org/licenses/>.
+    License along with this library; if not, write to the Free Software
+    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
+#include "xs_lib.h"
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
-#include "xenstore_lib.h"
 
 /* Common routines for the Xen store daemon and client library. */
 
-const char *xs_daemon_rootdir(void)
+static const char *xs_daemon_rootdir(void)
 {
 	char *s = getenv("XENSTORED_ROOTDIR");
-	return (s ? s : XEN_LIB_STORED);
+	return (s ? s : "/var/lib/xenstored");
 }
 
-const char *xs_daemon_rundir(void)
+static const char *xs_daemon_rundir(void)
 {
 	char *s = getenv("XENSTORED_RUNDIR");
-	return (s ? s : XEN_RUN_STORED);
+	return (s ? s : "/var/run/xenstored");
 }
 
 static const char *xs_daemon_path(void)
@@ -43,7 +44,7 @@ static const char *xs_daemon_path(void)
 	char *s = getenv("XENSTORED_PATH");
 	if (s)
 		return s;
-	if (snprintf(buf, sizeof(buf), "%s/socket",
+	if (snprintf(buf, PATH_MAX, "%s/socket",
 		     xs_daemon_rundir()) >= PATH_MAX)
 		return NULL;
 	return buf;
@@ -52,7 +53,7 @@ static const char *xs_daemon_path(void)
 const char *xs_daemon_tdb(void)
 {
 	static char buf[PATH_MAX];
-	snprintf(buf, sizeof(buf), "%s/tdb", xs_daemon_rootdir());
+	sprintf(buf, "%s/tdb", xs_daemon_rootdir());
 	return buf;
 }
 
@@ -63,27 +64,19 @@ const char *xs_daemon_socket(void)
 
 const char *xs_daemon_socket_ro(void)
 {
-	return xs_daemon_path();
+	static char buf[PATH_MAX];
+	const char *s = xs_daemon_path();
+	if (s == NULL)
+		return NULL;
+	if (snprintf(buf, PATH_MAX, "%s_ro", s) >= PATH_MAX)
+		return NULL;
+	return buf;
 }
 
 const char *xs_domain_dev(void)
 {
 	char *s = getenv("XENSTORED_PATH");
-	if (s)
-		return s;
-#if defined(__RUMPUSER_XEN__) || defined(__RUMPRUN__)
-	return "/dev/xen/xenbus";
-#elif defined(__linux__)
-	if (access("/dev/xen/xenbus", F_OK) == 0)
-		return "/dev/xen/xenbus";
-	return "/proc/xen/xenbus";
-#elif defined(__NetBSD__)
-	return "/kern/xen/xenbus";
-#elif defined(__FreeBSD__)
-	return "/dev/xen/xenstore";
-#else
-	return "/dev/xen/xenbus";
-#endif
+	return (s ? s : "/proc/xen/xenbus");
 }
 
 /* Simple routines for writing to sockets, etc. */
@@ -143,10 +136,9 @@ bool xs_strings_to_perms(struct xs_permissions *perms, unsigned int num,
 }
 
 /* Convert permissions to a string (up to len MAX_STRLEN(unsigned int)+1). */
-bool xs_perm_to_string(const struct xs_permissions *perm,
-                       char *buffer, size_t buf_len)
+bool xs_perm_to_string(const struct xs_permissions *perm, char *buffer)
 {
-	switch ((int)perm->perms & ~XS_PERM_IGNORE) {
+	switch (perm->perms) {
 	case XS_PERM_WRITE:
 		*buffer = 'w';
 		break;
@@ -163,7 +155,7 @@ bool xs_perm_to_string(const struct xs_permissions *perm,
 		errno = EINVAL;
 		return false;
 	}
-	snprintf(buffer+1, buf_len-1, "%i", (int)perm->id);
+	sprintf(buffer+1, "%i", (int)perm->id);
 	return true;
 }
 

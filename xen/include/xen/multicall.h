@@ -5,26 +5,17 @@
 #ifndef __XEN_MULTICALL_H__
 #define __XEN_MULTICALL_H__
 
-#ifdef CONFIG_COMPAT
-#include <compat/xen.h>
-#endif
+#include <asm/multicall.h>
 
 #define _MCSF_in_multicall   0
+#define _MCSF_call_preempted 1
 #define MCSF_in_multicall    (1<<_MCSF_in_multicall)
+#define MCSF_call_preempted  (1<<_MCSF_call_preempted)
 struct mc_state {
     unsigned long flags;
-    union {
-        struct multicall_entry call;
-#ifdef CONFIG_COMPAT
-        struct compat_multicall_entry compat_call;
-#endif
-    };
-};
+    struct multicall_entry call;
+} __cacheline_aligned;
 
-enum mc_disposition {
-    mc_continue,
-    mc_exit,
-    mc_preempt,
-} arch_do_multicall_call(struct mc_state *mc);
+extern struct mc_state mc_state[NR_CPUS];
 
 #endif /* __XEN_MULTICALL_H__ */

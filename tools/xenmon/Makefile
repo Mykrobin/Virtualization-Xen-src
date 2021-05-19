@@ -10,49 +10,39 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 
-XEN_ROOT=$(CURDIR)/../..
+INSTALL         = install
+INSTALL_PROG    = $(INSTALL) -m0755
+INSTALL_DIR     = $(INSTALL) -d -m0755
+INSTALL_DATA    = $(INSTALL) -m0644
+
+sbindir=/usr/sbin
+
+XEN_ROOT=../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-CFLAGS  += -Werror
-CFLAGS  += $(CFLAGS_libxenevtchn)
-CFLAGS  += $(CFLAGS_libxenctrl)
-LDLIBS  += $(LDLIBS_libxenctrl)
-LDLIBS  += $(LDLIBS_libxenevtchn)
+CFLAGS  += -Werror -g
+CFLAGS  += -I $(XEN_XC)
+CFLAGS  += -I $(XEN_LIBXC)
+LDFLAGS += -L $(XEN_LIBXC)
 
+BIN = setmask xenbaked
 SCRIPTS = xenmon.py
 
-.PHONY: all
 all: build
 
-.PHONY: build
-build: xentrace_setmask xenbaked
+build: $(BIN)
 
-.PHONY: install
-install: build
-	$(INSTALL_DIR) $(DESTDIR)$(sbindir)
+install: xenbaked setmask
+	[ -d $(DESTDIR)$(sbindir) ] || $(INSTALL_DIR) $(DESTDIR)$(sbindir)
 	$(INSTALL_PROG) xenbaked $(DESTDIR)$(sbindir)/xenbaked
-	$(INSTALL_PROG) xentrace_setmask  $(DESTDIR)$(sbindir)/xentrace_setmask
-	$(INSTALL_PYTHON_PROG) xenmon.py  $(DESTDIR)$(sbindir)/xenmon
+	$(INSTALL_PROG) setmask  $(DESTDIR)$(sbindir)/setmask
+	$(INSTALL_PROG) xenmon.py  $(DESTDIR)$(sbindir)/xenmon.py
 
-.PHONY: uninstall
-uninstall:
-	rm -f $(DESTDIR)$(sbindir)/xenbaked
-	rm -f $(DESTDIR)$(sbindir)/xentrace_setmask
-	rm -f $(DESTDIR)$(sbindir)/xenmon
-
-.PHONY: clean
 clean:
-	$(RM) -f $(DEPS_RM)
-	$(RM) -f xenbaked xenbaked.o
-	$(RM) -f xentrace_setmask setmask.o
+	rm -f $(BIN)
 
-.PHONY: distclean
-distclean: clean
 
-xenbaked: xenbaked.o Makefile
-	$(CC) $(LDFLAGS) $< -o $@ $(LDLIBS) $(APPEND_LDFLAGS)
+%: %.c Makefile
+	$(CC) $(CFLAGS) $(LDFLAGS) -lxenctrl -o $@ $<
 
-xentrace_setmask: setmask.o Makefile
-	$(CC) $(LDFLAGS) $< -o $@ $(LDLIBS) $(APPEND_LDFLAGS)
 
--include $(DEPS_INCLUDE)

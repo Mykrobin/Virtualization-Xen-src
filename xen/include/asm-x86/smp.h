@@ -5,86 +5,103 @@
  * We need the APIC definitions automatically as part of 'smp.h'
  */
 #ifndef __ASSEMBLY__
-#include <xen/bitops.h>
+#include <xen/config.h>
 #include <xen/kernel.h>
 #include <xen/cpumask.h>
 #include <asm/current.h>
-#include <asm/mpspec.h>
 #endif
 
-#define BAD_APICID   (-1U)
-#define INVALID_CUID (~0U)   /* AMD Compute Unit ID */
+#ifdef CONFIG_X86_LOCAL_APIC
+#ifndef __ASSEMBLY__
+#include <asm/fixmap.h>
+#include <asm/bitops.h>
+#include <asm/mpspec.h>
+#ifdef CONFIG_X86_IO_APIC
+#include <asm/io_apic.h>
+#endif
+#include <asm/apic.h>
+#endif
+#endif
+
+#define BAD_APICID 0xFFu
+#ifdef CONFIG_SMP
 #ifndef __ASSEMBLY__
 
 /*
  * Private routines/data
  */
-DECLARE_PER_CPU(cpumask_var_t, cpu_sibling_mask);
-DECLARE_PER_CPU(cpumask_var_t, cpu_core_mask);
-DECLARE_PER_CPU(cpumask_var_t, scratch_cpumask);
-DECLARE_PER_CPU(cpumask_var_t, send_ipi_cpumask);
-
-/*
- * Do we, for platform reasons, need to actually keep CPUs online when we
- * would otherwise prefer them to be off?
- */
-extern bool park_offline_cpus;
-
-void smp_send_nmi_allbutself(void);
-
-void send_IPI_mask(const cpumask_t *, int vector);
-void send_IPI_self(int vector);
+ 
+extern void smp_alloc_memory(void);
+extern int pic_mode;
+extern int smp_num_siblings;
+extern cpumask_t cpu_sibling_map[];
+extern cpumask_t cpu_core_map[];
 
 extern void (*mtrr_hook) (void);
 
+#ifdef CONFIG_X86_64
 extern void zap_low_mappings(void);
+#else
+extern void zap_low_mappings(l2_pgentry_t *base);
+#endif
 
-extern u32 x86_cpu_to_apicid[];
+#define MAX_APICID 256
+extern u8 x86_cpu_to_apicid[];
 
 #define cpu_physical_id(cpu)	x86_cpu_to_apicid[cpu]
 
-#define cpu_is_offline(cpu) unlikely(!cpu_online(cpu))
-extern void cpu_exit_clear(unsigned int cpu);
-extern void cpu_uninit(unsigned int cpu);
-int cpu_add(uint32_t apic_id, uint32_t acpi_id, uint32_t pxm);
+#ifdef CONFIG_HOTPLUG_CPU
+extern void cpu_exit_clear(void);
+extern void cpu_uninit(void);
+#endif
 
 /*
  * This function is needed by all SMP systems. It must _always_ be valid
  * from the initial startup. We map APIC_BASE very early in page_setup(),
  * so this is correct in the x86 case.
  */
-#define smp_processor_id() get_processor_id()
+#define raw_smp_processor_id() (get_processor_id())
 
-void __stop_this_cpu(void);
+extern cpumask_t cpu_callout_map;
+extern cpumask_t cpu_callin_map;
+extern cpumask_t cpu_possible_map;
 
-long cpu_up_helper(void *data);
-long cpu_down_helper(void *data);
+/* We don't mark CPUs online until __cpu_up(), so we need another measure */
+static inline int num_booting_cpus(void)
+{
+	return cpus_weight(cpu_callout_map);
+}
 
-long core_parking_helper(void *data);
-bool core_parking_remove(unsigned int cpu);
-uint32_t get_cur_idle_nums(void);
+#ifdef CONFIG_X86_LOCAL_APIC
 
-/*
- * The value may be greater than the actual socket number in the system and
- * is required not to change from the initial startup.
- */
-extern unsigned int nr_sockets;
+#ifdef APIC_DEFINITION
+extern int hard_smp_processor_id(void);
+#else
+#include <mach_apicdef.h>
+static inline int hard_smp_processor_id(void)
+{
+	/* we don't want to mark this access volatile - bad code generation */
+	return GET_APIC_ID(*(unsigned int *)(APIC_BASE+APIC_ID));
+}
+#endif
 
-void set_nr_sockets(void);
+static __inline int logical_smp_processor_id(void)
+{
+	/* we don't want to mark this access volatile - bad code generation */
+	return GET_APIC_LOGICAL_ID(*(unsigned int *)(APIC_BASE+APIC_LDR));
+}
 
-/* Representing HT and core siblings in each socket. */
-extern cpumask_t **socket_cpumask;
+#endif
 
-/*
- * To be used only while no context switch can occur on the cpu, i.e.
- * by certain scheduling code only.
- */
-#define get_cpu_current(cpu) \
-    (get_cpu_info_from_stack((unsigned long)stack_base[cpu])->current_vcpu)
-
-extern unsigned int disabled_cpus;
-extern bool unaccounted_cpus;
-
+extern int __cpu_disable(void);
+extern void __cpu_die(unsigned int cpu);
 #endif /* !__ASSEMBLY__ */
 
+#else /* CONFIG_SMP */
+
+#define cpu_physical_id(cpu)		boot_cpu_physical_apicid
+
+#define NO_PROC_ID		0xFF		/* No processor magic marker */
+
+#endif
 #endif

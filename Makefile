@@ -2,335 +2,202 @@
 # Grand Unified Makefile for Xen.
 #
 
-# Default target must appear before any include lines
-.PHONY: all
-all: dist
+KERNELS ?= linux-2.6-xen
+# You may use wildcards in the above e.g. KERNELS=*2.6*
 
--include config/Toplevel.mk
-SUBSYSTEMS?=xen tools stubdom docs
-TARGS_DIST=$(patsubst %, dist-%, $(SUBSYSTEMS))
-TARGS_INSTALL=$(patsubst %, install-%, $(SUBSYSTEMS))
-TARGS_UNINSTALL=$(patsubst %, uninstall-%, $(SUBSYSTEMS))
-TARGS_BUILD=$(patsubst %, build-%, $(SUBSYSTEMS))
-TARGS_CLEAN=$(patsubst %, clean-%, $(SUBSYSTEMS))
-TARGS_DISTCLEAN=$(patsubst %, distclean-%, $(SUBSYSTEMS))
+XKERNELS := $(foreach kernel, $(KERNELS), $(patsubst buildconfigs/mk.%,%,$(wildcard buildconfigs/mk.$(kernel))) )
 
-export XEN_ROOT=$(CURDIR)
-include Config.mk
-
-.PHONY: mini-os-dir
-mini-os-dir:
-	if [ ! -d $(XEN_ROOT)/extras/mini-os ]; then \
-		GIT=$(GIT) $(XEN_ROOT)/scripts/git-checkout.sh \
-			$(MINIOS_UPSTREAM_URL) \
-			$(MINIOS_UPSTREAM_REVISION) \
-			$(XEN_ROOT)/extras/mini-os ; \
-	fi
-
-.PHONY: mini-os-dir-force-update
-mini-os-dir-force-update: mini-os-dir
-	set -ex; \
-	if [ "$(MINIOS_UPSTREAM_REVISION)" ]; then \
-		cd extras/mini-os-remote; \
-		$(GIT) fetch origin; \
-		$(GIT) reset --hard $(MINIOS_UPSTREAM_REVISION); \
-	fi
-
-export XEN_TARGET_ARCH
-export DESTDIR
-
-.PHONY: %-tools-public-headers
-%-tools-public-headers:
-	$(MAKE) -C tools/include $*
-
-# build and install everything into the standard system directories
-.PHONY: install
-install: $(TARGS_INSTALL)
-
-.PHONY: build
-build: $(TARGS_BUILD)
-
-.PHONY: build-xen
-build-xen:
-	$(MAKE) -C xen build
-
-.PHONY: %_defconfig
-%_defconfig:
-	$(MAKE) -C xen $@
-
-.PHONY: build-tools
-build-tools: build-tools-public-headers
-	$(MAKE) -C tools build
-
-.PHONY: build-tools-oxenstored
-build-tools-oxenstored: build-tools-public-headers
-	$(MAKE) -s -C tools/ocaml clean
-	$(MAKE) -s -C tools/libs
-	$(MAKE) -C tools/ocaml build-tools-oxenstored
-
-.PHONY: build-stubdom
-build-stubdom: mini-os-dir build-tools-public-headers
-	$(MAKE) -C stubdom build
-ifeq (x86_64,$(XEN_TARGET_ARCH))
-	XEN_TARGET_ARCH=x86_32 $(MAKE) -C stubdom pv-grub
+# Export target architecture overrides to Xen and Linux sub-trees.
+ifneq ($(XEN_TARGET_ARCH),)
+SUBARCH := $(subst x86_32,i386,$(XEN_TARGET_ARCH))
+export XEN_TARGET_ARCH SUBARCH XEN_SYSTYPE
 endif
 
-.PHONY: build-docs
-build-docs:
+# Default target must appear before any include lines
+all: dist
+
+XEN_ROOT=$(CURDIR)
+include Config.mk
+include buildconfigs/Rules.mk
+
+ifeq ($(XEN_TARGET_X86_PAE),y)
+export pae=y
+endif
+
+.PHONY:	all dist install xen kernels tools dev-docs docs world clean
+.PHONY:	mkpatches mrproper kbuild kdelete kclean
+
+# build and install everything into the standard system directories
+install: install-xen install-kernels install-tools install-docs
+
+build: kernels
+	$(MAKE) -C xen build
+	$(MAKE) -C tools build
 	$(MAKE) -C docs build
 
 # The test target is for unit tests that can run without an installation.  Of
 # course, many tests require a machine running Xen itself, and these are
 # handled elsewhere.
-.PHONY: test
 test:
 	$(MAKE) -C tools/python test
 
-run-tests-%: build-tools-public-headers tools/tests/%/
-	$(MAKE) -C tools/tests/$* run
-
-# For most targets here,
-#   make COMPONENT-TARGET
-# is implemented, more or less, by
-#   make -C COMPONENT TARGET
-#
-# Each rule that does this needs to have dependencies on any
-# other COMPONENTs that have to be processed first.  See
-# The install-tools target here for an example.
-#
-# dist* targets are special: these do not occur in lower-level
-# Makefiles.  Instead, these are all implemented only here.
-# They run the appropriate install targets with DESTDIR set.
-#
-# Also, we have a number of targets COMPONENT which run
-# dist-COMPONENT, for convenience.
-#
-# The Makefiles invoked with -C from the toplevel should
-# generally have the following targets:
-#       all  build  install  clean  distclean
-
-
-.PHONY: dist
+# build and install everything into local dist directory
 dist: DESTDIR=$(DISTDIR)/install
-dist: $(TARGS_DIST) dist-misc
-
-dist-misc:
-	$(INSTALL_DIR) $(DISTDIR)/
+dist: dist-xen dist-kernels dist-tools dist-docs
+	$(INSTALL_DIR) $(DISTDIR)/check
 	$(INSTALL_DATA) ./COPYING $(DISTDIR)
 	$(INSTALL_DATA) ./README $(DISTDIR)
 	$(INSTALL_PROG) ./install.sh $(DISTDIR)
-
-
+	$(INSTALL_PROG) tools/check/chk tools/check/check_* $(DISTDIR)/check
 dist-%: DESTDIR=$(DISTDIR)/install
 dist-%: install-%
 	@: # do nothing
 
-.PHONY: xen tools stubdom docs
+# Legacy dist targets
 xen: dist-xen
 tools: dist-tools
-stubdom: dist-stubdom
+kernels: dist-kernels
 docs: dist-docs
 
-.PHONY: install-xen
+prep-kernels:
+	for i in $(XKERNELS) ; do $(MAKE) $$i-prep || exit 1; done
+
 install-xen:
 	$(MAKE) -C xen install
 
-.PHONY: install-tools
-install-tools: install-tools-public-headers
+install-tools:
 	$(MAKE) -C tools install
 
-.PHONY: install-stubdom
-install-stubdom: mini-os-dir install-tools
-	$(MAKE) -C stubdom install
-ifeq (x86_64,$(XEN_TARGET_ARCH))
-	XEN_TARGET_ARCH=x86_32 $(MAKE) -C stubdom install-grub
-endif
+install-kernels:
+	for i in $(XKERNELS) ; do $(MAKE) $$i-install || exit 1; done
 
-.PHONY: tools/firmware/seabios-dir-force-update
-tools/firmware/seabios-dir-force-update:
-	$(MAKE) -C tools/firmware seabios-dir-force-update
-
-.PHONY: tools/firmware/ovmf-dir-force-update
-tools/firmware/ovmf-dir-force-update:
-	$(MAKE) -C tools/firmware ovmf-dir-force-update
-
-.PHONY: install-docs
 install-docs:
-	$(MAKE) -C docs install
+	sh ./docs/check_pkgs && $(MAKE) -C docs install || true
 
-# We only have build-tests install-tests, not uninstall-tests etc.
-.PHONY: build-tests
-build-tests: build-xen
-	$(MAKE) -C xen tests
+dev-docs:
+	$(MAKE) -C docs dev-docs
 
-.PHONY: install-tests
-install-tests: install-xen
-	$(MAKE) -C xen $@
+# Build all the various kernels and modules
+kbuild: kernels
 
-# build xen and the tools and place them in the install
-# directory. 'make install' should then copy them to the normal system
-# directories
-.PHONY: world
+# Delete the kernel build trees entirely
+kdelete:
+	for i in $(XKERNELS) ; do $(MAKE) $$i-delete ; done
+
+# Clean the kernel build trees
+kclean:
+	for i in $(XKERNELS) ; do $(MAKE) $$i-clean ; done
+
+# Make patches from kernel sparse trees
+mkpatches:
+	for i in $(ALLSPARSETREES) ; do $(MAKE) $$i-xen.patch; done
+
+# build xen, the tools, and a domain 0 plus unprivileged linux-xen images,
+# and place them in the install directory. 'make install' should then
+# copy them to the normal system directories
 world: 
 	$(MAKE) clean
+	$(MAKE) kdelete
 	$(MAKE) dist
 
-# Package a build in a debball file, that is inside a .deb format
-# container to allow for easy and clean removal. This is not intended
-# to be a full featured policy compliant .deb package.
-.PHONY: debball
-debball: dist
-	fakeroot sh ./tools/misc/mkdeb $(XEN_ROOT) $$($(MAKE) -C xen xenversion --no-print-directory)
-
-# Package a build in an rpmball file, that is inside a .rpm format
-# container to allow for easy and clean removal. This is not intended
-# to be a full featured policy compliant .rpm package.
-.PHONY: rpmball
-rpmball: dist
-	bash ./tools/misc/mkrpm $(XEN_ROOT) $$($(MAKE) -C xen xenversion --no-print-directory)
-
-.PHONY: subtree-force-update
-subtree-force-update: mini-os-dir-force-update
-	$(MAKE) -C tools subtree-force-update
-
-.PHONY: subtree-force-update-all
-subtree-force-update-all: mini-os-dir-force-update
-	$(MAKE) -C tools subtree-force-update-all
-
-# Make a source tarball, including qemu sub-trees.
-#
-# src-tarball will use "git describe" for the version number.  This
-# will have the most recent tag, number of commits since that tag, and
-# git commit id of the head.  This is suitable for a "snapshot"
-# tarball of an unreleased tree.
-#
-# src-tarball-release will use "make xenversion" as the version
-# number.  This is suitable for release tarballs.
-.PHONY: src-tarball-release
-src-tarball-release: subtree-force-update-all
-	bash ./tools/misc/mktarball $(XEN_ROOT) $$($(MAKE) -C xen xenversion --no-print-directory)
-
-.PHONY: src-tarball
-src-tarball: subtree-force-update-all
-	bash ./tools/misc/mktarball $(XEN_ROOT) $$(git describe)
-
-.PHONY: clean
-clean: $(TARGS_CLEAN)
-
-.PHONY: clean-xen
-clean-xen:
+# clean doesn't do a kclean
+clean:: 
 	$(MAKE) -C xen clean
-
-.PHONY: clean-tools
-clean-tools: clean-tools-public-headers
 	$(MAKE) -C tools clean
-
-.PHONY: clean-stubdom
-clean-stubdom: clean-tools-public-headers
-	$(MAKE) -C stubdom crossclean
-ifeq (x86_64,$(XEN_TARGET_ARCH))
-	XEN_TARGET_ARCH=x86_32 $(MAKE) -C stubdom crossclean
-endif
-
-.PHONY: clean-docs
-clean-docs:
 	$(MAKE) -C docs clean
 
-# clean, but blow away tarballs
-.PHONY: distclean
-distclean: $(TARGS_DISTCLEAN)
-	$(MAKE) -C tools/include distclean
-	rm -f config/Toplevel.mk
-	rm -rf dist
-	rm -rf config.log config.status config.cache autom4te.cache
-
-.PHONY: distclean-xen
-distclean-xen:
-	$(MAKE) -C xen distclean
-
-.PHONY: distclean-tools
-distclean-tools:
-	$(MAKE) -C tools distclean
-
-.PHONY: distclean-stubdom
-distclean-stubdom:
-	$(MAKE) -C stubdom distclean
-ifeq (x86_64,$(XEN_TARGET_ARCH))
-	XEN_TARGET_ARCH=x86_32 $(MAKE) -C stubdom distclean
-endif
-	rm -rf extras/mini-os extras/mini-os-remote
-
-.PHONY: distclean-docs
-distclean-docs:
-	$(MAKE) -C docs distclean
+# clean, but blow away kernel build tree plus tarballs
+distclean: clean
+	rm -rf dist patches/tmp
+	for i in $(ALLKERNELS) ; do $(MAKE) $$i-delete ; done
+	for i in $(ALLSPARSETREES) ; do $(MAKE) $$i-mrproper ; done
 
 # Linux name for GNU distclean
-.PHONY: mrproper
 mrproper: distclean
 
-.PHONY: help
+install-logging: LOGGING=logging-0.4.9.2
+install-logging:
+	[ -f $(LOGGING).tar.gz ] || wget http://www.red-dove.com/$(LOGGING).tar.gz
+	tar -zxf $(LOGGING).tar.gz
+	cd $(LOGGING) && python setup.py install
+
+# handy target to upgrade iptables (use rpm or apt-get in preference)
+install-iptables:
+	wget http://www.netfilter.org/files/iptables-1.2.11.tar.bz2
+	tar -jxf iptables-1.2.11.tar.bz2
+	$(MAKE) -C iptables-1.2.11 PREFIX= KERNEL_DIR=../linux-$(LINUX_VER)-xen0 install
+
 help:
 	@echo 'Installation targets:'
-	@echo '  install               - build and install everything'
-	@echo '  install-xen           - build and install the Xen hypervisor'
-	@echo '  install-tools         - build and install the control tools'
-	@echo '  install-stubdom       - build and install the stubdomain images'
-	@echo '  install-docs          - build and install user documentation'
-	@echo ''
-	@echo 'Local dist targets:'
-	@echo '  dist                  - build and install everything into local dist directory'
-	@echo '  world                 - clean everything then make dist'
-	@echo '  dist-xen              - build Xen hypervisor and install into local dist'
-	@echo '  dist-tools            - build the tools and install into local dist'
-	@echo '  dist-stubdom          - build the stubdomain images and install into local dist'
-	@echo '  dist-docs             - build user documentation and install into local dist'
+	@echo '  install          - build and install everything'
+	@echo '  install-xen      - build and install the Xen hypervisor'
+	@echo '  install-tools    - build and install the control tools'
+	@echo '  install-kernels  - build and install guest kernels'
+	@echo '  install-docs     - build and install user documentation'
 	@echo ''
 	@echo 'Building targets:'
-	@echo '  build                 - build everything'
-	@echo '  build-xen             - build Xen hypervisor'
-	@echo '  build-tools           - build the tools'
-	@echo '  build-stubdom         - build the stubdomain images'
-	@echo '  build-docs            - build user documentation'
+	@echo '  dist             - build and install everything into local dist directory'
+	@echo '  world            - clean everything, delete guest kernel build'
+	@echo '                     trees then make dist'
+	@echo '  xen              - build and install Xen hypervisor'
+	@echo '  tools            - build and install tools'
+	@echo '  kernels          - build and install guest kernels'
+	@echo '  kbuild           - synonym for make kernels'
+	@echo '  docs             - build and install user documentation'
+	@echo '  dev-docs         - build developer-only documentation'
 	@echo ''
 	@echo 'Cleaning targets:'
-	@echo '  clean                 - clean the Xen, tools and docs'
-	@echo '  distclean             - clean plus delete kernel build trees and'
-	@echo '                          local downloaded files'
-	@echo '  subtree-force-update  - Call *-force-update on all git subtrees (qemu, seabios, ovmf)'
+	@echo '  clean            - clean the Xen, tools and docs (but not'
+	@echo '                     guest kernel) trees'
+	@echo '  distclean        - clean plus delete kernel tarballs and kernel'
+	@echo '                     build trees'
+	@echo '  kdelete          - delete guest kernel build trees'
+	@echo '  kclean           - clean guest kernel build trees'
+	@echo ''
+	@echo 'Dependency installation targets:'
+	@echo '  install-logging  - install the Python Logging package'
+	@echo '  install-iptables - install iptables tools'
 	@echo ''
 	@echo 'Miscellaneous targets:'
-	@echo '  uninstall             - attempt to remove installed Xen tools'
-	@echo '                          (use with extreme care!)'
-	@echo
-	@echo 'Package targets:'
-	@echo '  src-tarball-release   - make a source tarball with xen and qemu tagged with a release'
-	@echo '  src-tarball           - make a source tarball with xen and qemu tagged with git describe'
-	@echo
-	@echo 'Environment:'
-	@echo '  [ this documentation is sadly not complete ]'
+	@echo '  prep-kernels     - prepares kernel directories, does not build'
+	@echo '  mkpatches        - make patches against vanilla kernels from'
+	@echo '                     sparse trees'
+	@echo '  uninstall        - attempt to remove installed Xen tools (use'
+	@echo '                     with extreme care!)'
 
 # Use this target with extreme care!
-
-.PHONY: uninstall-xen
-uninstall-xen:
-	$(MAKE) -C xen uninstall
-
-.PHONY: uninstall-tools
-uninstall-tools:
-	$(MAKE) -C tools uninstall
-
-.PHONY: uninstall-stubdom
-uninstall-stubdom:
-	$(MAKE) -C stubdom uninstall
-
-.PHONY: uninstall-docs
-uninstall-docs:
-	$(MAKE) -C docs uninstall
-
-.PHONY: uninstall
 uninstall: D=$(DESTDIR)
-uninstall: uninstall-tools-public-headers $(TARGS_UNINSTALL)
+uninstall:
+	[ -d $(D)/etc/xen ] && mv -f $(D)/etc/xen $(D)/etc/xen.old-`date +%s` || true
+	rm -rf $(D)/etc/init.d/xend*
+	rm -rf $(D)/etc/hotplug/xen-backend.agent
+	rm -f  $(D)/etc/udev/rules.d/xen-backend.rules
+	rm -f  $(D)/etc/udev/xen-backend.rules
+	rm -f  $(D)/etc/sysconfig/xendomains
+	rm -rf $(D)/var/run/xen* $(D)/var/lib/xen*
+	rm -rf $(D)/boot/*xen*
+	rm -rf $(D)/lib/modules/*xen*
+	rm -rf $(D)/usr/bin/xen* $(D)/usr/bin/lomount
+	rm -rf $(D)/usr/bin/cpuperf-perfcntr $(D)/usr/bin/cpuperf-xen
+	rm -rf $(D)/usr/bin/xc_shadow
+	rm -rf $(D)/usr/bin/pygrub
+	rm -rf $(D)/usr/bin/setsize $(D)/usr/bin/tbctl
+	rm -rf $(D)/usr/bin/xsls
+	rm -rf $(D)/usr/include/xenctrl.h $(D)/usr/include/xenguest.h
+	rm -rf $(D)/usr/include/xs_lib.h $(D)/usr/include/xs.h
+	rm -rf $(D)/usr/include/xen
+	rm -rf $(D)/usr/$(LIBDIR)/libxenctrl* $(D)/usr/$(LIBDIR)/libxenguest*
+	rm -rf $(D)/usr/$(LIBDIR)/libxenstore*
+	rm -rf $(D)/usr/$(LIBDIR)/python/xen $(D)/usr/$(LIBDIR)/python/grub
+	rm -rf $(D)/usr/$(LIBDIR)/xen/
+	rm -rf $(D)/usr/lib/xen/
+	rm -rf $(D)/usr/local/sbin/setmask $(D)/usr/local/sbin/xen*
+	rm -rf $(D)/usr/sbin/xen* $(D)/usr/sbin/netfix $(D)/usr/sbin/xm
+	rm -rf $(D)/usr/share/doc/xen
+	rm -rf $(D)/usr/share/xen
+	rm -rf $(D)/usr/share/man/man1/xen*
+	rm -rf $(D)/usr/share/man/man8/xen*
 
-.PHONY: xenversion
-xenversion:
-	@$(MAKE) --no-print-directory -C xen xenversion
+# Legacy targets for compatibility
+linux26:
+	$(MAKE) 'KERNELS=linux-2.6*' kernels

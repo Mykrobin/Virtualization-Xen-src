@@ -13,7 +13,8 @@
     GNU General Public License for more details.
 
     You should have received a copy of the GNU General Public License
-    along with this program; If not, see <http://www.gnu.org/licenses/>.
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #ifndef _XENSTORED_WATCH_H
@@ -21,18 +22,12 @@
 
 #include "xenstored_core.h"
 
-int do_watch(struct connection *conn, struct buffered_data *in);
-int do_unwatch(struct connection *conn, struct buffered_data *in);
+void do_watch(struct connection *conn, struct buffered_data *in);
+void do_unwatch(struct connection *conn, struct buffered_data *in);
 
-/* Fire all watches: !exact means all the children are affected (ie. rm). */
-void fire_watches(struct connection *conn, const void *tmp, const char *name,
-		  struct node *node, bool exact, struct node_perms *perms);
+/* Fire all watches: recurse means all the children are affected (ie. rm). */
+void fire_watches(struct connection *conn, const char *name, bool recurse);
 
-void conn_delete_all_watches(struct connection *conn);
-
-const char *dump_state_watches(FILE *fp, struct connection *conn,
-			       unsigned int conn_id);
-
-void read_state_watch(const void *ctx, const void *state);
+void dump_watches(struct connection *conn);
 
 #endif /* _XENSTORED_WATCH_H */

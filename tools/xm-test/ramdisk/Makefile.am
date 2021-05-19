@@ -1,0 +1,80 @@
+
+EXTRA_DIST = skel configs patches
+
+BR_TAR = buildroot-20060215.tar.bz2
+BR_URL = http://buildroot.uclibc.org/downloads/snapshots/$(BR_TAR)
+#BR_URL = http://buildroot.uclibc.org/downloads/snapshots/buildroot-snapshot.tar.bz2
+BR_SRC = buildroot
+BR_IMG = $(BR_SRC)/rootfs.i386.ext2
+
+BR_ROOT = build_i386/root
+
+HVM_SCRIPT = bin/create_disk_image
+
+XMTEST_MAJ_VER = $(shell echo @PACKAGE_VERSION@ | perl -pe 's/(\d+)\.(\d+)\.\d+/\1.\2/')
+XMTEST_VER_IMG = initrd-$(XMTEST_MAJ_VER).img
+
+EXTRA_ROOT_DIRS = sys
+
+if HVM
+all: initrd.img disk.img
+else
+all: initrd.img
+endif
+
+$(BR_TAR):
+	wget $(BR_URL)
+
+$(BR_SRC): $(BR_TAR)
+	tar xjf $(BR_TAR)
+
+$(BR_IMG): $(BR_SRC)
+	cp configs/buildroot $(BR_SRC)/.config
+	cp configs/busybox $(BR_SRC)/package/busybox/busybox.config
+	cp configs/uClibc $(BR_SRC)/toolchain/uClibc/uClibc.config
+	(for i in patches/buildroot/*.patch; do \
+	  cd $(BR_SRC) && patch -p1 <../$$i && cd ..; done )
+	cd $(BR_SRC) && make oldconfig && make
+
+$(XMTEST_VER_IMG): $(BR_IMG)
+	chmod a+x skel/etc/init.d/rcS
+	(cd skel; mkdir -p $(EXTRA_ROOT_DIRS); tar cf - .) \
+		| (cd $(BR_SRC)/$(BR_ROOT); tar xvf -)
+	cd $(BR_SRC) && make
+	cp $(BR_IMG) initrd-$(XMTEST_MAJ_VER).img
+
+initrd.img: $(XMTEST_VER_IMG)
+	ln -sf $(XMTEST_VER_IMG) initrd.img
+
+disk.img: existing
+	chmod a+x $(HVM_SCRIPT)
+	@if test ! "$(HVMKERNEL)" = "no" -a ! "$(DRVDIR)" = "no"; then \
+		$(HVM_SCRIPT) -r $(XMTEST_VER_IMG) -k $(HVMKERNEL) \
+			-d $(DRVDIR); \
+	elif test "$(HVMKERNEL)" = "no" -a ! "$(DRVDIR)" = "no"; then \
+		$(HVM_SCRIPT) -r $(XMTEST_VER_IMG) -d $(DRVDIR); \
+	elif test ! "$(HVMKERNEL)" = "no" -a "$(DRVDIR)" = "no"; then \
+		$(HVM_SCRIPT) -r $(XMTEST_VER_IMG) -k $(HVMKERNEL); \
+	else \
+		$(HVM_SCRIPT) -r $(XMTEST_VER_IMG); \
+	fi
+
+existing:
+	@if test -n "$(INITRD)"; then \
+		wget $(INITRD)/$(XMTEST_VER_IMG); \
+	fi
+	@if [ -f $(XMTEST_VER_IMG) ] ; then \
+		ln -sf $(XMTEST_VER_IMG) initrd.img; \
+	else \
+		echo Error, $(XMTEST_VER_IMG) not found;  \
+		false; \
+	fi
+
+clean-local: am_config_clean-local
+
+am_config_clean-local:
+	rm -Rf buildroot
+	rm -f *~
+	rm -f initrd.img
+	rm -f $(BR_TAR)
+	rm -f disk.img

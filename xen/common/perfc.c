@@ -7,254 +7,221 @@
 #include <xen/spinlock.h>
 #include <xen/mm.h>
 #include <xen/guest_access.h>
-#include <public/sysctl.h>
-#include <asm/perfc.h>
+#include <public/dom0_ops.h>
 
+#undef  PERFCOUNTER
+#undef  PERFCOUNTER_CPU
+#undef  PERFCOUNTER_ARRAY
+#undef  PERFSTATUS
+#undef  PERFSTATUS_CPU
+#undef  PERFSTATUS_ARRAY
 #define PERFCOUNTER( var, name )              { name, TYPE_SINGLE, 0 },
+#define PERFCOUNTER_CPU( var, name )          { name, TYPE_CPU,    0 },
 #define PERFCOUNTER_ARRAY( var, name, size )  { name, TYPE_ARRAY,  size },
 #define PERFSTATUS( var, name )               { name, TYPE_S_SINGLE, 0 },
+#define PERFSTATUS_CPU( var, name )           { name, TYPE_S_CPU,    0 },
 #define PERFSTATUS_ARRAY( var, name, size )   { name, TYPE_S_ARRAY,  size },
-static const struct {
-    const char *name;
-    enum { TYPE_SINGLE, TYPE_ARRAY,
-           TYPE_S_SINGLE, TYPE_S_ARRAY
+static struct {
+    char *name;
+    enum { TYPE_SINGLE, TYPE_CPU, TYPE_ARRAY,
+           TYPE_S_SINGLE, TYPE_S_CPU, TYPE_S_ARRAY
     } type;
-    unsigned int nr_elements;
+    int nr_elements;
 } perfc_info[] = {
 #include <xen/perfc_defn.h>
 };
 
 #define NR_PERFCTRS (sizeof(perfc_info) / sizeof(perfc_info[0]))
 
-DEFINE_PER_CPU(perfc_t[NUM_PERFCOUNTERS], perfcounters);
+struct perfcounter perfcounters;
 
 void perfc_printall(unsigned char key)
 {
-    unsigned int i, j;
+    int i, j, sum;
     s_time_t now = NOW();
+    atomic_t *counters = (atomic_t *)&perfcounters;
 
-    printk("Xen performance counters SHOW  (now = %"PRI_stime")\n", now);
+    printk("Xen performance counters SHOW  (now = 0x%08X:%08X)\n",
+           (u32)(now>>32), (u32)now);
 
-    for ( i = j = 0; i < NR_PERFCTRS; i++ )
+    for ( i = 0; i < NR_PERFCTRS; i++ ) 
     {
-        unsigned int k, cpu;
-        unsigned long long sum = 0;
-
         printk("%-32s  ",  perfc_info[i].name);
         switch ( perfc_info[i].type )
         {
         case TYPE_SINGLE:
         case TYPE_S_SINGLE:
-            for_each_online_cpu ( cpu )
-                sum += per_cpu(perfcounters, cpu)[j];
-            if ( perfc_info[i].type == TYPE_S_SINGLE ) 
-                sum = (perfc_t) sum;
-            printk("TOTAL[%12Lu]", sum);
-            if ( sum )
-            {
-                k = 0;
-                for_each_online_cpu ( cpu )
-                {
-                    if ( k > 0 && (k % 4) == 0 )
-                        printk("\n%53s", "");
-                    printk("  CPU%02u[%10"PRIperfc"u]", cpu, per_cpu(perfcounters, cpu)[j]);
-                    ++k;
-                }
-            }
-            ++j;
+            printk("TOTAL[%10d]", atomic_read(&counters[0]));
+            counters += 1;
+            break;
+        case TYPE_CPU:
+        case TYPE_S_CPU:
+            sum = 0;
+            for_each_online_cpu ( j )
+                sum += atomic_read(&counters[j]);
+            printk("TOTAL[%10d]  ", sum);
+            for_each_online_cpu ( j )
+                printk("CPU%02d[%10d]  ", j, atomic_read(&counters[j]));
+            counters += NR_CPUS;
             break;
         case TYPE_ARRAY:
         case TYPE_S_ARRAY:
-            for_each_online_cpu ( cpu )
+            for ( j = sum = 0; j < perfc_info[i].nr_elements; j++ )
+                sum += atomic_read(&counters[j]);
+            printk("TOTAL[%10d]  ", sum);
+#ifdef PERF_ARRAYS
+            for ( j = 0; j < perfc_info[i].nr_elements; j++ )
             {
-                perfc_t *counters = per_cpu(perfcounters, cpu) + j;
-
-                for ( k = 0; k < perfc_info[i].nr_elements; k++ )
-                    sum += counters[k];
+                if ( (j != 0) && ((j % 4) == 0) )
+                    printk("\n                   ");
+                printk("ARR%02d[%10d]  ", j, atomic_read(&counters[j]));
             }
-            if ( perfc_info[i].type == TYPE_S_ARRAY ) 
-                sum = (perfc_t) sum;
-            printk("TOTAL[%12Lu]", sum);
-            if (sum)
-            {
-#ifdef CONFIG_PERF_ARRAYS
-                for ( k = 0; k < perfc_info[i].nr_elements; k++ )
-                {
-                    sum = 0;
-                    for_each_online_cpu ( cpu )
-                        sum += per_cpu(perfcounters, cpu)[j + k];
-                    if ( perfc_info[i].type == TYPE_S_ARRAY ) 
-                        sum = (perfc_t) sum;
-                    if ( (k % 4) == 0 )
-                        printk("\n%16s", "");
-                    printk("  ARR%02u[%10Lu]", k, sum);
-                }
-#else
-                k = 0;
-                for_each_online_cpu ( cpu )
-                {
-                    perfc_t *counters = per_cpu(perfcounters, cpu) + j;
-                    unsigned int n;
-
-                    sum = 0;
-                    for ( n = 0; n < perfc_info[i].nr_elements; n++ )
-                        sum += counters[n];
-                    if ( perfc_info[i].type == TYPE_S_ARRAY ) 
-                        sum = (perfc_t) sum;
-                    if ( k > 0 && (k % 4) == 0 )
-                        printk("\n%53s", "");
-                    printk("  CPU%02u[%10Lu]", cpu, sum);
-                    ++k;
-                }
 #endif
-            }
-            j += perfc_info[i].nr_elements;
+            counters += j;
             break;
         }
         printk("\n");
     }
+
+#ifdef PERF_ARRAYS
+    ptwr_eip_stat_print();
+#endif
 }
 
 void perfc_reset(unsigned char key)
 {
-    unsigned int i, j;
+    int i, j;
     s_time_t now = NOW();
+    atomic_t *counters = (atomic_t *)&perfcounters;
 
     if ( key != '\0' )
-        printk("Xen performance counters RESET (now = %"PRI_stime")\n", now);
+        printk("Xen performance counters RESET (now = 0x%08X:%08X)\n",
+               (u32)(now>>32), (u32)now);
 
     /* leave STATUS counters alone -- don't reset */
 
-    for ( i = j = 0; i < NR_PERFCTRS; i++ )
+    for ( i = 0; i < NR_PERFCTRS; i++ ) 
     {
-        unsigned int cpu;
-
         switch ( perfc_info[i].type )
         {
         case TYPE_SINGLE:
-            for_each_online_cpu ( cpu )
-                per_cpu(perfcounters, cpu)[j] = 0;
+            atomic_set(&counters[0],0);
         case TYPE_S_SINGLE:
-            ++j;
+            counters += 1;
+            break;
+        case TYPE_CPU:
+            for ( j = 0; j < NR_CPUS; j++ )
+                atomic_set(&counters[j],0);
+        case TYPE_S_CPU:
+            counters += NR_CPUS;
             break;
         case TYPE_ARRAY:
-            for_each_online_cpu ( cpu )
-                memset(per_cpu(perfcounters, cpu) + j, 0,
-                       perfc_info[i].nr_elements * sizeof(perfc_t));
+            for ( j = 0; j < NR_CPUS; j++ )
+                atomic_set(&counters[j],0);
         case TYPE_S_ARRAY:
-            j += perfc_info[i].nr_elements;
+            counters += perfc_info[i].nr_elements;
             break;
         }
     }
 
-    arch_perfc_reset();
+#ifdef PERF_ARRAYS
+    ptwr_eip_stat_reset();
+#endif
 }
 
-static struct xen_sysctl_perfc_desc perfc_d[NR_PERFCTRS];
-static xen_sysctl_perfc_val_t *perfc_vals;
-static unsigned int      perfc_nbr_vals;
-static cpumask_t         perfc_cpumap;
-
-static int perfc_copy_info(XEN_GUEST_HANDLE_64(xen_sysctl_perfc_desc_t) desc,
-                           XEN_GUEST_HANDLE_64(xen_sysctl_perfc_val_t) val)
+static dom0_perfc_desc_t perfc_d[NR_PERFCTRS];
+static int               perfc_init = 0;
+static int perfc_copy_info(GUEST_HANDLE(dom0_perfc_desc_t) desc)
 {
-    unsigned int i, j, v;
+    unsigned int i, j;
+    atomic_t *counters = (atomic_t *)&perfcounters;
+
+    if ( guest_handle_is_null(desc) )
+        return 0;
 
     /* We only copy the name and array-size information once. */
-    if ( !cpumask_equal(&cpu_online_map, &perfc_cpumap) )
+    if ( !perfc_init ) 
     {
-        unsigned int nr_cpus;
-        perfc_cpumap = cpu_online_map;
-        nr_cpus = cpumask_weight(&perfc_cpumap);
-
-        perfc_nbr_vals = 0;
-
         for ( i = 0; i < NR_PERFCTRS; i++ )
         {
-            safe_strcpy(perfc_d[i].name, perfc_info[i].name);
+            strncpy(perfc_d[i].name, perfc_info[i].name,
+                    sizeof(perfc_d[i].name));
+            perfc_d[i].name[sizeof(perfc_d[i].name)-1] = '\0';
 
             switch ( perfc_info[i].type )
             {
             case TYPE_SINGLE:
             case TYPE_S_SINGLE:
-                perfc_d[i].nr_vals = nr_cpus;
+                perfc_d[i].nr_vals = 1;
+                break;
+            case TYPE_CPU:
+            case TYPE_S_CPU:
+                perfc_d[i].nr_vals = num_online_cpus();
                 break;
             case TYPE_ARRAY:
             case TYPE_S_ARRAY:
                 perfc_d[i].nr_vals = perfc_info[i].nr_elements;
                 break;
             }
-            perfc_nbr_vals += perfc_d[i].nr_vals;
+
+            if ( perfc_d[i].nr_vals > ARRAY_SIZE(perfc_d[i].vals) )
+                perfc_d[i].nr_vals = ARRAY_SIZE(perfc_d[i].vals);
         }
 
-        xfree(perfc_vals);
-        perfc_vals = xmalloc_array(xen_sysctl_perfc_val_t, perfc_nbr_vals);
+        perfc_init = 1;
     }
 
-    if ( guest_handle_is_null(desc) )
-        return 0;
-
-    if ( perfc_vals == NULL )
-        return -ENOMEM;
-
-    /* Architecture may fill counters from hardware.  */
-    arch_perfc_gather();
-
     /* We gather the counts together every time. */
-    for ( i = j = v = 0; i < NR_PERFCTRS; i++ )
+    for ( i = 0; i < NR_PERFCTRS; i++ )
     {
-        unsigned int cpu;
-
         switch ( perfc_info[i].type )
         {
         case TYPE_SINGLE:
         case TYPE_S_SINGLE:
-            for_each_cpu ( cpu, &perfc_cpumap )
-                perfc_vals[v++] = per_cpu(perfcounters, cpu)[j];
-            ++j;
+            perfc_d[i].vals[0] = atomic_read(&counters[0]);
+            counters += 1;
+            break;
+        case TYPE_CPU:
+        case TYPE_S_CPU:
+            for ( j = 0; j < perfc_d[i].nr_vals; j++ )
+                perfc_d[i].vals[j] = atomic_read(&counters[j]);
+            counters += NR_CPUS;
             break;
         case TYPE_ARRAY:
         case TYPE_S_ARRAY:
-            memset(perfc_vals + v, 0, perfc_d[i].nr_vals * sizeof(*perfc_vals));
-            for_each_cpu ( cpu, &perfc_cpumap )
-            {
-                perfc_t *counters = per_cpu(perfcounters, cpu) + j;
-                unsigned int k;
-
-                for ( k = 0; k < perfc_d[i].nr_vals; k++ )
-                    perfc_vals[v + k] += counters[k];
-            }
-            v += perfc_d[i].nr_vals;
-            j += perfc_info[i].nr_elements;
+            for ( j = 0; j < perfc_d[i].nr_vals; j++ )
+                perfc_d[i].vals[j] = atomic_read(&counters[j]);
+            counters += perfc_info[i].nr_elements;
             break;
         }
     }
-    BUG_ON(v != perfc_nbr_vals);
 
-    if ( copy_to_guest(desc, perfc_d, NR_PERFCTRS) )
-        return -EFAULT;
-    if ( copy_to_guest(val, perfc_vals, perfc_nbr_vals) )
-        return -EFAULT;
-    return 0;
+    return (copy_to_guest(desc, (dom0_perfc_desc_t *)perfc_d, NR_PERFCTRS) ?
+            -EFAULT : 0);
 }
 
 /* Dom0 control of perf counters */
-int perfc_control(struct xen_sysctl_perfc_op *pc)
+int perfc_control(dom0_perfccontrol_t *pc)
 {
-    static DEFINE_SPINLOCK(lock);
+    static spinlock_t lock = SPIN_LOCK_UNLOCKED;
+    u32 op = pc->op;
     int rc;
+
+    pc->nr_counters = NR_PERFCTRS;
 
     spin_lock(&lock);
 
-    switch ( pc->cmd )
+    switch ( op )
     {
-    case XEN_SYSCTL_PERFCOP_reset:
-        rc = perfc_copy_info(pc->desc, pc->val);
+    case DOM0_PERFCCONTROL_OP_RESET:
+        perfc_copy_info(pc->desc);
         perfc_reset(0);
+        rc = 0;
         break;
 
-    case XEN_SYSCTL_PERFCOP_query:
-        rc = perfc_copy_info(pc->desc, pc->val);
+    case DOM0_PERFCCONTROL_OP_QUERY:
+        perfc_copy_info(pc->desc);
+        rc = 0;
         break;
 
     default:
@@ -264,16 +231,13 @@ int perfc_control(struct xen_sysctl_perfc_op *pc)
 
     spin_unlock(&lock);
 
-    pc->nr_counters = NR_PERFCTRS;
-    pc->nr_vals = perfc_nbr_vals;
-
     return rc;
 }
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

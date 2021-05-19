@@ -8,9 +8,7 @@
  */
 
 #include <xen/sched.h>
-#include <xen/errno.h>
 #include <xen/rangeset.h>
-#include <xsm/xsm.h>
 
 /* An inclusive range [s,e] and pointer to next range in ascending order. */
 struct range {
@@ -25,10 +23,7 @@ struct rangeset {
 
     /* Ordered list of ranges contained in this set, and protecting lock. */
     struct list_head range_list;
-
-    /* Number of ranges that can be allocated */
-    long             nr_ranges;
-    rwlock_t         lock;
+    spinlock_t       lock;
 
     /* Pretty-printing name. */
     char             name[32];
@@ -84,28 +79,10 @@ static void insert_range(
 
 /* Remove a range from its list and free it. */
 static void destroy_range(
-    struct rangeset *r, struct range *x)
+    struct range *x)
 {
-    r->nr_ranges++;
-
     list_del(&x->list);
     xfree(x);
-}
-
-/* Allocate a new range */
-static struct range *alloc_range(
-    struct rangeset *r)
-{
-    struct range *x;
-
-    if ( r->nr_ranges == 0 )
-        return NULL;
-
-    x = xmalloc(struct range);
-    if ( x )
-        --r->nr_ranges;
-
-    return x;
 }
 
 /*****************************
@@ -120,7 +97,7 @@ int rangeset_add_range(
 
     ASSERT(s <= e);
 
-    write_lock(&r->lock);
+    spin_lock(&r->lock);
 
     x = find_range(r, s);
     y = find_range(r, e);
@@ -129,7 +106,7 @@ int rangeset_add_range(
     {
         if ( (x == NULL) || ((x->e < s) && ((x->e + 1) != s)) )
         {
-            x = alloc_range(r);
+            x = xmalloc(struct range);
             if ( x == NULL )
             {
                 rc = -ENOMEM;
@@ -164,7 +141,7 @@ int rangeset_add_range(
             y = next_range(r, x);
             if ( (y == NULL) || (y->e > x->e) )
                 break;
-            destroy_range(r, y);
+            destroy_range(y);
         }
     }
 
@@ -172,11 +149,11 @@ int rangeset_add_range(
     if ( (y != NULL) && ((x->e + 1) == y->s) )
     {
         x->e = y->e;
-        destroy_range(r, y);
+        destroy_range(y);
     }
 
  out:
-    write_unlock(&r->lock);
+    spin_unlock(&r->lock);
     return rc;
 }
 
@@ -188,7 +165,7 @@ int rangeset_remove_range(
 
     ASSERT(s <= e);
 
-    write_lock(&r->lock);
+    spin_lock(&r->lock);
 
     x = find_range(r, s);
     y = find_range(r, e);
@@ -200,7 +177,7 @@ int rangeset_remove_range(
 
         if ( (x->s < s) && (x->e > e) )
         {
-            y = alloc_range(r);
+            y = xmalloc(struct range);
             if ( y == NULL )
             {
                 rc = -ENOMEM;
@@ -214,7 +191,7 @@ int rangeset_remove_range(
             insert_range(r, x, y);
         }
         else if ( (x->s == s) && (x->e <= e) )
-            destroy_range(r, x);
+            destroy_range(x);
         else if ( x->s == s )
             x->s = e + 1;
         else if ( x->e <= e )
@@ -235,165 +212,33 @@ int rangeset_remove_range(
         {
             t = x;
             x = next_range(r, x);
-            destroy_range(r, t);
+            destroy_range(t);
         }
 
         x->s = e + 1;
         if ( x->s > x->e )
-            destroy_range(r, x);
+            destroy_range(x);
     }
 
  out:
-    write_unlock(&r->lock);
+    spin_unlock(&r->lock);
     return rc;
 }
 
-bool_t rangeset_contains_range(
+int rangeset_contains_range(
     struct rangeset *r, unsigned long s, unsigned long e)
 {
     struct range *x;
-    bool_t contains;
+    int contains;
 
     ASSERT(s <= e);
 
-    if ( !r )
-        return false;
-
-    read_lock(&r->lock);
+    spin_lock(&r->lock);
     x = find_range(r, s);
     contains = (x && (x->e >= e));
-    read_unlock(&r->lock);
+    spin_unlock(&r->lock);
 
     return contains;
-}
-
-bool_t rangeset_overlaps_range(
-    struct rangeset *r, unsigned long s, unsigned long e)
-{
-    struct range *x;
-    bool_t overlaps;
-
-    ASSERT(s <= e);
-
-    if ( !r )
-        return false;
-
-    read_lock(&r->lock);
-    x = find_range(r, e);
-    overlaps = (x && (s <= x->e));
-    read_unlock(&r->lock);
-
-    return overlaps;
-}
-
-int rangeset_report_ranges(
-    struct rangeset *r, unsigned long s, unsigned long e,
-    int (*cb)(unsigned long s, unsigned long e, void *), void *ctxt)
-{
-    struct range *x;
-    int rc = 0;
-
-    read_lock(&r->lock);
-
-    for ( x = first_range(r); x && (x->s <= e) && !rc; x = next_range(r, x) )
-        if ( x->e >= s )
-            rc = cb(max(x->s, s), min(x->e, e), ctxt);
-
-    read_unlock(&r->lock);
-
-    return rc;
-}
-
-int rangeset_claim_range(struct rangeset *r, unsigned long size,
-                         unsigned long *s)
-{
-    struct range *prev, *next;
-    unsigned long start = 0;
-
-    write_lock(&r->lock);
-
-    for ( prev = NULL, next = first_range(r);
-          next;
-          prev = next, next = next_range(r, next) )
-    {
-        if ( (next->s - start) >= size )
-            goto insert;
-
-        if ( next->e == ~0UL )
-            goto out;
-
-        start = next->e + 1;
-    }
-
-    if ( (~0UL - start) + 1 >= size )
-        goto insert;
-
- out:
-    write_unlock(&r->lock);
-    return -ENOSPC;
-
- insert:
-    if ( unlikely(!prev) )
-    {
-        next = alloc_range(r);
-        if ( !next )
-        {
-            write_unlock(&r->lock);
-            return -ENOMEM;
-        }
-
-        next->s = start;
-        next->e = start + size - 1;
-        insert_range(r, prev, next);
-    }
-    else
-        prev->e += size;
-
-    write_unlock(&r->lock);
-
-    *s = start;
-
-    return 0;
-}
-
-int rangeset_consume_ranges(struct rangeset *r,
-                            int (*cb)(unsigned long s, unsigned long e, void *,
-                                      unsigned long *c),
-                            void *ctxt)
-{
-    int rc = 0;
-
-    write_lock(&r->lock);
-    while ( !rangeset_is_empty(r) )
-    {
-        unsigned long consumed = 0;
-        struct range *x = first_range(r);
-
-        rc = cb(x->s, x->e, ctxt, &consumed);
-
-        ASSERT(consumed <= x->e - x->s + 1);
-        x->s += consumed;
-        if ( x->s > x->e )
-            destroy_range(r, x);
-
-        if ( rc )
-            break;
-    }
-    write_unlock(&r->lock);
-
-    return rc;
-}
-
-static int merge(unsigned long s, unsigned long e, void *data)
-{
-    struct rangeset *r = data;
-
-    return rangeset_add_range(r, s, e);
-}
-
-int rangeset_merge(struct rangeset *r1, struct rangeset *r2)
-{
-    return rangeset_report_ranges(r2, 0, ~0ul, merge, r1);
 }
 
 int rangeset_add_singleton(
@@ -408,16 +253,16 @@ int rangeset_remove_singleton(
     return rangeset_remove_range(r, s, s);
 }
 
-bool_t rangeset_contains_singleton(
+int rangeset_contains_singleton(
     struct rangeset *r, unsigned long s)
 {
     return rangeset_contains_range(r, s, s);
 }
 
-bool_t rangeset_is_empty(
-    const struct rangeset *r)
+int rangeset_is_empty(
+    struct rangeset *r)
 {
-    return ((r == NULL) || list_empty(&r->range_list));
+    return list_empty(&r->range_list);
 }
 
 struct rangeset *rangeset_new(
@@ -429,20 +274,20 @@ struct rangeset *rangeset_new(
     if ( r == NULL )
         return NULL;
 
-    rwlock_init(&r->lock);
+    spin_lock_init(&r->lock);
     INIT_LIST_HEAD(&r->range_list);
-    r->nr_ranges = -1;
 
     BUG_ON(flags & ~RANGESETF_prettyprint_hex);
     r->flags = flags;
 
     if ( name != NULL )
     {
-        safe_strcpy(r->name, name);
+        strncpy(r->name, name, sizeof(r->name));
+        r->name[sizeof(r->name)-1] = '\0';
     }
     else
     {
-        snprintf(r->name, sizeof(r->name), "(no name)");
+        sprintf(r->name, "(no name)");
     }
 
     if ( (r->domain = d) != NULL )
@@ -471,15 +316,9 @@ void rangeset_destroy(
     }
 
     while ( (x = first_range(r)) != NULL )
-        destroy_range(r, x);
+        destroy_range(x);
 
     xfree(r);
-}
-
-void rangeset_limit(
-    struct rangeset *r, unsigned int limit)
-{
-    r->nr_ranges = limit;
 }
 
 void rangeset_domain_initialise(
@@ -494,9 +333,6 @@ void rangeset_domain_destroy(
 {
     struct rangeset *r;
 
-    if ( list_head_is_null(&d->rangesets) )
-        return;
-
     while ( !list_empty(&d->rangesets) )
     {
         r = list_entry(d->rangesets.next, struct rangeset, rangeset_list);
@@ -509,29 +345,6 @@ void rangeset_domain_destroy(
     }
 }
 
-void rangeset_swap(struct rangeset *a, struct rangeset *b)
-{
-    LIST_HEAD(tmp);
-
-    if ( a < b )
-    {
-        write_lock(&a->lock);
-        write_lock(&b->lock);
-    }
-    else
-    {
-        write_lock(&b->lock);
-        write_lock(&a->lock);
-    }
-
-    list_splice_init(&a->range_list, &tmp);
-    list_splice_init(&b->range_list, &a->range_list);
-    list_splice(&tmp, &b->range_list);
-
-    write_unlock(&a->lock);
-    write_unlock(&b->lock);
-}
-
 /*****************************
  * Pretty-printing functions
  */
@@ -541,12 +354,13 @@ static void print_limit(struct rangeset *r, unsigned long s)
     printk((r->flags & RANGESETF_prettyprint_hex) ? "%lx" : "%lu", s);
 }
 
-static void rangeset_printk(struct rangeset *r)
+void rangeset_printk(
+    struct rangeset *r)
 {
     int nr_printed = 0;
     struct range *x;
 
-    read_lock(&r->lock);
+    spin_lock(&r->lock);
 
     printk("%-10s {", r->name);
 
@@ -565,7 +379,7 @@ static void rangeset_printk(struct rangeset *r)
 
     printk(" }");
 
-    read_unlock(&r->lock);
+    spin_unlock(&r->lock);
 }
 
 void rangeset_domain_printk(
@@ -589,13 +403,3 @@ void rangeset_domain_printk(
 
     spin_unlock(&d->rangesets_lock);
 }
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * tab-width: 4
- * indent-tabs-mode: nil
- * End:
- */

@@ -5,13 +5,11 @@
  * This source code is licensed under the GNU General Public License,
  * Version 2.  See the file COPYING for more details.
  */
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/errno.h>
 #include <xen/bitmap.h>
 #include <xen/bitops.h>
-#include <xen/cpumask.h>
-#include <xen/guest_access.h>
-#include <asm/byteorder.h>
 
 /*
  * bitmaps provide an array of bits, implemented using an an
@@ -38,21 +36,6 @@
  * include/asm-ppc64/bitops.h and include/asm-s390/bitops.h
  * for the best explanations of this ordering.
  */
-
-/*
- * If a bitmap has a number of bits which is not a multiple of 8 then
- * the last few bits of the last byte of the bitmap can be
- * unexpectedly set which can confuse consumers (e.g. in the tools)
- * who also round up their loops to 8 bits. Ensure we clear those left
- * over bits so as to prevent surprises.
- */
-static void clamp_last_byte(uint8_t *bp, unsigned int nbits)
-{
-	unsigned int remainder = nbits % 8;
-
-	if (remainder)
-		bp[nbits/8] &= (1U << remainder) - 1;
-}
 
 int __bitmap_empty(const unsigned long *bitmap, int bits)
 {
@@ -110,6 +93,90 @@ void __bitmap_complement(unsigned long *dst, const unsigned long *src, int bits)
 		dst[k] = ~src[k] & BITMAP_LAST_WORD_MASK(bits);
 }
 EXPORT_SYMBOL(__bitmap_complement);
+
+/*
+ * __bitmap_shift_right - logical right shift of the bits in a bitmap
+ *   @dst - destination bitmap
+ *   @src - source bitmap
+ *   @nbits - shift by this many bits
+ *   @bits - bitmap size, in bits
+ *
+ * Shifting right (dividing) means moving bits in the MS -> LS bit
+ * direction.  Zeros are fed into the vacated MS positions and the
+ * LS bits shifted off the bottom are lost.
+ */
+void __bitmap_shift_right(unsigned long *dst,
+			const unsigned long *src, int shift, int bits)
+{
+	int k, lim = BITS_TO_LONGS(bits), left = bits % BITS_PER_LONG;
+	int off = shift/BITS_PER_LONG, rem = shift % BITS_PER_LONG;
+	unsigned long mask = (1UL << left) - 1;
+	for (k = 0; off + k < lim; ++k) {
+		unsigned long upper, lower;
+
+		/*
+		 * If shift is not word aligned, take lower rem bits of
+		 * word above and make them the top rem bits of result.
+		 */
+		if (!rem || off + k + 1 >= lim)
+			upper = 0;
+		else {
+			upper = src[off + k + 1];
+			if (off + k + 1 == lim - 1 && left)
+				upper &= mask;
+		}
+		lower = src[off + k];
+		if (left && off + k == lim - 1)
+			lower &= mask;
+		dst[k] = upper << (BITS_PER_LONG - rem) | lower >> rem;
+		if (left && k == lim - 1)
+			dst[k] &= mask;
+	}
+	if (off)
+		memset(&dst[lim - off], 0, off*sizeof(unsigned long));
+}
+EXPORT_SYMBOL(__bitmap_shift_right);
+
+
+/*
+ * __bitmap_shift_left - logical left shift of the bits in a bitmap
+ *   @dst - destination bitmap
+ *   @src - source bitmap
+ *   @nbits - shift by this many bits
+ *   @bits - bitmap size, in bits
+ *
+ * Shifting left (multiplying) means moving bits in the LS -> MS
+ * direction.  Zeros are fed into the vacated LS bit positions
+ * and those MS bits shifted off the top are lost.
+ */
+
+void __bitmap_shift_left(unsigned long *dst,
+			const unsigned long *src, int shift, int bits)
+{
+	int k, lim = BITS_TO_LONGS(bits), left = bits % BITS_PER_LONG;
+	int off = shift/BITS_PER_LONG, rem = shift % BITS_PER_LONG;
+	for (k = lim - off - 1; k >= 0; --k) {
+		unsigned long upper, lower;
+
+		/*
+		 * If shift is not word aligned, take upper rem bits of
+		 * word below and make them the bottom rem bits of result.
+		 */
+		if (rem && k > 0)
+			lower = src[k - 1];
+		else
+			lower = 0;
+		upper = src[k];
+		if (left && k == lim - 1)
+			upper &= (1UL << left) - 1;
+		dst[k + off] = lower  >> (BITS_PER_LONG - rem) | upper << rem;
+		if (left && k + off == lim - 1)
+			dst[k + off] &= (1UL << left) - 1;
+	}
+	if (off)
+		memset(dst, 0, off*sizeof(unsigned long));
+}
+EXPORT_SYMBOL(__bitmap_shift_left);
 
 void __bitmap_and(unsigned long *dst, const unsigned long *bitmap1,
 				const unsigned long *bitmap2, int bits)
@@ -214,45 +281,110 @@ int __bitmap_weight(const unsigned long *bitmap, int bits)
 #endif
 EXPORT_SYMBOL(__bitmap_weight);
 
-void __bitmap_set(unsigned long *map, unsigned int start, int len)
-{
-	unsigned long *p = map + BIT_WORD(start);
-	const unsigned int size = start + len;
-	int bits_to_set = BITS_PER_LONG - (start % BITS_PER_LONG);
-	unsigned long mask_to_set = BITMAP_FIRST_WORD_MASK(start);
+/*
+ * Bitmap printing & parsing functions: first version by Bill Irwin,
+ * second version by Paul Jackson, third by Joe Korty.
+ */
 
-	while (len - bits_to_set >= 0) {
-		*p |= mask_to_set;
-		len -= bits_to_set;
-		bits_to_set = BITS_PER_LONG;
-		mask_to_set = ~0UL;
-		p++;
+#define CHUNKSZ				32
+#define nbits_to_hold_value(val)	fls(val)
+#define roundup_power2(val,modulus)	(((val) + (modulus) - 1) & ~((modulus) - 1))
+#define unhex(c)			(isdigit(c) ? (c - '0') : (toupper(c) - 'A' + 10))
+#define BASEDEC 10		/* fancier cpuset lists input in decimal */
+
+/**
+ * bitmap_scnprintf - convert bitmap to an ASCII hex string.
+ * @buf: byte buffer into which string is placed
+ * @buflen: reserved size of @buf, in bytes
+ * @maskp: pointer to bitmap to convert
+ * @nmaskbits: size of bitmap, in bits
+ *
+ * Exactly @nmaskbits bits are displayed.  Hex digits are grouped into
+ * comma-separated sets of eight digits per set.
+ */
+int bitmap_scnprintf(char *buf, unsigned int buflen,
+	const unsigned long *maskp, int nmaskbits)
+{
+	int i, word, bit, len = 0;
+	unsigned long val;
+	const char *sep = "";
+	int chunksz;
+	u32 chunkmask;
+
+	chunksz = nmaskbits & (CHUNKSZ - 1);
+	if (chunksz == 0)
+		chunksz = CHUNKSZ;
+
+	i = roundup_power2(nmaskbits, CHUNKSZ) - CHUNKSZ;
+	for (; i >= 0; i -= CHUNKSZ) {
+		chunkmask = ((1ULL << chunksz) - 1);
+		word = i / BITS_PER_LONG;
+		bit = i % BITS_PER_LONG;
+		val = (maskp[word] >> bit) & chunkmask;
+		len += scnprintf(buf+len, buflen-len, "%s%0*lx", sep,
+			(chunksz+3)/4, val);
+		chunksz = CHUNKSZ;
+		sep = ",";
 	}
-	if (len) {
-		mask_to_set &= BITMAP_LAST_WORD_MASK(size);
-		*p |= mask_to_set;
-	}
+	return len;
+}
+EXPORT_SYMBOL(bitmap_scnprintf);
+
+/*
+ * bscnl_emit(buf, buflen, rbot, rtop, bp)
+ *
+ * Helper routine for bitmap_scnlistprintf().  Write decimal number
+ * or range to buf, suppressing output past buf+buflen, with optional
+ * comma-prefix.  Return len of what would be written to buf, if it
+ * all fit.
+ */
+static inline int bscnl_emit(char *buf, int buflen, int rbot, int rtop, int len)
+{
+	if (len > 0)
+		len += scnprintf(buf + len, buflen - len, ",");
+	if (rbot == rtop)
+		len += scnprintf(buf + len, buflen - len, "%d", rbot);
+	else
+		len += scnprintf(buf + len, buflen - len, "%d-%d", rbot, rtop);
+	return len;
 }
 
-void __bitmap_clear(unsigned long *map, unsigned int start, int len)
+/**
+ * bitmap_scnlistprintf - convert bitmap to list format ASCII string
+ * @buf: byte buffer into which string is placed
+ * @buflen: reserved size of @buf, in bytes
+ * @maskp: pointer to bitmap to convert
+ * @nmaskbits: size of bitmap, in bits
+ *
+ * Output format is a comma-separated list of decimal numbers and
+ * ranges.  Consecutively set bits are shown as two hyphen-separated
+ * decimal numbers, the smallest and largest bit numbers set in
+ * the range.  Output format is compatible with the format
+ * accepted as input by bitmap_parselist().
+ *
+ * The return value is the number of characters which would be
+ * generated for the given input, excluding the trailing '\0', as
+ * per ISO C99.
+ */
+int bitmap_scnlistprintf(char *buf, unsigned int buflen,
+	const unsigned long *maskp, int nmaskbits)
 {
-	unsigned long *p = map + BIT_WORD(start);
-	const unsigned int size = start + len;
-	int bits_to_clear = BITS_PER_LONG - (start % BITS_PER_LONG);
-	unsigned long mask_to_clear = BITMAP_FIRST_WORD_MASK(start);
+	int len = 0;
+	/* current bit is 'cur', most recently seen range is [rbot, rtop] */
+	int cur, rbot, rtop;
 
-	while (len - bits_to_clear >= 0) {
-		*p &= ~mask_to_clear;
-		len -= bits_to_clear;
-		bits_to_clear = BITS_PER_LONG;
-		mask_to_clear = ~0UL;
-		p++;
+	rbot = cur = find_first_bit(maskp, nmaskbits);
+	while (cur < nmaskbits) {
+		rtop = cur;
+		cur = find_next_bit(maskp, nmaskbits, cur+1);
+		if (cur >= nmaskbits || cur > rtop + 1) {
+			len = bscnl_emit(buf, buflen, rbot, rtop, len);
+			rbot = cur;
+		}
 	}
-	if (len) {
-		mask_to_clear &= BITMAP_LAST_WORD_MASK(size);
-		*p &= ~mask_to_clear;
-	}
+	return len;
 }
+EXPORT_SYMBOL(bitmap_scnlistprintf);
 
 /**
  *	bitmap_find_free_region - find a contiguous aligned mem region
@@ -335,139 +467,3 @@ int bitmap_allocate_region(unsigned long *bitmap, int pos, int order)
 	return 0;
 }
 EXPORT_SYMBOL(bitmap_allocate_region);
-
-#ifdef __BIG_ENDIAN
-
-void bitmap_long_to_byte(uint8_t *bp, const unsigned long *lp, int nbits)
-{
-	unsigned long l;
-	int i, j, b;
-
-	for (i = 0, b = 0; nbits > 0; i++, b += sizeof(l)) {
-		l = lp[i];
-		for (j = 0; (j < sizeof(l)) && (nbits > 0); j++) {
-			bp[b+j] = l;
-			l >>= 8;
-			nbits -= 8;
-		}
-	}
-	clamp_last_byte(bp, nbits);
-}
-
-void bitmap_byte_to_long(unsigned long *lp, const uint8_t *bp, int nbits)
-{
-	unsigned long l;
-	int i, j, b;
-
-	for (i = 0, b = 0; nbits > 0; i++, b += sizeof(l)) {
-		l = 0;
-		for (j = 0; (j < sizeof(l)) && (nbits > 0); j++) {
-			l |= (unsigned long)bp[b+j] << (j*8);
-			nbits -= 8;
-		}
-		lp[i] = l;
-	}
-}
-
-#elif defined(__LITTLE_ENDIAN)
-
-void bitmap_long_to_byte(uint8_t *bp, const unsigned long *lp, int nbits)
-{
-	memcpy(bp, lp, (nbits+7)/8);
-	clamp_last_byte(bp, nbits);
-}
-
-void bitmap_byte_to_long(unsigned long *lp, const uint8_t *bp, int nbits)
-{
-	/* We may need to pad the final longword with zeroes. */
-	if (nbits & (BITS_PER_LONG-1))
-		lp[BITS_TO_LONGS(nbits)-1] = 0;
-	memcpy(lp, bp, (nbits+7)/8);
-}
-
-#endif
-
-int bitmap_to_xenctl_bitmap(struct xenctl_bitmap *xenctl_bitmap,
-                            const unsigned long *bitmap, unsigned int nbits)
-{
-    unsigned int guest_bytes, copy_bytes, i;
-    uint8_t zero = 0;
-    int err = 0;
-    uint8_t *bytemap = xmalloc_array(uint8_t, (nbits + 7) / 8);
-
-    if ( !bytemap )
-        return -ENOMEM;
-
-    guest_bytes = (xenctl_bitmap->nr_bits + 7) / 8;
-    copy_bytes  = min(guest_bytes, (nbits + 7) / 8);
-
-    bitmap_long_to_byte(bytemap, bitmap, nbits);
-
-    if ( copy_bytes &&
-         copy_to_guest(xenctl_bitmap->bitmap, bytemap, copy_bytes) )
-        err = -EFAULT;
-
-    xfree(bytemap);
-
-    for ( i = copy_bytes; !err && i < guest_bytes; i++ )
-        if ( copy_to_guest_offset(xenctl_bitmap->bitmap, i, &zero, 1) )
-            err = -EFAULT;
-
-    return err;
-}
-
-int xenctl_bitmap_to_bitmap(unsigned long *bitmap,
-                            const struct xenctl_bitmap *xenctl_bitmap,
-                            unsigned int nbits)
-{
-    unsigned int guest_bytes, copy_bytes;
-    int err = 0;
-    uint8_t *bytemap = xzalloc_array(uint8_t, (nbits + 7) / 8);
-
-    if ( !bytemap )
-        return -ENOMEM;
-
-    guest_bytes = (xenctl_bitmap->nr_bits + 7) / 8;
-    copy_bytes  = min(guest_bytes, (nbits + 7) / 8);
-
-    if ( copy_bytes )
-    {
-        if ( copy_from_guest(bytemap, xenctl_bitmap->bitmap, copy_bytes) )
-            err = -EFAULT;
-        if ( (xenctl_bitmap->nr_bits & 7) && (guest_bytes == copy_bytes) )
-            bytemap[guest_bytes - 1] &= ~(0xff << (xenctl_bitmap->nr_bits & 7));
-    }
-
-    if ( !err )
-        bitmap_byte_to_long(bitmap, bytemap, nbits);
-
-    xfree(bytemap);
-
-    return err;
-}
-
-int cpumask_to_xenctl_bitmap(struct xenctl_bitmap *xenctl_cpumap,
-                             const cpumask_t *cpumask)
-{
-    return bitmap_to_xenctl_bitmap(xenctl_cpumap, cpumask_bits(cpumask),
-                                   nr_cpu_ids);
-}
-
-int xenctl_bitmap_to_cpumask(cpumask_var_t *cpumask,
-                             const struct xenctl_bitmap *xenctl_cpumap)
-{
-    int err = 0;
-
-    if ( alloc_cpumask_var(cpumask) )
-    {
-        err = xenctl_bitmap_to_bitmap(cpumask_bits(*cpumask), xenctl_cpumap,
-                                      nr_cpu_ids);
-        /* In case of error, cleanup is up to us, as the caller won't care! */
-        if ( err )
-            free_cpumask_var(*cpumask);
-    }
-    else
-        err = -ENOMEM;
-
-    return err;
-}

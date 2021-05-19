@@ -6,172 +6,121 @@
  * Copyright 2002 Andi Kleen <ak@suse.de>
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
-#include <xen/sched.h>
 #include <asm/uaccess.h>
 
-#ifndef GUARD
-# define GUARD UA_KEEP
-#endif
-
-unsigned int copy_to_guest_ll(void __user *to, const void *from, unsigned int n)
+unsigned long __copy_to_user_ll(void __user *to, const void *from, unsigned n)
 {
-    unsigned dummy;
-
-    stac();
-    asm volatile (
-        GUARD(
-        "    guest_access_mask_ptr %[to], %q[scratch1], %q[scratch2]\n"
-        )
-        "    cmp  $"STR(2*BYTES_PER_LONG-1)", %[cnt]\n"
-        "    jbe  1f\n"
-        "    mov  %k[to], %[cnt]\n"
-        "    neg  %[cnt]\n"
-        "    and  $"STR(BYTES_PER_LONG-1)", %[cnt]\n"
-        "    sub  %[cnt], %[aux]\n"
-        "4:  rep movsb\n" /* make 'to' address aligned */
-        "    mov  %[aux], %[cnt]\n"
-        "    shr  $"STR(LONG_BYTEORDER)", %[cnt]\n"
-        "    and  $"STR(BYTES_PER_LONG-1)", %[aux]\n"
-        "    .align 2,0x90\n"
-        "0:  rep movs"__OS"\n" /* as many words as possible... */
-        "    mov  %[aux],%[cnt]\n"
-        "1:  rep movsb\n" /* ...remainder copied as bytes */
-        "2:\n"
-        ".section .fixup,\"ax\"\n"
-        "5:  add %[aux], %[cnt]\n"
-        "    jmp 2b\n"
-        "3:  lea (%q[aux], %q[cnt], "STR(BYTES_PER_LONG)"), %[cnt]\n"
-        "    jmp 2b\n"
-        ".previous\n"
-        _ASM_EXTABLE(4b, 5b)
-        _ASM_EXTABLE(0b, 3b)
-        _ASM_EXTABLE(1b, 2b)
-        : [cnt] "+c" (n), [to] "+D" (to), [from] "+S" (from),
-          [aux] "=&r" (dummy)
-          GUARD(, [scratch1] "=&r" (dummy), [scratch2] "=&r" (dummy))
-        : "[aux]" (n)
-        : "memory" );
-    clac();
-
-    return n;
+	unsigned long __d0, __d1, __d2, __n = n;
+	__asm__ __volatile__(
+		"	cmp  $"STR(2*BYTES_PER_LONG-1)",%0\n"
+		"	jbe  1f\n"
+		"	mov  %1,%0\n"
+		"	neg  %0\n"
+		"	and  $"STR(BYTES_PER_LONG-1)",%0\n"
+		"	sub  %0,%3\n"
+		"4:	rep; movsb\n" /* make 'to' address aligned */
+		"	mov  %3,%0\n"
+		"	shr  $"STR(LONG_BYTEORDER)",%0\n"
+		"	and  $"STR(BYTES_PER_LONG-1)",%3\n"
+		"	.align 2,0x90\n"
+		"0:	rep; movs"__OS"\n" /* as many words as possible... */
+		"	mov  %3,%0\n"
+		"1:	rep; movsb\n" /* ...remainder copied as bytes */
+		"2:\n"
+		".section .fixup,\"ax\"\n"
+		"5:	add %3,%0\n"
+		"	jmp 2b\n"
+		"3:	lea 0(%3,%0,"STR(BYTES_PER_LONG)"),%0\n"
+		"	jmp 2b\n"
+		".previous\n"
+		".section __ex_table,\"a\"\n"
+		"	"__FIXUP_ALIGN"\n"
+		"	"__FIXUP_WORD" 4b,5b\n"
+		"	"__FIXUP_WORD" 0b,3b\n"
+		"	"__FIXUP_WORD" 1b,2b\n"
+		".previous"
+		: "=&c"(__n), "=&D" (__d0), "=&S" (__d1), "=r"(__d2)
+		: "3"(__n), "0"(__n), "1"(to), "2"(from)
+		: "memory");
+	return (unsigned)__n;
 }
 
-unsigned int copy_from_guest_ll(void *to, const void __user *from, unsigned int n)
+unsigned long
+__copy_from_user_ll(void *to, const void __user *from, unsigned n)
 {
-    unsigned dummy;
-
-    stac();
-    asm volatile (
-        GUARD(
-        "    guest_access_mask_ptr %[from], %q[scratch1], %q[scratch2]\n"
-        )
-        "    cmp  $"STR(2*BYTES_PER_LONG-1)", %[cnt]\n"
-        "    jbe  1f\n"
-        "    mov  %k[to], %[cnt]\n"
-        "    neg  %[cnt]\n"
-        "    and  $"STR(BYTES_PER_LONG-1)", %[cnt]\n"
-        "    sub  %[cnt], %[aux]\n"
-        "4:  rep movsb\n" /* make 'to' address aligned */
-        "    mov  %[aux],%[cnt]\n"
-        "    shr  $"STR(LONG_BYTEORDER)", %[cnt]\n"
-        "    and  $"STR(BYTES_PER_LONG-1)", %[aux]\n"
-        "    .align 2,0x90\n"
-        "0:  rep movs"__OS"\n" /* as many words as possible... */
-        "    mov  %[aux], %[cnt]\n"
-        "1:  rep movsb\n" /* ...remainder copied as bytes */
-        "2:\n"
-        ".section .fixup,\"ax\"\n"
-        "5:  add  %[aux], %[cnt]\n"
-        "    jmp 6f\n"
-        "3:  lea  (%q[aux], %q[cnt], "STR(BYTES_PER_LONG)"), %[cnt]\n"
-        "6:  mov  %[cnt], %k[from]\n"
-        "    xchg %%eax, %[aux]\n"
-        "    xor  %%eax, %%eax\n"
-        "    rep stosb\n"
-        "    xchg %[aux], %%eax\n"
-        "    mov  %k[from], %[cnt]\n"
-        "    jmp 2b\n"
-        ".previous\n"
-        _ASM_EXTABLE(4b, 5b)
-        _ASM_EXTABLE(0b, 3b)
-        _ASM_EXTABLE(1b, 6b)
-        : [cnt] "+c" (n), [to] "+D" (to), [from] "+S" (from),
-          [aux] "=&r" (dummy)
-          GUARD(, [scratch1] "=&r" (dummy), [scratch2] "=&r" (dummy))
-        : "[aux]" (n)
-        : "memory" );
-    clac();
-
-    return n;
+	unsigned long __d0, __d1, __d2, __n = n;
+	__asm__ __volatile__(
+		"	cmp  $"STR(2*BYTES_PER_LONG-1)",%0\n"
+		"	jbe  1f\n"
+		"	mov  %1,%0\n"
+		"	neg  %0\n"
+		"	and  $"STR(BYTES_PER_LONG-1)",%0\n"
+		"	sub  %0,%3\n"
+		"4:	rep; movsb\n" /* make 'to' address aligned */
+		"	mov  %3,%0\n"
+		"	shr  $"STR(LONG_BYTEORDER)",%0\n"
+		"	and  $"STR(BYTES_PER_LONG-1)",%3\n"
+		"	.align 2,0x90\n"
+		"0:	rep; movs"__OS"\n" /* as many words as possible... */
+		"	mov  %3,%0\n"
+		"1:	rep; movsb\n" /* ...remainder copied as bytes */
+		"2:\n"
+		".section .fixup,\"ax\"\n"
+		"5:	add %3,%0\n"
+		"	jmp 6f\n"
+		"3:	lea 0(%3,%0,"STR(BYTES_PER_LONG)"),%0\n"
+		"6:	push %0\n"
+		"	push %%"__OP"ax\n"
+		"	xor  %%eax,%%eax\n"
+		"	rep; stosb\n"
+		"	pop  %%"__OP"ax\n"
+		"	pop  %0\n"
+		"	jmp 2b\n"
+		".previous\n"
+		".section __ex_table,\"a\"\n"
+		"	"__FIXUP_ALIGN"\n"
+		"	"__FIXUP_WORD" 4b,5b\n"
+		"	"__FIXUP_WORD" 0b,3b\n"
+		"	"__FIXUP_WORD" 1b,6b\n"
+		".previous"
+		: "=&c"(__n), "=&D" (__d0), "=&S" (__d1), "=r"(__d2)
+		: "3"(__n), "0"(__n), "1"(to), "2"(from)
+		: "memory");
+	return (unsigned)__n;
 }
-
-#if GUARD(1) + 0
 
 /**
- * copy_to_guest_pv: - Copy a block of data into PV guest space.
- * @to:   Destination address, in PV guest space.
- * @from: Source address, in hypervisor space.
+ * copy_to_user: - Copy a block of data into user space.
+ * @to:   Destination address, in user space.
+ * @from: Source address, in kernel space.
  * @n:    Number of bytes to copy.
  *
- * Copy data from hypervisor space to PV guest space.
+ * Context: User context only.  This function may sleep.
+ *
+ * Copy data from kernel space to user space.
  *
  * Returns number of bytes that could not be copied.
  * On success, this will be zero.
  */
-unsigned int copy_to_guest_pv(void __user *to, const void *from, unsigned int n)
+unsigned long
+copy_to_user(void __user *to, const void *from, unsigned n)
 {
-    if ( access_ok(to, n) )
-        n = __copy_to_guest_pv(to, from, n);
-    return n;
+	if (access_ok(to, n))
+		n = __copy_to_user(to, from, n);
+	return n;
 }
 
 /**
- * clear_guest_pv: - Zero a block of memory in PV guest space.
- * @to:   Destination address, in PV guest space.
- * @n:    Number of bytes to zero.
- *
- * Zero a block of memory in PV guest space.
- *
- * Returns number of bytes that could not be cleared.
- * On success, this will be zero.
- */
-unsigned int clear_guest_pv(void __user *to, unsigned int n)
-{
-    if ( access_ok(to, n) )
-    {
-        long dummy;
-
-        stac();
-        asm volatile (
-            "    guest_access_mask_ptr %[to], %[scratch1], %[scratch2]\n"
-            "0:  rep stos"__OS"\n"
-            "    mov  %[bytes], %[cnt]\n"
-            "1:  rep stosb\n"
-            "2:\n"
-            ".section .fixup,\"ax\"\n"
-            "3:  lea  (%q[bytes], %q[longs], "STR(BYTES_PER_LONG)"), %[cnt]\n"
-            "    jmp  2b\n"
-            ".previous\n"
-            _ASM_EXTABLE(0b,3b)
-            _ASM_EXTABLE(1b,2b)
-            : [cnt] "=&c" (n), [to] "+D" (to), [scratch1] "=&r" (dummy),
-              [scratch2] "=&r" (dummy)
-            : [bytes] "r" (n & (BYTES_PER_LONG - 1)),
-              [longs] "0" (n / BYTES_PER_LONG), "a" (0) );
-        clac();
-    }
-
-    return n;
-}
-
-/**
- * copy_from_guest_pv: - Copy a block of data from PV guest space.
- * @to:   Destination address, in hypervisor space.
- * @from: Source address, in PV guest space.
+ * copy_from_user: - Copy a block of data from user space.
+ * @to:   Destination address, in kernel space.
+ * @from: Source address, in user space.
  * @n:    Number of bytes to copy.
  *
- * Copy data from PV guest space to hypervisor space.
+ * Context: User context only.  This function may sleep.
+ *
+ * Copy data from user space to kernel space.
  *
  * Returns number of bytes that could not be copied.
  * On success, this will be zero.
@@ -179,32 +128,12 @@ unsigned int clear_guest_pv(void __user *to, unsigned int n)
  * If some data could not be copied, this function will pad the copied
  * data to the requested size using zero bytes.
  */
-unsigned int copy_from_guest_pv(void *to, const void __user *from,
-                                unsigned int n)
+unsigned long
+copy_from_user(void *to, const void __user *from, unsigned n)
 {
-    if ( access_ok(from, n) )
-        n = __copy_from_guest_pv(to, from, n);
-    else
-        memset(to, 0, n);
-    return n;
+	if (access_ok(from, n))
+		n = __copy_from_user(to, from, n);
+	else
+		memset(to, 0, n);
+	return n;
 }
-
-# undef GUARD
-# define GUARD UA_DROP
-# define copy_to_guest_ll copy_to_unsafe_ll
-# define copy_from_guest_ll copy_from_unsafe_ll
-# undef __user
-# define __user
-# include __FILE__
-
-#endif /* GUARD(1) */
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * tab-width: 4
- * indent-tabs-mode: nil
- * End:
- */

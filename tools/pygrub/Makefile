@@ -1,42 +1,18 @@
 
-XEN_ROOT = $(CURDIR)/../..
+XEN_ROOT = ../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-PY_CFLAGS = $(CFLAGS) $(PY_NOOPT_CFLAGS)
-PY_LDFLAGS = $(SHLIB_LDFLAGS) $(APPEND_LDFLAGS)
-INSTALL_LOG = build/installed_files.txt
-
-.PHONY: all
 all: build
-.PHONY: build
 build:
-	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" LDSHARED="$(CC)" LDFLAGS="$(PY_LDFLAGS)" $(PYTHON) setup.py build
+	CFLAGS="$(CFLAGS)" python setup.py build
 
-.PHONY: install
+ifndef XEN_PYTHON_NATIVE_INSTALL
 install: all
-	$(INSTALL_DIR) $(DESTDIR)/$(bindir)
-	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" LDSHARED="$(CC)" \
-		LDFLAGS="$(PY_LDFLAGS)" $(PYTHON) setup.py install \
-		--record $(INSTALL_LOG) $(PYTHON_PREFIX_ARG) \
-		 --root="$(DESTDIR)" --install-scripts=$(LIBEXEC_BIN) --force
-	set -e; if [ $(bindir) != $(LIBEXEC_BIN) -a \
-	             "`readlink -f $(DESTDIR)/$(bindir)`" != \
-	             "`readlink -f $(LIBEXEC_BIN)`" ]; then \
-	    ln -sf $(LIBEXEC_BIN)/pygrub $(DESTDIR)/$(bindir); \
-	fi
+	CFLAGS="$(CFLAGS)" python setup.py install --home="$(DESTDIR)/usr"
+else
+install: all
+	CFLAGS="$(CFLAGS)" python setup.py install --root="$(DESTDIR)"
+endif
 
-.PHONY: uninstall
-uninstall:
-	rm -f $(DESTDIR)/$(bindir)/pygrub
-	if [ -e $(INSTALL_LOG) ]; then \
-		cat $(INSTALL_LOG) | xargs -i rm -f $(DESTDIR)/{}; \
-	fi
-
-.PHONY: clean
 clean:
-	rm -rf build tmp *.pyc *.pyo *.o *.a *~ a.out $(INSTALL_LOG) $(DEPS_RM)
-
-.PHONY: distclean
-distclean: clean
-
--include $(DEPS_INCLUDE)
+	rm -rf build tmp *.pyc *.pyo *.o *.a *~

@@ -1,4 +1,5 @@
-obj-y += cpufreq/
+include $(BASEDIR)/Rules.mk
 
-obj-y += lib.o power.o cpu_idle.o cpuidle_menu.o
-obj-bin-y += boot.init.o wakeup_prot.o
+obj-y += boot.o
+
+include $(BASEDIR)/Post.mk

@@ -3,7 +3,6 @@
  *
  * Copyright (c) 2004, Intel Corporation.
  * Copyright (c) 2005, International Business Machines Corporation.
- * Copyright (c) 2008, Citrix Systems, Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -15,550 +14,747 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
-#include <xen/ioreq.h>
 #include <xen/mm.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/trace.h>
 #include <xen/event.h>
+
 #include <xen/hypercall.h>
-#include <xen/vpci.h>
 #include <asm/current.h>
 #include <asm/cpufeature.h>
 #include <asm/processor.h>
 #include <asm/msr.h>
 #include <asm/apic.h>
-#include <asm/paging.h>
 #include <asm/shadow.h>
-#include <asm/p2m.h>
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/support.h>
-#include <asm/hvm/vpt.h>
+#include <asm/hvm/vpit.h>
 #include <asm/hvm/vpic.h>
 #include <asm/hvm/vlapic.h>
-#include <asm/hvm/trace.h>
-#include <asm/hvm/emulate.h>
+
 #include <public/sched.h>
-#include <xen/iocap.h>
 #include <public/hvm/ioreq.h>
 
-void send_timeoffset_req(unsigned long timeoff)
+#if defined (__i386__)
+static void set_reg_value (int size, int index, int seg, struct cpu_user_regs *regs, long value)
 {
-    ioreq_t p = {
-        .type = IOREQ_TYPE_TIMEOFFSET,
-        .size = 8,
-        .count = 1,
-        .dir = IOREQ_WRITE,
-        .data = timeoff,
-        .state = STATE_IOREQ_READY,
-    };
-
-    if ( timeoff == 0 )
-        return;
-
-    if ( ioreq_broadcast(&p, true) != 0 )
-        gprintk(XENLOG_ERR, "Unsuccessful timeoffset update\n");
-}
-
-bool hvm_emulate_one_insn(hvm_emulate_validate_t *validate, const char *descr)
-{
-    struct hvm_emulate_ctxt ctxt;
-    int rc;
-
-    hvm_emulate_init_once(&ctxt, validate, guest_cpu_user_regs());
-
-    switch ( rc = hvm_emulate_one(&ctxt, VIO_no_completion) )
-    {
-    case X86EMUL_UNHANDLEABLE:
-        hvm_dump_emulation_state(XENLOG_G_WARNING, descr, &ctxt, rc);
-        return false;
-
-    case X86EMUL_UNRECOGNIZED:
-        hvm_dump_emulation_state(XENLOG_G_WARNING, descr, &ctxt, rc);
-        hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
+    switch (size) {
+    case BYTE:
+        switch (index) {
+        case 0:
+            regs->eax &= 0xFFFFFF00;
+            regs->eax |= (value & 0xFF);
+            break;
+        case 1:
+            regs->ecx &= 0xFFFFFF00;
+            regs->ecx |= (value & 0xFF);
+            break;
+        case 2:
+            regs->edx &= 0xFFFFFF00;
+            regs->edx |= (value & 0xFF);
+            break;
+        case 3:
+            regs->ebx &= 0xFFFFFF00;
+            regs->ebx |= (value & 0xFF);
+            break;
+        case 4:
+            regs->eax &= 0xFFFF00FF;
+            regs->eax |= ((value & 0xFF) << 8);
+            break;
+        case 5:
+            regs->ecx &= 0xFFFF00FF;
+            regs->ecx |= ((value & 0xFF) << 8);
+            break;
+        case 6:
+            regs->edx &= 0xFFFF00FF;
+            regs->edx |= ((value & 0xFF) << 8);
+            break;
+        case 7:
+            regs->ebx &= 0xFFFF00FF;
+            regs->ebx |= ((value & 0xFF) << 8);
+            break;
+        default:
+            printk("Error: size:%x, index:%x are invalid!\n", size, index);
+            domain_crash_synchronous();
+            break;
+        }
         break;
-
-    case X86EMUL_EXCEPTION:
-        hvm_inject_event(&ctxt.ctxt.event);
+    case WORD:
+        switch (index) {
+        case 0:
+            regs->eax &= 0xFFFF0000;
+            regs->eax |= (value & 0xFFFF);
+            break;
+        case 1:
+            regs->ecx &= 0xFFFF0000;
+            regs->ecx |= (value & 0xFFFF);
+            break;
+        case 2:
+            regs->edx &= 0xFFFF0000;
+            regs->edx |= (value & 0xFFFF);
+            break;
+        case 3:
+            regs->ebx &= 0xFFFF0000;
+            regs->ebx |= (value & 0xFFFF);
+            break;
+        case 4:
+            regs->esp &= 0xFFFF0000;
+            regs->esp |= (value & 0xFFFF);
+            break;
+        case 5:
+            regs->ebp &= 0xFFFF0000;
+            regs->ebp |= (value & 0xFFFF);
+            break;
+        case 6:
+            regs->esi &= 0xFFFF0000;
+            regs->esi |= (value & 0xFFFF);
+            break;
+        case 7:
+            regs->edi &= 0xFFFF0000;
+            regs->edi |= (value & 0xFFFF);
+            break;
+        default:
+            printk("Error: size:%x, index:%x are invalid!\n", size, index);
+            domain_crash_synchronous();
+            break;
+        }
+        break;
+    case LONG:
+        switch (index) {
+        case 0:
+            regs->eax = value;
+            break;
+        case 1:
+            regs->ecx = value;
+            break;
+        case 2:
+            regs->edx = value;
+            break;
+        case 3:
+            regs->ebx = value;
+            break;
+        case 4:
+            regs->esp = value;
+            break;
+        case 5:
+            regs->ebp = value;
+            break;
+        case 6:
+            regs->esi = value;
+            break;
+        case 7:
+            regs->edi = value;
+            break;
+        default:
+            printk("Error: size:%x, index:%x are invalid!\n", size, index);
+            domain_crash_synchronous();
+            break;
+        }
+        break;
+    default:
+        printk("Error: size:%x, index:%x are invalid!\n", size, index);
+        domain_crash_synchronous();
         break;
     }
-
-    hvm_emulate_writeback(&ctxt);
-
-    return true;
+}
+#else
+static inline void __set_reg_value(unsigned long *reg, int size, long value)
+{
+    switch (size) {
+    case BYTE_64:
+        *reg &= ~0xFF;
+        *reg |= (value & 0xFF);
+        break;
+    case WORD:
+        *reg &= ~0xFFFF;
+        *reg |= (value & 0xFFFF);
+        break;
+    case LONG:
+        *reg &= ~0xFFFFFFFF;
+        *reg |= (value & 0xFFFFFFFF);
+        break;
+    case QUAD:
+        *reg = value;
+        break;
+    default:
+        printk("Error: <__set_reg_value>: size:%x is invalid\n", size);
+        domain_crash_synchronous();
+    }
 }
 
-bool handle_mmio_with_translation(unsigned long gla, unsigned long gpfn,
-                                  struct npfec access)
+static void set_reg_value (int size, int index, int seg, struct cpu_user_regs *regs, long value)
 {
-    struct hvm_vcpu_io *hvio = &current->arch.hvm.hvm_io;
+    if (size == BYTE) {
+        switch (index) {
+        case 0:
+            regs->rax &= ~0xFF;
+            regs->rax |= (value & 0xFF);
+            break;
+        case 1:
+            regs->rcx &= ~0xFF;
+            regs->rcx |= (value & 0xFF);
+            break;
+        case 2:
+            regs->rdx &= ~0xFF;
+            regs->rdx |= (value & 0xFF);
+            break;
+        case 3:
+            regs->rbx &= ~0xFF;
+            regs->rbx |= (value & 0xFF);
+            break;
+        case 4:
+            regs->rax &= 0xFFFFFFFFFFFF00FF;
+            regs->rax |= ((value & 0xFF) << 8);
+            break;
+        case 5:
+            regs->rcx &= 0xFFFFFFFFFFFF00FF;
+            regs->rcx |= ((value & 0xFF) << 8);
+            break;
+        case 6:
+            regs->rdx &= 0xFFFFFFFFFFFF00FF;
+            regs->rdx |= ((value & 0xFF) << 8);
+            break;
+        case 7:
+            regs->rbx &= 0xFFFFFFFFFFFF00FF;
+            regs->rbx |= ((value & 0xFF) << 8);
+            break;
+        default:
+            printk("Error: size:%x, index:%x are invalid!\n", size, index);
+            domain_crash_synchronous();
+            break;
+        }
+        return;
+    }
 
-    hvio->mmio_access = access.gla_valid &&
-                        access.kind == npfec_kind_with_gla
-                        ? access : (struct npfec){};
-    hvio->mmio_gla = gla & PAGE_MASK;
-    hvio->mmio_gpfn = gpfn;
-    return handle_mmio();
+    switch (index) {
+    case 0:
+        __set_reg_value(&regs->rax, size, value);
+        break;
+    case 1:
+        __set_reg_value(&regs->rcx, size, value);
+        break;
+    case 2:
+        __set_reg_value(&regs->rdx, size, value);
+        break;
+    case 3:
+        __set_reg_value(&regs->rbx, size, value);
+        break;
+    case 4:
+        __set_reg_value(&regs->rsp, size, value);
+        break;
+    case 5:
+        __set_reg_value(&regs->rbp, size, value);
+        break;
+    case 6:
+        __set_reg_value(&regs->rsi, size, value);
+        break;
+    case 7:
+        __set_reg_value(&regs->rdi, size, value);
+        break;
+    case 8:
+        __set_reg_value(&regs->r8, size, value);
+        break;
+    case 9:
+        __set_reg_value(&regs->r9, size, value);
+        break;
+    case 10:
+        __set_reg_value(&regs->r10, size, value);
+        break;
+    case 11:
+        __set_reg_value(&regs->r11, size, value);
+        break;
+    case 12:
+        __set_reg_value(&regs->r12, size, value);
+        break;
+    case 13:
+        __set_reg_value(&regs->r13, size, value);
+        break;
+    case 14:
+        __set_reg_value(&regs->r14, size, value);
+        break;
+    case 15:
+        __set_reg_value(&regs->r15, size, value);
+        break;
+    default:
+        printk("Error: <set_reg_value> Invalid index\n");
+        domain_crash_synchronous();
+    }
+    return;
 }
+#endif
 
-bool handle_pio(uint16_t port, unsigned int size, int dir)
+extern long get_reg_value(int size, int index, int seg, struct cpu_user_regs *regs);
+
+static inline void set_eflags_CF(int size, unsigned long v1,
+                                 unsigned long v2, struct cpu_user_regs *regs)
 {
-    struct vcpu *curr = current;
-    struct vcpu_io *vio = &curr->io;
-    unsigned int data;
-    int rc;
+    unsigned long mask = (1 << (8 * size)) - 1;
 
-    ASSERT((size - 1) < 4 && size != 3);
-
-    if ( dir == IOREQ_WRITE )
-        data = guest_cpu_user_regs()->eax;
+    if ((v1 & mask) > (v2 & mask))
+        regs->eflags |= X86_EFLAGS_CF;
     else
-        data = ~0; /* Avoid any risk of stack rubble. */
+        regs->eflags &= ~X86_EFLAGS_CF;
+}
 
-    rc = hvmemul_do_pio_buffer(port, size, dir, &data);
+static inline void set_eflags_OF(int size, unsigned long v1,
+                                 unsigned long v2, unsigned long v3, struct cpu_user_regs *regs)
+{
+    if ((v3 ^ v2) & (v3 ^ v1) & (1 << ((8 * size) - 1)))
+        regs->eflags |= X86_EFLAGS_OF;
+}
 
-    if ( ioreq_needs_completion(&vio->req) )
-        vio->completion = VIO_pio_completion;
+static inline void set_eflags_AF(int size, unsigned long v1,
+                                 unsigned long v2, unsigned long v3, struct cpu_user_regs *regs)
+{
+    if ((v1 ^ v2 ^ v3) & 0x10)
+        regs->eflags |= X86_EFLAGS_AF;
+}
 
-    switch ( rc )
-    {
-    case X86EMUL_OKAY:
-        if ( dir == IOREQ_READ )
-        {
-            if ( size == 4 ) /* Needs zero extension. */
-                guest_cpu_user_regs()->rax = data;
-            else
-                memcpy(&guest_cpu_user_regs()->rax, &data, size);
+static inline void set_eflags_ZF(int size, unsigned long v1,
+                                 struct cpu_user_regs *regs)
+{
+    unsigned long mask = (1 << (8 * size)) - 1;
+
+    if ((v1 & mask) == 0)
+        regs->eflags |= X86_EFLAGS_ZF;
+}
+
+static inline void set_eflags_SF(int size, unsigned long v1,
+                                 struct cpu_user_regs *regs)
+{
+    if (v1 & (1 << ((8 * size) - 1)))
+        regs->eflags |= X86_EFLAGS_SF;
+}
+
+static char parity_table[256] = {
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+    0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+    1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1
+};
+
+static inline void set_eflags_PF(int size, unsigned long v1,
+                                 struct cpu_user_regs *regs)
+{
+    if (parity_table[v1 & 0xFF])
+        regs->eflags |= X86_EFLAGS_PF;
+}
+
+static void hvm_pio_assist(struct cpu_user_regs *regs, ioreq_t *p,
+                           struct mmio_op *mmio_opp)
+{
+    unsigned long old_eax;
+    int sign = p->df ? -1 : 1;
+
+    if (p->dir == IOREQ_WRITE) {
+        if (p->pdata_valid) {
+            regs->esi += sign * p->count * p->size;
+            if (mmio_opp->flags & REPZ)
+                regs->ecx -= p->count;
+        }
+    } else {
+        if (mmio_opp->flags & OVERLAP) {
+            unsigned long addr;
+
+            regs->edi += sign * p->count * p->size;
+            if (mmio_opp->flags & REPZ)
+                regs->ecx -= p->count;
+
+            addr = regs->edi;
+            if (sign > 0)
+                addr -= p->size;
+            hvm_copy(&p->u.data, addr, p->size, HVM_COPY_OUT);
+        } else if (p->pdata_valid) {
+            regs->edi += sign * p->count * p->size;
+            if (mmio_opp->flags & REPZ)
+                regs->ecx -= p->count;
+        } else {
+            old_eax = regs->eax;
+            switch (p->size) {
+            case 1:
+                regs->eax = (old_eax & 0xffffff00) | (p->u.data & 0xff);
+                break;
+            case 2:
+                regs->eax = (old_eax & 0xffff0000) | (p->u.data & 0xffff);
+                break;
+            case 4:
+                regs->eax = (p->u.data & 0xffffffff);
+                break;
+            default:
+                printk("Error: %s unknown port size\n", __FUNCTION__);
+                domain_crash_synchronous();
+            }
+        }
+    }
+}
+
+static void hvm_mmio_assist(struct vcpu *v, struct cpu_user_regs *regs,
+                            ioreq_t *p, struct mmio_op *mmio_opp)
+{
+    int sign = p->df ? -1 : 1;
+    int size = -1, index = -1;
+    unsigned long value = 0, diff = 0;
+    unsigned long src, dst;
+
+    src = mmio_opp->operand[0];
+    dst = mmio_opp->operand[1];
+    size = operand_size(src);
+
+    switch (mmio_opp->instr) {
+    case INSTR_MOV:
+        if (dst & REGISTER) {
+            index = operand_index(dst);
+            set_reg_value(size, index, 0, regs, p->u.data);
         }
         break;
 
-    case X86EMUL_RETRY:
+    case INSTR_MOVZX:
+        if (dst & REGISTER) {
+            switch (size) {
+            case BYTE:
+                p->u.data &= 0xFFULL;
+                break;
+
+            case WORD:
+                p->u.data &= 0xFFFFULL;
+                break;
+
+            case LONG:
+                p->u.data &= 0xFFFFFFFFULL;
+                break;
+
+            default:
+                printk("Impossible source operand size of movzx instr: %d\n", size);
+                domain_crash_synchronous();
+            }
+            index = operand_index(dst);
+            set_reg_value(operand_size(dst), index, 0, regs, p->u.data);
+        }
+        break;
+
+    case INSTR_MOVSX:
+        if (dst & REGISTER) {
+            switch (size) {
+            case BYTE:
+                p->u.data &= 0xFFULL;
+                if ( p->u.data & 0x80ULL )
+                    p->u.data |= 0xFFFFFFFFFFFFFF00ULL;
+                break;
+
+            case WORD:
+                p->u.data &= 0xFFFFULL;
+                if ( p->u.data & 0x8000ULL )
+                    p->u.data |= 0xFFFFFFFFFFFF0000ULL;
+                break;
+
+            case LONG:
+                p->u.data &= 0xFFFFFFFFULL;
+                if ( p->u.data & 0x80000000ULL )
+                    p->u.data |= 0xFFFFFFFF00000000ULL;
+                break;
+
+            default:
+                printk("Impossible source operand size of movsx instr: %d\n", size);
+                domain_crash_synchronous();
+            }
+            index = operand_index(dst);
+            set_reg_value(operand_size(dst), index, 0, regs, p->u.data);
+        }
+        break;
+
+    case INSTR_MOVS:
+        sign = p->df ? -1 : 1;
+        regs->esi += sign * p->count * p->size;
+        regs->edi += sign * p->count * p->size;
+
+        if ((mmio_opp->flags & OVERLAP) && p->dir == IOREQ_READ) {
+            unsigned long addr = regs->edi;
+
+            if (sign > 0)
+                addr -= p->size;
+            hvm_copy(&p->u.data, addr, p->size, HVM_COPY_OUT);
+        }
+
+        if (mmio_opp->flags & REPZ)
+            regs->ecx -= p->count;
+        break;
+
+    case INSTR_STOS:
+        sign = p->df ? -1 : 1;
+        regs->edi += sign * p->count * p->size;
+        if (mmio_opp->flags & REPZ)
+            regs->ecx -= p->count;
+        break;
+
+    case INSTR_AND:
+        if (src & REGISTER) {
+            index = operand_index(src);
+            value = get_reg_value(size, index, 0, regs);
+            diff = (unsigned long) p->u.data & value;
+        } else if (src & IMMEDIATE) {
+            value = mmio_opp->immediate;
+            diff = (unsigned long) p->u.data & value;
+        } else if (src & MEMORY) {
+            index = operand_index(dst);
+            value = get_reg_value(size, index, 0, regs);
+            diff = (unsigned long) p->u.data & value;
+            set_reg_value(size, index, 0, regs, diff);
+        }
+
         /*
-         * We should not advance RIP/EIP if the domain is shutting down or
-         * if X86EMUL_RETRY has been returned by an internal handler.
+         * The OF and CF flags are cleared; the SF, ZF, and PF
+         * flags are set according to the result. The state of
+         * the AF flag is undefined.
          */
-        if ( curr->domain->is_shutting_down || !vcpu_ioreq_pending(curr) )
-            return false;
+        regs->eflags &= ~(X86_EFLAGS_CF|X86_EFLAGS_PF|
+                          X86_EFLAGS_ZF|X86_EFLAGS_SF|X86_EFLAGS_OF);
+        set_eflags_ZF(size, diff, regs);
+        set_eflags_SF(size, diff, regs);
+        set_eflags_PF(size, diff, regs);
         break;
 
-    default:
-        gprintk(XENLOG_ERR, "Unexpected PIO status %d, port %#x %s 0x%0*x\n",
-                rc, port, dir == IOREQ_WRITE ? "write" : "read",
-                size * 2, data & ((1u << (size * 8)) - 1));
-        domain_crash(curr->domain);
-        return false;
-    }
-
-    return true;
-}
-
-static bool_t g2m_portio_accept(const struct hvm_io_handler *handler,
-                                const ioreq_t *p)
-{
-    struct vcpu *curr = current;
-    const struct hvm_domain *hvm = &curr->domain->arch.hvm;
-    struct hvm_vcpu_io *hvio = &curr->arch.hvm.hvm_io;
-    struct g2m_ioport *g2m_ioport;
-    unsigned int start, end;
-
-    list_for_each_entry( g2m_ioport, &hvm->g2m_ioport_list, list )
-    {
-        start = g2m_ioport->gport;
-        end = start + g2m_ioport->np;
-        if ( (p->addr >= start) && (p->addr + p->size <= end) )
-        {
-            hvio->g2m_ioport = g2m_ioport;
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-static int g2m_portio_read(const struct hvm_io_handler *handler,
-                           uint64_t addr, uint32_t size, uint64_t *data)
-{
-    struct hvm_vcpu_io *hvio = &current->arch.hvm.hvm_io;
-    const struct g2m_ioport *g2m_ioport = hvio->g2m_ioport;
-    unsigned int mport = (addr - g2m_ioport->gport) + g2m_ioport->mport;
-
-    switch ( size )
-    {
-    case 1:
-        *data = inb(mport);
-        break;
-    case 2:
-        *data = inw(mport);
-        break;
-    case 4:
-        *data = inl(mport);
-        break;
-    default:
-        BUG();
-    }
-
-    return X86EMUL_OKAY;
-}
-
-static int g2m_portio_write(const struct hvm_io_handler *handler,
-                            uint64_t addr, uint32_t size, uint64_t data)
-{
-    struct hvm_vcpu_io *hvio = &current->arch.hvm.hvm_io;
-    const struct g2m_ioport *g2m_ioport = hvio->g2m_ioport;
-    unsigned int mport = (addr - g2m_ioport->gport) + g2m_ioport->mport;
-
-    switch ( size )
-    {
-    case 1:
-        outb(data, mport);
-        break;
-    case 2:
-        outw(data, mport);
-        break;
-    case 4:
-        outl(data, mport);
-        break;
-    default:
-        BUG();
-    }
-
-    return X86EMUL_OKAY;
-}
-
-static const struct hvm_io_ops g2m_portio_ops = {
-    .accept = g2m_portio_accept,
-    .read = g2m_portio_read,
-    .write = g2m_portio_write
-};
-
-void register_g2m_portio_handler(struct domain *d)
-{
-    struct hvm_io_handler *handler = hvm_next_io_handler(d);
-
-    if ( handler == NULL )
-        return;
-
-    handler->type = IOREQ_TYPE_PIO;
-    handler->ops = &g2m_portio_ops;
-}
-
-unsigned int hvm_pci_decode_addr(unsigned int cf8, unsigned int addr,
-                                 pci_sbdf_t *sbdf)
-{
-    ASSERT(CF8_ENABLED(cf8));
-
-    sbdf->bdf = CF8_BDF(cf8);
-    sbdf->seg = 0;
-    /*
-     * NB: the lower 2 bits of the register address are fetched from the
-     * offset into the 0xcfc register when reading/writing to it.
-     */
-    return CF8_ADDR_LO(cf8) | (addr & 3);
-}
-
-/* Do some sanity checks. */
-static bool vpci_access_allowed(unsigned int reg, unsigned int len)
-{
-    /* Check access size. */
-    if ( len != 1 && len != 2 && len != 4 && len != 8 )
-        return false;
-
-    /* Check that access is size aligned. */
-    if ( (reg & (len - 1)) )
-        return false;
-
-    return true;
-}
-
-/* vPCI config space IO ports handlers (0xcf8/0xcfc). */
-static bool vpci_portio_accept(const struct hvm_io_handler *handler,
-                               const ioreq_t *p)
-{
-    return (p->addr == 0xcf8 && p->size == 4) || (p->addr & ~3) == 0xcfc;
-}
-
-static int vpci_portio_read(const struct hvm_io_handler *handler,
-                            uint64_t addr, uint32_t size, uint64_t *data)
-{
-    const struct domain *d = current->domain;
-    unsigned int reg;
-    pci_sbdf_t sbdf;
-    uint32_t cf8;
-
-    *data = ~(uint64_t)0;
-
-    if ( addr == 0xcf8 )
-    {
-        ASSERT(size == 4);
-        *data = d->arch.hvm.pci_cf8;
-        return X86EMUL_OKAY;
-    }
-
-    ASSERT((addr & ~3) == 0xcfc);
-    cf8 = ACCESS_ONCE(d->arch.hvm.pci_cf8);
-    if ( !CF8_ENABLED(cf8) )
-        return X86EMUL_UNHANDLEABLE;
-
-    reg = hvm_pci_decode_addr(cf8, addr, &sbdf);
-
-    if ( !vpci_access_allowed(reg, size) )
-        return X86EMUL_OKAY;
-
-    *data = vpci_read(sbdf, reg, size);
-
-    return X86EMUL_OKAY;
-}
-
-static int vpci_portio_write(const struct hvm_io_handler *handler,
-                             uint64_t addr, uint32_t size, uint64_t data)
-{
-    struct domain *d = current->domain;
-    unsigned int reg;
-    pci_sbdf_t sbdf;
-    uint32_t cf8;
-
-    if ( addr == 0xcf8 )
-    {
-        ASSERT(size == 4);
-        d->arch.hvm.pci_cf8 = data;
-        return X86EMUL_OKAY;
-    }
-
-    ASSERT((addr & ~3) == 0xcfc);
-    cf8 = ACCESS_ONCE(d->arch.hvm.pci_cf8);
-    if ( !CF8_ENABLED(cf8) )
-        return X86EMUL_UNHANDLEABLE;
-
-    reg = hvm_pci_decode_addr(cf8, addr, &sbdf);
-
-    if ( !vpci_access_allowed(reg, size) )
-        return X86EMUL_OKAY;
-
-    vpci_write(sbdf, reg, size, data);
-
-    return X86EMUL_OKAY;
-}
-
-static const struct hvm_io_ops vpci_portio_ops = {
-    .accept = vpci_portio_accept,
-    .read = vpci_portio_read,
-    .write = vpci_portio_write,
-};
-
-void register_vpci_portio_handler(struct domain *d)
-{
-    struct hvm_io_handler *handler;
-
-    if ( !has_vpci(d) )
-        return;
-
-    handler = hvm_next_io_handler(d);
-    if ( !handler )
-        return;
-
-    handler->type = IOREQ_TYPE_PIO;
-    handler->ops = &vpci_portio_ops;
-}
-
-struct hvm_mmcfg {
-    struct list_head next;
-    paddr_t addr;
-    unsigned int size;
-    uint16_t segment;
-    uint8_t start_bus;
-};
-
-/* Handlers to trap PCI MMCFG config accesses. */
-static const struct hvm_mmcfg *vpci_mmcfg_find(const struct domain *d,
-                                               paddr_t addr)
-{
-    const struct hvm_mmcfg *mmcfg;
-
-    list_for_each_entry ( mmcfg, &d->arch.hvm.mmcfg_regions, next )
-        if ( addr >= mmcfg->addr && addr < mmcfg->addr + mmcfg->size )
-            return mmcfg;
-
-    return NULL;
-}
-
-bool vpci_is_mmcfg_address(const struct domain *d, paddr_t addr)
-{
-    return vpci_mmcfg_find(d, addr);
-}
-
-static unsigned int vpci_mmcfg_decode_addr(const struct hvm_mmcfg *mmcfg,
-                                           paddr_t addr, pci_sbdf_t *sbdf)
-{
-    addr -= mmcfg->addr;
-    sbdf->bdf = MMCFG_BDF(addr);
-    sbdf->bus += mmcfg->start_bus;
-    sbdf->seg = mmcfg->segment;
-
-    return addr & (PCI_CFG_SPACE_EXP_SIZE - 1);
-}
-
-static int vpci_mmcfg_accept(struct vcpu *v, unsigned long addr)
-{
-    struct domain *d = v->domain;
-    bool found;
-
-    read_lock(&d->arch.hvm.mmcfg_lock);
-    found = vpci_mmcfg_find(d, addr);
-    read_unlock(&d->arch.hvm.mmcfg_lock);
-
-    return found;
-}
-
-static int vpci_mmcfg_read(struct vcpu *v, unsigned long addr,
-                           unsigned int len, unsigned long *data)
-{
-    struct domain *d = v->domain;
-    const struct hvm_mmcfg *mmcfg;
-    unsigned int reg;
-    pci_sbdf_t sbdf;
-
-    *data = ~0ul;
-
-    read_lock(&d->arch.hvm.mmcfg_lock);
-    mmcfg = vpci_mmcfg_find(d, addr);
-    if ( !mmcfg )
-    {
-        read_unlock(&d->arch.hvm.mmcfg_lock);
-        return X86EMUL_RETRY;
-    }
-
-    reg = vpci_mmcfg_decode_addr(mmcfg, addr, &sbdf);
-    read_unlock(&d->arch.hvm.mmcfg_lock);
-
-    if ( !vpci_access_allowed(reg, len) ||
-         (reg + len) > PCI_CFG_SPACE_EXP_SIZE )
-        return X86EMUL_OKAY;
-
-    /*
-     * According to the PCIe 3.1A specification:
-     *  - Configuration Reads and Writes must usually be DWORD or smaller
-     *    in size.
-     *  - Because Root Complex implementations are not required to support
-     *    accesses to a RCRB that cross DW boundaries [...] software
-     *    should take care not to cause the generation of such accesses
-     *    when accessing a RCRB unless the Root Complex will support the
-     *    access.
-     *  Xen however supports 8byte accesses by splitting them into two
-     *  4byte accesses.
-     */
-    *data = vpci_read(sbdf, reg, min(4u, len));
-    if ( len == 8 )
-        *data |= (uint64_t)vpci_read(sbdf, reg + 4, 4) << 32;
-
-    return X86EMUL_OKAY;
-}
-
-static int vpci_mmcfg_write(struct vcpu *v, unsigned long addr,
-                            unsigned int len, unsigned long data)
-{
-    struct domain *d = v->domain;
-    const struct hvm_mmcfg *mmcfg;
-    unsigned int reg;
-    pci_sbdf_t sbdf;
-
-    read_lock(&d->arch.hvm.mmcfg_lock);
-    mmcfg = vpci_mmcfg_find(d, addr);
-    if ( !mmcfg )
-    {
-        read_unlock(&d->arch.hvm.mmcfg_lock);
-        return X86EMUL_RETRY;
-    }
-
-    reg = vpci_mmcfg_decode_addr(mmcfg, addr, &sbdf);
-    read_unlock(&d->arch.hvm.mmcfg_lock);
-
-    if ( !vpci_access_allowed(reg, len) ||
-         (reg + len) > PCI_CFG_SPACE_EXP_SIZE )
-        return X86EMUL_OKAY;
-
-    vpci_write(sbdf, reg, min(4u, len), data);
-    if ( len == 8 )
-        vpci_write(sbdf, reg + 4, 4, data >> 32);
-
-    return X86EMUL_OKAY;
-}
-
-static const struct hvm_mmio_ops vpci_mmcfg_ops = {
-    .check = vpci_mmcfg_accept,
-    .read = vpci_mmcfg_read,
-    .write = vpci_mmcfg_write,
-};
-
-int register_vpci_mmcfg_handler(struct domain *d, paddr_t addr,
-                                unsigned int start_bus, unsigned int end_bus,
-                                unsigned int seg)
-{
-    struct hvm_mmcfg *mmcfg, *new;
-
-    ASSERT(is_hardware_domain(d));
-
-    if ( start_bus > end_bus )
-        return -EINVAL;
-
-    new = xmalloc(struct hvm_mmcfg);
-    if ( !new )
-        return -ENOMEM;
-
-    new->addr = addr + (start_bus << 20);
-    new->start_bus = start_bus;
-    new->segment = seg;
-    new->size = (end_bus - start_bus + 1) << 20;
-
-    write_lock(&d->arch.hvm.mmcfg_lock);
-    list_for_each_entry ( mmcfg, &d->arch.hvm.mmcfg_regions, next )
-        if ( new->addr < mmcfg->addr + mmcfg->size &&
-             mmcfg->addr < new->addr + new->size )
-        {
-            int ret = -EEXIST;
-
-            if ( new->addr == mmcfg->addr &&
-                 new->start_bus == mmcfg->start_bus &&
-                 new->segment == mmcfg->segment &&
-                 new->size == mmcfg->size )
-                ret = 0;
-            write_unlock(&d->arch.hvm.mmcfg_lock);
-            xfree(new);
-            return ret;
+    case INSTR_OR:
+        if (src & REGISTER) {
+            index = operand_index(src);
+            value = get_reg_value(size, index, 0, regs);
+            diff = (unsigned long) p->u.data | value;
+        } else if (src & IMMEDIATE) {
+            value = mmio_opp->immediate;
+            diff = (unsigned long) p->u.data | value;
+        } else if (src & MEMORY) {
+            index = operand_index(dst);
+            value = get_reg_value(size, index, 0, regs);
+            diff = (unsigned long) p->u.data | value;
+            set_reg_value(size, index, 0, regs, diff);
         }
 
-    if ( list_empty(&d->arch.hvm.mmcfg_regions) )
-        register_mmio_handler(d, &vpci_mmcfg_ops);
+        /*
+         * The OF and CF flags are cleared; the SF, ZF, and PF
+         * flags are set according to the result. The state of
+         * the AF flag is undefined.
+         */
+        regs->eflags &= ~(X86_EFLAGS_CF|X86_EFLAGS_PF|
+                          X86_EFLAGS_ZF|X86_EFLAGS_SF|X86_EFLAGS_OF);
+        set_eflags_ZF(size, diff, regs);
+        set_eflags_SF(size, diff, regs);
+        set_eflags_PF(size, diff, regs);
+        break;
 
-    list_add(&new->next, &d->arch.hvm.mmcfg_regions);
-    write_unlock(&d->arch.hvm.mmcfg_lock);
+    case INSTR_XOR:
+        if (src & REGISTER) {
+            index = operand_index(src);
+            value = get_reg_value(size, index, 0, regs);
+            diff = (unsigned long) p->u.data ^ value;
+        } else if (src & IMMEDIATE) {
+            value = mmio_opp->immediate;
+            diff = (unsigned long) p->u.data ^ value;
+        } else if (src & MEMORY) {
+            index = operand_index(dst);
+            value = get_reg_value(size, index, 0, regs);
+            diff = (unsigned long) p->u.data ^ value;
+            set_reg_value(size, index, 0, regs, diff);
+        }
 
-    return 0;
+        /*
+         * The OF and CF flags are cleared; the SF, ZF, and PF
+         * flags are set according to the result. The state of
+         * the AF flag is undefined.
+         */
+        regs->eflags &= ~(X86_EFLAGS_CF|X86_EFLAGS_PF|
+                          X86_EFLAGS_ZF|X86_EFLAGS_SF|X86_EFLAGS_OF);
+        set_eflags_ZF(size, diff, regs);
+        set_eflags_SF(size, diff, regs);
+        set_eflags_PF(size, diff, regs);
+        break;
+
+    case INSTR_CMP:
+        if (src & REGISTER) {
+            index = operand_index(src);
+            value = get_reg_value(size, index, 0, regs);
+            diff = (unsigned long) p->u.data - value;
+        } else if (src & IMMEDIATE) {
+            value = mmio_opp->immediate;
+            diff = (unsigned long) p->u.data - value;
+        } else if (src & MEMORY) {
+            index = operand_index(dst);
+            value = get_reg_value(size, index, 0, regs);
+            diff = value - (unsigned long) p->u.data;
+        }
+
+        /*
+         * The CF, OF, SF, ZF, AF, and PF flags are set according
+         * to the result
+         */
+        regs->eflags &= ~(X86_EFLAGS_CF|X86_EFLAGS_PF|X86_EFLAGS_AF|
+                          X86_EFLAGS_ZF|X86_EFLAGS_SF|X86_EFLAGS_OF);
+        set_eflags_CF(size, value, (unsigned long) p->u.data, regs);
+        set_eflags_OF(size, diff, value, (unsigned long) p->u.data, regs);
+        set_eflags_AF(size, diff, value, (unsigned long) p->u.data, regs);
+        set_eflags_ZF(size, diff, regs);
+        set_eflags_SF(size, diff, regs);
+        set_eflags_PF(size, diff, regs);
+        break;
+
+    case INSTR_TEST:
+        if (src & REGISTER) {
+            index = operand_index(src);
+            value = get_reg_value(size, index, 0, regs);
+        } else if (src & IMMEDIATE) {
+            value = mmio_opp->immediate;
+        } else if (src & MEMORY) {
+            index = operand_index(dst);
+            value = get_reg_value(size, index, 0, regs);
+        }
+        diff = (unsigned long) p->u.data & value;
+
+        /*
+         * Sets the SF, ZF, and PF status flags. CF and OF are set to 0
+         */
+        regs->eflags &= ~(X86_EFLAGS_CF|X86_EFLAGS_PF|
+                          X86_EFLAGS_ZF|X86_EFLAGS_SF|X86_EFLAGS_OF);
+        set_eflags_ZF(size, diff, regs);
+        set_eflags_SF(size, diff, regs);
+        set_eflags_PF(size, diff, regs);
+        break;
+
+    case INSTR_BT:
+        index = operand_index(src);
+        value = get_reg_value(size, index, 0, regs);
+
+        if (p->u.data & (1 << (value & ((1 << 5) - 1))))
+            regs->eflags |= X86_EFLAGS_CF;
+        else
+            regs->eflags &= ~X86_EFLAGS_CF;
+
+        break;
+    }
+
+    hvm_load_cpu_guest_regs(v, regs);
 }
 
-void destroy_vpci_mmcfg(struct domain *d)
+void hvm_io_assist(struct vcpu *v)
 {
-    struct list_head *mmcfg_regions = &d->arch.hvm.mmcfg_regions;
+    vcpu_iodata_t *vio;
+    ioreq_t *p;
+    struct cpu_user_regs *regs = guest_cpu_user_regs();
+    struct mmio_op *mmio_opp;
+    struct cpu_user_regs *inst_decoder_regs;
 
-    write_lock(&d->arch.hvm.mmcfg_lock);
-    while ( !list_empty(mmcfg_regions) )
-    {
-        struct hvm_mmcfg *mmcfg = list_first_entry(mmcfg_regions,
-                                                   struct hvm_mmcfg, next);
+    mmio_opp = &v->arch.hvm_vcpu.mmio_op;
+    inst_decoder_regs = mmio_opp->inst_decoder_regs;
 
-        list_del(&mmcfg->next);
-        xfree(mmcfg);
+    vio = get_vio(v->domain, v->vcpu_id);
+
+    if (vio == 0) {
+        HVM_DBG_LOG(DBG_LEVEL_1,
+                    "bad shared page: %lx", (unsigned long) vio);
+        printf("bad shared page: %lx\n", (unsigned long) vio);
+        domain_crash_synchronous();
     }
-    write_unlock(&d->arch.hvm.mmcfg_lock);
+
+    p = &vio->vp_ioreq;
+    if (p->state == STATE_IORESP_HOOK)
+        hvm_hooks_assist(v);
+
+    /* clear IO wait HVM flag */
+    if (test_bit(ARCH_HVM_IO_WAIT, &v->arch.hvm_vcpu.ioflags)) {
+        if (p->state == STATE_IORESP_READY) {
+            p->state = STATE_INVALID;
+            clear_bit(ARCH_HVM_IO_WAIT, &v->arch.hvm_vcpu.ioflags);
+
+            if (p->type == IOREQ_TYPE_PIO)
+                hvm_pio_assist(regs, p, mmio_opp);
+            else
+                hvm_mmio_assist(v, regs, p, mmio_opp);
+        }
+        /* else an interrupt send event raced us */
+    }
+}
+
+/*
+ * On exit from hvm_wait_io, we're guaranteed not to be waiting on
+ * I/O response from the device model.
+ */
+void hvm_wait_io(void)
+{
+    struct vcpu *v = current;
+    struct domain *d = v->domain;
+    int port = iopacket_port(v);
+
+    for ( ; ; )
+    {
+        /* Clear master flag, selector flag, event flag each in turn. */
+        v->vcpu_info->evtchn_upcall_pending = 0;
+        clear_bit(port/BITS_PER_LONG, &v->vcpu_info->evtchn_pending_sel);
+        smp_mb__after_clear_bit();
+        if ( test_and_clear_bit(port, &d->shared_info->evtchn_pending[0]) )
+            hvm_io_assist(v);
+
+        /* Need to wait for I/O responses? */
+        if ( !test_bit(ARCH_HVM_IO_WAIT, &v->arch.hvm_vcpu.ioflags) )
+            break;
+
+        do_sched_op(SCHEDOP_block, 0);
+    }
+
+    /*
+     * Re-set the selector and master flags in case any other notifications
+     * are pending.
+     */
+    if ( d->shared_info->evtchn_pending[port/BITS_PER_LONG] )
+        set_bit(port/BITS_PER_LONG, &v->vcpu_info->evtchn_pending_sel);
+    if ( v->vcpu_info->evtchn_pending_sel )
+        v->vcpu_info->evtchn_upcall_pending = 1;
+}
+
+void hvm_safe_block(void)
+{
+    struct vcpu *v = current;
+    struct domain *d = v->domain;
+    int port = iopacket_port(v);
+
+    for ( ; ; )
+    {
+        /* Clear master flag & selector flag so we will wake from block. */
+        v->vcpu_info->evtchn_upcall_pending = 0;
+        clear_bit(port/BITS_PER_LONG, &v->vcpu_info->evtchn_pending_sel);
+        smp_mb__after_clear_bit();
+
+        /* Event pending already? */
+        if ( test_bit(port, &d->shared_info->evtchn_pending[0]) )
+            break;
+
+        do_sched_op(SCHEDOP_block, 0);
+    }
+
+    /* Reflect pending event in selector and master flags. */
+    set_bit(port/BITS_PER_LONG, &v->vcpu_info->evtchn_pending_sel);
+    v->vcpu_info->evtchn_upcall_pending = 1;
 }
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

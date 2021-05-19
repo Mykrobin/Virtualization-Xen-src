@@ -1,244 +1,106 @@
-XEN_ROOT=$(CURDIR)/..
-include $(XEN_ROOT)/Config.mk
--include $(XEN_ROOT)/config/Docs.mk
+#!/usr/bin/make -f
 
-VERSION		:= $(shell $(MAKE) -C $(XEN_ROOT)/xen --no-print-directory xenversion)
-DATE		:= $(shell date +%Y-%m-%d)
+VERSION		= xen-unstable
+INSTALL		= install
+INSTALL_DIR	= $(INSTALL) -d -m0755
 
-DOC_ARCHES      := arm x86_32 x86_64
-MAN_SECTIONS    := 1 5 7 8
+PS2PDF		:= ps2pdf
+DVIPS		:= dvips
+LATEX		:= latex
+FIG2DEV		:= fig2dev
+LATEX2HTML	:= latex2html
+DOXYGEN		:= doxygen
+POD2MAN		:= pod2man
 
-# Documentation sources to build
-MAN-SRC-y := $(sort $(basename $(wildcard man/*.pod man/*.pandoc)))
+pkgdocdir	:= /usr/share/doc/xen
+mandir		:= /usr/share/man
 
-RST-SRC-y := $(sort $(filter-out %index.rst,$(shell find * -type f -name '*.rst' -print)))
+DOC_MAN5SRC	:= $(wildcard man/*.pod.5)
+DOC_MAN1SRC	:= $(wildcard man/*.pod.1)
+DOC_MAN1	:= $(patsubst man/%.pod.1,man1/%.1,$(DOC_MAN1SRC))
+DOC_MAN5	:= $(patsubst man/%.pod.5,man5/%.5,$(DOC_MAN5SRC))
+DOC_TEX		:= src/user.tex src/interface.tex
+DOC_PS		:= $(patsubst src/%.tex,ps/%.ps,$(DOC_TEX))
+DOC_PDF		:= $(patsubst src/%.tex,pdf/%.pdf,$(DOC_TEX))
+DOC_HTML	:= $(patsubst src/%.tex,html/%/index.html,$(DOC_TEX))
 
-TXTSRC-y := $(sort $(shell find misc -name '*.txt' -print))
+GFX = $(patsubst %.fig, %.eps, $(wildcard figs/*.fig))
 
-PANDOCSRC-y := $(sort $(shell find designs/ features/ misc/ process/ specs/ \( -name '*.pandoc' -o -name '*.md' \) -print))
+.PHONY:	all build dev-docs python-dev-docs ps pdf html clean install
 
-# Documentation targets
-$(foreach i,$(MAN_SECTIONS), \
-  $(eval DOC_MAN$(i) := $(patsubst man/%.$(i),man$(i)/%.$(i), \
-                                   $(filter %.$(i),$(MAN-SRC-y)))))
-
-DOC_HTML := html/SUPPORT.html \
-            $(patsubst %.pandoc,html/%.html,$(PANDOCSRC-y)) \
-            $(patsubst %.md,html/%.html,$(PANDOCSRC-y)) \
-            $(patsubst %.rst,html/%.html,$(RST-SRC-y)) \
-            $(patsubst %,html/%.html,$(MAN-SRC-y)) \
-            $(patsubst %.txt,html/%.txt,$(TXTSRC-y)) \
-            $(patsubst %,html/hypercall/%/index.html,$(DOC_ARCHES))
-DOC_TXT  := $(patsubst %.txt,txt/%.txt,$(TXTSRC-y)) \
-            $(patsubst %.pandoc,txt/%.txt,$(PANDOCSRC-y)) \
-            $(patsubst %.md,txt/%.txt,$(PANDOCSRC-y)) \
-            $(patsubst %.rst,txt/%.txt,$(RST-SRC-y)) \
-            $(patsubst %,txt/%.txt,$(MAN-SRC-y))
-DOC_PDF  := $(patsubst %.pandoc,pdf/%.pdf,$(PANDOCSRC-y)) \
-            $(patsubst %.md,pdf/%.pdf,$(PANDOCSRC-y)) \
-            $(patsubst %.rst,pdf/%.pdf,$(RST-SRC-y))
-
-# Top level build targets
-.PHONY: all
 all: build
+build: ps pdf html man-pages
+	rm -f *.aux *.dvi *.bbl *.blg *.glo *.idx *.ilg *.log *.ind *.toc
 
-.PHONY: build
-build: html txt pdf man-pages figs
+dev-docs: python-dev-docs
 
-.PHONY: sphinx-html
-sphinx-html:
-	sphinx-build -b html . sphinx/html
+ps: $(DOC_PS)
 
-.PHONY: html
-html: $(DOC_HTML) html/index.html
-
-.PHONY: txt
-txt: $(DOC_TXT)
-
-.PHONY: figs
-figs:
-ifneq ($(FIG2DEV),)
-	$(MAKE) -C figs
-else
-	@echo "fig2dev (transfig) not installed; skipping figs."
-endif
-
-.PHONY: pdf
 pdf: $(DOC_PDF)
 
-.PHONY: clean
-clean: clean-man-pages
-	$(MAKE) -C figs clean
-	rm -rf .word_count *.aux *.dvi *.bbl *.blg *.glo *.idx *~
-	rm -rf *.ilg *.log *.ind *.toc *.bak *.tmp core
-	rm -rf html txt pdf sphinx/html
+html:
+	@if which $(LATEX2HTML) 1>/dev/null 2>/dev/null; then \
+	$(MAKE) $(DOC_HTML); fi
 
-.PHONY: distclean
-distclean: clean
-	rm -rf $(XEN_ROOT)/config/Docs.mk config.log config.status config.cache \
-		autom4te.cache
+python-dev-docs:
+	@mkdir -v -p api/tools/python
+	@if which $(DOXYGEN) 1>/dev/null 2>/dev/null; then         \
+        echo "Running doxygen to generate Python tools APIs ... "; \
+	$(DOXYGEN) Doxyfile;                                       \
+	$(MAKE) -C api/tools/python/latex ; else                   \
+        echo "Doxygen not installed; skipping python-dev-docs."; fi
 
-# Top level install targets
+man-pages:
+	@if which $(POD2MAN) 1>/dev/null 2>/dev/null; then \
+	$(MAKE) $(DOC_MAN1) $(DOC_MAN5); fi
 
-.PHONY: man-pages install-man-pages clean-man-pages uninstall-man-pages
-
-# Metarules for generating manpages.  Run with $(1) substitued for section
-define GENERATE_MANPAGE_RULES
-
-# Real manpages
-man$(1)/%.$(1): man/%.$(1).pod Makefile
-ifneq ($(POD2MAN),)
-	@$(INSTALL_DIR) $$(@D)
-	$(POD2MAN) --release=$(VERSION) --name=$$* -s $(1) -c "Xen" $$< $$@
-else
-	@echo "pod2man not installed; skipping $$@"
-endif
-
-man$(1)/%.$(1): man/%.$(1).pandoc Makefile
-ifneq ($(PANDOC),)
-	@$(INSTALL_DIR) $$(@D)
-	$(PANDOC) --standalone -V title=$$* -V section=$(1) \
-		      -V date="$(DATE)" -V footer="$(VERSION)" \
-			  -V header=Xen $$< -t man --output $$@
-else
-	@echo "pandoc not installed; skipping $$@"
-endif
-
-# HTML manpages
-# sed used to fix up links between man-pages
-# 1) L<xl(1)> -> L<xl(1)|relative:xl.1.html>
-# 2) <a href="relative:xl.1.html"> -> <a href="xl.1.html">
-html/man/%.$(1).html: man/%.$(1).pod Makefile
-ifneq ($(POD2HTML),)
-	@$(INSTALL_DIR) $$(@D)
-	sed -r -e 's%L<([^>]+)\(([1-9])\)>%L<\1(\2)|relative:\1.\2.html>%g' $$< | \
-		$(POD2HTML) | \
-		sed -r -e 's%( href=")relative:%\1%g' > $$@
-else
-	@echo "pod2html not installed; skipping $$@"
-endif
-
-html/man/%.$(1).html: man/%.$(1).pandoc Makefile
-ifneq ($(PANDOC),)
-	@$(INSTALL_DIR) $$(@D)
-	$(PANDOC) --standalone $$< -t html --toc --output $$@
-else
-	@echo "pandoc not installed; skipping $$@"
-endif
-
-# Text manpages
-txt/man/%.$(1).txt: man/%.$(1).pod Makefile
-ifneq ($(POD2TEXT),)
-	@$(INSTALL_DIR) $$(@D)
-	$(POD2TEXT) $$< $$@
-else
-	@echo "pod2text not installed; skipping $$@"
-endif
-
-txt/man/%.$(1).txt: man/%.$(1).pandoc Makefile
-ifneq ($(PANDOC),)
-	@$(INSTALL_DIR) $$(@D)
-	$(PANDOC) --standalone $$< -t plain --output $$@
-else
-	@echo "pandoc not installed; skipping $$@"
-endif
-
-# Build
-.PHONY: man$(1)-pages
-man$(1)-pages: $$(DOC_MAN$(1))
-
-# Install
-.PHONY: install-man$(1)-pages
-install-man$(1)-pages: man$(1)-pages
-	$(INSTALL_DIR) $(DESTDIR)$(mandir)
-	cp -r man$(1) $(DESTDIR)$(mandir)
-
-# Clean
-.PHONY: clean-man$(1)-pages
-clean-man$(1)-pages:
-	rm -rf man$(1)
-
-# Uninstall
-.PHONY: uninstall-man$(1)-pages
-uninstall-man$(1)-pages:
-	rm -f $(addprefix $(DESTDIR)$(mandir)/,$(DOC_MAN$(1)))
-
-# Link buld/install/clean to toplevel rules
-man-pages: man$(1)-pages
-install-man-pages: install-man$(1)-pages
-clean-man-pages: clean-man$(1)-pages
-uninstall-man-pages: uninstall-man$(1)-pages
-
-endef
-
-# Generate manpage rules for each section
-$(foreach i,$(MAN_SECTIONS),$(eval $(call GENERATE_MANPAGE_RULES,$(i))))
-
-.PHONY: install-html
-install-html: html txt figs
-	$(INSTALL_DIR) $(DESTDIR)$(docdir)
-	[ ! -d html ] || cp -R html $(DESTDIR)$(docdir)
-
-.PHONY: install
-install: install-man-pages install-html
-
-.PHONY: uninstall-html
-uninstall-html:
-	rm -rf $(DESTDIR)$(docdir)
-
-.PHONY: uninstall
-uninstall: uninstall-man-pages uninstall-html
-
-# Individual file build targets
-html/index.html: $(DOC_HTML) $(CURDIR)/gen-html-index INDEX
-	$(PERL) -w -- $(CURDIR)/gen-html-index -i INDEX html $(DOC_HTML)
-
-html/%.txt: %.txt
-	@$(INSTALL_DIR) $(@D)
-	$(INSTALL_DATA) $< $@
-
-
-# For non-x86 arches exclude the subarch whole x86 arch.
-$(foreach i,$(filter-out x86_32 x86_64,$(DOC_ARCHES)),html/hypercall/$(i)/index.html): EXTRA_EXCLUDE := -X arch-x86
-
-html/hypercall/%/index.html: $(CURDIR)/xen-headers Makefile
-	rm -rf $(@D)
+man1/%.1: man/%.pod.1 Makefile
 	$(INSTALL_DIR) $(@D)
-	$(PERL) -w $(CURDIR)/xen-headers -O $(@D) \
-		-T 'arch-$* - Xen public headers' \
-		$(patsubst %,-X arch-%,$(filter-out $*,$(DOC_ARCHES))) \
-		$(patsubst %,-X xen-%,$(filter-out $*,$(DOC_ARCHES))) \
-		$(EXTRA_EXCLUDE) \
-		$(XEN_ROOT)/xen include/public include/xen/errno.h
+	$(POD2MAN) --release=$(VERSION) --name=`echo $@ | sed 's/^man1.//'| \
+		sed 's/.1//'` -s 1 -c "Xen" $< $@
 
--include $(wildcard html/hypercall/*/.deps)
+man5/%.5: man/%.pod.5 Makefile
+	$(INSTALL_DIR) $(@D)
+	$(POD2MAN) --release=$(VERSION) --name=`echo $@ | sed 's/^man5.//'| \
+		sed 's/.5//'` -s 5 -c "Xen" $< $@
 
-txt/%.txt: %.txt
-	@$(INSTALL_DIR) $(@D)
-	$(INSTALL_DATA) $< $@
+clean:
+	rm -rf .word_count *.aux *.dvi *.bbl *.blg *.glo *.idx *~ 
+	rm -rf *.ilg *.log *.ind *.toc *.bak core
+	rm -rf $(GFX) ps pdf html
+	rm -rf api
+	rm -rf man5
+	rm -rf man1
 
-# Metarule for generating pandoc rules.
-define GENERATE_PANDOC_RULE_RAW
-$(1): $(2)
-ifneq ($(PANDOC),)
-	@$(INSTALL_DIR) $$(@D)
-	$(PANDOC) --number-sections --toc --standalone $$< --output $$@
-else
-	@echo "pandoc not installed; skipping $$@"
-endif
-endef
-define GENERATE_PANDOC_RULE
-# $(1) is the target documentation format. $(2) is the source format.
-$(call GENERATE_PANDOC_RULE_RAW,$(1)/%.$(1),%.$(2))
-endef
+install: all
+	rm -rf $(DESTDIR)$(pkgdocdir)
+	$(INSTALL_DIR) $(DESTDIR)$(pkgdocdir)
+	cp -dR ps $(DESTDIR)$(pkgdocdir)
+	cp -dR pdf $(DESTDIR)$(pkgdocdir)
+	$(INSTALL_DIR) $(DESTDIR)$(mandir)
+	cp -dR man1 $(DESTDIR)$(mandir)
+	cp -dR man5 $(DESTDIR)$(mandir)
+	[ ! -d html ] || cp -dR html $(DESTDIR)$(pkgdocdir)
 
-$(foreach dst-fmt,pdf txt html,\
-$(foreach src-fmt,pandoc md rst,\
-$(eval $(call GENERATE_PANDOC_RULE,$(dst-fmt),$(src-fmt)))))
+pdf/%.pdf: ps/%.ps
+	$(INSTALL_DIR) $(@D)
+	$(PS2PDF) $< $@.new
+	mv $@.new $@
 
-$(eval $(call GENERATE_PANDOC_RULE_RAW,html/SUPPORT.html,$(XEN_ROOT)/SUPPORT.md))
+ps/%.ps: %.dvi
+	$(INSTALL_DIR) $(@D)
+	$(DVIPS) -Ppdf -G0 -o $@.new $<
+	mv $@.new $@
 
-ifeq (,$(findstring clean,$(MAKECMDGOALS)))
-$(XEN_ROOT)/config/Docs.mk:
-	$(error You have to run ./configure before building docs)
-endif
+%.dvi: src/%.tex $(GFX)
+	$(LATEX) $< >/dev/null
+	if [ -e $*.toc ] ; then $(LATEX) $< >/dev/null ; fi
+
+%.eps: %.fig
+	$(FIG2DEV) -L eps $< $@
+
+html/%/index.html: src/%.tex
+	$(INSTALL_DIR) $(@D)
+	$(LATEX2HTML) -split 0 -show_section_numbers -toc_depth 3 -nonavigation \
+	-numbered_footnotes -local_icons -noinfo -math -dir $(@D) \
+	$< 1>/dev/null 2>/dev/null

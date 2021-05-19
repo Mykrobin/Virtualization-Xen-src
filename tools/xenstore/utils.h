@@ -3,9 +3,6 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdint.h>
-#include <stdio.h>
-
-#include <xen-tools/libs.h>
 
 /* Is A == B ? */
 #define streq(a,b) (strcmp((a),(b)) == 0)
@@ -22,22 +19,41 @@ static inline bool strends(const char *a, const char *b)
 	return streq(a + strlen(a) - strlen(b), b);
 }
 
-/*
- * Write NUL bytes for aligning state data to 8 bytes.
- */
-const char *dump_state_align(FILE *fp);
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 
-#define PRINTF_ATTRIBUTE(a1, a2) __attribute__((format (printf, a1, a2)))
+#define ___stringify(x)	#x
+#define __stringify(x)		___stringify(x)
 
-#define __noreturn __attribute__((noreturn))
+/* Convenient wrappers for malloc and realloc.  Use them. */
+#define new(type) ((type *)malloc_nofail(sizeof(type)))
+#define new_array(type, num) realloc_array((type *)0, (num))
+#define realloc_array(ptr, num) ((__typeof__(ptr))_realloc_array((ptr), sizeof((*ptr)), (num)))
 
-void barf(const char *fmt, ...) __noreturn PRINTF_ATTRIBUTE(1, 2);
-void barf_perror(const char *fmt, ...) __noreturn PRINTF_ATTRIBUTE(1, 2);
+void *malloc_nofail(size_t size);
+void *realloc_nofail(void *ptr, size_t size);
+void *_realloc_array(void *ptr, size_t size, size_t num);
 
-/* Function pointer as xprintf() can be configured at runtime. */
-extern void (*xprintf)(const char *fmt, ...) PRINTF_ATTRIBUTE(1, 2);
+void barf(const char *fmt, ...) __attribute__((noreturn));
+void barf_perror(const char *fmt, ...) __attribute__((noreturn));
+
+/* This version adds one byte (for nul term) */
+void *grab_file(const char *filename, unsigned long *size);
+void release_file(void *data, unsigned long size);
+
+/* Signal handling: returns fd to listen on. */
+int signal_to_fd(int signal);
+void close_signal(int fd);
+
+void xprintf(const char *fmt, ...);
 
 #define eprintf(_fmt, _args...) xprintf("[ERR] %s" _fmt, __FUNCTION__, ##_args)
+#define iprintf(_fmt, _args...) xprintf("[INF] %s" _fmt, __FUNCTION__, ##_args)
+
+#ifdef DEBUG
+#define dprintf(_fmt, _args...) xprintf("[DBG] %s" _fmt, __FUNCTION__, ##_args)
+#else
+#define dprintf(_fmt, _args...) ((void)0)
+#endif
 
 /*
  * Mux errno values onto returned pointers.
@@ -63,9 +79,9 @@ static inline long IS_ERR(const void *ptr)
 
 /*
  * Local variables:
- *  mode: C
  *  c-file-style: "linux"
  *  indent-tabs-mode: t
+ *  c-indent-level: 8
  *  c-basic-offset: 8
  *  tab-width: 8
  * End:

@@ -8,43 +8,44 @@
 # Copyright (C) 2005 by Christian Limpach
 #
 
-XEN_ROOT	= $(CURDIR)/../..
+INSTALL		= install
+INSTALL_PROG	= $(INSTALL) -m0755
+INSTALL_DIR	= $(INSTALL) -d -m0755
+
+XEN_ROOT	= ../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-PROGRAMS = readnotes lsevtchn
+PROGRAMS_INSTALL_DIR = /usr/$(LIBDIR)/xen/bin
 
-CFLAGS += -Werror
+INCLUDES += -I $(XEN_LIBXC)
 
-CFLAGS_readnotes.o  := $(CFLAGS_libxenevtchn) $(CFLAGS_libxenctrl) $(CFLAGS_libxenguest)
-CFLAGS_lsevtchn.o   := $(CFLAGS_libxenevtchn) $(CFLAGS_libxenctrl)
+CFLAGS += -Werror -fno-strict-aliasing
+CFLAGS += $(INCLUDES)
+
+# Make gcc generate dependencies.
+CFLAGS += -Wp,-MD,.$(@F).d
+PROG_DEP = .*.d
+
+PROGRAMS		= xc_restore xc_save
+
+LDLIBS			= -L$(XEN_LIBXC) -lxenguest -lxenctrl
 
 .PHONY: all
 all: build
-
-.PHONY: build
 build: $(PROGRAMS)
 
-readnotes: readnotes.o
-	$(CC) $(LDFLAGS) $^ -o $@ $(LDLIBS_libxenctrl) $(LDLIBS_libxenguest) $(APPEND_LDFLAGS)
-
-lsevtchn: lsevtchn.o
-	$(CC) $(LDFLAGS) $^ -o $@ $(LDLIBS_libxenctrl) $(APPEND_LDFLAGS)
+$(PROGRAMS): %: %.o
+	$(LINK.o) $^ $(LDLIBS) -o $@
 
 .PHONY: install
 install: build
-	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC_BIN)
-	$(INSTALL_PROG) $(PROGRAMS) $(DESTDIR)$(LIBEXEC_BIN)
+	[ -d $(DESTDIR)$(PROGRAMS_INSTALL_DIR) ] || \
+		$(INSTALL_DIR) $(DESTDIR)$(PROGRAMS_INSTALL_DIR)
+	$(INSTALL_PROG) $(PROGRAMS) $(DESTDIR)$(PROGRAMS_INSTALL_DIR)
 
-.PHONY: uninstall
-uninstall:
-	rm -f $(addprefix $(DESTDIR)$(LIBEXECDIR)/, $(PROGRAMS))
 
-.PHONY: clean
 clean:
 	$(RM) *.o $(PROGRAMS)
-	$(RM) $(DEPS_RM)
+	$(RM) $(PROG_DEP)
 
-.PHONY: distclean
-distclean: clean
-
--include $(DEPS_INCLUDE)
+-include $(PROG_DEP)

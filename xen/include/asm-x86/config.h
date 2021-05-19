@@ -7,120 +7,102 @@
 #ifndef __X86_CONFIG_H__
 #define __X86_CONFIG_H__
 
-#define LONG_BYTEORDER 3
-#define CONFIG_PAGING_LEVELS 4
+#if defined(__x86_64__)
+# define CONFIG_PAGING_LEVELS 4
+#elif defined(CONFIG_X86_PAE)
+# define CONFIG_PAGING_LEVELS 3
+#else
+# define CONFIG_PAGING_LEVELS 2
+#endif
 
-#define BYTES_PER_LONG (1 << LONG_BYTEORDER)
-#define BITS_PER_LONG (BYTES_PER_LONG << 3)
-#define BITS_PER_BYTE 8
-#define POINTER_ALIGN BYTES_PER_LONG
-
-#define BITS_PER_LLONG 64
-
-#define BITS_PER_XEN_ULONG BITS_PER_LONG
-
-#define CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS 1
-#define CONFIG_DISCONTIGMEM 1
-#define CONFIG_NUMA_EMU 1
-#define CONFIG_DOMAIN_PAGE 1
-
-#define CONFIG_PAGEALLOC_MAX_ORDER (2 * PAGETABLE_ORDER)
-#define CONFIG_DOMU_MAX_ORDER      PAGETABLE_ORDER
-#define CONFIG_HWDOM_MAX_ORDER     12
+#define CONFIG_X86 1
+#define CONFIG_X86_HT 1
+#define CONFIG_SHADOW 1
+#define CONFIG_SMP 1
+#define CONFIG_X86_LOCAL_APIC 1
+#define CONFIG_X86_GOOD_APIC 1
+#define CONFIG_X86_IO_APIC 1
+#define CONFIG_HPET_TIMER 1
+#define CONFIG_X86_MCE_P4THERMAL 1
 
 /* Intel P4 currently has largest cache line (L2 line size is 128 bytes). */
 #define CONFIG_X86_L1_CACHE_SHIFT 7
 
-#define CONFIG_ACPI_NUMA 1
-#define CONFIG_ACPI_SRAT 1
-#define CONFIG_ACPI_CSTATE 1
-
-#define CONFIG_WATCHDOG 1
-
-#define CONFIG_MULTIBOOT 1
+#define CONFIG_ACPI 1
+#define CONFIG_ACPI_BOOT 1
 
 #define HZ 100
 
-#define OPT_CONSOLE_STR "vga"
+#define OPT_CONSOLE_STR "com1,vga"
+
+#define NR_CPUS 32
+
+#ifdef CONFIG_X86_SUPERVISOR_MODE_KERNEL
+# define supervisor_mode_kernel (1)
+#else
+# define supervisor_mode_kernel (0)
+#endif
 
 /* Linkage for x86 */
+#define __ALIGN .align 16,0x90
+#define __ALIGN_STR ".align 16,0x90"
 #ifdef __ASSEMBLY__
-#define ALIGN .align 16,0x90
+#define ALIGN __ALIGN
+#define ALIGN_STR __ALIGN_STR
 #define ENTRY(name)                             \
   .globl name;                                  \
   ALIGN;                                        \
   name:
-#define GLOBAL(name)                            \
-  .globl name;                                  \
-  name:
 #endif
 
-#define NR_hypercalls 64
+#define barrier() __asm__ __volatile__("": : :"memory")
+
+#define NR_hypercalls 32
 
 #ifndef NDEBUG
 #define MEMORY_GUARD
+#ifdef __x86_64__
+#define STACK_ORDER 2
+#endif
 #endif
 
-#define STACK_ORDER 3
+#ifndef STACK_ORDER
+#define STACK_ORDER 1
+#endif
 #define STACK_SIZE  (PAGE_SIZE << STACK_ORDER)
 
-#define IST_SHSTK_SIZE 1024
-
-#define TRAMPOLINE_STACK_SPACE  PAGE_SIZE
-#define TRAMPOLINE_SPACE        (KB(64) - TRAMPOLINE_STACK_SPACE)
-#define WAKEUP_STACK_MIN        3072
-
-#define MBI_SPACE_MIN           (2 * PAGE_SIZE)
-
-/* Primary stack is restricted to 8kB by guard pages. */
-#define PRIMARY_STACK_SIZE 8192
-
-/* Primary shadow stack is slot 5 of 8, immediately under the primary stack. */
-#define PRIMARY_SHSTK_SLOT 5
-
-/* Total size of syscall and emulation stubs. */
-#define STUB_BUF_SHIFT (L1_CACHE_SHIFT > 7 ? L1_CACHE_SHIFT : 7)
-#define STUB_BUF_SIZE  (1 << STUB_BUF_SHIFT)
-#define STUBS_PER_PAGE (PAGE_SIZE / STUB_BUF_SIZE)
-
-/* Return value for zero-size _xmalloc(), distinguished from NULL. */
-#define ZERO_BLOCK_PTR ((void *)0xBAD0BAD0BAD0BAD0UL)
-
-/* Override include/xen/list.h to make these non-canonical addresses. */
-#define LIST_POISON1  ((void *)0x0100100100100100UL)
-#define LIST_POISON2  ((void *)0x0200200200200200UL)
+#define MAX_DMADOM_PFN 0x7FFFFUL /* 31 addressable bits */
 
 #ifndef __ASSEMBLY__
-extern unsigned long trampoline_phys;
-#define bootsym_phys(sym)                                 \
-    (((unsigned long)&(sym)-(unsigned long)&trampoline_start)+trampoline_phys)
-#define bootsym(sym)                                      \
-    (*((typeof(sym) *)__va(bootsym_phys(sym))))
+extern unsigned long _end; /* standard ELF symbol */
+#endif /* __ASSEMBLY__ */
 
-extern char trampoline_start[], trampoline_end[];
-extern char trampoline_realmode_entry[];
-extern unsigned int trampoline_xen_phys_start;
-extern unsigned char trampoline_cpu_started;
-extern char wakeup_start[];
+#define FORCE_CRASH() __asm__ __volatile__ ( "ud2" )
 
-extern unsigned char video_flags;
+#if defined(__x86_64__)
 
-extern unsigned short boot_edid_caps;
-extern unsigned char boot_edid_info[128];
-#endif
+#define CONFIG_X86_64 1
 
-#include <xen/const.h>
+#define asmlinkage
+
+#define XENHEAP_DEFAULT_MB (16)
 
 #define PML4_ENTRY_BITS  39
-#define PML4_ENTRY_BYTES (_AC(1,UL) << PML4_ENTRY_BITS)
-#define PML4_ADDR(_slot)                              \
-    (((_AC(_slot, UL) >> 8) * _AC(0xffff000000000000,UL)) | \
-     (_AC(_slot, UL) << PML4_ENTRY_BITS))
+#ifndef __ASSEMBLY__
+#define PML4_ENTRY_BYTES (1UL << PML4_ENTRY_BITS)
+#define PML4_ADDR(_slot)                             \
+    ((((_slot ## UL) >> 8) * 0xffff000000000000UL) | \
+     (_slot ## UL << PML4_ENTRY_BITS))
+#else
+#define PML4_ENTRY_BYTES (1 << PML4_ENTRY_BITS)
+#define PML4_ADDR(_slot)                             \
+    (((_slot >> 8) * 0xffff000000000000) | (_slot << PML4_ENTRY_BITS))
+#endif
 
 /*
  * Memory layout:
  *  0x0000000000000000 - 0x00007fffffffffff [128TB, 2^47 bytes, PML4:0-255]
- *    Guest-defined use (see below for compatibility mode guests).
+ *    Guest-defined use.
  *  0x0000800000000000 - 0xffff7fffffffffff [16EB]
  *    Inaccessible: current arch only supports 48-bit sign-extended VAs.
  *  0xffff800000000000 - 0xffff803fffffffff [256GB, 2^38 bytes, PML4:256]
@@ -128,62 +110,33 @@ extern unsigned char boot_edid_info[128];
  *  0xffff804000000000 - 0xffff807fffffffff [256GB, 2^38 bytes, PML4:256]
  *    Reserved for future shared info with the guest OS (GUEST ACCESSIBLE).
  *  0xffff808000000000 - 0xffff80ffffffffff [512GB, 2^39 bytes, PML4:257]
- *    ioremap for PCI mmconfig space
+ *    Read-only guest linear page table (GUEST ACCESSIBLE).
  *  0xffff810000000000 - 0xffff817fffffffff [512GB, 2^39 bytes, PML4:258]
  *    Guest linear page table.
  *  0xffff818000000000 - 0xffff81ffffffffff [512GB, 2^39 bytes, PML4:259]
  *    Shadow linear page table.
  *  0xffff820000000000 - 0xffff827fffffffff [512GB, 2^39 bytes, PML4:260]
  *    Per-domain mappings (e.g., GDT, LDT).
- *  0xffff828000000000 - 0xffff82bfffffffff [256GB, 2^38 bytes, PML4:261]
+ *  0xffff828000000000 - 0xffff8283ffffffff [16GB,  2^34 bytes, PML4:261]
  *    Machine-to-phys translation table.
- *  0xffff82c000000000 - 0xffff82cfffffffff [64GB,  2^36 bytes, PML4:261]
- *    vmap()/ioremap()/fixmap area.
- *  0xffff82d000000000 - 0xffff82d03fffffff [1GB,   2^30 bytes, PML4:261]
- *    Compatibility machine-to-phys translation table (CONFIG_PV32).
- *  0xffff82d040000000 - 0xffff82d07fffffff [1GB,   2^30 bytes, PML4:261]
- *    Xen text, static data, bss.
-#ifndef CONFIG_BIGMEM
- *  0xffff82d080000000 - 0xffff82dfffffffff [62GB,              PML4:261]
- *    Reserved for future use.
- *  0xffff82e000000000 - 0xffff82ffffffffff [128GB, 2^37 bytes, PML4:261]
+ *  0xffff828400000000 - 0xffff8287ffffffff [16GB,  2^34 bytes, PML4:261]
  *    Page-frame information array.
- *  0xffff830000000000 - 0xffff87ffffffffff [5TB, 5*2^40 bytes, PML4:262-271]
- *    1:1 direct mapping of all physical memory.
-#else
- *  0xffff82d080000000 - 0xffff82ffffffffff [190GB,             PML4:261]
+ *  0xffff828800000000 - 0xffff828bffffffff [16GB,  2^34 bytes, PML4:261]
+ *    ioremap()/fixmap area.
+ *  0xffff828c00000000 - 0xffff82ffffffffff [464GB,             PML4:261]
  *    Reserved for future use.
- *  0xffff830000000000 - 0xffff847fffffffff [1.5TB, 3*2^39 bytes, PML4:262-264]
- *    Page-frame information array.
- *  0xffff848000000000 - 0xffff87ffffffffff [3.5TB, 7*2^39 bytes, PML4:265-271]
- *    1:1 direct mapping of all physical memory.
-#endif
- *  0xffff880000000000 - 0xffffffffffffffff [120TB,             PML4:272-511]
- *    PV: Guest-defined use.
- *  0xffff880000000000 - 0xffffff7fffffffff [119.5TB,           PML4:272-510]
- *    HVM/idle: continuation of 1:1 mapping
- *  0xffffff8000000000 - 0xffffffffffffffff [512GB, 2^39 bytes  PML4:511]
- *    HVM/idle: unused
- *
- * Compatibility guest area layout:
- *  0x0000000000000000 - 0x00000000f57fffff [3928MB,            PML4:0]
+ *  0xffff830000000000 - 0xffff83ffffffffff [1TB,   2^40 bytes, PML4:262-263]
+ *    1:1 direct mapping of all physical memory. Xen and its heap live here.
+ *  0xffff840000000000 - 0xffff87ffffffffff [4TB,   2^42 bytes, PML4:264-271]
+ *    Reserved for future use.
+ *  0xffff880000000000 - 0xffffffffffffffff [120TB, PML4:272-511]
  *    Guest-defined use.
- *  0x00000000f5800000 - 0x00000000ffffffff [168MB,             PML4:0]
- *    Read-only machine-to-phys translation table (GUEST ACCESSIBLE).
- *  0x0000000100000000 - 0x000001ffffffffff [2TB-4GB,           PML4:0-3]
- *    Unused / Reserved for future use.
- *  0x0000020000000000 - 0x0000027fffffffff [512GB, 2^39 bytes, PML4:4]
- *    Mirror of per-domain mappings (for argument translation area; also HVM).
- *  0x0000028000000000 - 0x00007fffffffffff [125.5TB,           PML4:5-255]
- *    Unused / Reserved for future use.
  */
 
 
 #define ROOT_PAGETABLE_FIRST_XEN_SLOT 256
 #define ROOT_PAGETABLE_LAST_XEN_SLOT  271
 #define ROOT_PAGETABLE_XEN_SLOTS \
-    (L4_PAGETABLE_ENTRIES - ROOT_PAGETABLE_FIRST_XEN_SLOT - 1)
-#define ROOT_PAGETABLE_PV_XEN_SLOTS \
     (ROOT_PAGETABLE_LAST_XEN_SLOT - ROOT_PAGETABLE_FIRST_XEN_SLOT + 1)
 
 /* Hypervisor reserves PML4 slots 256 to 271 inclusive. */
@@ -191,115 +144,157 @@ extern unsigned char boot_edid_info[128];
 #define HYPERVISOR_VIRT_END     (HYPERVISOR_VIRT_START + PML4_ENTRY_BYTES*16)
 /* Slot 256: read-only guest-accessible machine-to-phys translation table. */
 #define RO_MPT_VIRT_START       (PML4_ADDR(256))
-#define MPT_VIRT_SIZE           (PML4_ENTRY_BYTES / 2)
-#define RO_MPT_VIRT_END         (RO_MPT_VIRT_START + MPT_VIRT_SIZE)
-/* Slot 257: ioremap for PCI mmconfig space for 2048 segments (512GB)
- *     - full 16-bit segment support needs 44 bits
- *     - since PML4 slot has 39 bits, we limit segments to 2048 (11-bits)
- */
-#define PCI_MCFG_VIRT_START     (PML4_ADDR(257))
-#define PCI_MCFG_VIRT_END       (PCI_MCFG_VIRT_START + PML4_ENTRY_BYTES)
+#define RO_MPT_VIRT_END         (RO_MPT_VIRT_START + PML4_ENTRY_BYTES/2)
+/* Slot 257: read-only guest-accessible linear page table. */
+#define RO_LINEAR_PT_VIRT_START (PML4_ADDR(257))
+#define RO_LINEAR_PT_VIRT_END   (RO_LINEAR_PT_VIRT_START + PML4_ENTRY_BYTES)
 /* Slot 258: linear page table (guest table). */
 #define LINEAR_PT_VIRT_START    (PML4_ADDR(258))
 #define LINEAR_PT_VIRT_END      (LINEAR_PT_VIRT_START + PML4_ENTRY_BYTES)
 /* Slot 259: linear page table (shadow table). */
 #define SH_LINEAR_PT_VIRT_START (PML4_ADDR(259))
 #define SH_LINEAR_PT_VIRT_END   (SH_LINEAR_PT_VIRT_START + PML4_ENTRY_BYTES)
-/* Slot 260: per-domain mappings (including map cache). */
+/* Slot 260: per-domain mappings. */
 #define PERDOMAIN_VIRT_START    (PML4_ADDR(260))
-#define PERDOMAIN_SLOT_MBYTES   (PML4_ENTRY_BYTES >> (20 + PAGETABLE_ORDER))
-#define PERDOMAIN_SLOTS         3
-#define PERDOMAIN_VIRT_SLOT(s)  (PERDOMAIN_VIRT_START + (s) * \
-                                 (PERDOMAIN_SLOT_MBYTES << 20))
-/* Slot 4: mirror of per-domain mappings (for compat xlat area accesses). */
-#define PERDOMAIN_ALT_VIRT_START PML4_ADDR(4)
-/* Slot 261: machine-to-phys conversion table (256GB). */
+#define PERDOMAIN_VIRT_END      (PERDOMAIN_VIRT_START + (PERDOMAIN_MBYTES<<20))
+#define PERDOMAIN_MBYTES        ((unsigned long)GDT_LDT_MBYTES)
+/* Slot 261: machine-to-phys conversion table (16GB). */
 #define RDWR_MPT_VIRT_START     (PML4_ADDR(261))
-#define RDWR_MPT_VIRT_END       (RDWR_MPT_VIRT_START + MPT_VIRT_SIZE)
-/* Slot 261: vmap()/ioremap()/fixmap area (64GB). */
-#define VMAP_VIRT_START         RDWR_MPT_VIRT_END
-#define VMAP_VIRT_END           (VMAP_VIRT_START + GB(64))
-/* Slot 261: compatibility machine-to-phys conversion table (1GB). */
-#define RDWR_COMPAT_MPT_VIRT_START VMAP_VIRT_END
-#define RDWR_COMPAT_MPT_VIRT_END (RDWR_COMPAT_MPT_VIRT_START + GB(1))
-/* Slot 261: xen text, static data, bss, per-cpu stubs and executable fixmap (1GB). */
-#define XEN_VIRT_START          RDWR_COMPAT_MPT_VIRT_END
-#define XEN_VIRT_END            (XEN_VIRT_START + GB(1))
-
-#ifndef CONFIG_BIGMEM
-/* Slot 261: page-frame information array (128GB). */
-#define FRAMETABLE_SIZE         GB(128)
-#else
-/* Slot 262-264: page-frame information array (1.5TB). */
-#define FRAMETABLE_SIZE         GB(1536)
-#endif
-#define FRAMETABLE_VIRT_END     DIRECTMAP_VIRT_START
-#define FRAMETABLE_NR           (FRAMETABLE_SIZE / sizeof(*frame_table))
-#define FRAMETABLE_VIRT_START   (FRAMETABLE_VIRT_END - FRAMETABLE_SIZE)
-
-#ifndef CONFIG_BIGMEM
-/* Slot 262-271/510: A direct 1:1 mapping of all of physical memory. */
+#define RDWR_MPT_VIRT_END       (RDWR_MPT_VIRT_START + (16UL<<30))
+/* Slot 261: page-frame information array (16GB). */
+#define FRAMETABLE_VIRT_START   (RDWR_MPT_VIRT_END)
+#define FRAMETABLE_VIRT_END     (FRAMETABLE_VIRT_START + (16UL<<30))
+/* Slot 261: ioremap()/fixmap area (16GB). */
+#define IOREMAP_VIRT_START      (FRAMETABLE_VIRT_END)
+#define IOREMAP_VIRT_END        (IOREMAP_VIRT_START + (16UL<<30))
+/* Slot 262-263: A direct 1:1 mapping of all of physical memory. */
 #define DIRECTMAP_VIRT_START    (PML4_ADDR(262))
-#define DIRECTMAP_SIZE          (PML4_ENTRY_BYTES * (511 - 262))
-#else
-/* Slot 265-271/510: A direct 1:1 mapping of all of physical memory. */
-#define DIRECTMAP_VIRT_START    (PML4_ADDR(265))
-#define DIRECTMAP_SIZE          (PML4_ENTRY_BYTES * (511 - 265))
-#endif
-#define DIRECTMAP_VIRT_END      (DIRECTMAP_VIRT_START + DIRECTMAP_SIZE)
+#define DIRECTMAP_VIRT_END      (DIRECTMAP_VIRT_START + PML4_ENTRY_BYTES*2)
 
-#ifndef __ASSEMBLY__
+#define PGT_base_page_table PGT_l4_page_table
 
-#ifdef CONFIG_PV32
-
-/* This is not a fixed value, just a lower limit. */
-#define __HYPERVISOR_COMPAT_VIRT_START 0xF5800000
-#define HYPERVISOR_COMPAT_VIRT_START(d) ((d)->arch.hv_compat_vstart)
-
-#else /* !CONFIG_PV32 */
-
-#define HYPERVISOR_COMPAT_VIRT_START(d) ((void)(d), 0)
-
-#endif /* CONFIG_PV32 */
-
-#define MACH2PHYS_COMPAT_VIRT_START    HYPERVISOR_COMPAT_VIRT_START
-#define MACH2PHYS_COMPAT_VIRT_END      0xFFE00000
-#define MACH2PHYS_COMPAT_NR_ENTRIES(d) \
-    ((MACH2PHYS_COMPAT_VIRT_END-MACH2PHYS_COMPAT_VIRT_START(d))>>2)
-
-#define COMPAT_L2_PAGETABLE_FIRST_XEN_SLOT(d) \
-    l2_table_offset(HYPERVISOR_COMPAT_VIRT_START(d))
-#define COMPAT_L2_PAGETABLE_LAST_XEN_SLOT  l2_table_offset(~0U)
-#define COMPAT_L2_PAGETABLE_XEN_SLOTS(d) \
-    (COMPAT_L2_PAGETABLE_LAST_XEN_SLOT - COMPAT_L2_PAGETABLE_FIRST_XEN_SLOT(d) + 1)
-
-#define COMPAT_LEGACY_MAX_VCPUS XEN_LEGACY_MAX_VCPUS
-#define COMPAT_HAVE_PV_GUEST_ENTRY XEN_HAVE_PV_GUEST_ENTRY
-#define COMPAT_HAVE_PV_UPCALL_MASK XEN_HAVE_PV_UPCALL_MASK
-
-#endif
-
-#define __HYPERVISOR_CS   0xe008
+#define __HYPERVISOR_CS64 0xe010
+#define __HYPERVISOR_CS32 0xe008
+#define __HYPERVISOR_CS   __HYPERVISOR_CS64
 #define __HYPERVISOR_DS64 0x0000
-#define __HYPERVISOR_DS32 0xe010
+#define __HYPERVISOR_DS32 0xe018
 #define __HYPERVISOR_DS   __HYPERVISOR_DS64
 
-#define SYMBOLS_ORIGIN XEN_VIRT_START
+#define __GUEST_CS64      0xe033
+#define __GUEST_CS32      0xe023
+#define __GUEST_CS        __GUEST_CS64
+#define __GUEST_DS        0x0000
+#define __GUEST_SS        0xe02b
 
 /* For generic assembly code: use macros to define operation/operand sizes. */
 #define __OS          "q"  /* Operation Suffix */
 #define __OP          "r"  /* Operand Prefix */
+#define __FIXUP_ALIGN ".align 8"
+#define __FIXUP_WORD  ".quad"
+
+#elif defined(__i386__)
+
+#define CONFIG_X86_32      1
+#define CONFIG_DOMAIN_PAGE 1
+
+#define asmlinkage __attribute__((regparm(0)))
+
+/*
+ * Memory layout (high to low):                          SIZE   PAE-SIZE
+ *                                                       ------ ------
+ *  I/O remapping area                                   ( 4MB)
+ *  Direct-map (1:1) area [Xen code/data/heap]           (12MB)
+ *  Per-domain mappings (inc. 4MB map_domain_page cache) ( 4MB)
+ *  Shadow linear pagetable                              ( 4MB) ( 8MB)
+ *  Guest linear pagetable                               ( 4MB) ( 8MB)
+ *  Machine-to-physical translation table [writable]     ( 4MB) (16MB)
+ *  Frame-info table                                     (24MB) (96MB)
+ *   * Start of guest inaccessible area
+ *  Machine-to-physical translation table [read-only]    ( 4MB)
+ *   * Start of guest unmodifiable area
+ */
+
+#define IOREMAP_MBYTES           4
+#define DIRECTMAP_MBYTES        12
+#define MAPCACHE_MBYTES          4
+#define PERDOMAIN_MBYTES         8
+
+#ifdef CONFIG_X86_PAE
+# define LINEARPT_MBYTES         8
+# define MACHPHYS_MBYTES        16 /* 1 MB needed per 1 GB memory */
+# define FRAMETABLE_MBYTES (MACHPHYS_MBYTES * 6)
+#else
+# define LINEARPT_MBYTES         4
+# define MACHPHYS_MBYTES         4
+# define FRAMETABLE_MBYTES      24
+#endif
+
+#define IOREMAP_VIRT_END	0UL
+#define IOREMAP_VIRT_START	(IOREMAP_VIRT_END - (IOREMAP_MBYTES<<20))
+#define DIRECTMAP_VIRT_END	IOREMAP_VIRT_START
+#define DIRECTMAP_VIRT_START	(DIRECTMAP_VIRT_END - (DIRECTMAP_MBYTES<<20))
+#define MAPCACHE_VIRT_END	DIRECTMAP_VIRT_START
+#define MAPCACHE_VIRT_START	(MAPCACHE_VIRT_END - (MAPCACHE_MBYTES<<20))
+#define PERDOMAIN_VIRT_END	DIRECTMAP_VIRT_START
+#define PERDOMAIN_VIRT_START	(PERDOMAIN_VIRT_END - (PERDOMAIN_MBYTES<<20))
+#define SH_LINEAR_PT_VIRT_END	PERDOMAIN_VIRT_START
+#define SH_LINEAR_PT_VIRT_START	(SH_LINEAR_PT_VIRT_END - (LINEARPT_MBYTES<<20))
+#define LINEAR_PT_VIRT_END	SH_LINEAR_PT_VIRT_START
+#define LINEAR_PT_VIRT_START	(LINEAR_PT_VIRT_END - (LINEARPT_MBYTES<<20))
+#define RDWR_MPT_VIRT_END	LINEAR_PT_VIRT_START
+#define RDWR_MPT_VIRT_START	(RDWR_MPT_VIRT_END - (MACHPHYS_MBYTES<<20))
+#define FRAMETABLE_VIRT_END	RDWR_MPT_VIRT_START
+#define FRAMETABLE_VIRT_START	(FRAMETABLE_VIRT_END - (FRAMETABLE_MBYTES<<20))
+#define RO_MPT_VIRT_END		FRAMETABLE_VIRT_START
+#define RO_MPT_VIRT_START	(RO_MPT_VIRT_END - (MACHPHYS_MBYTES<<20))
+
+#define XENHEAP_DEFAULT_MB	(DIRECTMAP_MBYTES)
+#define DIRECTMAP_PHYS_END	(DIRECTMAP_MBYTES<<20)
+
+/* Maximum linear address accessible via guest memory segments. */
+#define GUEST_SEGMENT_MAX_ADDR  RO_MPT_VIRT_END
+
+#ifdef CONFIG_X86_PAE
+/* Hypervisor owns top 168MB of virtual address space. */
+#define HYPERVISOR_VIRT_START   mk_unsigned_long(0xF5800000)
+#else
+/* Hypervisor owns top 64MB of virtual address space. */
+#define HYPERVISOR_VIRT_START   mk_unsigned_long(0xFC000000)
+#endif
+
+#define L2_PAGETABLE_FIRST_XEN_SLOT \
+    (HYPERVISOR_VIRT_START >> L2_PAGETABLE_SHIFT)
+#define L2_PAGETABLE_LAST_XEN_SLOT  \
+    (~0UL >> L2_PAGETABLE_SHIFT)
+#define L2_PAGETABLE_XEN_SLOTS \
+    (L2_PAGETABLE_LAST_XEN_SLOT - L2_PAGETABLE_FIRST_XEN_SLOT + 1)
+
+#ifdef CONFIG_X86_PAE
+# define PGT_base_page_table PGT_l3_page_table
+#else
+# define PGT_base_page_table PGT_l2_page_table
+#endif
+
+#define __HYPERVISOR_CS 0xe008
+#define __HYPERVISOR_DS 0xe010
+
+/* For generic assembly code: use macros to define operation/operand sizes. */
+#define __OS          "l"  /* Operation Suffix */
+#define __OP          "e"  /* Operand Prefix */
+#define __FIXUP_ALIGN ".align 4"
+#define __FIXUP_WORD  ".long"
+
+#endif /* __i386__ */
 
 #ifndef __ASSEMBLY__
-extern unsigned long xen_phys_start;
+extern unsigned long xenheap_phys_end; /* user-configurable */
 #endif
 
 /* GDT/LDT shadow mapping area. The first per-domain-mapping sub-area. */
 #define GDT_LDT_VCPU_SHIFT       5
 #define GDT_LDT_VCPU_VA_SHIFT    (GDT_LDT_VCPU_SHIFT + PAGE_SHIFT)
-#define GDT_LDT_MBYTES           PERDOMAIN_SLOT_MBYTES
-#define MAX_VIRT_CPUS            (GDT_LDT_MBYTES << (20-GDT_LDT_VCPU_VA_SHIFT))
-#define GDT_LDT_VIRT_START       PERDOMAIN_VIRT_SLOT(0)
+#define GDT_LDT_MBYTES           (MAX_VIRT_CPUS >> (20-GDT_LDT_VCPU_VA_SHIFT))
+#define GDT_LDT_VIRT_START       PERDOMAIN_VIRT_START
 #define GDT_LDT_VIRT_END         (GDT_LDT_VIRT_START + (GDT_LDT_MBYTES << 20))
 
 /* The address of a particular VCPU's GDT or LDT. */
@@ -308,22 +303,15 @@ extern unsigned long xen_phys_start;
 #define LDT_VIRT_START(v)    \
     (GDT_VIRT_START(v) + (64*1024))
 
-/* map_domain_page() map cache. The second per-domain-mapping sub-area. */
-#define MAPCACHE_VCPU_ENTRIES    (CONFIG_PAGING_LEVELS * CONFIG_PAGING_LEVELS)
-#define MAPCACHE_ENTRIES         (MAX_VIRT_CPUS * MAPCACHE_VCPU_ENTRIES)
-#define MAPCACHE_VIRT_START      PERDOMAIN_VIRT_SLOT(1)
-#define MAPCACHE_VIRT_END        (MAPCACHE_VIRT_START + \
-                                  MAPCACHE_ENTRIES * PAGE_SIZE)
+#define PDPT_L1_ENTRIES       \
+    ((PERDOMAIN_VIRT_END - PERDOMAIN_VIRT_START) >> PAGE_SHIFT)
+#define PDPT_L2_ENTRIES       \
+    ((PDPT_L1_ENTRIES + (1 << PAGETABLE_ORDER) - 1) >> PAGETABLE_ORDER)
 
-/* Argument translation area. The third per-domain-mapping sub-area. */
-#define ARG_XLAT_VIRT_START      PERDOMAIN_VIRT_SLOT(2)
-/* Allow for at least one guard page (COMPAT_ARG_XLAT_SIZE being 2 pages): */
-#define ARG_XLAT_VA_SHIFT        (2 + PAGE_SHIFT)
-#define ARG_XLAT_START(v)        \
-    (ARG_XLAT_VIRT_START + ((v)->vcpu_id << ARG_XLAT_VA_SHIFT))
-
+#if defined(__x86_64__)
 #define ELFSIZE 64
-
-#define ARCH_CRASH_SAVE_VMCOREINFO
+#else
+#define ELFSIZE 32
+#endif
 
 #endif /* __X86_CONFIG_H__ */

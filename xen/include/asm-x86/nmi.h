@@ -5,25 +5,16 @@
 #include <public/nmi.h>
 
 struct cpu_user_regs;
-
-/* Watchdog boolean from the command line */
-extern bool opt_watchdog;
-
-/* Watchdog force parameter from the command line */
-extern bool watchdog_force;
-
-/* CPU to handle platform NMI */
-extern const unsigned int nmi_cpu;
  
-typedef int nmi_callback_t(const struct cpu_user_regs *regs, int cpu);
+typedef int (*nmi_callback_t)(struct cpu_user_regs *regs, int cpu);
  
 /** 
  * set_nmi_callback
  *
  * Set a handler for an NMI. Only one handler may be
- * set. Return the old nmi callback handler.
+ * set. Return 1 if the NMI was handled.
  */
-nmi_callback_t *set_nmi_callback(nmi_callback_t *callback);
+void set_nmi_callback(nmi_callback_t callback);
  
 /** 
  * unset_nmi_callback
@@ -31,16 +22,5 @@ nmi_callback_t *set_nmi_callback(nmi_callback_t *callback);
  * Remove the handler previously set.
  */
 void unset_nmi_callback(void);
-
-DECLARE_PER_CPU(unsigned int, nmi_count);
-
-/**
- * trigger_nmi_continuation
- *
- * Schedule continuation to be started in interrupt context after NMI handling.
- */
-void trigger_nmi_continuation(void);
-
-/* Check for NMI continuation pending. */
-bool nmi_check_continuation(void);
+ 
 #endif /* ASM_NMI_H */

@@ -5,7 +5,7 @@
  *****************************************************************************/
 
 /*
- * Copyright (C) 2000 - 2007, R. Byron Moore
+ * Copyright (C) 2000 - 2005, R. Byron Moore
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -47,40 +47,46 @@
 #define ACPI_USE_SYSTEM_CLIBRARY
 #define ACPI_USE_DO_WHILE_0
 
-#include <xen/cache.h>
+#if 1 /*def __KERNEL__*/
+
+#include <xen/config.h>
 #include <xen/string.h>
 #include <xen/kernel.h>
 #include <xen/ctype.h>
-#include <xen/spinlock.h>
 #include <asm/system.h>
 #include <asm/atomic.h>
 #include <asm/div64.h>
 #include <asm/acpi.h>
-#include <asm/current.h>
 
-/* Host-dependent types and defines */
+#define strtoul simple_strtoul
 
-#define ACPI_MACHINE_WIDTH          BITS_PER_LONG
-#define acpi_cache_t                        void /*struct kmem_cache*/
-#define acpi_spinlock                   spinlock_t *
-#define ACPI_EXPORT_SYMBOL(symbol)  EXPORT_SYMBOL(symbol);
-#define strtoul                     simple_strtoul
+#define ACPI_MACHINE_WIDTH  BITS_PER_LONG
 
-/* Full namespace pathname length limit - arbitrary */
-#define ACPI_PATHNAME_MAX              256
+#else /* !__KERNEL__ */
+
+#include <stdarg.h>
+#include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <unistd.h>
+
+#if defined(__ia64__) || defined(__x86_64__)
+#define ACPI_MACHINE_WIDTH          64
+#define COMPILER_DEPENDENT_INT64    long
+#define COMPILER_DEPENDENT_UINT64   unsigned long
+#else
+#define ACPI_MACHINE_WIDTH          32
+#define COMPILER_DEPENDENT_INT64    long long
+#define COMPILER_DEPENDENT_UINT64   unsigned long long
+#define ACPI_USE_NATIVE_DIVIDE
+#endif
+
+#define __cdecl
+#define ACPI_FLUSH_CPU_CACHE()
+#endif /* __KERNEL__ */
+
+/* Linux uses GCC */
 
 #include "acgcc.h"
 
-#define acpi_cpu_flags unsigned long
-
-#define acpi_thread_id struct vcpu *
-
-void *acpi_os_alloc_memory(size_t);
-void *acpi_os_zalloc_memory(size_t);
-void acpi_os_free_memory(void *);
-
-#define ACPI_ALLOCATE(a)	acpi_os_alloc_memory(a)
-#define ACPI_ALLOCATE_ZEROED(a)	acpi_os_zalloc_memory(a)
-#define ACPI_FREE(a)		acpi_os_free_memory(a)
-
-#endif				/* __ACLINUX_H__ */
+#endif /* __ACLINUX_H__ */

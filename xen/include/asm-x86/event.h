@@ -9,48 +9,21 @@
 #ifndef __ASM_EVENT_H__
 #define __ASM_EVENT_H__
 
-#include <xen/shared.h>
-
-void vcpu_kick(struct vcpu *v);
-void vcpu_mark_events_pending(struct vcpu *v);
-
-static inline int vcpu_event_delivery_is_enabled(struct vcpu *v)
+static inline void evtchn_notify(struct vcpu *v)
 {
-    return !vcpu_info(v, evtchn_upcall_mask);
+    /*
+     * NB1. 'vcpu_flags' and 'processor' must be checked /after/ update of
+     * pending flag. These values may fluctuate (after all, we hold no
+     * locks) but the key insight is that each change will cause
+     * evtchn_upcall_pending to be polled.
+     * 
+     * NB2. We save VCPUF_running across the unblock to avoid a needless
+     * IPI for domains that we IPI'd to unblock.
+     */
+    int running = test_bit(_VCPUF_running, &v->vcpu_flags);
+    vcpu_unblock(v);
+    if ( running )
+        smp_send_event_check_cpu(v->processor);
 }
-
-int hvm_local_events_need_delivery(struct vcpu *v);
-static always_inline bool local_events_need_delivery(void)
-{
-    struct vcpu *v = current;
-
-    ASSERT(!is_idle_vcpu(v));
-
-    return (is_hvm_vcpu(v) ? hvm_local_events_need_delivery(v) :
-            (vcpu_info(v, evtchn_upcall_pending) &&
-             !vcpu_info(v, evtchn_upcall_mask)));
-}
-
-static inline void local_event_delivery_disable(void)
-{
-    vcpu_info(current, evtchn_upcall_mask) = 1;
-}
-
-static inline void local_event_delivery_enable(void)
-{
-    vcpu_info(current, evtchn_upcall_mask) = 0;
-}
-
-/* No arch specific virq definition now. Default to global. */
-static inline bool arch_virq_is_global(unsigned int virq)
-{
-    return true;
-}
-
-#ifdef CONFIG_PV_SHIM
-# include <asm/pv/shim.h>
-# define arch_evtchn_is_special(chn) \
-             (pv_shim && (chn)->port && (chn)->state == ECS_RESERVED)
-#endif
 
 #endif

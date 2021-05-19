@@ -41,18 +41,41 @@ int strnicmp(const char *s1, const char *s2, size_t len)
 }
 #endif
 
-#ifndef __HAVE_ARCH_STRCASECMP
-int (strcasecmp)(const char *s1, const char *s2)
+#ifndef __HAVE_ARCH_STRCPY
+/**
+ * strcpy - Copy a %NUL terminated string
+ * @dest: Where to copy the string to
+ * @src: Where to copy the string from
+ */
+char * strcpy(char * dest,const char *src)
 {
-    int c1, c2;
+	char *tmp = dest;
 
-    do
-    {
-        c1 = tolower(*s1++);
-        c2 = tolower(*s2++);
-    } while ( c1 == c2 && c1 != 0 );
+	while ((*dest++ = *src++) != '\0')
+		/* nothing */;
+	return tmp;
+}
+#endif
 
-    return c1 - c2;
+#ifndef __HAVE_ARCH_STRNCPY
+/**
+ * strncpy - Copy a length-limited, %NUL-terminated string
+ * @dest: Where to copy the string to
+ * @src: Where to copy the string from
+ * @count: The maximum number of bytes to copy
+ *
+ * Note that unlike userspace strncpy, this does not %NUL-pad the buffer.
+ * However, the result is not %NUL-terminated if the source exceeds
+ * @count bytes.
+ */
+char * strncpy(char * dest,const char *src,size_t count)
+{
+	char *tmp = dest;
+
+	while (count-- && (*dest++ = *src++) != '\0')
+		/* nothing */;
+
+	return tmp;
 }
 #endif
 
@@ -82,33 +105,52 @@ size_t strlcpy(char *dest, const char *src, size_t size)
 EXPORT_SYMBOL(strlcpy);
 #endif
 
-#ifndef __HAVE_ARCH_STRLCAT
+#ifndef __HAVE_ARCH_STRCAT
 /**
- * strlcat - Append a %NUL terminated string into a sized buffer
- * @dest: Where to copy the string to
- * @src: Where to copy the string from
- * @size: size of destination buffer
- *
- * Compatible with *BSD: the result is always a valid
- * NUL-terminated string that fits in the buffer (unless,
- * of course, the buffer size is zero).
+ * strcat - Append one %NUL-terminated string to another
+ * @dest: The string to be appended to
+ * @src: The string to append to it
  */
-size_t strlcat(char *dest, const char *src, size_t size)
+char * strcat(char * dest, const char * src)
 {
-	size_t slen = strlen(src);
-	size_t dlen = strnlen(dest, size);
-	char *p = dest + dlen;
+	char *tmp = dest;
 
-	while ((p - dest) < size)
-		if ((*p++ = *src++) == '\0')
-			break;
+	while (*dest)
+		dest++;
+	while ((*dest++ = *src++) != '\0')
+		;
 
-	if (dlen < size)
-		*(p-1) = '\0';
-
-	return slen + dlen;
+	return tmp;
 }
-EXPORT_SYMBOL(strlcat);
+#endif
+
+#ifndef __HAVE_ARCH_STRNCAT
+/**
+ * strncat - Append a length-limited, %NUL-terminated string to another
+ * @dest: The string to be appended to
+ * @src: The string to append to it
+ * @count: The maximum numbers of bytes to copy
+ *
+ * Note that in contrast to strncpy, strncat ensures the result is
+ * terminated.
+ */
+char * strncat(char *dest, const char *src, size_t count)
+{
+	char *tmp = dest;
+
+	if (count) {
+		while (*dest)
+			dest++;
+		while ((*dest++ = *src++)) {
+			if (--count == 0) {
+				*dest = '\0';
+				break;
+			}
+		}
+	}
+
+	return tmp;
+}
 #endif
 
 #ifndef __HAVE_ARCH_STRCMP
@@ -117,7 +159,7 @@ EXPORT_SYMBOL(strlcat);
  * @cs: One string
  * @ct: Another string
  */
-int (strcmp)(const char *cs, const char *ct)
+int strcmp(const char * cs,const char * ct)
 {
 	register signed char __res;
 
@@ -137,7 +179,7 @@ int (strcmp)(const char *cs, const char *ct)
  * @ct: Another string
  * @count: The maximum number of bytes to compare
  */
-int (strncmp)(const char *cs, const char *ct, size_t count)
+int strncmp(const char * cs,const char * ct,size_t count)
 {
 	register signed char __res = 0;
 
@@ -157,7 +199,7 @@ int (strncmp)(const char *cs, const char *ct, size_t count)
  * @s: The string to be searched
  * @c: The character to search for
  */
-char *(strchr)(const char *s, int c)
+char * strchr(const char * s, int c)
 {
 	for(; *s != (char) c; ++s)
 		if (*s == '\0')
@@ -172,15 +214,14 @@ char *(strchr)(const char *s, int c)
  * @s: The string to be searched
  * @c: The character to search for
  */
-char *(strrchr)(const char *s, int c)
+char * strrchr(const char * s, int c)
 {
-	const char *p = s + strlen(s);
-
-	for (; *p != (char)c; --p)
-		if (p == s)
-			return NULL;
-
-	return (char *)p;
+       const char *p = s + strlen(s);
+       do {
+           if (*p == (char)c)
+               return (char *)p;
+       } while (--p >= s);
+       return NULL;
 }
 #endif
 
@@ -189,7 +230,7 @@ char *(strrchr)(const char *s, int c)
  * strlen - Find the length of a string
  * @s: The string to be sized
  */
-size_t (strlen)(const char * s)
+size_t strlen(const char * s)
 {
 	const char *sc;
 
@@ -290,27 +331,6 @@ char * strsep(char **s, const char *ct)
 }
 #endif
 
-#ifndef __HAVE_ARCH_STRSTR
-/**
- * strstr - Find the first substring in a %NUL terminated string
- * @s1: The string to be searched
- * @s2: The string to search for
- */
-char *(strstr)(const char *s1, const char *s2)
-{
-	size_t l1, l2 = strlen(s2);
-
-	if (!l2)
-		return (char *)s1;
-
-	for (l1 = strlen(s1); l1 >= l2; --l1, ++s1)
-		if (!memcmp(s1, s2, l2))
-			return (char *)s1;
-
-	return NULL;
-}
-#endif
-
 #ifndef __HAVE_ARCH_MEMSET
 /**
  * memset - Fill a region of memory with the given value
@@ -320,7 +340,7 @@ char *(strstr)(const char *s1, const char *s2)
  *
  * Do not use memset() to access IO space, use memset_io() instead.
  */
-void *(memset)(void *s, int c, size_t count)
+void * memset(void * s,int c,size_t count)
 {
 	char *xs = (char *) s;
 
@@ -328,6 +348,30 @@ void *(memset)(void *s, int c, size_t count)
 		*xs++ = c;
 
 	return s;
+}
+#endif
+
+#ifndef __HAVE_ARCH_BCOPY
+/**
+ * bcopy - Copy one area of memory to another
+ * @src: Where to copy from
+ * @dest: Where to copy to
+ * @count: The size of the area.
+ *
+ * Note that this is the same as memcpy(), with the arguments reversed.
+ * memcpy() is the standard, bcopy() is a legacy BSD function.
+ *
+ * You should not use this function to access IO space, use memcpy_toio()
+ * or memcpy_fromio() instead.
+ */
+char * bcopy(const char * src, char * dest, int count)
+{
+	char *tmp = dest;
+
+	while (count--)
+		*tmp++ = *src++;
+
+	return dest;
 }
 #endif
 
@@ -341,7 +385,7 @@ void *(memset)(void *s, int c, size_t count)
  * You should not use this function to access IO space, use memcpy_toio()
  * or memcpy_fromio() instead.
  */
-void *(memcpy)(void *dest, const void *src, size_t count)
+void * memcpy(void * dest,const void *src,size_t count)
 {
 	char *tmp = (char *) dest, *s = (char *) src;
 
@@ -361,7 +405,7 @@ void *(memcpy)(void *dest, const void *src, size_t count)
  *
  * Unlike memcpy(), memmove() copes with overlapping areas.
  */
-void *(memmove)(void *dest, const void *src, size_t count)
+void * memmove(void * dest,const void *src,size_t count)
 {
 	char *tmp, *s;
 
@@ -389,7 +433,7 @@ void *(memmove)(void *dest, const void *src, size_t count)
  * @ct: Another area of memory
  * @count: The size of the area.
  */
-int (memcmp)(const void *cs, const void *ct, size_t count)
+int memcmp(const void * cs,const void * ct,size_t count)
 {
 	const unsigned char *su1, *su2;
 	int res = 0;
@@ -398,6 +442,54 @@ int (memcmp)(const void *cs, const void *ct, size_t count)
 		if ((res = *su1 - *su2) != 0)
 			break;
 	return res;
+}
+#endif
+
+#ifndef __HAVE_ARCH_MEMSCAN
+/**
+ * memscan - Find a character in an area of memory.
+ * @addr: The memory area
+ * @c: The byte to search for
+ * @size: The size of the area.
+ *
+ * returns the address of the first occurrence of @c, or 1 byte past
+ * the area if @c is not found
+ */
+void * memscan(void * addr, int c, size_t size)
+{
+	unsigned char * p = (unsigned char *) addr;
+
+	while (size) {
+		if (*p == c)
+			return (void *) p;
+		p++;
+		size--;
+	}
+  	return (void *) p;
+}
+#endif
+
+#ifndef __HAVE_ARCH_STRSTR
+/**
+ * strstr - Find the first substring in a %NUL terminated string
+ * @s1: The string to be searched
+ * @s2: The string to search for
+ */
+char * strstr(const char * s1,const char * s2)
+{
+	int l1, l2;
+
+	l2 = strlen(s2);
+	if (!l2)
+		return (char *) s1;
+	l1 = strlen(s1);
+	while (l1 >= l2) {
+		l1--;
+		if (!memcmp(s1,s2,l2))
+			return (char *) s1;
+		s1++;
+	}
+	return NULL;
 }
 #endif
 
@@ -411,42 +503,23 @@ int (memcmp)(const void *cs, const void *ct, size_t count)
  * returns the address of the first occurrence of @c, or %NULL
  * if @c is not found
  */
-void *(memchr)(const void *s, int c, size_t n)
+void *memchr(const void *s, int c, size_t n)
 {
 	const unsigned char *p = s;
-
-	while (n--)
-		if ((unsigned char)c == *p++)
-			return (void *)(p - 1);
-
+	while (n-- != 0) {
+        	if ((unsigned char)c == *p++) {
+			return (void *)(p-1);
+		}
+	}
 	return NULL;
 }
+
 #endif
-
-/**
- * memchr_inv - Find an unmatching character in an area of memory.
- * @s: The memory area
- * @c: The byte that is expected
- * @n: The size of the area.
- *
- * returns the address of the first occurrence of a character other than @c,
- * or %NULL if the whole buffer contains just @c.
- */
-void *memchr_inv(const void *s, int c, size_t n)
-{
-	const unsigned char *p = s;
-
-	while (n--)
-		if ((unsigned char)c != *p++)
-			return (void *)(p - 1);
-
-	return NULL;
-}
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 8
  * tab-width: 8
  * indent-tabs-mode: t

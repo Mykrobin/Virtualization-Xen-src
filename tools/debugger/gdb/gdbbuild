@@ -1,0 +1,24 @@
+#!/bin/sh
+
+[ "$GDB_MIRROR" ] || GDB_MIRROR="ftp://ftp.gnu.org/gnu/gdb/"
+
+rm -rf gdb-6.2.1 gdb-6.2.1-linux-i386-xen
+[ -a gdb-6.2.1.tar.bz2 ] || wget -c "$GDB_MIRROR/gdb-6.2.1.tar.bz2"
+tar xjf gdb-6.2.1.tar.bz2
+
+cd gdb-6.2.1-xen-sparse
+./mkbuildtree ../gdb-6.2.1
+
+cd ..
+mkdir gdb-6.2.1-linux-i386-xen
+cd gdb-6.2.1-linux-i386-xen
+../gdb-6.2.1/configure
+
+# Use $MAKE if set, else use gmake if present, otherwise use make
+if [ "$MAKE" ]; then
+    $MAKE
+elif which gmake ; then
+    gmake -j4
+else
+    make -j4
+fi

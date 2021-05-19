@@ -1,0 +1,11 @@
+# Xen/ia64 heavily leverages/reuses many files from Linux/ia64
+# however as of August 2005, all of these files are checked
+# into the Xen tree so (if you remember doing so in the past)
+# there is no need to fetch a copy of linux-2.6.x.tar.gz
+
+# build xen/ia64
+# if native
+make
+
+# or if using cross-compiler
+make XEN_TARGET_ARCH=ia64

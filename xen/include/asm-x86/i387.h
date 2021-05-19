@@ -11,30 +11,35 @@
 #ifndef __ASM_I386_I387_H
 #define __ASM_I386_I387_H
 
-#include <xen/types.h>
+#include <xen/sched.h>
+#include <asm/processor.h>
 
-/* Byte offset of the stored word size within the FXSAVE area/portion. */
-#define FPU_WORD_SIZE_OFFSET 511
+extern void init_fpu(void);
+extern void save_init_fpu(struct vcpu *v);
+extern void restore_fpu(struct vcpu *v);
 
-struct ix87_env {
-    uint16_t fcw, _res0;
-    uint16_t fsw, _res1;
-    uint16_t ftw, _res2;
-    uint32_t fip;
-    uint16_t fcs;
-    uint16_t fop;
-    uint32_t fdp;
-    uint16_t fds, _res6;
-};
+#define unlazy_fpu(v) do {                                      \
+    if ( test_bit(_VCPUF_fpu_dirtied, &(v)->vcpu_flags) )       \
+        save_init_fpu(v);                                       \
+} while ( 0 )
 
-void vcpu_restore_fpu_nonlazy(struct vcpu *v, bool need_stts);
-void vcpu_restore_fpu_lazy(struct vcpu *v);
-void vcpu_save_fpu(struct vcpu *v);
-void save_fpu_enable(void);
+#define load_mxcsr(val) do {                                    \
+    unsigned long __mxcsr = ((unsigned long)(val) & 0xffbf);    \
+    __asm__ __volatile__ ( "ldmxcsr %0" : : "m" (__mxcsr) );    \
+} while ( 0 )
 
-int vcpu_init_fpu(struct vcpu *v);
-struct xsave_struct;
-void vcpu_setup_fpu(struct vcpu *v, struct xsave_struct *xsave_area,
-                    const void *data, unsigned int fcw_default);
-void vcpu_destroy_fpu(struct vcpu *v);
+static inline void setup_fpu(struct vcpu *v)
+{
+    /* Avoid recursion. */
+    clts();
+
+    if ( !test_and_set_bit(_VCPUF_fpu_dirtied, &v->vcpu_flags) )
+    {
+        if ( test_bit(_VCPUF_fpu_initialised, &v->vcpu_flags) )
+            restore_fpu(v);
+        else
+            init_fpu();
+    }
+}
+
 #endif /* __ASM_I386_I387_H */

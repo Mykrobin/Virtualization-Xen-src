@@ -1,22 +1,8 @@
 #ifndef _LINUX_INIT_H
 #define _LINUX_INIT_H
 
+#include <xen/config.h>
 #include <asm/init.h>
-
-/*
- * Mark functions and data as being only used at initialization
- * or exit time.
- */
-#define __init            __text_section(".init.text")
-#define __exit            __text_section(".exit.text")
-#define __cold            __text_section(".text.cold")
-#define __initdata        __section(".init.data")
-#define __initconst       __section(".init.rodata")
-#define __initconstrel    __section(".init.rodata.rel")
-#define __exitdata        __used_section(".exit.data")
-#define __initsetup       __used_section(".init.setup")
-#define __init_call(lvl)  __used_section(".initcall" lvl ".init")
-#define __exit_call       __used_section(".exitcall.exit")
 
 /* These macros are used to mark some functions or 
  * initialized data (doesn't apply to uninitialized data)
@@ -61,24 +47,57 @@
 typedef int (*initcall_t)(void);
 typedef void (*exitcall_t)(void);
 
-#define presmp_initcall(fn) \
-    const static initcall_t __initcall_##fn __init_call("presmp") = fn
+extern initcall_t __initcall_start, __initcall_end;
+
 #define __initcall(fn) \
-    const static initcall_t __initcall_##fn __init_call("1") = fn
+    static initcall_t __initcall_##fn __init_call = fn
 #define __exitcall(fn) \
     static exitcall_t __exitcall_##fn __exit_call = fn
 
-void do_presmp_initcalls(void);
-void do_initcalls(void);
+/*
+ * Used for kernel command line parameter setup
+ */
+struct kernel_param {
+    const char *name;
+    enum { OPT_STR, OPT_UINT, OPT_BOOL, OPT_CUSTOM } type;
+    void *var;
+    unsigned int len;
+};
 
+extern struct kernel_param __setup_start, __setup_end;
+
+#define custom_param(_name, _var) \
+    static char __setup_str_##_var[] __initdata = _name; \
+    static struct kernel_param __setup_##_var __attribute_used__ \
+        __initsetup = { __setup_str_##_var, OPT_CUSTOM, &_var, 0 }
+#define boolean_param(_name, _var) \
+    static char __setup_str_##_var[] __initdata = _name; \
+    static struct kernel_param __setup_##_var __attribute_used__ \
+        __initsetup = { __setup_str_##_var, OPT_BOOL, &_var, sizeof(_var) }
+#define integer_param(_name, _var) \
+    static char __setup_str_##_var[] __initdata = _name; \
+    static struct kernel_param __setup_##_var __attribute_used__ \
+        __initsetup = { __setup_str_##_var, OPT_UINT, &_var, sizeof(_var) }
+#define string_param(_name, _var) \
+    static char __setup_str_##_var[] __initdata = _name; \
+    static struct kernel_param __setup_##_var __attribute_used__ \
+        __initsetup = { __setup_str_##_var, OPT_STR, &_var, sizeof(_var) }
+
+/* Make sure obsolete cmdline params don't break the build. */
+#define __setup(_name, _fn) static void * __attribute_used__ _dummy_##_fn = _fn
+    
 #endif /* __ASSEMBLY__ */
 
-#ifdef CONFIG_LATE_HWDOM
-#define __hwdom_init
-#define __hwdom_initdata  __read_mostly
+#ifdef CONFIG_HOTPLUG
+#define __devinit
+#define __devinitdata
+#define __devexit
+#define __devexitdata
 #else
-#define __hwdom_init      __init
-#define __hwdom_initdata  __initdata
+#define __devinit __init
+#define __devinitdata __initdata
+#define __devexit __exit
+#define __devexitdata __exitdata
 #endif
 
 #endif /* _LINUX_INIT_H */

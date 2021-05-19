@@ -1,112 +1,98 @@
 /******************************************************************************
  * include/xen/grant_table.h
- *
+ * 
  * Mechanism for granting foreign access to page frames, and receiving
  * page-ownership transfers.
- *
+ * 
  * Copyright (c) 2004-2005 K A Fraser
- *
+ * 
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- *
+ * 
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- *
+ * 
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #ifndef __XEN_GRANT_TABLE_H__
 #define __XEN_GRANT_TABLE_H__
 
-#include <xen/mm-frame.h>
-#include <xen/rwlock.h>
+#include <xen/config.h>
 #include <public/grant_table.h>
 #include <asm/grant_table.h>
 
-#ifdef CONFIG_GRANT_TABLE
-struct grant_table;
+/* Active grant entry - used for shadowing GTF_permit_access grants. */
+typedef struct {
+    u32           pin;    /* Reference count information.  */
+    domid_t       domid;  /* Domain being granted access.  */
+    unsigned long frame;  /* Frame being granted.          */
+} active_grant_entry_t;
 
-extern unsigned int opt_max_grant_frames;
+ /* Count of writable host-CPU mappings. */
+#define GNTPIN_hstw_shift    (0)
+#define GNTPIN_hstw_inc      (1 << GNTPIN_hstw_shift)
+#define GNTPIN_hstw_mask     (0xFFU << GNTPIN_hstw_shift)
+ /* Count of read-only host-CPU mappings. */
+#define GNTPIN_hstr_shift    (8)
+#define GNTPIN_hstr_inc      (1 << GNTPIN_hstr_shift)
+#define GNTPIN_hstr_mask     (0xFFU << GNTPIN_hstr_shift)
+ /* Count of writable device-bus mappings. */
+#define GNTPIN_devw_shift    (16)
+#define GNTPIN_devw_inc      (1 << GNTPIN_devw_shift)
+#define GNTPIN_devw_mask     (0xFFU << GNTPIN_devw_shift)
+ /* Count of read-only device-bus mappings. */
+#define GNTPIN_devr_shift    (24)
+#define GNTPIN_devr_inc      (1 << GNTPIN_devr_shift)
+#define GNTPIN_devr_mask     (0xFFU << GNTPIN_devr_shift)
 
-/* Create/destroy per-domain grant table context. */
-int grant_table_init(struct domain *d, int max_grant_frames,
-                     int max_maptrack_frames);
-void grant_table_destroy(
-    struct domain *d);
-void grant_table_init_vcpu(struct vcpu *v);
+#define NR_GRANT_FRAMES      (1U << ORDER_GRANT_FRAMES)
+#define NR_GRANT_ENTRIES     \
+    ((NR_GRANT_FRAMES << PAGE_SHIFT) / sizeof(grant_entry_t))
 
 /*
- * Check if domain has active grants and log first 10 of them.
+ * Tracks a mapping of another domain's grant reference. Each domain has a
+ * table of these, indexes into which are returned as a 'mapping handle'.
  */
-void grant_table_warn_active_grants(struct domain *d);
+typedef struct {
+    u16      ref_and_flags; /* 0-4: GNTMAP_* ; 5-15: grant ref */
+    domid_t  domid;         /* granting domain */
+} grant_mapping_t;
+#define MAPTRACK_GNTMAP_MASK  0x1f
+#define MAPTRACK_REF_SHIFT    5
+#define MAPTRACK_MAX_ENTRIES  (1 << (16 - MAPTRACK_REF_SHIFT))
+
+/* Per-domain grant information. */
+typedef struct {
+    /* Shared grant table (see include/public/grant_table.h). */
+    grant_entry_t        *shared;
+    /* Active grant table. */
+    active_grant_entry_t *active;
+    /* Mapping tracking table. */
+    grant_mapping_t      *maptrack;
+    unsigned int          maptrack_head;
+    unsigned int          maptrack_order;
+    unsigned int          maptrack_limit;
+    unsigned int          map_count;
+    /* Lock protecting updates to active and shared grant tables. */
+    spinlock_t            lock;
+} grant_table_t;
+
+/* Create/destroy per-domain grant table context. */
+int grant_table_create(
+    struct domain *d);
+void grant_table_destroy(
+    struct domain *d);
 
 /* Domain death release of granted mappings of other domains' memory. */
 void
 gnttab_release_mappings(
     struct domain *d);
-
-int mem_sharing_gref_to_gfn(struct grant_table *gt, grant_ref_t ref,
-                            gfn_t *gfn, uint16_t *status);
-
-int gnttab_map_frame(struct domain *d, unsigned long idx, gfn_t gfn,
-                     mfn_t *mfn);
-
-unsigned int gnttab_resource_max_frames(const struct domain *d, unsigned int id);
-
-int gnttab_acquire_resource(
-    struct domain *d, unsigned int id, unsigned int frame,
-    unsigned int nr_frames, xen_pfn_t mfn_list[]);
-
-#else
-
-#define opt_max_grant_frames 0
-
-static inline int grant_table_init(struct domain *d,
-                                   int max_grant_frames,
-                                   int max_maptrack_frames)
-{
-    return 0;
-}
-
-static inline void grant_table_destroy(struct domain *d) {}
-
-static inline void grant_table_init_vcpu(struct vcpu *v) {}
-
-static inline void grant_table_warn_active_grants(struct domain *d) {}
-
-static inline void gnttab_release_mappings(struct domain *d) {}
-
-static inline int mem_sharing_gref_to_gfn(struct grant_table *gt,
-                                          grant_ref_t ref,
-                                          gfn_t *gfn, uint16_t *status)
-{
-    return -EINVAL;
-}
-
-static inline int gnttab_map_frame(struct domain *d, unsigned long idx,
-                                   gfn_t gfn, mfn_t *mfn)
-{
-    return -EINVAL;
-}
-
-static inline unsigned int gnttab_resource_max_frames(
-    const struct domain *d, unsigned int id)
-{
-    return 0;
-}
-
-static inline int gnttab_acquire_resource(
-    struct domain *d, unsigned int id, unsigned int frame,
-    unsigned int nr_frames, xen_pfn_t mfn_list[])
-{
-    return -EINVAL;
-}
-
-#endif /* CONFIG_GRANT_TABLE */
 
 #endif /* __XEN_GRANT_TABLE_H__ */

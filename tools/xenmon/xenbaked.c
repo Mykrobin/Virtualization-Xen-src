@@ -7,13 +7,11 @@
  *
  * Copyright (C) 2004 by Intel Research Cambridge
  * Copyright (C) 2005 by Hewlett Packard, Palo Alto and Fort Collins
- * Copyright (C) 2006 by Hewlett Packard Fort Collins
  *
  * Authors: Diwaker Gupta, diwaker.gupta@hp.com
  *          Rob Gardner, rob.gardner@hp.com
  *          Lucy Cherkasova, lucy.cherkasova.hp.com
- * Much code based on xentrace, authored by Mark Williamson, 
- * mark.a.williamson@intel.com
+ * Much code based on xentrace, authored by Mark Williamson, mark.a.williamson@intel.com
  * Date:   November, 2005
  * 
  *  This program is free software; you can redistribute it and/or modify
@@ -26,39 +24,33 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <time.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <argp.h>
 #include <signal.h>
-#include <xenevtchn.h>
-#define XC_WANT_COMPAT_MAP_FOREIGN_API
 #include <xenctrl.h>
 #include <xen/xen.h>
 #include <string.h>
-#include <sys/select.h>
-#include <getopt.h>
 
-#define PERROR(_m, _a...)                                       \
-do {                                                            \
-    int __saved_errno = errno;                                  \
-    fprintf(stderr, "ERROR: " _m " (%d = %s)\n" , ## _a ,       \
-            __saved_errno, strerror(__saved_errno));            \
-    errno = __saved_errno;                                      \
-} while (0)
-
+#include "xc_private.h"
 typedef struct { int counter; } atomic_t;
 #define _atomic_read(v)		((v).counter)
 
 #include <xen/trace.h>
 #include "xenbaked.h"
 
+extern FILE *stderr;
 
 /***** Compile time configuration of defaults ********************************/
 
@@ -78,31 +70,25 @@ typedef struct { int counter; } atomic_t;
 /***** The code **************************************************************/
 
 typedef struct settings_st {
+    char *outfile;
     struct timespec poll_sleep;
     unsigned long new_data_thresh;
     unsigned long ms_per_sample;
     double cpu_freq;
 } settings_t;
 
-struct t_struct {
-    const struct t_info *t_info; /* Structure with information about individual buffers */
-    struct t_buf **meta;    /* Pointers to trace buffer metadata */
-    unsigned char **data;   /* Pointers to trace buffer data areas */
-};
-
 settings_t opts;
 
 int interrupted = 0; /* gets set if we get a SIGHUP */
 int rec_count = 0;
-int wakeups = 0;
 time_t start_time;
 int dom0_flips = 0;
 
 _new_qos_data *new_qos;
 _new_qos_data **cpu_qos_data;
 
-int global_cpu;
-uint64_t global_now;
+
+#define ID(X) ((X>NDOMAINS-1)?(NDOMAINS-1):X)
 
 // array of currently running domains, indexed by cpu
 int *running = NULL;
@@ -111,46 +97,38 @@ int *running = NULL;
 int NCPU = 0;
 
 
-static void advance_next_datapoint(uint64_t);
-static void alloc_qos_data(int ncpu);
-static int process_record(int, struct t_rec *);
-static void qos_kill_thread(int domid);
-
-
-static void init_current(int ncpu)
+void init_current(int ncpu)
 {
-    running = calloc(ncpu, sizeof(int));
-    NCPU = ncpu;
-    printf("Initialized with %d %s\n", ncpu, (ncpu == 1) ? "cpu" : "cpu's");
+  running = calloc(ncpu, sizeof(int));
+  NCPU = ncpu;
+  printf("Initialized with %d %s\n", ncpu, (ncpu == 1) ? "cpu" : "cpu's");
 }
 
-static int is_current(int domain, int cpu)
+int is_current(int domain, int cpu)
 {
-    //  int i;
+  //  int i;
   
-    //  for (i=0; i<NCPU; i++)
+  //  for (i=0; i<NCPU; i++)
     if (running[cpu] == domain)
-        return 1;
-    return 0;
+      return 1;
+  return 0;
 }
 
 
-#if 0 /* unused */
 // return the domain that's currently running on the given cpu
-static int current(int cpu)
+int current(int cpu)
 {
-    return running[cpu];
-}
-#endif
-
-static void set_current(int cpu, int domain)
-{
-    running[cpu] = domain;
+  return running[cpu];
 }
 
+void set_current(int cpu, int domain)
+{
+  running[cpu] = domain;
+}
 
 
-static void close_handler(int signal)
+
+void close_handler(int signal)
 {
     interrupted = 1;
 }
@@ -159,7 +137,7 @@ static void close_handler(int signal)
 void dump_record(int cpu, struct t_rec *x)
 {
     printf("record: cpu=%x, tsc=%lx, event=%x, d1=%lx\n", 
-           cpu, x->cycles, x->event, x->data[0]);
+            cpu, x->cycles, x->event, x->data[0]);
 }
 #endif
 
@@ -167,7 +145,7 @@ void dump_record(int cpu, struct t_rec *x)
  * millis_to_timespec - convert a time in milliseconds to a struct timespec
  * @millis:             time interval in milliseconds
  */
-static struct timespec millis_to_timespec(unsigned long millis)
+struct timespec millis_to_timespec(unsigned long millis)
 {
     struct timespec spec;
 
@@ -203,7 +181,7 @@ stat_map_t stat_map[] = {
 };
 
 
-static void check_gotten_sum(void)
+void check_gotten_sum(void)
 {
 #if 0
     uint64_t sum, ns;
@@ -212,22 +190,22 @@ static void check_gotten_sum(void)
     int i;
 
     for (i=0; i<NCPU; i++) {
-        new_qos = cpu_qos_data[i];
-        ns = billion;
-        sum = total_ns_gotten(&ns);
+      new_qos = cpu_qos_data[i];
+      ns = billion;
+      sum = total_ns_gotten(&ns);
 
-        printf("[cpu%d] ns_gotten over all domains = %lldns, over %lldns\n",
-               i, sum, ns);
-        percent = (double) sum;
-        percent = (100.0*percent) / (double)ns;
-        printf(" ==> ns_gotten = %7.3f%%\n", percent);
+      printf("[cpu%d] ns_gotten over all domains = %lldns, over %lldns\n",
+	      i, sum, ns);
+      percent = (double) sum;
+      percent = (100.0*percent) / (double)ns;
+      printf(" ==> ns_gotten = %7.3f%%\n", percent);
     }
 #endif
 }
 
 
 
-static void dump_stats(void) 
+void dump_stats(void) 
 {
     stat_map_t *smt = stat_map;
     time_t end_time, run_time;
@@ -243,17 +221,12 @@ static void dump_stats(void)
     }
 
     printf("processed %d total records in %d seconds (%ld per second)\n",
-           rec_count, (int)run_time,
-           run_time ? (long)(rec_count/run_time) : 0L);
-
-    printf("woke up %d times in %d seconds (%ld per second)\n",
-           wakeups, (int) run_time,
-           run_time ? (long)(wakeups/run_time) : 0L);
+            rec_count, (int)run_time, rec_count/run_time);
 
     check_gotten_sum();
 }
 
-static void log_event(int event_id) 
+void log_event(int event_id) 
 {
     stat_map_t *smt = stat_map;
 
@@ -270,91 +243,38 @@ static void log_event(int event_id)
         stat_map[0].event_count++;	// other
 }
 
-int virq_port;
-xenevtchn_handle *xce_handle = NULL;
 
-/* Returns the event channel handle. */
-/* Stolen from xenstore code */
-static int eventchn_init(void)
-{
-    int rc;
-  
-    // to revert to old way:
-    if (0)
-        return -1;
-  
-    xce_handle = xenevtchn_open(NULL, 0);
 
-    if (xce_handle == NULL)
-        perror("Failed to open evtchn device");
-  
-    if ((rc = xenevtchn_bind_virq(xce_handle, VIRQ_TBUF)) == -1)
-        perror("Failed to bind to domain exception virq port");
-    virq_port = rc;
-  
-    return xce_handle == NULL ? -1 : 0;
-}
-
-static void wait_for_event(void)
+/**
+ * get_tbufs - get pointer to and size of the trace buffers
+ * @mfn:  location to store mfn of the trace buffers to
+ * @size: location to store the size of a trace buffer to
+ *
+ * Gets the machine address of the trace pointer area and the size of the
+ * per CPU buffers.
+ */
+void get_tbufs(unsigned long *mfn, unsigned long *size)
 {
     int ret;
-    fd_set inset;
-    evtchn_port_t port;
-    struct timeval tv;
-    int evtchn_fd;
-  
-    if (xce_handle == NULL) {
-        nanosleep(&opts.poll_sleep, NULL);
-        return;
-    }
+    dom0_op_t op;                        /* dom0 op we'll build             */
+    int xc_handle = xc_interface_open(); /* for accessing control interface */
 
-    evtchn_fd = xenevtchn_fd(xce_handle);
+    op.cmd = DOM0_TBUFCONTROL;
+    op.interface_version = DOM0_INTERFACE_VERSION;
+    op.u.tbufcontrol.op  = DOM0_TBUF_GET_INFO;
 
-    FD_ZERO(&inset);
-    FD_SET(evtchn_fd, &inset);
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    // tv = millis_to_timespec(&opts.poll_sleep);
-    ret = select(evtchn_fd+1, &inset, NULL, NULL, &tv);
-  
-    if ( (ret == 1) && FD_ISSET(evtchn_fd, &inset)) {
-        if ((port = xenevtchn_pending(xce_handle)) == -1)
-            perror("Failed to read from event fd");
-    
-        //    if (port == virq_port)
-        //      printf("got the event I was looking for\r\n");
+    ret = do_dom0_op(xc_handle, &op);
 
-        if (xenevtchn_unmask(xce_handle, port) == -1)
-            perror("Failed to write to event fd");
-    }
-}
-
-static void get_tbufs(unsigned long *mfn, unsigned long *size)
-{
-    xc_interface *xc_handle = xc_interface_open(0,0,0);
-    int ret;
-
-    if ( !xc_handle ) 
-    {
-        exit(EXIT_FAILURE);
-    }
-
-    ret = xc_tbuf_enable(xc_handle, DEFAULT_TBUF_SIZE, mfn, size);
+    xc_interface_close(xc_handle);
 
     if ( ret != 0 )
     {
-        perror("Couldn't enable trace buffers");
-        exit(1);
+        PERROR("Failure to get trace buffer pointer from Xen");
+        exit(EXIT_FAILURE);
     }
 
-    xc_interface_close(xc_handle);
-}
-
-static void disable_tracing(void)
-{
-    xc_interface *xc_handle = xc_interface_open(0,0,0);
-    xc_tbuf_disable(xc_handle);  
-    xc_interface_close(xc_handle);
+    *mfn  = op.u.tbufcontrol.buffer_mfn;
+    *size = op.u.tbufcontrol.size;
 }
 
 /**
@@ -365,82 +285,110 @@ static void disable_tracing(void)
  *
  * Maps the Xen trace buffers them into process address space.
  */
-static struct t_struct *map_tbufs(unsigned long tbufs_mfn, unsigned int num,
-                                  unsigned long tinfo_size)
+struct t_buf *map_tbufs(unsigned long tbufs_mfn, unsigned int num,
+                        unsigned long size)
 {
-    xc_interface *xc_handle;
-    static struct t_struct tbufs = { 0 };
-    int i;
+    int xc_handle;                  /* file descriptor for /proc/xen/privcmd */
+    struct t_buf *tbufs_mapped;
 
-    xc_handle = xc_interface_open(0,0,0);
-    if ( !xc_handle ) 
+    xc_handle = xc_interface_open();
+
+    if ( xc_handle < 0 ) 
     {
+        PERROR("Open /proc/xen/privcmd when mapping trace buffers\n");
         exit(EXIT_FAILURE);
     }
 
-    /* Map t_info metadata structure */
-    tbufs.t_info = xc_map_foreign_range(xc_handle, DOMID_XEN, tinfo_size,
-                                        PROT_READ, tbufs_mfn);
+    tbufs_mapped = xc_map_foreign_range(xc_handle, DOMID_XEN,
+                                        size * num, PROT_READ | PROT_WRITE,
+                                        tbufs_mfn);
 
-    if ( tbufs.t_info == 0 ) 
+    xc_interface_close(xc_handle);
+
+    if ( tbufs_mapped == 0 ) 
     {
         PERROR("Failed to mmap trace buffers");
         exit(EXIT_FAILURE);
     }
 
-    if ( tbufs.t_info->tbuf_size == 0 )
-    {
-        fprintf(stderr, "%s: tbuf_size 0!\n", __func__);
-        exit(EXIT_FAILURE);
-    }
+    return tbufs_mapped;
+}
 
-    /* Map per-cpu buffers */
-    tbufs.meta = (struct t_buf **)calloc(num, sizeof(struct t_buf *));
-    tbufs.data = (unsigned char **)calloc(num, sizeof(unsigned char *));
-    if ( tbufs.meta == NULL || tbufs.data == NULL )
+/**
+ * init_bufs_ptrs - initialises an array of pointers to the trace buffers
+ * @bufs_mapped:    the userspace address where the trace buffers are mapped
+ * @num:            number of trace buffers
+ * @size:           trace buffer size
+ *
+ * Initialises an array of pointers to individual trace buffers within the
+ * mapped region containing all trace buffers.
+ */
+struct t_buf **init_bufs_ptrs(void *bufs_mapped, unsigned int num,
+        unsigned long size)
+{
+    int i;
+    struct t_buf **user_ptrs;
+
+    user_ptrs = (struct t_buf **)calloc(num, sizeof(struct t_buf *));
+    if ( user_ptrs == NULL )
     {
         PERROR( "Failed to allocate memory for buffer pointers\n");
         exit(EXIT_FAILURE);
     }
 
-    for(i=0; i<num; i++)
+    /* initialise pointers to the trace buffers - given the size of a trace
+     * buffer and the value of bufs_maped, we can easily calculate these */
+    for ( i = 0; i<num; i++ )
+        user_ptrs[i] = (struct t_buf *)((unsigned long)bufs_mapped + size * i);
+
+    return user_ptrs;
+}
+
+
+/**
+ * init_rec_ptrs - initialises data area pointers to locations in user space
+ * @tbufs_mfn:     base mfn of the trace buffer area
+ * @tbufs_mapped:  user virtual address of base of trace buffer area
+ * @meta:          array of user-space pointers to struct t_buf's of metadata
+ * @num:           number of trace buffers
+ *
+ * Initialises data area pointers to the locations that data areas have been
+ * mapped in user space.  Note that the trace buffer metadata contains machine
+ * pointers - the array returned allows more convenient access to them.
+ */
+struct t_rec **init_rec_ptrs(struct t_buf **meta, unsigned int num)
+{
+    int i;
+    struct t_rec **data;
+    
+    data = calloc(num, sizeof(struct t_rec *));
+    if ( data == NULL )
     {
-        
-        const uint32_t *mfn_list = (const uint32_t *)tbufs.t_info
-                                   + tbufs.t_info->mfn_offset[i];
-        int j;
-        xen_pfn_t pfn_list[tbufs.t_info->tbuf_size];
-
-        for ( j=0; j<tbufs.t_info->tbuf_size; j++)
-            pfn_list[j] = (xen_pfn_t)mfn_list[j];
-
-        tbufs.meta[i] = xc_map_foreign_pages(xc_handle, DOMID_XEN,
-                                             PROT_READ | PROT_WRITE,
-                                             pfn_list,
-                                             tbufs.t_info->tbuf_size);
-        if ( tbufs.meta[i] == NULL )
-        {
-            PERROR("Failed to map cpu buffer!");
-            exit(EXIT_FAILURE);
-        }
-        tbufs.data[i] = (unsigned char *)(tbufs.meta[i]+1);
+        PERROR("Failed to allocate memory for data pointers\n");
+        exit(EXIT_FAILURE);
     }
 
-    xc_interface_close(xc_handle);
+    for ( i = 0; i < num; i++ )
+        data[i] = (struct t_rec *)(meta[i] + 1);
 
-    return &tbufs;
+    return data;
 }
+
+
 
 /**
  * get_num_cpus - get the number of logical CPUs
  */
-static unsigned int get_num_cpus(void)
+unsigned int get_num_cpus(void)
 {
-    xc_physinfo_t physinfo = { 0 };
-    xc_interface *xc_handle = xc_interface_open(0,0,0);
+    dom0_op_t op;
+    int xc_handle = xc_interface_open();
     int ret;
 
-    ret = xc_physinfo(xc_handle, &physinfo);
+    op.cmd = DOM0_PHYSINFO;
+    op.interface_version = DOM0_INTERFACE_VERSION;
+
+    ret = xc_dom0_op(xc_handle, &op);
 
     if ( ret != 0 )
     {
@@ -449,28 +397,33 @@ static unsigned int get_num_cpus(void)
     }
 
     xc_interface_close(xc_handle);
-    opts.cpu_freq = (double)physinfo.cpu_khz/1000.0;
+    opts.cpu_freq = (double)op.u.physinfo.cpu_khz/1000.0;
 
-    return physinfo.nr_cpus;
+    return (op.u.physinfo.threads_per_core *
+            op.u.physinfo.cores_per_socket *
+            op.u.physinfo.sockets_per_node *
+            op.u.physinfo.nr_nodes);
 }
+
 
 /**
  * monitor_tbufs - monitor the contents of tbufs
  */
-static int monitor_tbufs(void)
+int monitor_tbufs(void)
 {
     int i;
+    extern void process_record(int, struct t_rec *);
+    extern void alloc_qos_data(int ncpu);
 
-    struct t_struct *tbufs;      /* Pointer to hypervisor maps */
+    void *tbufs_mapped;          /* pointer to where the tbufs are mapped    */
     struct t_buf **meta;         /* pointers to the trace buffer metadata    */
-    unsigned char **data;        /* pointers to the trace buffer data areas
+    struct t_rec **data;         /* pointers to the trace buffer data areas
                                   * where they are mapped into user space.   */
     unsigned long tbufs_mfn;     /* mfn of the tbufs                         */
     unsigned int  num;           /* number of trace buffers / logical CPUS   */
-    unsigned long tinfo_size;    /* size of t_info metadata map              */
     unsigned long size;          /* size of a single trace buffer            */
 
-    unsigned long data_size, rec_size;
+    int size_in_recs;
 
     /* get number of logical CPUs (and therefore number of trace buffers) */
     num = get_num_cpus();
@@ -481,59 +434,33 @@ static int monitor_tbufs(void)
     printf("CPU Frequency = %7.2f\n", opts.cpu_freq);
     
     /* setup access to trace buffers */
-    get_tbufs(&tbufs_mfn, &tinfo_size);
-    tbufs = map_tbufs(tbufs_mfn, num, tinfo_size);
+    get_tbufs(&tbufs_mfn, &size);
 
-    size = tbufs->t_info->tbuf_size * XC_PAGE_SIZE;
+    //    printf("from dom0op: %ld, t_buf: %d, t_rec: %d\n",
+    //            size, sizeof(struct t_buf), sizeof(struct t_rec));
 
-    data_size = size - sizeof(struct t_buf);
+    tbufs_mapped = map_tbufs(tbufs_mfn, num, size);
 
-    meta = tbufs->meta;
-    data = tbufs->data;
+    size_in_recs = (size - sizeof(struct t_buf)) / sizeof(struct t_rec);
+    //    fprintf(stderr, "size_in_recs = %d\n", size_in_recs);
 
-    if ( eventchn_init() < 0 )
-        fprintf(stderr, "Failed to initialize event channel; "
-                "Using POLL method\r\n");
+    /* build arrays of convenience ptrs */
+    meta  = init_bufs_ptrs (tbufs_mapped, num, size);
+    data  = init_rec_ptrs(meta, num);
 
     /* now, scan buffers for events */
     while ( !interrupted )
     {
-        for ( i = 0; (i < num) && !interrupted; i++ )
-        {
-            unsigned long start_offset, end_offset, cons, prod;
-
-            cons = meta[i]->cons;
-            prod = meta[i]->prod;
-            xen_rmb(); /* read prod, then read item. */
-
-            if ( cons == prod )
-                continue;
-
-            start_offset = cons % data_size;
-            end_offset = prod % data_size;
-
-            if ( start_offset >= end_offset )
+        for ( i = 0; ( i < num ) && !interrupted; i++ )
+            while ( meta[i]->cons != meta[i]->prod )
             {
-                while ( start_offset != data_size )
-                {
-                    rec_size = process_record(
-                        i, (struct t_rec *)(data[i] + start_offset));
-                    start_offset += rec_size;
-                }
-                start_offset = 0;
+                rmb(); /* read prod, then read item. */
+                process_record(i, data[i] + meta[i]->cons % size_in_recs);
+                mb(); /* read item, then update cons. */
+                meta[i]->cons++;
             }
-            while ( start_offset != end_offset )
-            {
-                rec_size = process_record(
-                    i, (struct t_rec *)(data[i] + start_offset));
-                start_offset += rec_size;
-            }
-            xen_mb(); /* read item, then update cons. */
-            meta[i]->cons = prod;
-        }
 
-	wait_for_event();
-	wakeups++;
+        nanosleep(&opts.poll_sleep, NULL);
     }
 
     /* cleanup */
@@ -546,114 +473,67 @@ static int monitor_tbufs(void)
 
 
 /******************************************************************************
- * Command line handling
+ * Various declarations / definitions GNU argp needs to do its work
  *****************************************************************************/
 
-const char *program_version     = "xenbaked v1.4";
-const char *program_bug_address = "<rob.gardner@hp.com>";
 
-#define xstr(x) str(x)
-#define str(x) #x
-
-static void usage(void)
+/* command parser for GNU argp - see GNU docs for more info */
+error_t cmd_parser(int key, char *arg, struct argp_state *state)
 {
-#define USAGE_STR \
-"Usage: xenbaked [OPTION...]\n" \
-"Tool to capture and partially process Xen trace buffer data\n" \
-"\n" \
-"  -m, --ms_per_sample=MS     Specify the number of milliseconds per sample\n" \
-"                             (default " xstr(MS_PER_SAMPLE) ").\n" \
-"  -s, --poll-sleep=p         Set sleep time, p, in milliseconds between\n" \
-"                             polling the trace buffer for new data\n" \
-"                             (default " xstr(POLL_SLEEP_MILLIS) ").\n" \
-"  -t, --log-thresh=l         Set number, l, of new records required to\n" \
-"                             trigger a write to output (default " \
-                              xstr(NEW_DATA_THRESH) ").\n" \
-"  -?, --help                 Show this message\n" \
-" -V, --version              Print program version\n" \
-"\n" \
-"This tool is used to capture trace buffer data from Xen.  The data is\n" \
-"saved in a shared memory structure to be further processed by xenmon.\n"
+    settings_t *setup = (settings_t *)state->input;
 
-    printf(USAGE_STR);
-    printf("\nReport bugs to %s\n", program_bug_address);
-
-    exit(EXIT_FAILURE);
-}
-
-/* convert the argument string pointed to by arg to a long int representation */
-static long argtol(const char *restrict arg, int base)
-{
-    char *endp; 
-    long val;
-
-    errno = 0;
-    val = strtol(arg, &endp, base);
-
-    if (errno != 0) {
-        fprintf(stderr, "Invalid option argument: %s\n", arg);
-        fprintf(stderr, "Error: %s\n\n", strerror(errno));
-        usage();
-    } else if (endp == arg || *endp != '\0') {
-        fprintf(stderr, "Invalid option argument: %s\n\n", arg);
-        usage();
-    }
-
-    return val;
-}
-
-/* parse command line arguments */
-static void parse_args(int argc, char **argv)
-{
-    int option;
-    static struct option long_options[] = {
-        { "log-thresh",    required_argument, 0, 't' },
-        { "poll-sleep",    required_argument, 0, 's' },
-        { "ms_per_sample", required_argument, 0, 'm' },
-        { "help",          no_argument,       0, '?' },
-        { "version",       no_argument,       0, 'V' },
-        { 0, 0, 0, 0 }
-    };
-
-    while ( (option = getopt_long(argc, argv, "m:s:t:?V",
-                    long_options, NULL)) != -1)
+    switch ( key )
     {
-        switch ( option )
-        {
-            case 't': /* set new records threshold for logging */
-                opts.new_data_thresh = argtol(optarg, 0);
-                break;
+        case 't': /* set new records threshold for logging */
+            {
+                char *inval;
+                setup->new_data_thresh = strtol(arg, &inval, 0);
+                if ( inval == arg )
+                    argp_usage(state);
+            }
+            break;
 
-            case 's': /* set sleep time (given in milliseconds) */
-                opts.poll_sleep = millis_to_timespec(argtol(optarg, 0));
-                break;
+        case 's': /* set sleep time (given in milliseconds) */
+            {
+                char *inval;
+                setup->poll_sleep = millis_to_timespec(strtol(arg, &inval, 0));
+                if ( inval == arg )
+                    argp_usage(state);
+            }
+            break;
 
-            case 'm': /* set ms_per_sample */
-                opts.ms_per_sample = argtol(optarg, 0);
-                break;
+        case 'm': /* set ms_per_sample */
+            {
+                char *inval;
+                setup->ms_per_sample = strtol(arg, &inval, 0);
+                if ( inval == arg )
+                    argp_usage(state);
+            }
+            break;
 
-            case 'V': /* print program version */
-                printf("%s\n", program_version);
-                exit(EXIT_SUCCESS);
-                break;
+        case ARGP_KEY_ARG:
+            {
+                if ( state->arg_num == 0 )
+                    setup->outfile = arg;
+                else
+                    argp_usage(state);
+            }
+            break;
 
-            default:
-               usage(); 
-        }
+        default:
+            return ARGP_ERR_UNKNOWN;
     }
 
-    /* all arguments should have been processed */
-    if (optind != argc) {
-        usage();
-    }
+    return 0;
 }
 
-#define SHARED_MEM_FILE "/var/run/xenq-shm"
-static void alloc_qos_data(int ncpu)
+#define SHARED_MEM_FILE "/tmp/xenq-shm"
+void alloc_qos_data(int ncpu)
 {
     int i, n, pgsize, off=0;
     char *dummy;
     int qos_fd;
+    void advance_next_datapoint(uint64_t);
 
     cpu_qos_data = (_new_qos_data **) calloc(ncpu, sizeof(_new_qos_data *));
 
@@ -665,40 +545,71 @@ static void alloc_qos_data(int ncpu)
     }
     pgsize = getpagesize();
     dummy = malloc(pgsize);
-    if (!dummy) {
-        PERROR("malloc");
-        exit(EXIT_FAILURE);
-    }
-    memset(dummy, 0, pgsize);
 
     for (n=0; n<ncpu; n++) {
 
-        for (i=0; i<sizeof(_new_qos_data); i=i+pgsize)
-            if ((write(qos_fd, dummy, pgsize)) != pgsize) {
-                PERROR(SHARED_MEM_FILE);
-                exit(2);
-            }
+      for (i=0; i<sizeof(_new_qos_data); i=i+pgsize)
+        write(qos_fd, dummy, pgsize);
 
-        new_qos = (_new_qos_data *) mmap(0, sizeof(_new_qos_data), PROT_READ|PROT_WRITE, 
-                                         MAP_SHARED, qos_fd, off);
-        off += i;
-        if (new_qos == MAP_FAILED) {
-            PERROR("mmap");
-            exit(3);
-        }
-        //  printf("new_qos = %p\n", new_qos);
-        memset(new_qos, 0, sizeof(_new_qos_data));
-        new_qos->next_datapoint = 0;
-        advance_next_datapoint(0);
-        new_qos->structlen = i;
-        new_qos->ncpu = ncpu;
-        //      printf("structlen = 0x%x\n", i);
-        cpu_qos_data[n] = new_qos;
+      new_qos = (_new_qos_data *) mmap(0, sizeof(_new_qos_data), PROT_READ|PROT_WRITE, 
+				       MAP_SHARED, qos_fd, off);
+      off += i;
+      if (new_qos == NULL) {
+        PERROR("mmap");
+        exit(3);
+      }
+      //  printf("new_qos = %p\n", new_qos);
+      memset(new_qos, 0, sizeof(_new_qos_data));
+      new_qos->next_datapoint = 0;
+      advance_next_datapoint(0);
+      new_qos->structlen = i;
+      new_qos->ncpu = ncpu;
+      //      printf("structlen = 0x%x\n", i);
+      cpu_qos_data[n] = new_qos;
     }
     free(dummy);
-    close(qos_fd);
     new_qos = NULL;
 }
+
+
+#define xstr(x) str(x)
+#define str(x) #x
+
+const struct argp_option cmd_opts[] =
+{
+    { .name = "log-thresh", .key='t', .arg="l",
+        .doc =
+            "Set number, l, of new records required to trigger a write to output "
+            "(default " xstr(NEW_DATA_THRESH) ")." },
+
+    { .name = "poll-sleep", .key='s', .arg="p",
+        .doc = 
+            "Set sleep time, p, in milliseconds between polling the trace buffer "
+            "for new data (default " xstr(POLL_SLEEP_MILLIS) ")." },
+
+    { .name = "ms_per_sample", .key='m', .arg="MS",
+        .doc = 
+            "Specify the number of milliseconds per sample "
+            " (default " xstr(MS_PER_SAMPLE) ")." },
+
+    {0}
+};
+
+const struct argp parser_def =
+{
+    .options = cmd_opts,
+    .parser = cmd_parser,
+    //    .args_doc = "[output file]",
+    .doc =
+        "Tool to capture and partially process Xen trace buffer data"
+        "\v"
+        "This tool is used to capture trace buffer data from Xen.  The data is "
+        "saved in a shared memory structure to be further processed by xenmon."
+};
+
+
+const char *argp_program_version     = "xenbaked v1.3";
+const char *argp_program_bug_address = "<rob.gardner@hp.com>";
 
 
 int main(int argc, char **argv)
@@ -707,12 +618,13 @@ int main(int argc, char **argv)
     struct sigaction act;
 
     time(&start_time);
+    opts.outfile = 0;
     opts.poll_sleep = millis_to_timespec(POLL_SLEEP_MILLIS);
     opts.new_data_thresh = NEW_DATA_THRESH;
     opts.ms_per_sample = MS_PER_SAMPLE;
     opts.cpu_freq = CPU_FREQ;
 
-    parse_args(argc, argv);
+    argp_parse(&parser_def, argc, argv, 0, 0, &opts);
     fprintf(stderr, "ms_per_sample = %ld\n", opts.ms_per_sample);
 
 
@@ -728,123 +640,20 @@ int main(int argc, char **argv)
 
     dump_stats();
     msync(new_qos, sizeof(_new_qos_data), MS_SYNC);
-    disable_tracing();
 
     return ret;
 }
 
-static void qos_init_domain(int domid, int idx)
+int domain_runnable(int domid)
 {
-    int i;
-
-    memset(&new_qos->domain_info[idx], 0, sizeof(_domain_info));
-    new_qos->domain_info[idx].last_update_time = global_now;
-    //  runnable_start_time[idx] = 0;
-    new_qos->domain_info[idx].runnable_start_time = 0; // invalidate
-    new_qos->domain_info[idx].in_use = 1;
-    new_qos->domain_info[idx].blocked_start_time = 0;
-    new_qos->domain_info[idx].id = domid;
-    if (domid == IDLE_DOMAIN_ID)
-        snprintf(new_qos->domain_info[idx].name,
-		sizeof(new_qos->domain_info[idx].name),
-		"Idle Task%d", global_cpu);
-    else
-        snprintf(new_qos->domain_info[idx].name,
-		sizeof(new_qos->domain_info[idx].name),
-		"Domain#%d", domid);
-  
-    for (i=0; i<NSAMPLES; i++) {
-        new_qos->qdata[i].ns_gotten[idx] = 0;
-        new_qos->qdata[i].ns_allocated[idx] = 0;
-        new_qos->qdata[i].ns_waiting[idx] = 0;
-        new_qos->qdata[i].ns_blocked[idx] = 0;
-        new_qos->qdata[i].switchin_count[idx] = 0;
-        new_qos->qdata[i].io_count[idx] = 0;
-    }
-}
-
-static void global_init_domain(int domid, int idx) 
-{
-    int cpu;
-    _new_qos_data *saved_qos;
-  
-    saved_qos = new_qos;
-  
-    for (cpu=0; cpu<NCPU; cpu++) {
-        new_qos = cpu_qos_data[cpu];
-        qos_init_domain(domid, idx);
-    }
-    new_qos = saved_qos;
-}
-
-// give index of this domain in the qos data array
-static int indexof(int domid)
-{
-    int idx;
-    xc_dominfo_t dominfo[NDOMAINS];
-    xc_interface *xc_handle;
-    int ndomains;
-  
-    if (domid < 0) {	// shouldn't happen
-        printf("bad domain id: %d\r\n", domid);
-        return 0;
-    }
-
-    for (idx=0; idx<NDOMAINS; idx++)
-        if ( (new_qos->domain_info[idx].id == domid) && new_qos->domain_info[idx].in_use)
-            return idx;
-
-    // not found, make a new entry
-    for (idx=0; idx<NDOMAINS; idx++)
-        if (new_qos->domain_info[idx].in_use == 0) {
-            global_init_domain(domid, idx);
-            return idx;
-        }
-
-    // call domaininfo hypercall to try and garbage collect unused entries
-    xc_handle = xc_interface_open(0,0,0);
-    ndomains = xc_domain_getinfo(xc_handle, 0, NDOMAINS, dominfo);
-    xc_interface_close(xc_handle);
-
-    // for each domain in our data, look for it in the system dominfo structure
-    // and purge the domain's data from our state if it does not exist in the
-    // dominfo structure
-    for (idx=0; idx<NDOMAINS; idx++) {
-        int domid = new_qos->domain_info[idx].id;
-        int jdx;
-    
-        for (jdx=0; jdx<ndomains; jdx++) {
-            if (dominfo[jdx].domid == domid)
-                break;
-        }
-        if (jdx == ndomains)        // we didn't find domid in the dominfo struct
-            if (domid != IDLE_DOMAIN_ID) // exception for idle domain, which is not
-                // contained in dominfo
-                qos_kill_thread(domid);	// purge our stale data
-    }
-  
-    // look again for a free slot
-    for (idx=0; idx<NDOMAINS; idx++)
-        if (new_qos->domain_info[idx].in_use == 0) {
-            global_init_domain(domid, idx);
-            return idx;
-        }
-
-    // still no space found, so bail
-    fprintf(stderr, "out of space in domain table, increase NDOMAINS\r\n");
-    exit(2);
-}
-
-static int domain_runnable(int domid)
-{
-    return new_qos->domain_info[indexof(domid)].runnable;
+    return new_qos->domain_info[ID(domid)].runnable;
 }
 
 
-static void update_blocked_time(int domid, uint64_t now)
+void update_blocked_time(int domid, uint64_t now)
 {
     uint64_t t_blocked;
-    int id = indexof(domid);
+    int id = ID(domid);
 
     if (new_qos->domain_info[id].blocked_start_time != 0) {
         if (now >= new_qos->domain_info[id].blocked_start_time)
@@ -854,7 +663,7 @@ static void update_blocked_time(int domid, uint64_t now)
         new_qos->qdata[new_qos->next_datapoint].ns_blocked[id] += t_blocked;
     }
 
-    if (domain_runnable(domid))
+    if (domain_runnable(id))
         new_qos->domain_info[id].blocked_start_time = 0;
     else
         new_qos->domain_info[id].blocked_start_time = now;
@@ -862,7 +671,7 @@ static void update_blocked_time(int domid, uint64_t now)
 
 
 // advance to next datapoint for all domains
-static void advance_next_datapoint(uint64_t now)
+void advance_next_datapoint(uint64_t now)
 {
     int new, old, didx;
 
@@ -887,13 +696,13 @@ static void advance_next_datapoint(uint64_t now)
 
 
 
-static void qos_update_thread(int cpu, int domid, uint64_t now)
+void qos_update_thread(int cpu, int domid, uint64_t now)
 {
     int n, id;
     uint64_t last_update_time, start;
     int64_t time_since_update, run_time = 0;
 
-    id = indexof(domid);
+    id = ID(domid);
 
     n = new_qos->next_datapoint;
     last_update_time = new_qos->domain_info[id].last_update_time;
@@ -901,25 +710,25 @@ static void qos_update_thread(int cpu, int domid, uint64_t now)
     time_since_update = now - last_update_time;
 
     if (time_since_update < 0) {
-        // what happened here? either a timestamp wraparound, or more likely,
-        // a slight inconsistency among timestamps from various cpu's
-        if (-time_since_update < billion) {
-            // fairly small difference, let's just adjust 'now' to be a little
-            // beyond last_update_time
-            time_since_update = -time_since_update;
-        }
-        else if ( ((~0ULL - last_update_time) < billion) && (now < billion) ) {
-            // difference is huge, must be a wraparound
-            // last_update time should be "near" ~0ULL,
-            // and now should be "near" 0
-            time_since_update = now + (~0ULL - last_update_time);
-            printf("time wraparound\n");
-        }
-        else {
-            // none of the above, may be an out of order record
-            // no good solution, just ignore and update again later
-            return;
-        }
+      // what happened here? either a timestamp wraparound, or more likely,
+      // a slight inconsistency among timestamps from various cpu's
+      if (-time_since_update < billion) {
+	// fairly small difference, let's just adjust 'now' to be a little
+	// beyond last_update_time
+	time_since_update = -time_since_update;
+      }
+      else if ( ((~0ULL - last_update_time) < billion) && (now < billion) ) {
+	// difference is huge, must be a wraparound
+	// last_update time should be "near" ~0ULL,
+	// and now should be "near" 0
+	time_since_update = now + (~0ULL - last_update_time);
+	printf("time wraparound\n");
+      }
+      else {
+	// none of the above, may be an out of order record
+	// no good solution, just ignore and update again later
+	return;
+      }
     }
 	
     new_qos->domain_info[id].last_update_time = now;
@@ -928,9 +737,7 @@ static void qos_update_thread(int cpu, int domid, uint64_t now)
         start = new_qos->domain_info[id].start_time;
         if (start > now) {		// wrapped around
             run_time = now + (~0ULL - start);
-	    // this could happen if there is nothing going on within a cpu;
-	    // in this case the idle domain would run forever
-	    //        printf("warning: start > now\n");
+	    printf("warning: start > now\n");
         }
         else
             run_time = now - start;
@@ -939,11 +746,11 @@ static void qos_update_thread(int cpu, int domid, uint64_t now)
         new_qos->domain_info[id].ns_oncpu_since_boot += run_time;
         new_qos->domain_info[id].start_time = now;
         new_qos->domain_info[id].ns_since_boot += time_since_update;
-
+#if 1
 	new_qos->qdata[n].ns_gotten[id] += run_time;
-	//	if (domid == 0 && cpu == 1)
-	//	  printf("adding run time for dom0 on cpu1\r\n");
-
+	if (domid == 0 && cpu == 1)
+	  printf("adding run time for dom0 on cpu1\r\n");
+#endif
     }
 
     new_qos->domain_info[id].runnable_at_last_update = domain_runnable(domid);
@@ -965,17 +772,17 @@ static void qos_update_thread(int cpu, int domid, uint64_t now)
 
 
 // called by dump routines to update all structures
-static void qos_update_all(uint64_t now, int cpu)
+void qos_update_all(uint64_t now, int cpu)
 {
     int i;
 
     for (i=0; i<NDOMAINS; i++)
         if (new_qos->domain_info[i].in_use)
-            qos_update_thread(cpu, new_qos->domain_info[i].id, now); 
+            qos_update_thread(cpu, i, now);
 }
 
 
-static void qos_update_thread_stats(int cpu, int domid, uint64_t now)
+void qos_update_thread_stats(int cpu, int domid, uint64_t now)
 {
     if (new_qos->qdata[new_qos->next_datapoint].ns_passed > (million*opts.ms_per_sample)) {
         qos_update_all(now, cpu);
@@ -986,37 +793,69 @@ static void qos_update_thread_stats(int cpu, int domid, uint64_t now)
 }
 
 
+void qos_init_domain(int cpu, int domid, uint64_t now)
+{
+    int i, id;
+
+    id = ID(domid);
+
+    if (new_qos->domain_info[id].in_use)
+        return;
+
+
+    memset(&new_qos->domain_info[id], 0, sizeof(_domain_info));
+    new_qos->domain_info[id].last_update_time = now;
+    //  runnable_start_time[id] = 0;
+    new_qos->domain_info[id].runnable_start_time = 0; // invalidate
+    new_qos->domain_info[id].in_use = 1;
+    new_qos->domain_info[id].blocked_start_time = 0;
+    new_qos->domain_info[id].id = id;
+    if (domid == IDLE_DOMAIN_ID)
+        sprintf(new_qos->domain_info[id].name, "Idle Task%d", cpu);
+    else
+        sprintf(new_qos->domain_info[id].name, "Domain#%d", domid);
+
+    for (i=0; i<NSAMPLES; i++) {
+        new_qos->qdata[i].ns_gotten[id] = 0;
+        new_qos->qdata[i].ns_allocated[id] = 0;
+        new_qos->qdata[i].ns_waiting[id] = 0;
+        new_qos->qdata[i].ns_blocked[id] = 0;
+        new_qos->qdata[i].switchin_count[id] = 0;
+        new_qos->qdata[i].io_count[id] = 0;
+    }
+}
+
 
 // called when a new thread gets the cpu
-static void qos_switch_in(int cpu, int domid, uint64_t now, unsigned long ns_alloc, unsigned long ns_waited)
+void qos_switch_in(int cpu, int domid, uint64_t now, unsigned long ns_alloc, unsigned long ns_waited)
 {
-    int idx = indexof(domid);
+    int id = ID(domid);
 
-    new_qos->domain_info[idx].runnable = 1;
+    new_qos->domain_info[id].runnable = 1;
     update_blocked_time(domid, now);
-    new_qos->domain_info[idx].blocked_start_time = 0; // invalidate
-    new_qos->domain_info[idx].runnable_start_time = 0; // invalidate
-    //runnable_start_time[idx] = 0;
+    new_qos->domain_info[id].blocked_start_time = 0; // invalidate
+    new_qos->domain_info[id].runnable_start_time = 0; // invalidate
+    //runnable_start_time[id] = 0;
 
-    new_qos->domain_info[idx].start_time = now;
-    new_qos->qdata[new_qos->next_datapoint].switchin_count[idx]++;
-    new_qos->qdata[new_qos->next_datapoint].ns_allocated[idx] += ns_alloc;
-    new_qos->qdata[new_qos->next_datapoint].ns_waiting[idx] += ns_waited;
+    new_qos->domain_info[id].start_time = now;
+    new_qos->qdata[new_qos->next_datapoint].switchin_count[id]++;
+    new_qos->qdata[new_qos->next_datapoint].ns_allocated[id] += ns_alloc;
+    new_qos->qdata[new_qos->next_datapoint].ns_waiting[id] += ns_waited;
     qos_update_thread_stats(cpu, domid, now);
-    set_current(cpu, domid);
+    set_current(cpu, id);
 
     // count up page flips for dom0 execution
-    if (domid == 0)
-        dom0_flips = 0;
+    if (id == 0)
+      dom0_flips = 0;
 }
 
 // called when the current thread is taken off the cpu
-static void qos_switch_out(int cpu, int domid, uint64_t now, unsigned long gotten)
+void qos_switch_out(int cpu, int domid, uint64_t now, unsigned long gotten)
 {
-    int idx = indexof(domid);
+    int id = ID(domid);
     int n;
 
-    if (!is_current(domid, cpu)) {
+    if (!is_current(id, cpu)) {
         //    printf("switching out domain %d but it is not current. gotten=%ld\r\n", id, gotten);
     }
 
@@ -1031,166 +870,160 @@ static void qos_switch_out(int cpu, int domid, uint64_t now, unsigned long gotte
 
     n = new_qos->next_datapoint;
 #if 0
-    new_qos->qdata[n].ns_gotten[idx] += gotten;
+    new_qos->qdata[n].ns_gotten[id] += gotten;
     if (gotten > new_qos->qdata[n].ns_passed)
-        printf("inconsistency #257, diff = %lld\n",
-               gotten - new_qos->qdata[n].ns_passed );
+      printf("inconsistency #257, diff = %lld\n",
+	    gotten - new_qos->qdata[n].ns_passed );
 #endif
-    new_qos->domain_info[idx].ns_oncpu_since_boot += gotten;
-    new_qos->domain_info[idx].runnable_start_time = now;
+    new_qos->domain_info[id].ns_oncpu_since_boot += gotten;
+    new_qos->domain_info[id].runnable_start_time = now;
     //  runnable_start_time[id] = now;
-    qos_update_thread_stats(cpu, domid, now);
+    qos_update_thread_stats(cpu, id, now);
 
     // process dom0 page flips
-    if (domid == 0)
-        if (dom0_flips == 0)
-            new_qos->qdata[n].flip_free_periods++;
+    if (id == 0)
+      if (dom0_flips == 0)
+	new_qos->qdata[n].flip_free_periods++;
 }
 
 // called when domain is put to sleep, may also be called
 // when thread is already asleep
-static void qos_state_sleeping(int cpu, int domid, uint64_t now) 
+void qos_state_sleeping(int cpu, int domid, uint64_t now) 
 {
-    int idx;
+    int id = ID(domid);
 
-    if (!domain_runnable(domid))	// double call?
+    if (!domain_runnable(id))	// double call?
         return;
 
-    idx = indexof(domid);
-    new_qos->domain_info[idx].runnable = 0;
-    new_qos->domain_info[idx].blocked_start_time = now;
-    new_qos->domain_info[idx].runnable_start_time = 0; // invalidate
-    //  runnable_start_time[idx] = 0; // invalidate
+    new_qos->domain_info[id].runnable = 0;
+    new_qos->domain_info[id].blocked_start_time = now;
+    new_qos->domain_info[id].runnable_start_time = 0; // invalidate
+    //  runnable_start_time[id] = 0; // invalidate
     qos_update_thread_stats(cpu, domid, now);
 }
 
 
 
-// domain died, presume it's dead on all cpu's, not just mostly dead
-static void qos_kill_thread(int domid)
+void qos_kill_thread(int domid)
 {
-    int cpu;
-  
-    for (cpu=0; cpu<NCPU; cpu++) {
-        cpu_qos_data[cpu]->domain_info[indexof(domid)].in_use = 0;
-    }
-  
+    new_qos->domain_info[ID(domid)].in_use = 0;
 }
 
 
 // called when thread becomes runnable, may also be called
 // when thread is already runnable
-static void qos_state_runnable(int cpu, int domid, uint64_t now)
+void qos_state_runnable(int cpu, int domid, uint64_t now)
 {
-    int idx;
-  
+    int id = ID(domid);
+
+    if (domain_runnable(id))	// double call?
+        return;
+    new_qos->domain_info[id].runnable = 1;
+    update_blocked_time(domid, now);
 
     qos_update_thread_stats(cpu, domid, now);
 
-    if (domain_runnable(domid))	// double call?
-        return;
-
-    idx = indexof(domid);
-    new_qos->domain_info[idx].runnable = 1;
-    update_blocked_time(domid, now);
-
-    new_qos->domain_info[idx].blocked_start_time = 0; /* invalidate */
-    new_qos->domain_info[idx].runnable_start_time = now;
+    new_qos->domain_info[id].blocked_start_time = 0; /* invalidate */
+    new_qos->domain_info[id].runnable_start_time = now;
     //  runnable_start_time[id] = now;
 }
 
 
-static void qos_count_packets(domid_t domid, uint64_t now)
+void qos_count_packets(domid_t domid, uint64_t now)
 {
-    int i, idx = indexof(domid);
-    _new_qos_data *cpu_data;
+  int i, id = ID(domid);
+  _new_qos_data *cpu_data;
 
-    for (i=0; i<NCPU; i++) {
-        cpu_data = cpu_qos_data[i];
-        if (cpu_data->domain_info[idx].in_use) {
-            cpu_data->qdata[cpu_data->next_datapoint].io_count[idx]++;
-        }
+  for (i=0; i<NCPU; i++) {
+    cpu_data = cpu_qos_data[i];
+    if (cpu_data->domain_info[id].in_use) {
+      cpu_data->qdata[cpu_data->next_datapoint].io_count[id]++;
     }
+  }
 
-    new_qos->qdata[new_qos->next_datapoint].io_count[0]++;
-    dom0_flips++;
+  new_qos->qdata[new_qos->next_datapoint].io_count[0]++;
+  dom0_flips++;
 }
 
 
-static int process_record(int cpu, struct t_rec *r)
+int domain_ok(int cpu, int domid, uint64_t now)
 {
-    uint64_t now = 0;
-    uint32_t *extra_u32 = r->u.nocycles.extra_u32;
-
-    new_qos = cpu_qos_data[cpu];
-
-    rec_count++;
-
-    if ( r->cycles_included )
-    {
-        now = ((uint64_t)r->u.cycles.cycles_hi << 32) | r->u.cycles.cycles_lo;
-        now = ((double)now) / (opts.cpu_freq / 1000.0);
-        extra_u32 = r->u.cycles.extra_u32;
+    if (domid == IDLE_DOMAIN_ID)
+        domid = NDOMAINS-1;
+    if (domid < 0 || domid >= NDOMAINS) {
+        printf("bad domain id: %d\n", domid);
+        return 0;
     }
-
-    global_now = now;
-    global_cpu = cpu;
-
-    log_event(r->event);
-
-    switch (r->event) {
-
-    case TRC_SCHED_SWITCH_INFPREV:
-        // domain data[0] just switched out and received data[1] ns of cpu time
-        qos_switch_out(cpu, extra_u32[0], now, extra_u32[1]);
-        //    printf("ns_gotten %ld\n", extra_u32[1]);
-        break;
-    
-    case TRC_SCHED_SWITCH_INFNEXT:
-        // domain data[0] just switched in and
-        // waited data[1] ns, and was allocated data[2] ns of cpu time
-        qos_switch_in(cpu, extra_u32[0], now, extra_u32[2], extra_u32[1]);
-        break;
-    
-    case TRC_SCHED_DOM_ADD:
-        (void) indexof(extra_u32[0]);
-        break;
-    
-    case TRC_SCHED_DOM_REM:
-        qos_kill_thread(extra_u32[0]);
-        break;
-    
-    case TRC_SCHED_SLEEP:
-        qos_state_sleeping(cpu, extra_u32[0], now);
-        break;
-    
-    case TRC_SCHED_WAKE:
-        qos_state_runnable(cpu, extra_u32[0], now);
-        break;
-    
-    case TRC_SCHED_BLOCK:
-        qos_state_sleeping(cpu, extra_u32[0], now);
-        break;
-    
-    case TRC_MEM_PAGE_GRANT_TRANSFER:
-        qos_count_packets(extra_u32[0], now);
-        break;
-    
-    default:
-        break;
-    }
-
-    new_qos = NULL;
-
-    return 4 + (r->cycles_included ? 8 : 0) + (r->extra_u32 * 4);
+    if (new_qos->domain_info[domid].in_use == 0)
+        qos_init_domain(cpu, domid, now);
+    return 1;
 }
 
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * tab-width: 4
- * indent-tabs-mode: nil
- * End:
- */
+
+void process_record(int cpu, struct t_rec *r)
+{
+  uint64_t now;
+
+
+  new_qos = cpu_qos_data[cpu];
+
+  rec_count++;
+
+  now = ((double)r->cycles) / (opts.cpu_freq / 1000.0);
+
+  log_event(r->event);
+
+  switch (r->event) {
+
+  case TRC_SCHED_SWITCH_INFPREV:
+    // domain data[0] just switched out and received data[1] ns of cpu time
+    if (domain_ok(cpu, r->data[0], now))
+      qos_switch_out(cpu, r->data[0], now, r->data[1]);
+    //    printf("ns_gotten %ld\n", r->data[1]);
+    break;
+    
+  case TRC_SCHED_SWITCH_INFNEXT:
+    // domain data[0] just switched in and
+    // waited data[1] ns, and was allocated data[2] ns of cpu time
+    if (domain_ok(cpu, r->data[0], now))
+      qos_switch_in(cpu, r->data[0], now, r->data[2], r->data[1]);
+    break;
+    
+  case TRC_SCHED_DOM_ADD:
+    if (domain_ok(cpu, r->data[0], now))
+      qos_init_domain(cpu, r->data[0],  now);
+    break;
+    
+  case TRC_SCHED_DOM_REM:
+    if (domain_ok(cpu, r->data[0], now))
+      qos_kill_thread(r->data[0]);
+    break;
+    
+  case TRC_SCHED_SLEEP:
+    if (domain_ok(cpu, r->data[0], now))
+      qos_state_sleeping(cpu, r->data[0], now);
+    break;
+    
+  case TRC_SCHED_WAKE:
+    if (domain_ok(cpu, r->data[0], now))
+      qos_state_runnable(cpu, r->data[0], now);
+    break;
+    
+  case TRC_SCHED_BLOCK:
+    if (domain_ok(cpu, r->data[0], now))
+      qos_state_sleeping(cpu, r->data[0], now);
+    break;
+    
+  case TRC_MEM_PAGE_GRANT_TRANSFER:
+    if (domain_ok(cpu, r->data[0], now))
+      qos_count_packets(r->data[0], now);
+    break;
+    
+  default:
+    break;
+  }
+  new_qos = NULL;
+}
+
+
+

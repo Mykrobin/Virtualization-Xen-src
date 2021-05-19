@@ -1,42 +1,44 @@
 #ifndef __E820_HEADER
 #define __E820_HEADER
 
-/*
- * PC BIOS standard E820 types and structure.
- */
+#include <asm/page.h>
+
+#define E820MAX	128
+
 #define E820_RAM          1
 #define E820_RESERVED     2
 #define E820_ACPI         3
 #define E820_NVS          4
-#define E820_UNUSABLE     5
+#define E820_IO          16
+#define E820_SHARED_PAGE 17
+#define E820_XENSTORE    18
 
-struct __packed e820entry {
-    uint64_t addr;
-    uint64_t size;
-    uint32_t type;
-};
+#define E820_MAP_PAGE        0x00090000
+#define E820_MAP_NR_OFFSET   0x000001E8
+#define E820_MAP_OFFSET      0x000002D0
 
-#define E820MAX	1024
+#ifndef __ASSEMBLY__
+struct e820entry {
+    u64 addr;
+    u64 size;
+    u32 type;
+} __attribute__((packed));
 
 struct e820map {
-    unsigned int nr_map;
+    int nr_map;
     struct e820entry map[E820MAX];
 };
 
-extern int sanitize_e820_map(struct e820entry *biosmap, unsigned int *pnr_map);
-extern int e820_all_mapped(u64 start, u64 end, unsigned type);
-extern int reserve_e820_ram(struct e820map *e820, uint64_t s, uint64_t e);
-extern int e820_change_range_type(
-    struct e820map *e820, uint64_t s, uint64_t e,
-    uint32_t orig_type, uint32_t new_type);
-extern int e820_add_range(
-    struct e820map *, uint64_t s, uint64_t e, uint32_t type);
-extern unsigned long init_e820(const char *, struct e820map *);
+extern unsigned long init_e820(struct e820entry *, int *);
 extern struct e820map e820;
-extern struct e820map e820_raw;
 
-/* These symbols live in the boot trampoline. */
-extern struct e820map bios_e820map[];
-extern unsigned int bios_e820nr;
+#ifndef NDEBUG
+extern void print_e820_memory_map(struct e820entry *map, int entries);
+#endif
+
+#endif /*!__ASSEMBLY__*/
+
+#define PFN_DOWN(x)   ((x) >> PAGE_SHIFT)
+#define PFN_UP(x)     (((x) + PAGE_SIZE-1) >> PAGE_SHIFT)
 
 #endif /*__E820_HEADER*/

@@ -1,153 +1,157 @@
-XEN_ROOT=$(CURDIR)/../..
+XEN_ROOT=../..
 include $(XEN_ROOT)/tools/Rules.mk
+XEN_LIBXC          = $(XEN_ROOT)/tools/libxc
 
-MAJOR = 3.0
-MINOR = 3
+INSTALL         = install
+INSTALL_DATA	= $(INSTALL) -m0644
+INSTALL_PROG    = $(INSTALL) -m0755
+INSTALL_DIR     = $(INSTALL) -d -m0755
 
-CFLAGS += -Werror
-CFLAGS += -I.
-# Include configure output (config.h)
-CFLAGS += -include $(XEN_ROOT)/tools/config.h
-CFLAGS += -I./include
-CFLAGS += $(CFLAGS_libxenevtchn)
-CFLAGS += $(CFLAGS_libxenctrl)
-CFLAGS += $(CFLAGS_libxenguest)
-CFLAGS += $(CFLAGS_libxentoolcore)
-CFLAGS += -DXEN_LIB_STORED="\"$(XEN_LIB_STORED)\""
-CFLAGS += -DXEN_RUN_STORED="\"$(XEN_RUN_STORED)\""
+PROFILE=#-pg
+BASECFLAGS=-Wall -g -Werror
+# Make gcc generate dependencies.
+BASECFLAGS += -Wp,-MD,.$(@F).d
+PROG_DEP = .*.d
+BASECFLAGS+= $(PROFILE)
+#BASECFLAGS+= -I$(XEN_ROOT)/tools
+BASECFLAGS+= -I$(XEN_ROOT)/tools/libxc
+BASECFLAGS+= -I.
 
-CFLAGS  += $(CFLAGS-y)
-LDFLAGS += $(LDFLAGS-y)
+CFLAGS  += $(BASECFLAGS)
+LDFLAGS += $(PROFILE) -L$(XEN_LIBXC)
+TESTDIR  = testsuite/tmp
+TESTFLAGS= -DTESTING
+TESTENV  = XENSTORED_ROOTDIR=$(TESTDIR) XENSTORED_RUNDIR=$(TESTDIR)
 
-CLIENTS := xenstore-exists xenstore-list xenstore-read xenstore-rm xenstore-chmod
-CLIENTS += xenstore-write xenstore-ls xenstore-watch
+CLIENTS := xenstore-exists xenstore-list xenstore-read xenstore-rm
+CLIENTS += xenstore-write
+CLIENTS_OBJS := $(patsubst xenstore-%,xenstore_%.o,$(CLIENTS))
 
-XENSTORED_OBJS = xenstored_core.o xenstored_watch.o xenstored_domain.o
-XENSTORED_OBJS += xenstored_transaction.o xenstored_control.o
-XENSTORED_OBJS += xs_lib.o talloc.o utils.o tdb.o hashtable.o
+all: libxenstore.so xenstored $(CLIENTS) xs_tdb_dump xenstore-control xenstore-ls
 
-XENSTORED_OBJS_$(CONFIG_Linux) = xenstored_posix.o
-XENSTORED_OBJS_$(CONFIG_SunOS) = xenstored_solaris.o xenstored_posix.o xenstored_probes.o
-XENSTORED_OBJS_$(CONFIG_NetBSD) = xenstored_posix.o
-XENSTORED_OBJS_$(CONFIG_FreeBSD) = xenstored_posix.o
-XENSTORED_OBJS_$(CONFIG_MiniOS) = xenstored_minios.o
+test_interleaved_transactions: test_interleaved_transactions.o
+	$(LINK.o) $^ $(LOADLIBES) $(LDLIBS) -L. -lxenstore -o $@
 
-XENSTORED_OBJS += $(XENSTORED_OBJS_y)
-LDLIBS_xenstored += -lrt
+testcode: xs_test xenstored_test xs_random
 
-ALL_TARGETS = clients
-ifeq ($(XENSTORE_XENSTORED),y)
-ALL_TARGETS += xs_tdb_dump xenstored
-endif
+xenstored: xenstored_core.o xenstored_watch.o xenstored_domain.o xenstored_transaction.o xs_lib.o talloc.o utils.o tdb.o hashtable.o
+	$(LINK.o) $^ $(LOADLIBES) $(LDLIBS) -lxenctrl -o $@
 
-ifdef CONFIG_STUBDOM
-CFLAGS += -DNO_SOCKETS=1
-endif
+$(CLIENTS): xenstore-%: xenstore_%.o libxenstore.so
+	$(LINK.o) $< $(LOADLIBES) $(LDLIBS) -L. -lxenstore -o $@
 
-.PHONY: all
-all: $(ALL_TARGETS)
+$(CLIENTS_OBJS): xenstore_%.o: xenstore_client.c
+	$(COMPILE.c) -DCLIENT_$(*F) -o $@ $<
 
-.PHONY: clients
-clients: xenstore $(CLIENTS) xenstore-control
+xenstore-control: xenstore_control.o libxenstore.so
+	$(LINK.o) $< $(LOADLIBES) $(LDLIBS) -L. -lxenstore -o $@
 
-ifeq ($(CONFIG_SunOS),y)
-xenstored_probes.h: xenstored_probes.d
-	dtrace -C -h -s xenstored_probes.d
+xenstore-ls: xsls.o libxenstore.so
+	$(LINK.o) $< $(LOADLIBES) $(LDLIBS) -L. -lxenstore -o $@
 
-xenstored_solaris.o: xenstored_probes.h
-
-xenstored_probes.o: xenstored_solaris.o
-	dtrace -C -G -s xenstored_probes.d xenstored_solaris.o 
-
-CFLAGS += -DHAVE_DTRACE=1
-endif
-
-ifeq ($(CONFIG_SYSTEMD),y)
-$(XENSTORED_OBJS): CFLAGS += $(SYSTEMD_CFLAGS)
-xenstored: LDFLAGS += $(SYSTEMD_LIBS)
-endif
-
-$(XENSTORED_OBJS): CFLAGS += $(CFLAGS_libxengnttab)
-
-xenstored: $(XENSTORED_OBJS)
-	$(CC) $^ $(LDFLAGS) $(LDLIBS_libxenevtchn) $(LDLIBS_libxengnttab) $(LDLIBS_libxenctrl) $(LDLIBS_xenstored) $(SOCKET_LIBS) -o $@ $(APPEND_LDFLAGS)
-
-xenstored.a: $(XENSTORED_OBJS)
-	$(AR) cr $@ $^
-
-$(CLIENTS): xenstore
-	ln -f xenstore $@
-
-xenstore: xenstore_client.o
-	$(CC) $< $(LDFLAGS) $(LDLIBS_libxenstore) $(LDLIBS_libxentoolcore) $(SOCKET_LIBS) -o $@ $(APPEND_LDFLAGS)
-
-xenstore-control: xenstore_control.o
-	$(CC) $< $(LDFLAGS) $(LDLIBS_libxenstore) $(LDLIBS_libxenctrl) $(LDLIBS_libxenguest) $(LDLIBS_libxentoolcore) $(SOCKET_LIBS) -o $@ $(APPEND_LDFLAGS)
+xenstored_test: xenstored_core_test.o xenstored_watch_test.o xenstored_domain_test.o xenstored_transaction_test.o xs_lib.o talloc_test.o fake_libxc.o utils.o tdb.o
+	$(LINK.o) $^ $(LOADLIBES) $(LDLIBS) -o $@
 
 xs_tdb_dump: xs_tdb_dump.o utils.o tdb.o talloc.o
-	$(CC) $^ $(LDFLAGS) -o $@ $(APPEND_LDFLAGS)
+	$(LINK.o) $^ $(LOADLIBES) $(LDLIBS) -o $@
 
-.PHONY: clean
-clean:
-	rm -f *.a *.o xenstored_probes.h
+xs_test xs_random xs_stress xs_crashme: LDFLAGS+=-lpthread
+xs_test: xs_test.o xs_lib.o utils.o
+xs_random: xs_random.o xs_test_lib.o xs_lib.o talloc.o utils.o
+xs_stress: xs_stress.o xs_test_lib.o xs_lib.o talloc.o utils.o
+xs_crashme: xs_crashme.o xs_lib.o talloc.o utils.o
+
+speedtest: speedtest.o xs.o xs_lib.o utils.o talloc.o
+
+check-speed: speedtest xenstored_test $(TESTDIR)
+	$(TESTENV) time ./speedtest 100
+
+xs_test.o xs_stress.o xenstored_core_test.o xenstored_watch_test.o xenstored_transaction_test.o xenstored_domain_test.o xs_random.o xs_test_lib.o talloc_test.o fake_libxc.o xs_crashme.o: CFLAGS=$(BASECFLAGS) $(TESTFLAGS)
+
+xenstored_%_test.o: xenstored_%.c
+	$(COMPILE.c) -o $@ $<
+
+xs_test_lib.o: xs.c
+	$(COMPILE.c) -o $@ $<
+
+talloc_test.o: talloc.c
+	$(COMPILE.c) -o $@ $<
+
+libxenstore.so: xs.opic xs_lib.opic
+	$(CC) $(CFLAGS) $(LDFLAGS) -Wl,-soname -Wl,libxenstore.so -shared -o $@ $^ -lpthread
+
+clean: testsuite-clean
+	rm -f *.o *.opic *.so
 	rm -f xenstored xs_random xs_stress xs_crashme
-	rm -f xs_tdb_dump xenstore-control init-xenstore-domain
-	rm -f xenstore $(CLIENTS)
-	$(RM) $(DEPS_RM)
+	rm -f xs_test xenstored_test xs_tdb_dump xenstore-control xenstore-ls
+	rm -f $(CLIENTS)
+	$(RM) $(PROG_DEP)
 
-.PHONY: distclean
-distclean: clean
+print-dir:
+	@echo -n tools/xenstore: 
 
-.PHONY: TAGS
+print-end:
+	@echo
+
+check: print-dir testsuite-fast randomcheck-fast print-end
+
+fullcheck: testsuite-run randomcheck stresstest
+
+$(TESTDIR):
+	mkdir $@
+
+testsuite-run: xenstored_test xs_test $(TESTDIR)
+	$(TESTENV) testsuite/test.sh && echo
+
+testsuite-fast: xenstored_test xs_test $(TESTDIR)
+	@$(TESTENV) testsuite/test.sh --fast
+
+testsuite-clean:
+	rm -rf $(TESTDIR)
+
+# Make this visible so they can see repeat tests without --fast if they
+# fail.
+RANDSEED=$(shell date +%s)
+randomcheck: xs_random xenstored_test $(TESTDIR)
+	$(TESTENV) ./xs_random --simple --fast /tmp/xs_random 200000 $(RANDSEED) && echo
+	$(TESTENV) ./xs_random --fast /tmp/xs_random 100000 $(RANDSEED) && echo
+#	$(TESTENV) ./xs_random --fail /tmp/xs_random 10000 $(RANDSEED)
+
+crashme:  xs_crashme xenstored_test $(TESTDIR)
+	rm -rf $(TESTDIR)/store $(TESTDIR)/transactions /tmp/xs_crashme.vglog* /tmp/trace
+	export $(TESTENV); ./xs_crashme 5000 $(RANDSEED) 2>/dev/null
+	if [ -n "`cat /tmp/xs_crashme.vglog*`" ]; then echo Valgrind complained; cat /tmp/xs_crashme.vglog*; exit 1; fi
+	rm -rf $(TESTDIR)/store $(TESTDIR)/transactions /tmp/xs_crashme.vglog* /tmp/trace
+
+randomcheck-fast: xs_random xenstored_test $(TESTDIR)
+	@$(TESTENV) ./xs_random --fast /tmp/xs_random 2000 $(RANDSEED)
+
+stresstest: xs_stress xenstored_test $(TESTDIR)
+	rm -rf $(TESTDIR)/store $(TESTDIR)/transactions
+	export $(TESTENV); PID=`./xenstored_test --output-pid --trace-file=/tmp/trace`; ./xs_stress 5000; ret=$$?; kill $$PID; exit $$ret
+
 TAGS:
 	etags `find . -name '*.[ch]'`
 
-.PHONY: tarball
 tarball: clean
 	cd .. && tar -c -j -v -h -f xenstore.tar.bz2 xenstore/
 
-.PHONY: install
 install: all
-	$(INSTALL_DIR) $(DESTDIR)$(bindir)
-ifeq ($(XENSTORE_XENSTORED),y)
-	$(INSTALL_DIR) $(DESTDIR)$(sbindir)
-	$(INSTALL_DIR) $(DESTDIR)$(XEN_LIB_STORED)
-	$(INSTALL_PROG) xenstored $(DESTDIR)$(sbindir)
-endif
-	$(INSTALL_PROG) xenstore-control $(DESTDIR)$(bindir)
-	$(INSTALL_PROG) xenstore $(DESTDIR)$(bindir)
-	set -e ; for c in $(CLIENTS) ; do \
-		ln -f $(DESTDIR)$(bindir)/xenstore $(DESTDIR)$(bindir)/$${c} ; \
-	done
+	$(INSTALL_DIR) -p $(DESTDIR)/var/run/xenstored
+	$(INSTALL_DIR) -p $(DESTDIR)/var/lib/xenstored
+	$(INSTALL_DIR) -p $(DESTDIR)/usr/bin
+	$(INSTALL_DIR) -p $(DESTDIR)/usr/sbin
+	$(INSTALL_DIR) -p $(DESTDIR)/usr/include
+	$(INSTALL_PROG) xenstored $(DESTDIR)/usr/sbin
+	$(INSTALL_PROG) $(CLIENTS) $(DESTDIR)/usr/bin
+	$(INSTALL_PROG) xenstore-control $(DESTDIR)/usr/bin
+	$(INSTALL_PROG) xenstore-ls $(DESTDIR)/usr/bin
+	$(INSTALL_DIR) -p $(DESTDIR)/usr/$(LIBDIR)
+	$(INSTALL_DATA) libxenstore.so $(DESTDIR)/usr/$(LIBDIR)
+	$(INSTALL_DATA) xs.h $(DESTDIR)/usr/include
+	$(INSTALL_DATA) xs_lib.h $(DESTDIR)/usr/include
 
-.PHONY: uninstall
-uninstall:
-	rm -f $(addprefix $(DESTDIR)$(bindir)/, $(CLIENTS))
-	rm -f $(DESTDIR)$(bindir)/xenstore
-	rm -f $(DESTDIR)$(bindir)/xenstore-control
-ifeq ($(XENSTORE_XENSTORED),y)
-	rm -f $(DESTDIR)$(sbindir)/xenstored
-	if [ -d $(DESTDIR)$(XEN_LIB_STORED) ]; then \
-		rmdir --ignore-fail-on-non-empty $(DESTDIR)$(XEN_LIB_STORED); \
-	fi
-endif
-	if [ -d $(DESTDIR)$(includedir)/xenstore-compat ]; then \
-		rmdir --ignore-fail-on-non-empty $(DESTDIR)$(includedir)/xenstore-compat; \
-	fi
-
-.PHONY: clients-uninstall
-clients-uninstall:
-	rm -f $(addprefix $(DESTDIR)$(bindir)/, $(CLIENTS))
-
-.PHONY: clients-install
-clients-install: clients
-	$(INSTALL_DIR) $(DESTDIR)$(bindir)
-	$(INSTALL_PROG) xenstore $(DESTDIR)$(bindir)
-	set -e ; for c in $(CLIENTS) ; do \
-		ln -f $(DESTDIR)$(bindir)/xenstore $(DESTDIR)$(bindir)/$${c} ; \
-	done
-
--include $(DEPS_INCLUDE)
+-include $(PROG_DEP)
 
 # never delete any intermediate files.
 .SECONDARY:

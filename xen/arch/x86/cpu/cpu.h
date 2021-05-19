@@ -1,22 +1,30 @@
-/* attempt to consolidate cpu attributes */
-struct cpu_dev {
-	void		(*c_early_init)(struct cpuinfo_x86 *c);
-	void		(*c_init)(struct cpuinfo_x86 * c);
+
+struct cpu_model_info {
+	int vendor;
+	int family;
+	char *model_names[16];
 };
 
-extern const struct cpu_dev intel_cpu_dev, amd_cpu_dev, centaur_cpu_dev,
-    shanghai_cpu_dev, hygon_cpu_dev;
+/* attempt to consolidate cpu attributes */
+struct cpu_dev {
+	char	* c_vendor;
 
-extern bool_t opt_arat;
-extern unsigned int opt_cpuid_mask_ecx, opt_cpuid_mask_edx;
-extern unsigned int opt_cpuid_mask_xsave_eax;
-extern unsigned int opt_cpuid_mask_ext_ecx, opt_cpuid_mask_ext_edx;
+	/* some have two possibilities for cpuid string */
+	char	* c_ident[2];	
+
+	struct		cpu_model_info c_models[4];
+
+	void		(*c_init)(struct cpuinfo_x86 * c);
+	void		(*c_identify)(struct cpuinfo_x86 * c);
+	unsigned int	(*c_size_cache)(struct cpuinfo_x86 * c, unsigned int size);
+};
+
+extern struct cpu_dev * cpu_devs [X86_VENDOR_NUM];
 
 extern int get_model_name(struct cpuinfo_x86 *c);
 extern void display_cacheinfo(struct cpuinfo_x86 *c);
 
-extern void detect_ht(struct cpuinfo_x86 *c);
-extern bool detect_extended_topology(struct cpuinfo_x86 *c);
+extern void generic_identify(struct cpuinfo_x86 * c);
 
-void early_init_amd(struct cpuinfo_x86 *c);
-void amd_log_freq(const struct cpuinfo_x86 *c);
+extern void early_intel_workaround(struct cpuinfo_x86 *c);
+

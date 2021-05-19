@@ -13,40 +13,24 @@
     GNU General Public License for more details.
 
     You should have received a copy of the GNU General Public License
-    along with this program; If not, see <http://www.gnu.org/licenses/>.
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 #ifndef _XENSTORED_TRANSACTION_H
 #define _XENSTORED_TRANSACTION_H
 #include "xenstored_core.h"
 
-enum node_access_type {
-    NODE_ACCESS_READ,
-    NODE_ACCESS_WRITE,
-    NODE_ACCESS_DELETE
-};
-
 struct transaction;
 
-extern uint64_t generation;
-
-int do_transaction_start(struct connection *conn, struct buffered_data *node);
-int do_transaction_end(struct connection *conn, struct buffered_data *in);
+void do_transaction_start(struct connection *conn, struct buffered_data *node);
+void do_transaction_end(struct connection *conn, const char *arg);
 
 struct transaction *transaction_lookup(struct connection *conn, uint32_t id);
 
-/* inc/dec entry number local to trans while changing a node */
-void transaction_entry_inc(struct transaction *trans, unsigned int domid);
-void transaction_entry_dec(struct transaction *trans, unsigned int domid);
+/* This node was changed: can fail and longjmp. */
+void add_change_node(struct transaction *trans, const char *node,
+                     bool recurse);
 
-/* This node was accessed. */
-int access_node(struct connection *conn, struct node *node,
-                enum node_access_type type, TDB_DATA *key);
-
-/* Prepend the transaction to name if appropriate. */
-int transaction_prepend(struct connection *conn, const char *name,
-                        TDB_DATA *key);
-
-void conn_delete_all_transactions(struct connection *conn);
-int check_transactions(struct hashtable *hash);
-
+/* Return tdb context to use for this connection. */
+TDB_CONTEXT *tdb_transaction_context(struct transaction *trans);
 #endif /* _XENSTORED_TRANSACTION_H */

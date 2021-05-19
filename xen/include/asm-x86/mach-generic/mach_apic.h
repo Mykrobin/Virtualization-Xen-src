@@ -1,81 +1,50 @@
 #ifndef __ASM_MACH_APIC_H
 #define __ASM_MACH_APIC_H
 
-#include <asm/apic.h>
-#include <asm/io_apic.h>
 #include <asm/genapic.h>
-#include <asm/smp.h>
 
-/* ESR was originally disabled in Linux for NUMA-Q. Do we really need to? */
-#define esr_disable (0)
+#define esr_disable (genapic->ESR_DISABLE)
+#define NO_BALANCE_IRQ (genapic->no_balance_irq)
+#define INT_DELIVERY_MODE (genapic->int_delivery_mode)
+#define INT_DEST_MODE (genapic->int_dest_mode)
+#undef APIC_DEST_LOGICAL
+#define APIC_DEST_LOGICAL (genapic->apic_destination_logical)
+#define TARGET_CPUS	  (genapic->target_cpus())
+#define apic_id_registered (genapic->apic_id_registered)
+#define init_apic_ldr (genapic->init_apic_ldr)
+#define ioapic_phys_id_map (genapic->ioapic_phys_id_map)
+#define clustered_apic_check (genapic->clustered_apic_check) 
+#define apicid_to_node (genapic->apicid_to_node)
+#define cpu_to_logical_apicid (genapic->cpu_to_logical_apicid) 
+#define cpu_present_to_apicid (genapic->cpu_present_to_apicid)
+#define apicid_to_cpu_present (genapic->apicid_to_cpu_present)
+#define check_apicid_present (genapic->check_apicid_present)
+#define check_phys_apicid_present (genapic->check_phys_apicid_present)
+#define check_apicid_used (genapic->check_apicid_used)
+#define cpu_mask_to_apicid (genapic->cpu_mask_to_apicid)
+#define enable_apic_mode (genapic->enable_apic_mode)
+#define phys_pkg_id (genapic->phys_pkg_id)
 
-/* The following are dependent on APIC delivery mode (logical vs. physical). */
-#define INT_DELIVERY_MODE (genapic.int_delivery_mode)
-#define INT_DEST_MODE (genapic.int_dest_mode)
-#define TARGET_CPUS ((const typeof(cpu_online_map) *)&cpu_online_map)
-#define init_apic_ldr (genapic.init_apic_ldr)
-#define clustered_apic_check (genapic.clustered_apic_check)
-#define cpu_mask_to_apicid(mask) ({ \
-	/* \
-	 * There are a number of places where the address of a local variable \
-	 * gets passed here. The use of ?: in alternative_call<N>() triggers an \
-	 * "address of ... is always true" warning in such a case with at least \
-	 * gcc 7 and 8. Hence the seemingly pointless local variable here. \
-	 */ \
-	const cpumask_t *m_ = (mask); \
-	alternative_call(genapic.cpu_mask_to_apicid, m_); \
-})
-#define vector_allocation_cpumask(cpu) \
-	alternative_call(genapic.vector_allocation_cpumask, cpu)
-
-static inline void enable_apic_mode(void)
+static inline int mpc_apic_id(struct mpc_config_processor *m, 
+			struct mpc_config_translation *translation_record)
 {
-	/* Not needed for modern ES7000 which boot in Virtual Wire mode. */
-	/*es7000_sw_apic();*/
+	printk("Processor #%d %d:%d APIC version %d\n",
+			m->mpc_apicid,
+			(m->mpc_cpufeature & CPU_FAMILY_MASK) >> 8,
+			(m->mpc_cpufeature & CPU_MODEL_MASK) >> 4,
+			m->mpc_apicver);
+	return (m->mpc_apicid);
 }
 
-#define apicid_to_node(apicid) ((int)apicid_to_node[(u32)apicid])
-
-extern u32 bios_cpu_apicid[];
+static inline void setup_portio_remap(void)
+{
+}
 
 static inline int multi_timer_check(int apic, int irq)
 {
 	return 0;
 }
 
-extern void generic_apic_probe(void);
 extern void generic_bigsmp_probe(void);
-
-/*
- * The following functions based around phys_cpu_present_map are disabled in
- * some i386 Linux subarchitectures, and in x86_64 'cluster' genapic mode. I'm
- * really not sure why, since all local APICs should have distinct physical
- * IDs, and we need to know what they are.
- */
-static inline int apic_id_registered(void)
-{
-	return physid_isset(get_apic_id(),
-			    phys_cpu_present_map);
-}
-
-static inline void ioapic_phys_id_map(physid_mask_t *map)
-{
-	*map = phys_cpu_present_map;
-}
-
-static inline int check_apicid_used(const physid_mask_t *map, int apicid)
-{
-	return physid_isset(apicid, *map);
-}
-
-static inline int check_apicid_present(int apicid)
-{
-	return physid_isset(apicid, phys_cpu_present_map);
-}
-
-static inline void set_apicid(int phys_apicid, physid_mask_t *map)
-{
-	physid_set(phys_apicid, *map);
-}
 
 #endif /* __ASM_MACH_APIC_H */

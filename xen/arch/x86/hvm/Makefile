@@ -1,31 +1,14 @@
-obj-y += svm/
-obj-y += vmx/
-obj-y += viridian/
+include $(BASEDIR)/Rules.mk
 
-obj-y += asid.o
-obj-y += dm.o
-obj-bin-y += dom0_build.init.o
-obj-y += domain.o
-obj-y += emulate.o
-obj-$(CONFIG_GRANT_TABLE) += grant_table.o
-obj-y += hpet.o
+subdir-y += svm
+subdir-y += vmx
+
 obj-y += hvm.o
-obj-y += hypercall.o
+obj-y += i8259.o
 obj-y += intercept.o
 obj-y += io.o
-obj-y += ioreq.o
-obj-y += irq.o
-obj-y += monitor.o
-obj-y += mtrr.o
-obj-y += nestedhvm.o
-obj-y += pmtimer.o
-obj-y += quirks.o
-obj-y += rtc.o
-obj-y += save.o
-obj-y += stdvga.o
+obj-y += platform.o
 obj-y += vioapic.o
 obj-y += vlapic.o
-obj-y += vm_event.o
-obj-y += vmsi.o
-obj-y += vpic.o
-obj-y += vpt.o
+
+include $(BASEDIR)/Post.mk

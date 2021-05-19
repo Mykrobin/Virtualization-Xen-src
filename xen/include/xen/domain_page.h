@@ -9,13 +9,8 @@
 #ifndef __XEN_DOMAIN_PAGE_H__
 #define __XEN_DOMAIN_PAGE_H__
 
+#include <xen/config.h>
 #include <xen/mm.h>
-
-/*
- * Clear a given page frame, or copy between two of them.
- */
-void clear_domain_page(mfn_t mfn);
-void copy_domain_page(mfn_t dst, const mfn_t src);
 
 #ifdef CONFIG_DOMAIN_PAGE
 
@@ -23,58 +18,98 @@ void copy_domain_page(mfn_t dst, const mfn_t src);
  * Map a given page frame, returning the mapped virtual address. The page is
  * then accessible within the current VCPU until a corresponding unmap call.
  */
-void *map_domain_page(mfn_t mfn);
+extern void *map_domain_page(unsigned long pfn);
 
 /*
  * Pass a VA within a page previously mapped in the context of the
- * currently-executing VCPU via a call to map_domain_page().
+ * currently-executing VCPU via a call to map_domain_pages().
  */
-void unmap_domain_page(const void *va);
-
-/* 
- * Given a VA from map_domain_page(), return its underlying MFN.
- */
-mfn_t domain_page_map_to_mfn(const void *va);
+extern void unmap_domain_page(void *va);
 
 /*
  * Similar to the above calls, except the mapping is accessible in all
  * address spaces (not just within the VCPU that created the mapping). Global
  * mappings can also be unmapped from any context.
  */
-void *map_domain_page_global(mfn_t mfn);
-void unmap_domain_page_global(const void *va);
+extern void *map_domain_page_global(unsigned long pfn);
+extern void unmap_domain_page_global(void *va);
 
-#define __map_domain_page(pg)        map_domain_page(page_to_mfn(pg))
+#define DMCACHE_ENTRY_VALID 1U
+#define DMCACHE_ENTRY_HELD  2U
 
-static inline void *__map_domain_page_global(const struct page_info *pg)
+struct domain_mmap_cache {
+    unsigned long pfn;
+    void         *va;
+    unsigned int  flags;
+};
+
+static inline void
+domain_mmap_cache_init(struct domain_mmap_cache *cache)
 {
-    return map_domain_page_global(page_to_mfn(pg));
+    ASSERT(cache != NULL);
+    cache->flags = 0;
+    cache->pfn = 0;
+    cache->va = NULL;
+}
+
+static inline void *
+map_domain_page_with_cache(unsigned long pfn, struct domain_mmap_cache *cache)
+{
+    ASSERT(cache != NULL);
+    BUG_ON(cache->flags & DMCACHE_ENTRY_HELD);
+
+    if ( likely(cache->flags & DMCACHE_ENTRY_VALID) )
+    {
+        cache->flags |= DMCACHE_ENTRY_HELD;
+        if ( likely(pfn == cache->pfn) )
+            goto done;
+        unmap_domain_page(cache->va);
+    }
+
+    cache->pfn   = pfn;
+    cache->va    = map_domain_page(pfn);
+    cache->flags = DMCACHE_ENTRY_HELD | DMCACHE_ENTRY_VALID;
+
+ done:
+    return cache->va;
+}
+
+static inline void
+unmap_domain_page_with_cache(void *va, struct domain_mmap_cache *cache)
+{
+    ASSERT(cache != NULL);
+    cache->flags &= ~DMCACHE_ENTRY_HELD;
+}
+
+static inline void
+domain_mmap_cache_destroy(struct domain_mmap_cache *cache)
+{
+    ASSERT(cache != NULL);
+    BUG_ON(cache->flags & DMCACHE_ENTRY_HELD);
+
+    if ( likely(cache->flags & DMCACHE_ENTRY_VALID) )
+    {
+        unmap_domain_page(cache->va);
+        cache->flags = 0;
+    }
 }
 
 #else /* !CONFIG_DOMAIN_PAGE */
 
-#define map_domain_page(mfn)                __mfn_to_virt(mfn_x(mfn))
-#define __map_domain_page(pg)               page_to_virt(pg)
+#define map_domain_page(pfn)                maddr_to_virt((pfn)<<PAGE_SHIFT)
 #define unmap_domain_page(va)               ((void)(va))
-#define domain_page_map_to_mfn(va)          _mfn(virt_to_mfn((unsigned long)(va)))
 
-static inline void *map_domain_page_global(mfn_t mfn)
-{
-    return mfn_to_virt(mfn_x(mfn));
-}
+#define map_domain_page_global(pfn)         maddr_to_virt((pfn)<<PAGE_SHIFT)
+#define unmap_domain_page_global(va)        ((void)(va))
 
-static inline void *__map_domain_page_global(const struct page_info *pg)
-{
-    return page_to_virt(pg);
-}
+struct domain_mmap_cache { 
+};
 
-static inline void unmap_domain_page_global(const void *va) {};
+#define domain_mmap_cache_init(c)           ((void)(c))
+#define map_domain_page_with_cache(pfn,c)   (map_domain_page(pfn))
+#define unmap_domain_page_with_cache(va,c)  ((void)(va))
+#define domain_mmap_cache_destroy(c)        ((void)(c))
 
 #endif /* !CONFIG_DOMAIN_PAGE */
-
-#define UNMAP_DOMAIN_PAGE(p) do {   \
-    unmap_domain_page(p);           \
-    (p) = NULL;                     \
-} while ( false )
 
 #endif /* __XEN_DOMAIN_PAGE_H__ */

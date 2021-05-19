@@ -11,7 +11,8 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * Copyright (C) 2005 Mike Wray Hewlett-Packard
  * Copyright (C) 2005 Christian Limpach <Christian.Limpach@cl.cam.ac.uk>
@@ -27,9 +28,9 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <errno.h>
 
-#include <xenstore.h>
+#include <xenctrl.h>
+#include "xs.h"
 
 /** @file
  * Python interface to the Xen Store Daemon (xs).
@@ -43,16 +44,6 @@
 #define PKG "xen.lowlevel.xs"
 #define CLS "xs"
 
-#if PY_MAJOR_VERSION < 3
-/* Python 2 compatibility */
-#define PyLong_FromLong PyInt_FromLong
-#undef PyLong_Check
-#define PyLong_Check PyInt_Check
-#define PyLong_AsLong PyInt_AsLong
-#endif
-
-static PyObject *xs_error;
-
 /** Python wrapper round an xs handle.
  */
 typedef struct XsHandle {
@@ -61,23 +52,15 @@ typedef struct XsHandle {
     PyObject *watches;
 } XsHandle;
 
-static void xs_set_error(int value)
-{
-	errno = value;
-	PyErr_SetFromErrno(xs_error);
-}
-
 static inline struct xs_handle *xshandle(XsHandle *self)
 {
     struct xs_handle *xh = self->xh;
     if (!xh)
-	xs_set_error(EINVAL);
+        PyErr_SetString(PyExc_RuntimeError, "invalid xenstore daemon handle");
     return xh;
 }
 
 static void remove_watch(XsHandle *xsh, PyObject *token);
-
-static PyObject *match_watch_by_token(XsHandle *self, char **xsval);
 
 static PyObject *none(bool result);
 
@@ -94,7 +77,7 @@ static int parse_transaction_path(XsHandle *self, PyObject *args,
 	"\n"                                            \
 	"Returns: [string] data read.\n"                \
 	"         None if key doesn't exist.\n"         \
-	"Raises xen.lowlevel.xs.Error on error.\n"               \
+	"Raises RuntimeError on error.\n"               \
 	"\n"
 
 static PyObject *xspy_read(XsHandle *self, PyObject *args)
@@ -113,7 +96,7 @@ static PyObject *xspy_read(XsHandle *self, PyObject *args)
     xsval = xs_read(xh, th, path, &xsval_n);
     Py_END_ALLOW_THREADS
     if (xsval) {
-        PyObject *val = PyBytes_FromStringAndSize(xsval, xsval_n);
+        PyObject *val = PyString_FromStringAndSize(xsval, xsval_n);
         free(xsval);
         return val;
     }
@@ -130,7 +113,7 @@ static PyObject *xspy_read(XsHandle *self, PyObject *args)
 	" data   [string] : data to write.\n"			\
 	"\n"							\
 	"Returns None on success.\n"				\
-	"Raises xen.lowlevel.xs.Error on error.\n"			\
+	"Raises RuntimeError on error.\n"			\
 	"\n"
 
 static PyObject *xspy_write(XsHandle *self, PyObject *args)
@@ -166,7 +149,7 @@ static PyObject *xspy_write(XsHandle *self, PyObject *args)
 	"\n"							\
 	"Returns: [string array] list of subdirectory names.\n"	\
 	"         None if key doesn't exist.\n"			\
-	"Raises xen.lowlevel.xs.Error on error.\n"			\
+	"Raises RuntimeError on error.\n"			\
 	"\n"
 
 static PyObject *xspy_ls(XsHandle *self, PyObject *args)
@@ -186,14 +169,10 @@ static PyObject *xspy_ls(XsHandle *self, PyObject *args)
     Py_END_ALLOW_THREADS
 
     if (xsval) {
-        size_t i;
+        int i;
         PyObject *val = PyList_New(xsval_n);
         for (i = 0; i < xsval_n; i++)
-#if PY_MAJOR_VERSION >= 3
-            PyList_SetItem(val, i, PyUnicode_FromString(xsval[i]));
-#else
-            PyList_SetItem(val, i, PyBytes_FromString(xsval[i]));
-#endif
+            PyList_SetItem(val, i, PyString_FromString(xsval[i]));
         free(xsval);
         return val;
     }
@@ -205,11 +184,10 @@ static PyObject *xspy_ls(XsHandle *self, PyObject *args)
 
 #define xspy_mkdir_doc "\n"					\
 	"Make a directory.\n"					\
-	" transaction [string]: transaction handle.\n"		\
-	" path [string]       : path to directory to create.\n"	\
+	" path [string]: path to directory to create.\n"	\
 	"\n"							\
 	"Returns None on success.\n"				\
-	"Raises xen.lowlevel.xs.Error on error.\n"			\
+	"Raises RuntimeError on error.\n"			\
 	"\n"
 
 static PyObject *xspy_mkdir(XsHandle *self, PyObject *args)
@@ -237,7 +215,7 @@ static PyObject *xspy_mkdir(XsHandle *self, PyObject *args)
 	" path [string] : path to remove\n"             \
 	"\n"                                            \
 	"Returns None on success.\n"                    \
-	"Raises xen.lowlevel.xs.Error on error.\n"               \
+	"Raises RuntimeError on error.\n"               \
 	"\n"
 
 static PyObject *xspy_rm(XsHandle *self, PyObject *args)
@@ -265,7 +243,7 @@ static PyObject *xspy_rm(XsHandle *self, PyObject *args)
 	" path [string]:        xenstore path.\n"       \
 	"\n"                                            \
 	"Returns: permissions array.\n"                 \
-	"Raises xen.lowlevel.xs.Error on error.\n"               \
+	"Raises RuntimeError on error.\n"               \
 	"\n"
 
 static PyObject *xspy_get_permissions(XsHandle *self, PyObject *args)
@@ -276,7 +254,7 @@ static PyObject *xspy_get_permissions(XsHandle *self, PyObject *args)
     struct xs_handle *xh = xshandle(self);
     struct xs_permissions *perms;
     unsigned int perms_n = 0;
-    size_t i;
+    int i;
 
     xs_transaction_t th;
     char *thstr;
@@ -294,12 +272,11 @@ static PyObject *xspy_get_permissions(XsHandle *self, PyObject *args)
 
     if (perms) {
         PyObject *val = PyList_New(perms_n);
-        for (i = 0; i < perms_n; i++) {
-            PyObject *p =
-                Py_BuildValue("{s:i,s:i,s:i}",
-                              "dom",   perms[i].id,
-                              "read",  perms[i].perms & XS_PERM_READ,
-                              "write", perms[i].perms & XS_PERM_WRITE);
+        for (i = 0; i < perms_n; i++, perms++) {
+            PyObject *p = Py_BuildValue("{s:i,s:i,s:i}",
+                                        "dom",  perms->id,
+                                        "read", perms->perms & XS_PERM_READ,
+                                        "write",perms->perms & XS_PERM_WRITE);
             PyList_SetItem(val, i, p);
         }
 
@@ -307,7 +284,7 @@ static PyObject *xspy_get_permissions(XsHandle *self, PyObject *args)
         return val;
     }
     else {
-        PyErr_SetFromErrno(xs_error);
+        PyErr_SetFromErrno(PyExc_RuntimeError);
         return NULL;
     }
 }
@@ -319,7 +296,7 @@ static PyObject *xspy_get_permissions(XsHandle *self, PyObject *args)
 	" perms               : permissions.\n"         \
 	"\n"                                            \
 	"Returns None on success.\n"                    \
-	"Raises xen.lowlevel.xs.Error on error.\n"               \
+	"Raises RuntimeError on error.\n"               \
 	"\n"
 
 static PyObject *xspy_set_permissions(XsHandle *self, PyObject *args)
@@ -337,7 +314,6 @@ static PyObject *xspy_set_permissions(XsHandle *self, PyObject *args)
 
     xs_transaction_t th;
     char *thstr;
-    PyObject *ret = NULL;
 
     if (!xh)
         goto exit;
@@ -347,22 +323,18 @@ static PyObject *xspy_set_permissions(XsHandle *self, PyObject *args)
     th = strtoul(thstr, NULL, 16);
 
     if (!PyList_Check(perms)) {
-	xs_set_error(EINVAL);
+        PyErr_SetString(PyExc_RuntimeError, "perms must be a list");
         goto exit;
     }
-
     xsperms_n = PyList_Size(perms);
-    /* NB. alloc +1 so we can change the owner if necessary. */
-    xsperms = calloc(xsperms_n + 1, sizeof(struct xs_permissions));
+    xsperms = calloc(xsperms_n, sizeof(struct xs_permissions));
     if (!xsperms) {
-	xs_set_error(ENOMEM);
+        PyErr_SetString(PyExc_RuntimeError, "out of memory");
         goto exit;
     }
-
     tuple0 = PyTuple_New(0);
     if (!tuple0)
         goto exit;
-
     for (i = 0; i < xsperms_n; i++) {
         /* Read/write perms. Set these. */
         int p_read = 0, p_write = 0;
@@ -375,32 +347,21 @@ static PyObject *xspy_set_permissions(XsHandle *self, PyObject *args)
         if (p_write)
             xsperms[i].perms |= XS_PERM_WRITE;
     }
-
-    /*
-     * Is the caller trying to restrict access to the first specified
-     * domain? If so then it cannot be owner, so we force dom0 as owner.
-     */
-    if (xsperms_n && xsperms[0].perms && xsperms[0].id) {
-        memmove(&xsperms[1], &xsperms[0], xsperms_n * sizeof(*xsperms));
-        xsperms[0].id = xsperms[0].perms = 0;
-        xsperms_n++;
-    }
-
     Py_BEGIN_ALLOW_THREADS
     result = xs_set_permissions(xh, th, path, xsperms, xsperms_n);
     Py_END_ALLOW_THREADS
     if (!result) {
-        PyErr_SetFromErrno(xs_error);
+        PyErr_SetFromErrno(PyExc_RuntimeError);
         goto exit;
     }
 
     Py_INCREF(Py_None);
-    ret = Py_None;
+    return Py_None;
 
  exit:
     Py_XDECREF(tuple0);
     free(xsperms);
-    return ret;
+    return NULL;
 }
 
 #define xspy_watch_doc "\n"						\
@@ -409,7 +370,7 @@ static PyObject *xspy_set_permissions(XsHandle *self, PyObject *args)
 	" token    [string] : returned in watch notification.\n"	\
 	"\n"								\
 	"Returns None on success.\n"					\
-	"Raises xen.lowlevel.xs.Error on error.\n"				\
+	"Raises RuntimeError on error.\n"				\
 	"\n"
 
 /* Each 10 bits takes ~ 3 digits, plus one, plus one for nul terminator. */
@@ -443,7 +404,7 @@ static PyObject *xspy_watch(XsHandle *self, PyObject *args)
     if (i == PyList_Size(self->watches))
         PyList_Append(self->watches, token);
 
-    snprintf(token_str, sizeof(token_str), "%li", (unsigned long)token);
+    sprintf(token_str, "%li", (unsigned long)token);
     Py_BEGIN_ALLOW_THREADS
     result = xs_watch(xh, path, token_str);
     Py_END_ALLOW_THREADS
@@ -455,57 +416,11 @@ static PyObject *xspy_watch(XsHandle *self, PyObject *args)
 }
 
 
-#define xspy_fileno_doc "\n"                              \
-	"Return the FD to poll for notifications when watches fire.\n"   \
-	"Returns: [int] file descriptor.\n"                \
-	"\n"
-
-static PyObject *xspy_fileno(XsHandle *self)
-{
-    struct xs_handle *xh = xshandle(self);
-    int fd;
-
-    if (!xh)
-        return NULL;
-
-    fd = xs_fileno(xh);
-
-    return PyLong_FromLong(fd);
-}
-
-
-#define xspy_check_watch_doc "\n"				\
-	"Check for watch notifications without blocking.\n"	\
-	"\n"							\
-	"Returns: [tuple] (path, token).\n"			\
-	"         None if no watches have fired.\n"             \
-	"Raises xen.lowlevel.xs.Error on error.\n"	        \
-	"\n"
-
-static PyObject *xspy_check_watch(XsHandle *self, PyObject *args)
-{
-    struct xs_handle *xh = xshandle(self);
-    PyObject *val = NULL;
-    char **xsval;
-
-    if (!xh)
-        return NULL;
-
-    xsval = xs_check_watch(xh);
-    if (!xsval) {
-        return none(errno == EAGAIN);
-    }
-
-    val = match_watch_by_token(self, xsval);
-    free(xsval);
-    return val;
-}
-
 #define xspy_read_watch_doc "\n"				\
 	"Read a watch notification.\n"				\
 	"\n"							\
 	"Returns: [tuple] (path, token).\n"			\
-	"Raises xen.lowlevel.xs.Error on error.\n"			\
+	"Raises RuntimeError on error.\n"			\
 	"\n"
 
 static PyObject *xspy_read_watch(XsHandle *self, PyObject *args)
@@ -513,6 +428,8 @@ static PyObject *xspy_read_watch(XsHandle *self, PyObject *args)
     struct xs_handle *xh = xshandle(self);
     PyObject *val = NULL;
     char **xsval;
+    PyObject *token;
+    int i;
     unsigned int num;
 
     if (!xh)
@@ -523,18 +440,30 @@ again:
     xsval = xs_read_watch(xh, &num);
     Py_END_ALLOW_THREADS
     if (!xsval) {
-        PyErr_SetFromErrno(xs_error);
-        return val;
+        PyErr_SetFromErrno(PyExc_RuntimeError);
+        goto exit;
     }
-
-    val = match_watch_by_token(self, xsval);
+    if (sscanf(xsval[XS_WATCH_TOKEN], "%li", (unsigned long *)&token) != 1) {
+        PyErr_SetString(PyExc_RuntimeError, "invalid token");
+        goto exit;
+    }
+    for (i = 0; i < PyList_Size(self->watches); i++) {
+        if (token == PyList_GetItem(self->watches, i))
+            break;
+    }
+    if (i == PyList_Size(self->watches)) {
+      /* We do not have a registered watch for the one that has just fired.
+         Ignore this -- a watch that has been recently deregistered can still
+         have watches in transit.  This is a blocking method, so go back to
+         read again.
+      */
+      free(xsval);
+      goto again;
+    }
+    /* Create tuple (path, token). */
+    val = Py_BuildValue("(sO)", xsval[XS_WATCH_PATH], token);
+ exit:
     free(xsval);
-
-    if (!val && errno == EAGAIN) {
-        PyErr_Clear();
-        goto again;
-    }
-
     return val;
 }
 
@@ -544,7 +473,7 @@ again:
 	" token [string] : token from the watch.\n"	\
 	"\n"						\
 	"Returns None on success.\n"			\
-	"Raises xen.lowlevel.xs.Error on error.\n"		\
+	"Raises RuntimeError on error.\n"		\
 	"\n"
 
 static PyObject *xspy_unwatch(XsHandle *self, PyObject *args)
@@ -560,7 +489,7 @@ static PyObject *xspy_unwatch(XsHandle *self, PyObject *args)
     if (!PyArg_ParseTuple(args, "sO", &path, &token))
         return NULL;
 
-    snprintf(token_str, sizeof(token_str), "%li", (unsigned long)token);
+    sprintf(token_str, "%li", (unsigned long)token);
     Py_BEGIN_ALLOW_THREADS
     result = xs_unwatch(xh, path, token_str);
     Py_END_ALLOW_THREADS
@@ -574,7 +503,7 @@ static PyObject *xspy_unwatch(XsHandle *self, PyObject *args)
 	"Start a transaction.\n"				\
 	"\n"							\
 	"Returns transaction handle on success.\n"		\
-	"Raises xen.lowlevel.xs.Error on error.\n"			\
+	"Raises RuntimeError on error.\n"			\
 	"\n"
 
 static PyObject *xspy_transaction_start(XsHandle *self)
@@ -591,26 +520,21 @@ static PyObject *xspy_transaction_start(XsHandle *self)
     Py_END_ALLOW_THREADS
 
     if (th == XBT_NULL) {
-        PyErr_SetFromErrno(xs_error);
+        PyErr_SetFromErrno(PyExc_RuntimeError);
         return NULL;
     }
 
-    snprintf(thstr, sizeof(thstr), "%lX", (unsigned long)th);
-#if PY_MAJOR_VERSION >= 3
-    return PyUnicode_FromString(thstr);
-#else
-    return PyBytes_FromString(thstr);
-#endif
+    sprintf(thstr, "%lX", (unsigned long)th);
+    return PyString_FromString(thstr);
 }
 
 #define xspy_transaction_end_doc "\n"					\
 	"End the current transaction.\n"				\
 	"Attempts to commit the transaction unless abort is true.\n"	\
-	" transaction [string] : transaction handle.\n"			\
-	" abort [int]          : abort flag (default 0).\n"		\
+	" abort [int]: abort flag (default 0).\n"			\
 	"\n"								\
 	"Returns True on success, False if you need to try again.\n"	\
-	"Raises xen.lowlevel.xs.Error on error.\n"				\
+	"Raises RuntimeError on error.\n"				\
 	"\n"
 
 static PyObject *xspy_transaction_end(XsHandle *self, PyObject *args,
@@ -647,7 +571,7 @@ static PyObject *xspy_transaction_end(XsHandle *self, PyObject *args,
         return Py_False;
     }
     else {
-        PyErr_SetFromErrno(xs_error);
+        PyErr_SetFromErrno(PyExc_RuntimeError);
         return NULL;
     }
 }
@@ -660,12 +584,12 @@ static PyObject *xspy_transaction_end(XsHandle *self, PyObject *args,
 	" port [int]   : port the domain is using for xenstore\n"	\
 	"\n"								\
 	"Returns None on success.\n"					\
-	"Raises xen.lowlevel.xs.Error on error.\n"				\
+	"Raises RuntimeError on error.\n"				\
 	"\n"
 
 static PyObject *xspy_introduce_domain(XsHandle *self, PyObject *args)
 {
-    uint32_t dom;
+    domid_t dom;
     unsigned long page;
     unsigned int port;
 
@@ -684,63 +608,6 @@ static PyObject *xspy_introduce_domain(XsHandle *self, PyObject *args)
     return none(result);
 }
 
-#define xspy_set_target_doc "\n"					\
-        "Tell xenstore that a domain is targetting another one so it\n" \
-        "should let it tinker with it.\n"	                        \
-	" dom    [int]   : domain id\n"					\
-	" target [int]   : domain id of the target\n"			\
-	"\n"								\
-	"Returns None on success.\n"					\
-	"Raises xen.lowlevel.xs.Error on error.\n"			\
-	"\n"
-
-static PyObject *xspy_set_target(XsHandle *self, PyObject *args)
-{
-    uint32_t dom;
-    uint32_t target;
-
-    struct xs_handle *xh = xshandle(self);
-    bool result = 0;
-
-    if (!xh)
-        return NULL;
-    if (!PyArg_ParseTuple(args, "ii", &dom, &target))
-        return NULL;
-
-    Py_BEGIN_ALLOW_THREADS
-    result = xs_set_target(xh, dom, target);
-    Py_END_ALLOW_THREADS
-
-    return none(result);
-}
-
-#define xspy_resume_domain_doc "\n"                                \
-	"Tell xenstore to clear its shutdown flag for a domain.\n" \
-	"This ensures that a subsequent shutdown will fire the\n"  \
-	"appropriate watches.\n"                                   \
-	" dom [int]: domain id\n"			           \
-        "\n"						           \
-        "Returns None on success.\n"				   \
-        "Raises xen.lowlevel.xs.Error on error.\n"
-
-static PyObject *xspy_resume_domain(XsHandle *self, PyObject *args)
-{
-    uint32_t dom;
-
-    struct xs_handle *xh = xshandle(self);
-    bool result = 0;
-
-    if (!xh)
-        return NULL;
-    if (!PyArg_ParseTuple(args, "i", &dom))
-        return NULL;
-
-    Py_BEGIN_ALLOW_THREADS
-    result = xs_resume_domain(xh, dom);
-    Py_END_ALLOW_THREADS
-
-    return none(result);
-}
 
 #define xspy_release_domain_doc "\n"					\
 	"Tell xenstore to release its channel to a domain.\n"		\
@@ -748,12 +615,12 @@ static PyObject *xspy_resume_domain(XsHandle *self, PyObject *args)
 	" dom [int]: domain id\n"					\
 	"\n"								\
 	"Returns None on success.\n"					\
-	"Raises xen.lowlevel.xs.Error on error.\n"				\
+	"Raises RuntimeError on error.\n"				\
 	"\n"
 
 static PyObject *xspy_release_domain(XsHandle *self, PyObject *args)
 {
-    uint32_t dom;
+    domid_t dom;
 
     struct xs_handle *xh = xshandle(self);
     bool result = 0;
@@ -775,7 +642,7 @@ static PyObject *xspy_release_domain(XsHandle *self, PyObject *args)
 	"Close the connection to xenstore.\n"	\
 	"\n"					\
 	"Returns None on success.\n"		\
-	"Raises xen.lowlevel.xs.Error on error.\n"	\
+	"Raises RuntimeError on error.\n"	\
 	"\n"
 
 static PyObject *xspy_close(XsHandle *self)
@@ -791,7 +658,7 @@ static PyObject *xspy_close(XsHandle *self)
         PySequence_SetItem(self->watches, i, Py_None);
     }
 
-    xs_close(xh);
+    xs_daemon_close(xh);
     self->xh = NULL;
 
     Py_INCREF(Py_None);
@@ -804,13 +671,13 @@ static PyObject *xspy_close(XsHandle *self)
 	" domid [int]: domain id\n"			\
 	"\n"						\
 	"Returns: [string] domain store path.\n"	\
-	"Raises xen.lowlevel.xs.Error on error.\n"		\
+	"Raises RuntimeError on error.\n"		\
 	"\n"
 
 static PyObject *xspy_get_domain_path(XsHandle *self, PyObject *args)
 {
     struct xs_handle *xh = xshandle(self);
-    uint32_t domid;
+    int domid;
     char *xsval;
 
     if (!xh)
@@ -823,11 +690,7 @@ static PyObject *xspy_get_domain_path(XsHandle *self, PyObject *args)
     Py_END_ALLOW_THREADS
 
     if (xsval) {
-#if PY_MAJOR_VERSION >= 3
-        PyObject *val = PyUnicode_FromString(xsval);
-#else
-        PyObject *val = PyBytes_FromString(xsval);
-#endif
+        PyObject *val = PyString_FromString(xsval);
         free(xsval);
         return val;
     }
@@ -871,7 +734,7 @@ static int parse_transaction_path(XsHandle *self, PyObject *args,
 
     *xh = xshandle(self);
 
-    if (!*xh)
+    if (!xh)
         return 0;
 
     if (!PyArg_ParseTuple(args, "ss", &thstr, path))
@@ -883,33 +746,6 @@ static int parse_transaction_path(XsHandle *self, PyObject *args,
 }
 
 
-static PyObject *match_watch_by_token(XsHandle *self, char **xsval)
-{
-    PyObject *token;
-    int i;
-
-    if (sscanf(xsval[XS_WATCH_TOKEN], "%li", (unsigned long *)&token) != 1) {
-        xs_set_error(EINVAL);
-        return NULL;
-    }
-    for (i = 0; i < PyList_Size(self->watches); i++) {
-        if (token == PyList_GetItem(self->watches, i))
-            break;
-    }
-    if (i == PyList_Size(self->watches)) {
-        /* We do not have a registered watch for the one that has just fired.
-           Ignore this -- a watch that has been recently deregistered can still
-           have watches in transit.
-        */
-        xs_set_error(EAGAIN);
-        return NULL;
-    }
-
-    /* Create tuple (path, token). */
-    return Py_BuildValue("(sO)", xsval[XS_WATCH_PATH], token);
-}
-
-
 static PyObject *none(bool result)
 {
     if (result) {
@@ -917,7 +753,7 @@ static PyObject *none(bool result)
         return Py_None;
     }
     else {
-        PyErr_SetFromErrno(xs_error);
+        PyErr_SetFromErrno(PyExc_RuntimeError);
         return NULL;
     }
 }
@@ -939,19 +775,20 @@ static PyMethodDef xshandle_methods[] = {
     XSPY_METH(set_permissions,   METH_VARARGS),
     XSPY_METH(watch,             METH_VARARGS),
     XSPY_METH(read_watch,        METH_NOARGS),
-    XSPY_METH(check_watch,       METH_NOARGS),
     XSPY_METH(unwatch,           METH_VARARGS),
     XSPY_METH(transaction_start, METH_NOARGS),
     XSPY_METH(transaction_end,   METH_VARARGS | METH_KEYWORDS),
     XSPY_METH(introduce_domain,  METH_VARARGS),
-    XSPY_METH(set_target,        METH_VARARGS),
-    XSPY_METH(resume_domain,     METH_VARARGS),
     XSPY_METH(release_domain,    METH_VARARGS),
     XSPY_METH(close,             METH_NOARGS),
     XSPY_METH(get_domain_path,   METH_VARARGS),
-    XSPY_METH(fileno,            METH_NOARGS),
     { NULL /* Sentinel. */ },
 };
+
+static PyObject *xshandle_getattr(PyObject *self, char *name)
+{
+    return Py_FindMethod(xshandle_methods, self, name);
+}
 
 static PyObject *
 xshandle_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
@@ -985,101 +822,93 @@ xshandle_init(XsHandle *self, PyObject *args, PyObject *kwds)
                                      &readonly))
         goto fail;
 
-    self->xh = xs_open(0);
+    self->xh = (readonly ? xs_daemon_open_readonly() : xs_daemon_open());
     if (!self->xh)
         goto fail;
 
     return 0;
 
  fail:
-    PyErr_SetFromErrno(xs_error);
+    PyErr_SetFromErrno(PyExc_RuntimeError);
     return -1;
 }
 
 static void xshandle_dealloc(XsHandle *self)
 {
     if (self->xh) {
-        xs_close(self->xh);
+        xs_daemon_close(self->xh);
         self->xh = NULL;
     }
 
     Py_XDECREF(self->watches);
 
-    Py_TYPE(self)->tp_free((PyObject *)self);
+    self->ob_type->tp_free((PyObject *)self);
 }
 
 static PyTypeObject xshandle_type = {
-#if PY_MAJOR_VERSION >= 3
-    .ob_base = { PyObject_HEAD_INIT(NULL) },
-#else
     PyObject_HEAD_INIT(NULL)
-#endif
-    .tp_name = PKG "." CLS,
-    .tp_basicsize = sizeof(XsHandle),
-    .tp_itemsize = 0,
-    .tp_dealloc = (destructor)xshandle_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_doc = "Xenstore connections",
-    .tp_methods = xshandle_methods,
-    .tp_init = (initproc)xshandle_init,
-    .tp_new = xshandle_new,
+    0,
+    PKG "." CLS,
+    sizeof(XsHandle),
+    0,
+    (destructor)xshandle_dealloc, /* tp_dealloc        */
+    NULL,                         /* tp_print          */
+    xshandle_getattr,             /* tp_getattr        */
+    NULL,                         /* tp_setattr        */
+    NULL,                         /* tp_compare        */
+    NULL,                         /* tp_repr           */
+    NULL,                         /* tp_as_number      */
+    NULL,                         /* tp_as_sequence    */
+    NULL,                         /* tp_as_mapping     */
+    NULL,                         /* tp_hash           */
+    NULL,                         /* tp_call           */
+    NULL,                         /* tp_str            */
+    NULL,                         /* tp_getattro       */
+    NULL,                         /* tp_setattro       */
+    NULL,                         /* tp_as_buffer      */
+    Py_TPFLAGS_DEFAULT,           /* tp_flags          */
+    "Xenstore connections",       /* tp_doc            */
+    NULL,                         /* tp_traverse       */
+    NULL,                         /* tp_clear          */
+    NULL,                         /* tp_richcompare    */
+    0,                            /* tp_weaklistoffset */
+    NULL,                         /* tp_iter           */
+    NULL,                         /* tp_iternext       */
+    xshandle_methods,             /* tp_methods        */
+    NULL,                         /* tp_members        */
+    NULL,                         /* tp_getset         */
+    NULL,                         /* tp_base           */
+    NULL,                         /* tp_dict           */
+    NULL,                         /* tp_descr_get      */
+    NULL,                         /* tp_descr_set      */
+    0,                            /* tp_dictoffset     */
+    (initproc)xshandle_init,      /* tp_init           */
+    NULL,                         /* tp_alloc          */
+    xshandle_new,                 /* tp_new            */
 };
 
 static PyMethodDef xs_methods[] = { { NULL } };
 
-#if PY_MAJOR_VERSION >= 3
-static PyModuleDef xs_module = {
-    PyModuleDef_HEAD_INIT,
-    PKG,     /* name */
-    NULL,   /* docstring */
-    -1,     /* size of per-interpreter state, -1 means the module use global
-               variables */
-    xs_methods
-};
-#endif
-
-#if PY_MAJOR_VERSION >= 3
-#define INITERROR return NULL
-PyMODINIT_FUNC PyInit_xs(void)
-#else
-#define INITERROR return
 PyMODINIT_FUNC initxs(void)
-#endif
 {
     PyObject* m;
 
     if (PyType_Ready(&xshandle_type) < 0)
-        INITERROR;
+        return;
 
-#if PY_MAJOR_VERSION >= 3
-    m = PyModule_Create(&xs_module);
-#else
     m = Py_InitModule(PKG, xs_methods);
-#endif
 
     if (m == NULL)
-        INITERROR;
-
-    xs_error = PyErr_NewException(PKG ".Error", PyExc_RuntimeError, NULL);
-    if (xs_error == NULL) {
-        Py_DECREF(m);
-        INITERROR;
-    }
+      return;
 
     Py_INCREF(&xshandle_type);
     PyModule_AddObject(m, CLS, (PyObject *)&xshandle_type);
-
-    Py_INCREF(xs_error);
-    PyModule_AddObject(m, "Error", xs_error);
-#if PY_MAJOR_VERSION >= 3
-    return m;
-#endif
 }
 
 
 /*
  * Local variables:
- *  mode: C
+ *  c-indent-level: 4
  *  c-basic-offset: 4
  * End:
  */

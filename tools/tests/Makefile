@@ -1,16 +1,23 @@
-XEN_ROOT = $(CURDIR)/../..
+
+XEN_ROOT=../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-SUBDIRS-y :=
-SUBDIRS-y += resource
-SUBDIRS-$(CONFIG_X86) += cpu-policy
-SUBDIRS-$(CONFIG_X86) += mce-test
-ifneq ($(clang),y)
-SUBDIRS-$(CONFIG_X86) += x86_emulator
-endif
-SUBDIRS-y += xenstore
-SUBDIRS-y += depriv
-SUBDIRS-$(CONFIG_HAS_PCI) += vpci
+TARGET := test_x86_emulator
 
-.PHONY: all clean install distclean uninstall
-all clean distclean install uninstall: %: subdirs-%
+HOSTCFLAGS += -D__TEST_HARNESS__
+
+all: $(TARGET)
+
+$(TARGET): x86_emulate.o test_x86_emulator.o
+	$(HOSTCC) -o $@ $^
+
+clean:
+	rm -rf $(TARGET) *.o *~ core
+
+install:
+
+x86_emulate.o: $(XEN_ROOT)/xen/arch/x86/x86_emulate.c
+	$(HOSTCC) $(HOSTCFLAGS) -I$(XEN_ROOT)/xen/include -c -o $@ $<
+
+%.o: %.c
+	$(HOSTCC) $(HOSTCFLAGS) -I$(XEN_ROOT)/xen/include -c -o $@ $<

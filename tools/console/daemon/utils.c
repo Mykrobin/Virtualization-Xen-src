@@ -14,7 +14,8 @@
  *  GNU General Public License for more details.
  * 
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 \*/
 
 #include <sys/types.h>
@@ -31,12 +32,38 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <string.h>
-#include <signal.h>
 
+#include "xenctrl.h"
 #include "utils.h"
 
 struct xs_handle *xs;
-xc_interface *xc;
+int xc;
+
+bool _read_write_sync(int fd, void *data, size_t size, bool do_read)
+{
+	size_t offset = 0;
+	ssize_t len;
+
+	while (offset < size) {
+		if (do_read) {
+			len = read(fd, data + offset, size - offset);
+		} else {
+			len = write(fd, data + offset, size - offset);
+		}
+
+		if (len < 1) {
+			if (len == -1 && (errno == EAGAIN || errno == EINTR)) {
+				continue;
+			} else {
+				return false;
+			}
+		} else {
+			offset += len;
+		}
+	}
+
+	return true;
+}
 
 static void child_exit(int sig)
 {
@@ -50,6 +77,10 @@ void daemonize(const char *pidfile)
 	int len;
 	int i;
 	char buf[100];
+
+	if (getppid() == 1) {
+		return;
+	}
 
 	if ((pid = fork()) > 0) {
 		exit(0);
@@ -81,7 +112,7 @@ void daemonize(const char *pidfile)
 	if (chdir("/") < 0)
 		exit (1);
 
-	fd = open(pidfile, O_RDWR | O_CREAT, S_IRUSR|S_IWUSR);
+	fd = open(pidfile, O_RDWR | O_CREAT);
 	if (fd == -1) {
 		exit(1);
 	}
@@ -90,7 +121,7 @@ void daemonize(const char *pidfile)
 		exit(1);
 	}
 
-	len = snprintf(buf, sizeof(buf), "%ld\n", (long)getpid());
+	len = sprintf(buf, "%d\n", getpid());
 	if (write(fd, buf, len) < 0)
 		exit(1);
 
@@ -98,21 +129,20 @@ void daemonize(const char *pidfile)
 	signal(SIGTSTP, SIG_IGN);
 	signal(SIGTTOU, SIG_IGN);
 	signal(SIGTTIN, SIG_IGN);
-	close(fd);
 }
 
 bool xen_setup(void)
 {
 	
-	xs = xs_open(0);
+	xs = xs_daemon_open();
 	if (xs == NULL) {
 		dolog(LOG_ERR,
 		      "Failed to contact xenstore (%m).  Is it running?");
 		goto out;
 	}
 
-	xc = xc_interface_open(0,0,0);
-	if (!xc) {
+	xc = xc_interface_open();
+	if (xc == -1) {
 		dolog(LOG_ERR, "Failed to contact hypervisor (%m)");
 		goto out;
 	}
@@ -131,8 +161,8 @@ bool xen_setup(void)
 
  out:
 	if (xs)
-		xs_close(xs);
-	if (xc)
+		xs_daemon_close(xs);
+	if (xc != -1)
 		xc_interface_close(xc);
 	return false;
 }

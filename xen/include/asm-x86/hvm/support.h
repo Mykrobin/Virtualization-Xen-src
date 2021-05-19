@@ -14,19 +14,101 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #ifndef __ASM_X86_HVM_SUPPORT_H__
 #define __ASM_X86_HVM_SUPPORT_H__
 
-#include <xen/types.h>
 #include <xen/sched.h>
-#include <asm/hvm/save.h>
+#include <asm/types.h>
+#include <asm/regs.h>
 #include <asm/processor.h>
-#include <asm/p2m.h>
 
 #ifndef NDEBUG
+#define HVM_DEBUG 1
+#else
+#define HVM_DEBUG 0
+#endif
+
+#define	hvm_guest(v)	((v)->arch.guest_context.flags & VGCF_HVM_GUEST)
+
+static inline shared_iopage_t *get_sp(struct domain *d)
+{
+    return (shared_iopage_t *) d->arch.hvm_domain.shared_page_va;
+}
+
+static inline vcpu_iodata_t *get_vio(struct domain *d, unsigned long cpu)
+{
+    return &get_sp(d)->vcpu_iodata[cpu];
+}
+
+static inline int iopacket_port(struct vcpu *v)
+{
+    return get_vio(v->domain, v->vcpu_id)->vp_eport;
+}
+
+/* XXX these are really VMX specific */
+#define TYPE_MOV_TO_DR          (0 << 4)
+#define TYPE_MOV_FROM_DR        (1 << 4)
+#define TYPE_MOV_TO_CR          (0 << 4)
+#define TYPE_MOV_FROM_CR        (1 << 4)
+#define TYPE_CLTS               (2 << 4)
+#define TYPE_LMSW               (3 << 4)
+
+enum hval_bitmaps {
+    EXCEPTION_BITMAP_TABLE=0,
+};
+ 
+#define EXCEPTION_BITMAP_DE     (1 << 0)        /* Divide Error */
+#define EXCEPTION_BITMAP_DB     (1 << 1)        /* Debug */
+#define EXCEPTION_BITMAP_NMI    (1 << 2)        /* NMI */
+#define EXCEPTION_BITMAP_BP     (1 << 3)        /* Breakpoint */
+#define EXCEPTION_BITMAP_OF     (1 << 4)        /* Overflow */
+#define EXCEPTION_BITMAP_BR     (1 << 5)        /* BOUND Range Exceeded */
+#define EXCEPTION_BITMAP_UD     (1 << 6)        /* Invalid Opcode */
+#define EXCEPTION_BITMAP_NM     (1 << 7)        /* Device Not Available */
+#define EXCEPTION_BITMAP_DF     (1 << 8)        /* Double Fault */
+/* reserved */
+#define EXCEPTION_BITMAP_TS     (1 << 10)       /* Invalid TSS */
+#define EXCEPTION_BITMAP_NP     (1 << 11)       /* Segment Not Present */
+#define EXCEPTION_BITMAP_SS     (1 << 12)       /* Stack-Segment Fault */
+#define EXCEPTION_BITMAP_GP     (1 << 13)       /* General Protection */
+#define EXCEPTION_BITMAP_PG     (1 << 14)       /* Page Fault */
+#define EXCEPTION_BITMAP_MF     (1 << 16)       /* x87 FPU Floating-Point Error (Math Fault)  */
+#define EXCEPTION_BITMAP_AC     (1 << 17)       /* Alignment Check */
+#define EXCEPTION_BITMAP_MC     (1 << 18)       /* Machine Check */
+#define EXCEPTION_BITMAP_XF     (1 << 19)       /* SIMD Floating-Point Exception */
+
+/* Pending Debug exceptions */
+#define PENDING_DEBUG_EXC_BP    (1 << 12)       /* break point */
+#define PENDING_DEBUG_EXC_BS    (1 << 14)       /* Single step */
+
+#ifdef XEN_DEBUGGER
+#define MONITOR_DEFAULT_EXCEPTION_BITMAP        \
+    ( EXCEPTION_BITMAP_PG |                     \
+      EXCEPTION_BITMAP_DB |                     \
+      EXCEPTION_BITMAP_BP |                     \
+      EXCEPTION_BITMAP_GP )
+#else
+#define MONITOR_DEFAULT_EXCEPTION_BITMAP        \
+    ( EXCEPTION_BITMAP_PG |                     \
+      EXCEPTION_BITMAP_GP )
+#endif
+
+#define PC_DEBUG_PORT   0x80
+
+#define VMX_DELIVER_NO_ERROR_CODE  -1
+
+/*
+ * This works for both 32bit & 64bit eflags filteration
+ * done in construct_init_vmc[sb]_guest()
+ */
+#define HVM_EFLAGS_RESERVED_0          0xffc08028 /* bitmap for 0 */
+#define HVM_EFLAGS_RESERVED_1          0x00000002 /* bitmap for 1 */
+
+#if HVM_DEBUG
 #define DBG_LEVEL_0                 (1 << 0)
 #define DBG_LEVEL_1                 (1 << 1)
 #define DBG_LEVEL_2                 (1 << 2)
@@ -37,131 +119,33 @@
 #define DBG_LEVEL_VLAPIC_TIMER      (1 << 7)
 #define DBG_LEVEL_VLAPIC_INTERRUPT  (1 << 8)
 #define DBG_LEVEL_IOAPIC            (1 << 9)
-#define DBG_LEVEL_HCALL             (1 << 10)
-#define DBG_LEVEL_MSR               (1 << 11)
 
 extern unsigned int opt_hvm_debug_level;
-#define HVM_DBG_LOG(level, _f, _a...)                                         \
-    do {                                                                      \
-        if ( unlikely((level) & opt_hvm_debug_level) )                        \
-            printk("[HVM:%d.%d] <%s> " _f "\n",                               \
-                   current->domain->domain_id, current->vcpu_id, __func__,    \
-                   ## _a);                                                    \
-    } while (0)
+#define HVM_DBG_LOG(level, _f, _a...)           \
+    if ( (level) & opt_hvm_debug_level )        \
+        printk("[HVM:%d.%d] <%s> " _f "\n",     \
+               current->domain->domain_id, current->vcpu_id, __func__, ## _a)
 #else
-#define HVM_DBG_LOG(level, _f, _a...) do {} while (0)
+#define HVM_DBG_LOG(level, _f, _a...)
 #endif
 
-extern unsigned long hvm_io_bitmap[];
+#define  __hvm_bug(regs)                                        \
+    do {                                                        \
+        printk("__hvm_bug at %s:%d\n", __FILE__, __LINE__);     \
+        show_registers(regs);                                   \
+        domain_crash_synchronous();                             \
+    } while (0)
 
-enum hvm_translation_result {
-    HVMTRANS_okay,
-    HVMTRANS_bad_linear_to_gfn,
-    HVMTRANS_bad_gfn_to_mfn,
-    HVMTRANS_unhandleable,
-    HVMTRANS_gfn_paged_out,
-    HVMTRANS_gfn_shared,
-    HVMTRANS_need_retry,
-};
+extern int hvm_enabled;
 
-/*
- * Copy to/from a guest physical address.
- * Returns HVMTRANS_okay, else HVMTRANS_bad_gfn_to_mfn if the given physical
- * address range does not map entirely onto ordinary machine memory.
- */
-enum hvm_translation_result hvm_copy_to_guest_phys(
-    paddr_t paddr, void *buf, unsigned int size, struct vcpu *v);
-enum hvm_translation_result hvm_copy_from_guest_phys(
-    void *buf, paddr_t paddr, unsigned int size);
+enum { HVM_COPY_IN = 0, HVM_COPY_OUT };
+extern int hvm_copy(void *buf, unsigned long vaddr, int size, int dir);
 
-/*
- * Copy to/from a guest linear address. @pfec should include PFEC_user_mode
- * if emulating a user-mode access (CPL=3). All other flags in @pfec are
- * managed by the called function: it is therefore optional for the caller
- * to set them.
- * 
- * Returns:
- *  HVMTRANS_okay: Copy was entirely successful.
- *  HVMTRANS_bad_gfn_to_mfn: Some guest physical address did not map to
- *                           ordinary machine memory.
- *  HVMTRANS_bad_linear_to_gfn: Some guest linear address did not have a
- *                              valid mapping to a guest physical address.
- *                              The pagefault_info_t structure will be filled
- *                              in if provided.
- */
-typedef struct pagefault_info
-{
-    unsigned long linear;
-    int ec;
-} pagefault_info_t;
-
-enum hvm_translation_result hvm_copy_to_guest_linear(
-    unsigned long addr, void *buf, unsigned int size, uint32_t pfec,
-    pagefault_info_t *pfinfo);
-enum hvm_translation_result hvm_copy_from_guest_linear(
-    void *buf, unsigned long addr, unsigned int size, uint32_t pfec,
-    pagefault_info_t *pfinfo);
-
-/*
- * Get a reference on the page under an HVM physical or linear address.  If
- * linear, a pagewalk is performed using pfec (fault details optionally in
- * pfinfo).
- * On success, returns HVMTRANS_okay with a reference taken on **_page.
- */
-enum hvm_translation_result hvm_translate_get_page(
-    struct vcpu *v, unsigned long addr, bool linear, uint32_t pfec,
-    pagefault_info_t *pfinfo, struct page_info **page_p,
-    gfn_t *gfn_p, p2m_type_t *p2mt_p);
-
-#define HVM_HCALL_completed  0 /* hypercall completed - no further action */
-#define HVM_HCALL_preempted  1 /* hypercall preempted - re-execute VMCALL */
-int hvm_hypercall(struct cpu_user_regs *regs);
-
-void hvm_hlt(unsigned int eflags);
-void hvm_triple_fault(void);
-
-#define VM86_TSS_UPDATED (1ULL << 63)
-void hvm_prepare_vm86_tss(struct vcpu *v, uint32_t base, uint32_t limit);
-
-void hvm_rdtsc_intercept(struct cpu_user_regs *regs);
-
-int __must_check hvm_handle_xsetbv(u32 index, u64 new_bv);
-
-void hvm_shadow_handle_cd(struct vcpu *v, unsigned long value);
-
-/*
- * These functions all return X86EMUL return codes.  For hvm_set_*(), the
- * caller is responsible for injecting #GP[0] if X86EMUL_EXCEPTION is
- * returned.
- */
-int hvm_set_efer(uint64_t value);
-int hvm_set_cr0(unsigned long value, bool may_defer);
-int hvm_set_cr3(unsigned long value, bool noflush, bool may_defer);
-int hvm_set_cr4(unsigned long value, bool may_defer);
-int hvm_descriptor_access_intercept(uint64_t exit_info,
-                                    uint64_t vmx_exit_qualification,
-                                    unsigned int descriptor, bool is_write);
-int hvm_mov_to_cr(unsigned int cr, unsigned int gpr);
-int hvm_mov_from_cr(unsigned int cr, unsigned int gpr);
-void hvm_ud_intercept(struct cpu_user_regs *);
-
-/*
- * May return X86EMUL_EXCEPTION, at which point the caller is responsible for
- * injecting a #GP fault.  Used to support speculative reads.
- */
-int __must_check hvm_msr_read_intercept(
-    unsigned int msr, uint64_t *msr_content);
-int __must_check hvm_msr_write_intercept(
-    unsigned int msr, uint64_t msr_content, bool may_defer);
+extern void hvm_setup_platform(struct domain* d);
+extern int hvm_mmio_intercept(ioreq_t *p);
+extern int hvm_io_intercept(ioreq_t *p, int type);
+extern void hvm_hooks_assist(struct vcpu *v);
+extern void hvm_print_line(struct vcpu *v, const char c);
+extern void hlt_timer_fn(void *data);
 
 #endif /* __ASM_X86_HVM_SUPPORT_H__ */
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * tab-width: 4
- * indent-tabs-mode: nil
- * End:
- */
