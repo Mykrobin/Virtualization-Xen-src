@@ -1,4 +1,5 @@
 /******************************************************************************
+ * tools/xenpaging/file_ops.c
  *
  * Common file operations.
  *
@@ -15,56 +16,67 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 
 #include <unistd.h>
 #include <xc_private.h>
 
+
+#define page_offset(_pfn)     (((off_t)(_pfn)) << PAGE_SHIFT)
+
+
 static int file_op(int fd, void *page, int i,
-                   ssize_t (*fn)(int, void *, size_t))
+                   ssize_t (*fn)(int, const void *, size_t))
 {
-    off_t offset = i;
-    int total = 0;
+    off_t seek_ret;
+    int total;
     int bytes;
+    int ret;
 
-    offset = lseek(fd, offset << PAGE_SHIFT, SEEK_SET);
-    if ( offset == (off_t)-1 )
-        return -1;
+    seek_ret = lseek(fd, i << PAGE_SHIFT, SEEK_SET);
 
+    total = 0;
     while ( total < PAGE_SIZE )
     {
         bytes = fn(fd, page + total, PAGE_SIZE - total);
         if ( bytes <= 0 )
-            return -1;
+        {
+            ret = -errno;
+            goto err;
+        }
 
         total += bytes;
     }
 
     return 0;
+
+ err:
+    return ret;
 }
 
-static ssize_t my_write(int fd, void *buf, size_t count)
+static ssize_t my_read(int fd, const void *buf, size_t count)
 {
-    return write(fd, buf, count);
+    return read(fd, (void *)buf, count);
 }
 
 int read_page(int fd, void *page, int i)
 {
-    return file_op(fd, page, i, &read);
+    return file_op(fd, page, i, &my_read);
 }
 
 int write_page(int fd, void *page, int i)
 {
-    return file_op(fd, page, i, &my_write);
+    return file_op(fd, page, i, &write);
 }
 
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * indent-tabs-mode: nil
  * End: 

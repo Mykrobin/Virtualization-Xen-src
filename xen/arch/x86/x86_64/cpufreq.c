@@ -16,17 +16,31 @@
  *  General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License along
- *  with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/xmalloc.h>
 #include <xen/guest_access.h>
-#include <xen/pmstat.h>
 #include <compat/platform.h>
 
 DEFINE_XEN_GUEST_HANDLE(compat_processor_px_t);
+
+#define xlat_page_start ((unsigned long)COMPAT_ARG_XLAT_VIRT_BASE)
+
+#define xlat_malloc_init(xlat_page_current)    do { \
+    xlat_page_current = xlat_page_start; \
+} while (0)
+
+extern void *xlat_malloc(unsigned long *xlat_page_current, size_t size);
+
+#define xlat_malloc_array(_p, _t, _c) ((_t *) xlat_malloc(&_p, sizeof(_t) * _c))
+
+extern int 
+set_px_pminfo(uint32_t cpu, struct xen_processor_performance *perf);
 
 int 
 compat_set_px_pminfo(uint32_t cpu, struct compat_processor_performance *perf)
@@ -43,12 +57,10 @@ compat_set_px_pminfo(uint32_t cpu, struct compat_processor_performance *perf)
 
 #define XLAT_processor_performance_HNDL_states(_d_, _s_) do { \
     XEN_GUEST_HANDLE(compat_processor_px_t) states; \
-    XEN_GUEST_HANDLE_PARAM(xen_processor_px_t) states_t; \
     if ( unlikely(!compat_handle_okay((_s_)->states, (_s_)->state_count)) ) \
         return -EFAULT; \
     guest_from_compat_handle(states, (_s_)->states); \
-    states_t = guest_handle_cast(states, xen_processor_px_t); \
-    (_d_)->states = guest_handle_from_param(states_t, xen_processor_px_t); \
+    (_d_)->states = guest_handle_cast(states, xen_processor_px_t); \
 } while (0)
 
     XLAT_processor_performance(xen_perf, perf);

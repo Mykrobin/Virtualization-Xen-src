@@ -12,24 +12,32 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #ifndef __ASM_X86_HVM_SVM_ASID_H__
 #define __ASM_X86_HVM_SVM_ASID_H__
 
-#include <xen/types.h>
+#include <xen/config.h>
+#include <asm/types.h>
+#include <asm/hvm/hvm.h>
 #include <asm/hvm/asid.h>
-#include <asm/processor.h>
+#include <asm/hvm/support.h>
+#include <asm/hvm/svm/svm.h>
+#include <asm/hvm/svm/vmcb.h>
+#include <asm/percpu.h>
 
-void svm_asid_init(const struct cpuinfo_x86 *c);
-void svm_asid_handle_vmrun(void);
+void svm_asid_init(struct cpuinfo_x86 *c);
 
 static inline void svm_asid_g_invlpg(struct vcpu *v, unsigned long g_vaddr)
 {
 #if 0
     /* Optimization? */
-    svm_invlpga(g_vaddr, v->arch.hvm_svm.vmcb->guest_asid);
+    asm volatile (".byte 0x0F,0x01,0xDF    \n"
+                  : /* output */
+                  : /* input */
+                  "a" (g_vaddr), "c"(v->arch.hvm_svm.vmcb->guest_asid) );
 #endif
 
     /* Safe fallback. Take a new ASID. */
@@ -41,7 +49,7 @@ static inline void svm_asid_g_invlpg(struct vcpu *v, unsigned long g_vaddr)
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

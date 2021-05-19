@@ -13,7 +13,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 #include <string.h>
 #include <inttypes.h>
@@ -27,7 +28,7 @@
 typedef struct {
     int     enabled;
     domid_t domid;
-    xc_interface *xc_handle;
+    int     xc_handle;
 } memshr_vbd_info_t;
 
 memshr_vbd_info_t vbd_info = {0, DOMID_INVALID};
@@ -81,7 +82,7 @@ void memshr_daemon_initialize(void)
 
 void memshr_vbd_initialize(void)
 {
-    xc_interface *xc_handle;
+    int xc_handle;
 
     memset(&memshr, 0, sizeof(private_memshr_info_t));
 
@@ -112,7 +113,7 @@ void memshr_vbd_initialize(void)
     if(vbd_info.domid == DOMID_INVALID)
         return;
 
-    if((xc_handle = xc_interface_open(0,0,0)) == 0)
+    if((xc_handle = xc_interface_open()) < 0)
     {
         DPRINTF("Failed to open XC interface.\n");
         return;
@@ -122,7 +123,7 @@ void memshr_vbd_initialize(void)
     vbd_info.enabled = 1;
 }
 
-uint16_t memshr_vbd_image_get(const char* file)
+uint16_t memshr_vbd_image_get(char* file)
 {
     uint16_t id;
 
@@ -144,17 +145,16 @@ void memshr_vbd_image_put(uint16_t memshr_id)
     
 int memshr_vbd_issue_ro_request(char *buf,
                                 grant_ref_t gref,
-                                uint16_t file_id,
+                                uint16_t file_id, 
                                 uint64_t sec, 
                                 int secs,
-                                share_tuple_t *hnd)
+                                uint64_t *hnd)
 {
     vbdblk_t blk;
-    share_tuple_t source_st, client_st;
-    uint64_t c_hnd;
+    uint64_t s_hnd, c_hnd;
     int ret;
 
-    *hnd = (share_tuple_t){ 0, 0, 0 };
+    *hnd = 0;
     if(!vbd_info.enabled) 
         return -1;
 
@@ -169,31 +169,26 @@ int memshr_vbd_issue_ro_request(char *buf,
     /* If page couldn't be made sharable, we cannot do anything about it */
     if(ret != 0)
         return -3;
-
-    client_st = (share_tuple_t){ vbd_info.domid, gref, c_hnd };
-    *hnd = client_st;
+    *hnd = c_hnd;
 
     /* Check if we've read matching disk block previously */
     blk.sec     = sec;
     blk.disk_id = file_id;
-    if(blockshr_block_lookup(memshr.blks, blk, &source_st) > 0)
+    if(blockshr_block_lookup(memshr.blks, blk, &s_hnd) > 0)
     {
-        ret = xc_memshr_share_grefs(vbd_info.xc_handle, source_st.domain, source_st.frame, 
-                                    source_st.handle, vbd_info.domid, gref, c_hnd);
+        ret = xc_memshr_share(vbd_info.xc_handle, s_hnd, c_hnd);
         if(!ret) return 0;
         /* Handles failed to be shared => at least one of them must be invalid,
            remove the relevant ones from the map */
         switch(ret)
         {
-            case XENMEM_SHARING_OP_S_HANDLE_INVALID:
-                ret = blockshr_shrhnd_remove(memshr.blks, source_st, NULL);
-                if(ret) DPRINTF("Could not rm invl s_hnd: %u %"PRId64" %"PRId64"\n", 
-                                    source_st.domain, source_st.frame, source_st.handle);
+            case XEN_DOMCTL_MEM_SHARING_S_HANDLE_INVALID:
+                ret = blockshr_shrhnd_remove(memshr.blks, s_hnd, NULL);
+                if(ret) DPRINTF("Could not rm invl s_hnd: %"PRId64"\n", s_hnd);
                 break;
-            case XENMEM_SHARING_OP_C_HANDLE_INVALID:
-                ret = blockshr_shrhnd_remove(memshr.blks, client_st, NULL);
-                if(ret) DPRINTF("Could not rm invl c_hnd: %u %"PRId64" %"PRId64"\n", 
-                                    client_st.domain, client_st.frame, client_st.handle);
+            case XEN_DOMCTL_MEM_SHARING_C_HANDLE_INVALID:
+                ret = blockshr_shrhnd_remove(memshr.blks, c_hnd, NULL);
+                if(ret) DPRINTF("Could not rm invl c_hnd: %"PRId64"\n", c_hnd);
                 break;
             default:
                 break;
@@ -204,7 +199,7 @@ int memshr_vbd_issue_ro_request(char *buf,
     return -4;
 }
 
-void memshr_vbd_complete_ro_request(share_tuple_t hnd,
+void memshr_vbd_complete_ro_request(uint64_t hnd,
                                     uint16_t file_id, 
                                     uint64_t sec, 
                                     int secs)

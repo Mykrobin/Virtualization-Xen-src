@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <string.h>
 #include <unistd.h>
+#include <libflask.h>
 
 #define USE_MMAP
 
@@ -34,7 +35,7 @@ int main (int argCnt, const char *args[])
     void *polMemCp = NULL;
     struct stat info;
     int ret;
-    xc_interface *xch = 0;
+    int xch = 0;
 
     if (argCnt != 2)
         usage(argCnt, args);
@@ -61,7 +62,7 @@ int main (int argCnt, const char *args[])
 
 #ifdef USE_MMAP
     polMem = mmap(NULL, info.st_size, PROT_READ, MAP_SHARED, polFd, 0);
-    if ( polMem == MAP_FAILED )
+    if ( !polMem )
     {
         fprintf(stderr, "Error occurred mapping policy file in memory: %s\n",
                 strerror(errno));
@@ -69,8 +70,8 @@ int main (int argCnt, const char *args[])
         goto cleanup;
     }
 
-    xch = xc_interface_open(0,0,0);
-    if ( !xch )
+    xch = xc_interface_open();
+    if ( xch < 0 )
     {
         fprintf(stderr, "Unable to create interface to xenctrl: %s\n",
                 strerror(errno));
@@ -93,7 +94,7 @@ int main (int argCnt, const char *args[])
     }
 #endif
 
-    ret = xc_flask_load(xch, polMemCp, info.st_size);
+    ret = flask_load(xch, polMemCp, info.st_size);
     if ( ret < 0 )
     {
         errno = -ret;
@@ -108,14 +109,15 @@ int main (int argCnt, const char *args[])
     }
 
 done:
-    free(polMemCp);
+    if ( polMemCp )
+        free(polMemCp);
     if ( polMem )
     {
         ret = munmap(polMem, info.st_size);
         if ( ret < 0 )
             fprintf(stderr, "Unable to unmap policy memory: %s\n", strerror(errno));
     }
-    if ( polFd >= 0 )
+    if ( polFd )
         close(polFd);
     if ( xch )
         xc_interface_close(xch);

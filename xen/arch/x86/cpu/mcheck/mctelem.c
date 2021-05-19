@@ -15,6 +15,7 @@
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/kernel.h>
+#include <xen/config.h>
 #include <xen/smp.h>
 #include <xen/errno.h>
 #include <xen/sched.h>
@@ -36,18 +37,23 @@ struct mctelem_ent {
 	void *mcte_data;		/* corresponding data payload */
 };
 
-#define	MCTE_F_CLASS_URGENT		0x0001U /* in use - urgent errors */
-#define	MCTE_F_CLASS_NONURGENT		0x0002U /* in use - nonurgent errors */
+#define	MCTE_F_HOME_URGENT		0x0001U	/* free to urgent freelist */
+#define	MCTE_F_HOME_NONURGENT		0x0002U /* free to nonurgent freelist */
+#define	MCTE_F_CLASS_URGENT		0x0004U /* in use - urgent errors */
+#define	MCTE_F_CLASS_NONURGENT		0x0008U /* in use - nonurgent errors */
 #define	MCTE_F_STATE_FREE		0x0010U	/* on a freelist */
 #define	MCTE_F_STATE_UNCOMMITTED	0x0020U	/* reserved; on no list */
 #define	MCTE_F_STATE_COMMITTED		0x0040U	/* on a committed list */
 #define	MCTE_F_STATE_PROCESSING		0x0080U	/* on a processing list */
 
+#define	MCTE_F_MASK_HOME	(MCTE_F_HOME_URGENT | MCTE_F_HOME_NONURGENT)
 #define	MCTE_F_MASK_CLASS	(MCTE_F_CLASS_URGENT | MCTE_F_CLASS_NONURGENT)
 #define	MCTE_F_MASK_STATE	(MCTE_F_STATE_FREE | \
 				MCTE_F_STATE_UNCOMMITTED | \
 				MCTE_F_STATE_COMMITTED | \
 				MCTE_F_STATE_PROCESSING)
+
+#define	MCTE_HOME(tep) ((tep)->mcte_flags & MCTE_F_MASK_HOME)
 
 #define	MCTE_CLASS(tep) ((tep)->mcte_flags & MCTE_F_MASK_CLASS)
 #define	MCTE_SET_CLASS(tep, new) do { \
@@ -63,8 +69,6 @@ struct mctelem_ent {
 #define	MC_URGENT_NENT		10
 #define	MC_NONURGENT_NENT	20
 
-#define MC_NENT (MC_URGENT_NENT + MC_NONURGENT_NENT)
-
 #define	MC_NCLASSES		(MC_NONURGENT + 1)
 
 #define	COOKIE2MCTE(c)		((struct mctelem_ent *)(c))
@@ -73,9 +77,11 @@ struct mctelem_ent {
 static struct mc_telem_ctl {
 	/* Linked lists that thread the array members together.
 	 *
-	 * The free lists is a bit array where bit 1 means free.
-	 * This as element number is quite small and is easy to
-	 * atomically allocate that way.
+	 * The free lists are singly-linked via mcte_next, and we allocate
+	 * from them by atomically unlinking an element from the head.
+	 * Consumed entries are returned to the head of the free list.
+	 * When an entry is reserved off the free list it is not linked
+	 * on any list until it is committed or dismissed.
 	 *
 	 * The committed list grows at the head and we do not maintain a
 	 * tail pointer; insertions are performed atomically.  The head
@@ -95,7 +101,7 @@ static struct mc_telem_ctl {
 	 * we can lock it for updates.  The head of the processing list
 	 * always has the oldest telemetry, and we append (as above)
 	 * at the tail of the processing list. */
-	DECLARE_BITMAP(mctc_free, MC_NENT);
+	struct mctelem_ent *mctc_free[MC_NCLASSES];
 	struct mctelem_ent *mctc_committed[MC_NCLASSES];
 	struct mctelem_ent *mctc_processing_head[MC_NCLASSES];
 	struct mctelem_ent *mctc_processing_tail[MC_NCLASSES];
@@ -103,142 +109,55 @@ static struct mc_telem_ctl {
 	 * Telemetry array
 	 */
 	struct mctelem_ent *mctc_elems;
-} mctctl;
-
-struct mc_telem_cpu_ctl {
 	/*
 	 * Per-CPU processing lists, used for deferred (softirq)
-	 * processing of telemetry.
-	 *
-	 * The two pending lists @lmce_pending and @pending grow at
-	 * the head in the reverse chronological order.
-	 *
-	 * @pending and @lmce_pending on the same CPU are mutually
-	 * exclusive, i.e. deferred MCE on a CPU are either all in
-	 * @lmce_pending or all in @pending. In the former case, all
-	 * deferred MCE are LMCE. In the latter case, both LMCE and
-	 * non-local MCE can be in @pending, and @pending contains at
-	 * least one non-local MCE if it's not empty.
-	 *
-	 * Changes to @pending and @lmce_pending should be performed
-	 * via mctelem_process_deferred() and mctelem_defer(), in order
-	 * to guarantee the above mutual exclusivity.
+	 * processing of telemetry. mctc_cpu is indexed by the
+	 * CPU that the telemetry belongs to. mctc_cpu_processing
+	 * is indexed by the CPU that is processing the telemetry.
 	 */
-	struct mctelem_ent *pending, *lmce_pending;
-	struct mctelem_ent *processing;
-};
-static DEFINE_PER_CPU(struct mc_telem_cpu_ctl, mctctl);
+	struct mctelem_ent *mctc_cpu[NR_CPUS];
+	struct mctelem_ent *mctc_cpu_processing[NR_CPUS];
+} mctctl;
 
 /* Lock protecting all processing lists */
 static DEFINE_SPINLOCK(processing_lock);
 
 static void mctelem_xchg_head(struct mctelem_ent **headp,
-				struct mctelem_ent **linkp,
+				struct mctelem_ent **old,
 				struct mctelem_ent *new)
 {
 	for (;;) {
-		struct mctelem_ent *old;
-
-		*linkp = old = *headp;
-		if (cmpxchgptr(headp, old, new) == old)
+		*old = *headp;
+		wmb();
+		if (cmpxchgptr(headp, *old, new) == *old)
 			break;
 	}
 }
 
-/**
- * Append a telemetry of deferred MCE to a per-cpu pending list,
- * either @pending or @lmce_pending, according to rules below:
- *  - if @pending is not empty, then the new telemetry will be
- *    appended to @pending;
- *  - if @pending is empty and the new telemetry is for a deferred
- *    LMCE, then the new telemetry will be appended to @lmce_pending;
- *  - if @pending is empty and the new telemetry is for a deferred
- *    non-local MCE, all existing telemetries in @lmce_pending will be
- *    moved to @pending and then the new telemetry will be appended to
- *    @pending.
- *
- * This function must be called with MCIP bit set, so that it does not
- * need to worry about MC# re-occurring in this function.
- *
- * As a result, this function can preserve the mutual exclusivity
- * between @pending and @lmce_pending (see their comments in struct
- * mc_telem_cpu_ctl).
- *
- * Parameters:
- *  @cookie: telemetry of the deferred MCE
- *  @lmce:   indicate whether the telemetry is for LMCE
- */
-void mctelem_defer(mctelem_cookie_t cookie, bool lmce)
+
+void mctelem_defer(mctelem_cookie_t cookie)
 {
 	struct mctelem_ent *tep = COOKIE2MCTE(cookie);
-	struct mc_telem_cpu_ctl *mctctl = &this_cpu(mctctl);
 
-	ASSERT(mctctl->pending == NULL || mctctl->lmce_pending == NULL);
-
-	if (mctctl->pending)
-		mctelem_xchg_head(&mctctl->pending, &tep->mcte_next, tep);
-	else if (lmce)
-		mctelem_xchg_head(&mctctl->lmce_pending, &tep->mcte_next, tep);
-	else {
-		/*
-		 * LMCE is supported on Skylake-server and later CPUs, on
-		 * which mce_broadcast is always true. Therefore, non-empty
-		 * mctctl->lmce_pending in this branch implies a broadcasting
-		 * MC# is being handled, every CPU is in the exception
-		 * context, and no one is consuming mctctl->pending at this
-		 * moment. As a result, the following two exchanges together
-		 * can be treated as atomic.
-		 */
-		if (mctctl->lmce_pending)
-			mctelem_xchg_head(&mctctl->lmce_pending,
-					  &mctctl->pending, NULL);
-		mctelem_xchg_head(&mctctl->pending, &tep->mcte_next, tep);
-	}
+	mctelem_xchg_head(&mctctl.mctc_cpu[smp_processor_id()],
+	    &tep->mcte_next, tep);
 }
 
-/**
- * Move telemetries of deferred MCE from the per-cpu pending list on
- * this or another CPU to the per-cpu processing list on this CPU, and
- * then process all deferred MCE on the processing list.
- *
- * This function can be called with MCIP bit set (e.g. from MC#
- * handler) or cleared (from MCE softirq handler). In the latter case,
- * MC# may re-occur in this function.
- *
- * Parameters:
- *  @cpu:  indicate the CPU where the pending list is
- *  @fn:   the function to handle the deferred MCE
- *  @lmce: indicate which pending list on @cpu is handled
- */
 void mctelem_process_deferred(unsigned int cpu,
-			      int (*fn)(mctelem_cookie_t),
-			      bool lmce)
+			      int (*fn)(mctelem_cookie_t))
 {
 	struct mctelem_ent *tep;
 	struct mctelem_ent *head, *prev;
-	struct mc_telem_cpu_ctl *mctctl = &per_cpu(mctctl, cpu);
 	int ret;
 
 	/*
-	 * First, unhook the list of telemetry structures, and
+	 * First, unhook the list of telemetry structures, and	
 	 * hook it up to the processing list head for this CPU.
-	 *
-	 * If @lmce is true and a non-local MC# occurs before the
-	 * following atomic exchange, @lmce will not hold after
-	 * resumption, because all telemetries in @lmce_pending on
-	 * @cpu are moved to @pending on @cpu in mcheck_cmn_handler().
-	 * In such a case, no telemetries will be handled in this
-	 * function after resumption. Another round of MCE softirq,
-	 * which was raised by above mcheck_cmn_handler(), will handle
-	 * those moved telemetries in @pending on @cpu.
-	 *
-	 * Any MC# occurring after the following atomic exchange will be
-	 * handled by another round of MCE softirq.
 	 */
-	mctelem_xchg_head(lmce ? &mctctl->lmce_pending : &mctctl->pending,
-			  &this_cpu(mctctl.processing), NULL);
+	mctelem_xchg_head(&mctctl.mctc_cpu[cpu],
+	    &mctctl.mctc_cpu_processing[smp_processor_id()], NULL);
 
-	head = this_cpu(mctctl.processing);
+	head = mctctl.mctc_cpu_processing[smp_processor_id()];
 
 	/*
 	 * Then, fix up the list to include prev pointers, to make
@@ -272,16 +191,11 @@ void mctelem_process_deferred(unsigned int cpu,
 	}
 }
 
-bool mctelem_has_deferred(unsigned int cpu)
+int mctelem_has_deferred(unsigned int cpu)
 {
-	if (per_cpu(mctctl.pending, cpu) != NULL)
-		return true;
-	return false;
-}
-
-bool mctelem_has_deferred_lmce(unsigned int cpu)
-{
-	return per_cpu(mctctl.lmce_pending, cpu) != NULL;
+	if (mctctl.mctc_cpu[cpu] != NULL)
+		return 1;
+	return 0;
 }
 
 /* Free an entry to its native free list; the entry must not be linked on
@@ -289,14 +203,14 @@ bool mctelem_has_deferred_lmce(unsigned int cpu)
  */
 static void mctelem_free(struct mctelem_ent *tep)
 {
+	mctelem_class_t target = MCTE_HOME(tep) == MCTE_F_HOME_URGENT ?
+	    MC_URGENT : MC_NONURGENT;
+
 	BUG_ON(tep->mcte_refcnt != 0);
 	BUG_ON(MCTE_STATE(tep) != MCTE_F_STATE_FREE);
 
 	tep->mcte_prev = NULL;
-	tep->mcte_next = NULL;
-
-	/* set free in array */
-	set_bit(tep - mctctl.mctc_elems, mctctl.mctc_free);
+	mctelem_xchg_head(&mctctl.mctc_free[target], &tep->mcte_next, tep);
 }
 
 /* Increment the reference count of an entry that is not linked on to
@@ -335,34 +249,55 @@ static void mctelem_processing_release(struct mctelem_ent *tep)
 	}
 }
 
-void __init mctelem_init(unsigned int datasz)
+void mctelem_init(int reqdatasz)
 {
+	static int called = 0;
+	static int datasz = 0, realdatasz = 0;
 	char *datarr;
-	unsigned int i;
+	int i;
+	
+	BUG_ON(MC_URGENT != 0 || MC_NONURGENT != 1 || MC_NCLASSES != 2);
 
-	BUILD_BUG_ON(MC_URGENT != 0 || MC_NONURGENT != 1 || MC_NCLASSES != 2);
-
-	datasz = (datasz & ~0xf) + 0x10;	/* 16 byte roundup */
+	/* Called from mcheck_init for all processors; initialize for the
+	 * first call only (no race here since the boot cpu completes
+	 * init before others start up). */
+	if (++called == 1) {
+		realdatasz = reqdatasz;
+		datasz = (reqdatasz & ~0xf) + 0x10;	/* 16 byte roundup */
+	} else {
+		BUG_ON(reqdatasz != realdatasz);
+		return;
+	}
 
 	if ((mctctl.mctc_elems = xmalloc_array(struct mctelem_ent,
-	    MC_NENT)) == NULL ||
-	    (datarr = xmalloc_bytes(MC_NENT * datasz)) == NULL) {
-		xfree(mctctl.mctc_elems);
+	    MC_URGENT_NENT + MC_NONURGENT_NENT)) == NULL ||
+	    (datarr = xmalloc_bytes((MC_URGENT_NENT + MC_NONURGENT_NENT) *
+	    datasz)) == NULL) {
+		if (mctctl.mctc_elems)
+			xfree(mctctl.mctc_elems);
 		printk("Allocations for MCA telemetry failed\n");
 		return;
 	}
 
-	for (i = 0; i < MC_NENT; i++) {
-		struct mctelem_ent *tep;
+	for (i = 0; i < MC_URGENT_NENT + MC_NONURGENT_NENT; i++) {
+		struct mctelem_ent *tep, **tepp;
 
 		tep = mctctl.mctc_elems + i;
 		tep->mcte_flags = MCTE_F_STATE_FREE;
 		tep->mcte_refcnt = 0;
 		tep->mcte_data = datarr + i * datasz;
 
-		__set_bit(i, mctctl.mctc_free);
-		tep->mcte_next = NULL;
+		if (i < MC_URGENT_NENT) {
+			tepp = &mctctl.mctc_free[MC_URGENT];
+			tep->mcte_flags |= MCTE_F_HOME_URGENT;
+		} else {
+			tepp = &mctctl.mctc_free[MC_NONURGENT];
+			tep->mcte_flags |= MCTE_F_HOME_NONURGENT;
+		}
+
+		tep->mcte_next = *tepp;
 		tep->mcte_prev = NULL;
+		*tepp = tep;
 	}
 }
 
@@ -371,25 +306,32 @@ static int mctelem_drop_count;
 
 /* Reserve a telemetry entry, or return NULL if none available.
  * If we return an entry then the caller must subsequently call exactly one of
- * mctelem_dismiss or mctelem_commit for that entry.
+ * mctelem_unreserve or mctelem_commit for that entry.
  */
 mctelem_cookie_t mctelem_reserve(mctelem_class_t which)
 {
-	unsigned bit;
-	unsigned start_bit = (which == MC_URGENT) ? 0 : MC_URGENT_NENT;
+	struct mctelem_ent **freelp;
+	struct mctelem_ent *oldhead, *newhead;
+	mctelem_class_t target = (which == MC_URGENT) ?
+	    MC_URGENT : MC_NONURGENT;
 
+	freelp = &mctctl.mctc_free[target];
 	for (;;) {
-		bit = find_next_bit(mctctl.mctc_free, MC_NENT, start_bit);
-
-		if (bit >= MC_NENT) {
-			mctelem_drop_count++;
-			return (NULL);
+		if ((oldhead = *freelp) == NULL) {
+			if (which == MC_URGENT && target == MC_URGENT) {
+				/* raid the non-urgent freelist */
+				target = MC_NONURGENT;
+				freelp = &mctctl.mctc_free[target];
+				continue;
+			} else {
+				mctelem_drop_count++;
+				return (NULL);
+			}
 		}
 
-		/* try to allocate, atomically clear free bit */
-		if (test_and_clear_bit(bit, mctctl.mctc_free)) {
-			/* return element we got */
-			struct mctelem_ent *tep = mctctl.mctc_elems + bit;
+		newhead = oldhead->mcte_next;
+		if (cmpxchgptr(freelp, oldhead, newhead) == oldhead) {
+			struct mctelem_ent *tep = oldhead;
 
 			mctelem_hold(tep);
 			MCTE_TRANSITION_STATE(tep, FREE, UNCOMMITTED);
@@ -501,9 +443,9 @@ static void mctelem_append_processing(mctelem_class_t which)
 		ltep->mcte_prev = *procltp;
 		*procltp = dangling[target];
 	}
-	smp_wmb();
+	wmb();
 	dangling[target] = NULL;
-	smp_wmb();
+	wmb();
 }
 
 mctelem_cookie_t mctelem_consume_oldest_begin(mctelem_class_t which)
@@ -520,6 +462,7 @@ mctelem_cookie_t mctelem_consume_oldest_begin(mctelem_class_t which)
 	}
 
 	mctelem_processing_hold(tep);
+	wmb();
 	spin_unlock(&processing_lock);
 	return MCTE2COOKIE(tep);
 }
@@ -530,6 +473,7 @@ void mctelem_consume_oldest_end(mctelem_cookie_t cookie)
 
 	spin_lock(&processing_lock);
 	mctelem_processing_release(tep);
+	wmb();
 	spin_unlock(&processing_lock);
 }
 
@@ -545,15 +489,6 @@ void mctelem_ack(mctelem_class_t which, mctelem_cookie_t cookie)
 	spin_lock(&processing_lock);
 	if (tep == mctctl.mctc_processing_head[target])
 		mctelem_processing_release(tep);
+	wmb();
 	spin_unlock(&processing_lock);
 }
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * indent-tabs-mode: t
- * tab-width: 8
- * End:
- */

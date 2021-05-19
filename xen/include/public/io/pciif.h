@@ -46,7 +46,6 @@
 #define XEN_PCI_OP_aer_resume		(7)
 #define XEN_PCI_OP_aer_mmio		(8)
 #define XEN_PCI_OP_aer_slotreset	(9)
-#define XEN_PCI_OP_enable_multi_msi	(10)
 
 /* xen_pci_op error numbers */
 #define XEN_PCI_ERR_success          (0)
@@ -117,7 +116,7 @@ struct xen_pci_sharedinfo {
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

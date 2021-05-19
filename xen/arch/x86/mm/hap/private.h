@@ -13,38 +13,22 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  */
 #ifndef __HAP_PRIVATE_H__
 #define __HAP_PRIVATE_H__
 
-#include "../mm-locks.h"
-
 /********************************************/
 /*          GUEST TRANSLATION FUNCS         */
 /********************************************/
-unsigned long hap_gva_to_gfn_2_levels(struct vcpu *v,
-                                     struct p2m_domain *p2m,
-                                     unsigned long gva, 
+unsigned long hap_gva_to_gfn_2_levels(struct vcpu *v, unsigned long gva, 
                                      uint32_t *pfec);
-unsigned long hap_gva_to_gfn_3_levels(struct vcpu *v,
-                                     struct p2m_domain *p2m,
-                                     unsigned long gva, 
+unsigned long hap_gva_to_gfn_3_levels(struct vcpu *v, unsigned long gva,
                                      uint32_t *pfec);
-unsigned long hap_gva_to_gfn_4_levels(struct vcpu *v,
-                                     struct p2m_domain *p2m,
-                                     unsigned long gva, 
+unsigned long hap_gva_to_gfn_4_levels(struct vcpu *v, unsigned long gva,
                                      uint32_t *pfec);
 
-unsigned long hap_p2m_ga_to_gfn_2_levels(struct vcpu *v,
-    struct p2m_domain *p2m, unsigned long cr3,
-    paddr_t ga, uint32_t *pfec, unsigned int *page_order);
-unsigned long hap_p2m_ga_to_gfn_3_levels(struct vcpu *v,
-    struct p2m_domain *p2m, unsigned long cr3,
-    paddr_t ga, uint32_t *pfec, unsigned int *page_order);
-unsigned long hap_p2m_ga_to_gfn_4_levels(struct vcpu *v,
-    struct p2m_domain *p2m, unsigned long cr3,
-    paddr_t ga, uint32_t *pfec, unsigned int *page_order);
 
-#endif /* __HAP_PRIVATE_H__ */
+#endif /* __SVM_NPT_H__ */

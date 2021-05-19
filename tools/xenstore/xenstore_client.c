@@ -18,13 +18,14 @@
 #include <string.h>
 #include <termios.h>
 #include <unistd.h>
-#include <xenstore.h>
+#include <xs.h>
 
 #include <sys/ioctl.h>
 
 #define PATH_SEP '/'
 #define MAX_PATH_LEN 256
 
+#define MAX_PERMS 16
 
 enum mode {
     MODE_unknown,
@@ -35,12 +36,10 @@ enum mode {
     MODE_read,
     MODE_rm,
     MODE_write,
-    MODE_watch,
 };
 
 static char *output_buf = NULL;
 static int output_pos = 0;
-static struct expanding_buffer ebuf;
 
 static int output_size = 0;
 
@@ -87,7 +86,6 @@ usage(enum mode mode, int incl_mode, const char *progname)
 	errx(1, "Usage: %s %s[-h] [-s] [-t] key [...]", progname, mstr);
     case MODE_exists:
 	mstr = incl_mode ? "exists " : "";
-	/* fallthrough */
     case MODE_list:
 	mstr = mstr ? : incl_mode ? "list " : "";
 	errx(1, "Usage: %s %s[-h] [-p] [-s] key [...]", progname, mstr);
@@ -97,9 +95,6 @@ usage(enum mode mode, int incl_mode, const char *progname)
     case MODE_chmod:
 	mstr = incl_mode ? "chmod " : "";
 	errx(1, "Usage: %s %s[-h] [-u] [-r] [-s] key <mode [modes...]>", progname, mstr);
-    case MODE_watch:
-	mstr = incl_mode ? "watch " : "";
-	errx(1, "Usage: %s %s[-h] [-n NR] key", progname, mstr);
     }
 }
 
@@ -128,15 +123,12 @@ static int show_whole_path = 0;
 
 static void do_ls(struct xs_handle *h, char *path, int cur_depth, int show_perms)
 {
+    static struct expanding_buffer ebuf;
     char **e;
-    char *newpath, *val;
+    char newpath[STRING_MAX], *val;
     int newpath_len;
     int i;
     unsigned int num, len;
-
-    newpath = malloc(STRING_MAX);
-    if (!newpath)
-      err(1, "malloc in do_ls");
 
     e = xs_directory(h, XBT_NULL, path, &num);
     if (e == NULL)
@@ -149,7 +141,7 @@ static void do_ls(struct xs_handle *h, char *path, int cur_depth, int show_perms
         int linewid;
 
         /* Compose fullpath */
-        newpath_len = snprintf(newpath, STRING_MAX, "%s%s%s", path,
+        newpath_len = snprintf(newpath, sizeof(newpath), "%s%s%s", path, 
                 path[strlen(path)-1] == '/' ? "" : "/", 
                 e[i]);
 
@@ -166,7 +158,7 @@ static void do_ls(struct xs_handle *h, char *path, int cur_depth, int show_perms
         }
 
 	/* Fetch value */
-        if ( newpath_len < STRING_MAX ) {
+        if ( newpath_len < sizeof(newpath) ) {
             val = xs_read(h, XBT_NULL, newpath, &len);
         }
         else {
@@ -222,7 +214,6 @@ static void do_ls(struct xs_handle *h, char *path, int cur_depth, int show_perms
         do_ls(h, newpath, cur_depth+1, show_perms); 
     }
     free(e);
-    free(newpath);
 }
 
 static void
@@ -272,28 +263,9 @@ do_chmod(char *path, struct xs_permissions *perms, int nperms, int upto,
     }
 }
 
-static void
-do_watch(struct xs_handle *xsh, int max_events)
-{
-    int count = 0;
-    char **vec = NULL;
-
-    for ( count = 0; max_events == -1 || count < max_events; count++ ) {
-	unsigned int num;
-
-	vec = xs_read_watch(xsh, &num);
-	if (vec == NULL)
-	    continue;
-
-	printf("%s\n", vec[XS_WATCH_PATH]);
-	fflush(stdout);
-	free(vec);
-    }
-}
-
 static int
 perform(enum mode mode, int optind, int argc, char **argv, struct xs_handle *xsh,
-        xs_transaction_t xth, int prefix, int tidy, int upto, int recurse, int nr_watches)
+        xs_transaction_t xth, int prefix, int tidy, int upto, int recurse)
 {
     switch (mode) {
     case MODE_ls:
@@ -314,6 +286,7 @@ perform(enum mode mode, int optind, int argc, char **argv, struct xs_handle *xsh
             /* CANNOT BE REACHED */
             errx(1, "invalid mode %d", mode);
         case MODE_read: {
+            static struct expanding_buffer ebuf;
             unsigned len;
             char *val = xs_read(xsh, xth, argv[optind], &len);
             if (val == NULL) {
@@ -328,6 +301,7 @@ perform(enum mode mode, int optind, int argc, char **argv, struct xs_handle *xsh
             break;
         }
         case MODE_write: {
+            static struct expanding_buffer ebuf;
             char *val_spec = argv[optind + 1];
             unsigned len;
             expanding_buffer_ensure(&ebuf, strlen(val_spec)+1);
@@ -371,13 +345,10 @@ perform(enum mode mode, int optind, int argc, char **argv, struct xs_handle *xsh
 
                         if (list) {
                             free(list);
-                            if (num == 0){
-                                free(val);
+                            if (num == 0)
                                 goto again;
-                            }
                         }
                     }
-                    free(val);
                 }
 
                 free(path);
@@ -413,55 +384,49 @@ perform(enum mode mode, int optind, int argc, char **argv, struct xs_handle *xsh
                 output("%s\n", list[i]);
             }
             free(list);
-            optind++;
-            break;
-        }
-        case MODE_ls: {
-            do_ls(xsh, argv[optind], 0, prefix);
-            optind++;
-            break;
+	    optind++;
+	    break;
+	}
+	case MODE_ls: {
+	    do_ls(xsh, argv[optind], 0, prefix);
+ 	    optind++;
+ 	    break;
         }
         case MODE_chmod: {
+            struct xs_permissions perms[MAX_PERMS];
+            int nperms = 0;
             /* save path pointer: */
             char *path = argv[optind++];
-            int nperms = argc - optind;
-            struct xs_permissions perms[nperms];
-            int i;
-            for (i = 0; argv[optind]; optind++, i++)
+            for (; argv[optind]; optind++, nperms++)
             {
-                perms[i].id = atoi(argv[optind]+1);
+                if (MAX_PERMS <= nperms)
+                    errx(1, "Too many permissions specified.  "
+			 "Maximum per invocation is %d.", MAX_PERMS);
+
+                perms[nperms].id = atoi(argv[optind]+1);
 
                 switch (argv[optind][0])
                 {
                 case 'n':
-                    perms[i].perms = XS_PERM_NONE;
+                    perms[nperms].perms = XS_PERM_NONE;
                     break;
                 case 'r':
-                    perms[i].perms = XS_PERM_READ;
+                    perms[nperms].perms = XS_PERM_READ;
                     break;
                 case 'w':
-                    perms[i].perms = XS_PERM_WRITE;
+                    perms[nperms].perms = XS_PERM_WRITE;
                     break;
                 case 'b':
-                    perms[i].perms = XS_PERM_READ | XS_PERM_WRITE;
+                    perms[nperms].perms = XS_PERM_READ | XS_PERM_WRITE;
                     break;
                 default:
                     errx(1, "Invalid permission specification: '%c'",
-                         argv[optind][0]);
+			 argv[optind][0]);
                 }
             }
 
             do_chmod(path, perms, nperms, upto, recurse, xsh, xth);
             break;
-        }
-        case MODE_watch: {
-            for (; argv[optind]; optind++) {
-                const char *w = argv[optind];
-
-                if (!xs_watch(xsh, w, w))
-                    errx(1, "Unable to add watch on %s\n", w);
-            }
-            do_watch(xsh, nr_watches);
         }
         }
     }
@@ -487,8 +452,6 @@ static enum mode lookup_mode(const char *m)
 	return MODE_write;
     else if (strcmp(m, "read") == 0)
 	return MODE_read;
-    else if (strcmp(m, "watch") == 0)
-	return MODE_watch;
 
     errx(1, "unknown mode %s\n", m);
     return 0;
@@ -504,7 +467,6 @@ main(int argc, char **argv)
     int tidy = 0;
     int upto = 0;
     int recurse = 0;
-    int nr_watches = -1;
     int transaction;
     struct winsize ws;
     enum mode mode;
@@ -538,11 +500,10 @@ main(int argc, char **argv)
 	    {"tidy",    0, 0, 't'}, /* MODE_rm */
 	    {"upto",    0, 0, 'u'}, /* MODE_chmod */
 	    {"recurse", 0, 0, 'r'}, /* MODE_chmod */
-	    {"number",  1, 0, 'n'}, /* MODE_watch */
 	    {0, 0, 0, 0}
 	};
 
-	c = getopt_long(argc - switch_argv, argv + switch_argv, "hfspturn:",
+	c = getopt_long(argc - switch_argv, argv + switch_argv, "hfsptur",
 			long_options, &index);
 	if (c == -1)
 	    break;
@@ -587,12 +548,6 @@ main(int argc, char **argv)
 	    else
 		usage(mode, switch_argv, argv[0]);
 	    break;
-	case 'n':
-	    if ( mode == MODE_watch )
-		nr_watches = atoi(optarg);
-	    else
-		usage(mode, switch_argv, argv[0]);
-	    break;
 	}
     }
 
@@ -620,7 +575,6 @@ main(int argc, char **argv)
 	transaction = (argc - switch_argv - optind) > 2;
 	break;
     case MODE_ls:
-    case MODE_watch:
 	transaction = 0;
 	break;
     default:
@@ -636,8 +590,9 @@ main(int argc, char **argv)
 	    max_width = ws.ws_col - 2;
     }
 
-    xsh = xs_open(socket ? XS_OPEN_SOCKETONLY : 0);
-    if (xsh == NULL) err(1, "xs_open");
+    xsh = socket ? xs_daemon_open() : xs_domain_open();
+    if (xsh == NULL)
+	err(1, socket ? "xs_daemon_open" : "xs_domain_open");
 
 again:
     if (transaction) {
@@ -646,7 +601,7 @@ again:
 	    errx(1, "couldn't start transaction");
     }
 
-    ret = perform(mode, optind, argc - switch_argv, argv + switch_argv, xsh, xth, prefix, tidy, upto, recurse, nr_watches);
+    ret = perform(mode, optind, argc - switch_argv, argv + switch_argv, xsh, xth, prefix, tidy, upto, recurse);
 
     if (transaction && !xs_transaction_end(xsh, xth, ret)) {
 	if (ret == 0 && errno == EAGAIN) {
@@ -658,12 +613,6 @@ again:
 
     if (output_pos)
 	printf("%s", output_buf);
-
-    free(output_buf);
-    free(ebuf.buf);
-
-    if (xsh)
-        xs_close(xsh);
 
     return ret;
 }

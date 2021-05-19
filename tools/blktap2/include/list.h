@@ -87,25 +87,24 @@ static inline int list_is_last(const struct list_head *list,
 	return list->next == head;
 }
 
-static inline void __list_splice(const struct list_head *list,
-				 struct list_head *prev,
-				 struct list_head *next)
+static inline void __list_splice(struct list_head *list,
+				 struct list_head *head)
 {
 	struct list_head *first = list->next;
 	struct list_head *last = list->prev;
+	struct list_head *at = head->next;
 
-	first->prev = prev;
-	prev->next = first;
+	first->prev = head;
+	head->next = first;
 
-	last->next = next;
-	next->prev = last;
+	last->next = at;
+	at->prev = last;
 }
 
-static inline void list_splice(const struct list_head *list,
-			       struct list_head *head)
+static inline void list_splice(struct list_head *list, struct list_head *head)
 {
 	if (!list_empty(list))
-		__list_splice(list, head, head->next);
+		__list_splice(list, head);
 }
 
 #define list_entry(ptr, type, member)                                   \

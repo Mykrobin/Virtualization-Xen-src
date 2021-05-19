@@ -1,14 +1,19 @@
-XEN_ROOT = $(CURDIR)/../..
+XEN_ROOT = ../..
 include $(XEN_ROOT)/tools/Rules.mk
 
 LIBMEMSHR-BUILD := libmemshr.a
 
 CFLAGS          += -Werror
 CFLAGS          += -Wno-unused
-CFLAGS          += $(CFLAGS_xeninclude)
+CFLAGS          += -I../include
 CFLAGS          += $(CFLAGS_libxenctrl)
 CFLAGS          += -D_GNU_SOURCE
 CFLAGS          += -fPIC
+CFLAGS          += -g
+
+# Get gcc to generate the dependencies for us.
+CFLAGS          += -Wp,-MD,.$(@F).d
+DEPS             = .*.d
 
 LIB-SRCS        := interface.c
 LIB-SRCS        += shm.c
@@ -36,14 +41,9 @@ libmemshr.a: $(LIB-OBJS)
 
 install: all
 
-uninstall:
-
 clean:
-	rm -rf *.a *.o *~ $(DEPS_RM)
+	rm -rf *.a *.o *~ $(DEPS)
 
-.PHONY: distclean
-distclean: clean
+.PHONY: all build clean install
 
-.PHONY: all build clean install distclean uninstall
-
--include $(DEPS_INCLUDE)
+-include $(DEPS)

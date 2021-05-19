@@ -3,41 +3,26 @@
  *
  */
 
-asm(".file \"" __FILE__ "\"");
-
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
 #include <xen/domain.h>
 #include <xen/guest_access.h>
 #include <xen/hypercall.h>
 #include <compat/vcpu.h>
-#include <compat/hvm/hvm_vcpu.h>
 
 #define xen_vcpu_set_periodic_timer vcpu_set_periodic_timer
 CHECK_vcpu_set_periodic_timer;
 #undef xen_vcpu_set_periodic_timer
 
-#define xen_vcpu_info vcpu_info
-CHECK_SIZE_(struct, vcpu_info);
-#undef xen_vcpu_info
-
-#define xen_vcpu_register_vcpu_info vcpu_register_vcpu_info
-CHECK_vcpu_register_vcpu_info;
-#undef xen_vcpu_register_vcpu_info
-
-#define xen_vcpu_hvm_context vcpu_hvm_context
-#define xen_vcpu_hvm_x86_32 vcpu_hvm_x86_32
-#define xen_vcpu_hvm_x86_64 vcpu_hvm_x86_64
-CHECK_vcpu_hvm_context;
-#undef xen_vcpu_hvm_x86_64
-#undef xen_vcpu_hvm_x86_32
-#undef xen_vcpu_hvm_context
-
-int compat_vcpu_op(int cmd, unsigned int vcpuid, XEN_GUEST_HANDLE_PARAM(void) arg)
+int compat_vcpu_op(int cmd, int vcpuid, XEN_GUEST_HANDLE(void) arg)
 {
     struct domain *d = current->domain;
     struct vcpu *v;
     int rc = 0;
+
+    if ( (vcpuid < 0) || (vcpuid >= MAX_VIRT_CPUS) )
+        return -EINVAL;
 
     if ( vcpuid >= d->max_vcpus || (v = d->vcpu[vcpuid]) == NULL )
         return -ENOENT;
@@ -46,44 +31,28 @@ int compat_vcpu_op(int cmd, unsigned int vcpuid, XEN_GUEST_HANDLE_PARAM(void) ar
     {
     case VCPUOP_initialise:
     {
-        if ( v->vcpu_info == &dummy_vcpu_info )
-            return -EINVAL;
+        struct compat_vcpu_guest_context *cmp_ctxt;
 
-        if ( is_hvm_vcpu(v) )
+        if ( (cmp_ctxt = xmalloc(struct compat_vcpu_guest_context)) == NULL )
         {
-            struct vcpu_hvm_context ctxt;
-
-            if ( copy_from_guest(&ctxt, arg, 1) )
-                return -EFAULT;
-
-            domain_lock(d);
-            rc = v->is_initialised ? -EEXIST : arch_set_info_hvm_guest(v, &ctxt);
-            domain_unlock(d);
-        }
-        else
-        {
-            struct compat_vcpu_guest_context *ctxt;
-
-            if ( (ctxt = xmalloc(struct compat_vcpu_guest_context)) == NULL )
-                return -ENOMEM;
-
-            if ( copy_from_guest(ctxt, arg, 1) )
-            {
-                xfree(ctxt);
-                return -EFAULT;
-            }
-
-            domain_lock(d);
-            rc = v->is_initialised ? -EEXIST : arch_set_info_guest(v, ctxt);
-            domain_unlock(d);
-
-            xfree(ctxt);
+            rc = -ENOMEM;
+            break;
         }
 
-        if ( rc == -ERESTART )
-            rc = hypercall_create_continuation(__HYPERVISOR_vcpu_op, "iih",
-                                               cmd, vcpuid, arg);
+        if ( copy_from_guest(cmp_ctxt, arg, 1) )
+        {
+            xfree(cmp_ctxt);
+            rc = -EFAULT;
+            break;
+        }
 
+        domain_lock(d);
+        rc = -EEXIST;
+        if ( !v->is_initialised )
+            rc = boot_vcpu(d, vcpuid, cmp_ctxt);
+        domain_unlock(d);
+
+        xfree(cmp_ctxt);
         break;
     }
 
@@ -93,7 +62,6 @@ int compat_vcpu_op(int cmd, unsigned int vcpuid, XEN_GUEST_HANDLE_PARAM(void) ar
     case VCPUOP_set_periodic_timer:
     case VCPUOP_stop_periodic_timer:
     case VCPUOP_stop_singleshot_timer:
-    case VCPUOP_register_vcpu_info:
     case VCPUOP_send_nmi:
         rc = do_vcpu_op(cmd, vcpuid, arg);
         break;
@@ -136,7 +104,7 @@ int compat_vcpu_op(int cmd, unsigned int vcpuid, XEN_GUEST_HANDLE_PARAM(void) ar
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

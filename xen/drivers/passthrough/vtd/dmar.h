@@ -11,7 +11,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  * Copyright (C) Ashok Raj <ashok.raj@intel.com>
  * Copyright (C) Shaohua Li <shaohua.li@intel.com>
@@ -22,7 +23,8 @@
 
 #include <xen/list.h>
 #include <xen/iommu.h>
-#include <xen/kexec.h>
+
+extern u8 dmar_host_address_width;
 
 /* This one is for interrupt remapping */
 struct acpi_ioapic_unit {
@@ -38,19 +40,6 @@ struct acpi_ioapic_unit {
     }ioapic;
 };
 
-struct acpi_hpet_unit {
-    struct list_head list;
-    unsigned int id;
-    union {
-        u16 bdf;
-        struct {
-            u16 func: 3,
-                dev:  5,
-                bus:  8;
-        };
-    };
-};
-
 struct dmar_scope {
     DECLARE_BITMAP(buses, 256);         /* buses owned by this unit */
     u16    *devices;                    /* devices owned by this unit */
@@ -58,29 +47,25 @@ struct dmar_scope {
 };
 
 struct acpi_drhd_unit {
-    struct dmar_scope scope;
+    struct dmar_scope scope;            /* must be first member of struct */
     struct list_head list;
     u64    address;                     /* register base address of the unit */
-    u16    segment;
     u8     include_all:1;
     struct iommu *iommu;
     struct list_head ioapic_list;
-    struct list_head hpet_list;
 };
 
 struct acpi_rmrr_unit {
-    struct dmar_scope scope;
+    struct dmar_scope scope;            /* must be first member of struct */
     struct list_head list;
     u64    base_address;
     u64    end_address;
-    u16    segment;
     u8     allow_all:1;
 };
 
 struct acpi_atsr_unit {
-    struct dmar_scope scope;
+    struct dmar_scope scope;            /* must be first member of struct */
     struct list_head list;
-    u16    segment;
     u8     all_ports:1;
 };
 
@@ -99,8 +84,10 @@ struct acpi_rhsa_unit {
         for (idx = 0; (bdf = rmrr->scope.devices[idx]) && \
                  idx < rmrr->scope.devices_cnt; idx++)
 
-struct acpi_drhd_unit *acpi_find_matched_drhd_unit(const struct pci_dev *);
-struct acpi_atsr_unit *acpi_find_matched_atsr_unit(const struct pci_dev *);
+struct acpi_drhd_unit * acpi_find_matched_drhd_unit(struct pci_dev *pdev);
+struct acpi_atsr_unit * acpi_find_matched_atsr_unit(u8 bus, u8 devfn);
+void dmar_scope_add_buses(struct dmar_scope *scope, u16 sec, u16 sub);
+void dmar_scope_remove_buses(struct dmar_scope *scope, u16 sec, u16 sub);
 
 #define DMAR_TYPE 1
 #define RMRR_TYPE 2
@@ -115,20 +102,18 @@ do {                                                \
         sts = op(iommu->reg, offset);               \
         if ( cond )                                 \
             break;                                  \
-        if ( NOW() > start_time + DMAR_OPERATION_TIMEOUT ) {    \
-            if ( !kexecing )                                    \
-            {                                                   \
-                dump_execution_state();                         \
-                panic("DMAR hardware malfunction");             \
-            }                                                   \
-            break;                                              \
-        }                                                       \
+        if ( NOW() > start_time + DMAR_OPERATION_TIMEOUT )      \
+            panic("%s:%d:%s: DMAR hardware is malfunctional\n", \
+                  __FILE__, __LINE__, __func__);                \
         cpu_relax();                                            \
     }                                                           \
 } while (0)
 
+void *map_to_nocache_virt(int nr_iommus, u64 maddr);
+
 int vtd_hw_check(void);
 void disable_pmr(struct iommu *iommu);
+int is_usb_device(u8 bus, u8 devfn);
 int is_igd_drhd(struct acpi_drhd_unit *drhd);
 
 #endif /* _DMAR_H_ */

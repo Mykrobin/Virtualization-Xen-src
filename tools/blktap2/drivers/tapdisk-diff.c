@@ -38,8 +38,6 @@
 #include "scheduler.h"
 #include "tapdisk-vbd.h"
 #include "tapdisk-server.h"
-#include "tapdisk-disktype.h"
-#include "tapdisk-utils.h"
 #include "libvhd.h"
 
 #define POLL_READ                        0
@@ -542,7 +540,7 @@ tapdisk_stream_open_image(struct tapdisk_stream *s, const char *path, int type)
 
 	s->id = tapdisk_stream_count++;
 
-	err = tapdisk_vbd_initialize(s->id);
+	err = tapdisk_vbd_initialize(-1, -1, s->id);
 	if (err)
 		goto out;
 
@@ -672,11 +670,11 @@ static int
 tapdisk_stream_open(struct tapdisk_stream *s, const char *arg)
 {
 	int err, type;
-	const char *path;
+	char *path;
 
-	type = tapdisk_disktype_parse_params(arg, &path);
-	if (type < 0)
-		return type;
+	err = tapdisk_parse_disk_type(arg, &path, &type);
+	if (err)
+		return err;
 
 	tapdisk_stream_initialize(s);
 
@@ -718,8 +716,7 @@ main(int argc, char *argv[])
 {
 	int c, err, type1;
 	const char *arg1 = NULL, *arg2 = NULL;
-	const disk_info_t *info;
-	const char *path1;
+	char *path1;
 
 	err    = 0;
 
@@ -744,10 +741,9 @@ main(int argc, char *argv[])
 	if (!arg1 || !arg2)
 		goto fail_usage;
 
-	type1 = tapdisk_disktype_parse_params(arg1, &path1);
-	if (type1 < 0)
-		return type1;
-
+	err = tapdisk_parse_disk_type(arg1, &path1, &type1);
+	if (err)
+		return err;
 	if (type1 != DISK_TYPE_VHD) {
 		printf("error: first VDI is not VHD\n");
 		return EINVAL;
@@ -759,7 +755,7 @@ main(int argc, char *argv[])
 
 	tapdisk_start_logging("tapdisk-diff");
 
-	err = tapdisk_server_initialize();
+	err = tapdisk_server_initialize(NULL, NULL);
 	if (err)
 		goto out;
 

@@ -47,7 +47,7 @@ struct td_driver_handle {
 	td_disk_info_t               info;
 
 	void                        *data;
-	const struct tap_disk       *ops;
+	struct tap_disk             *ops;
 
 	struct list_head             next;
 };

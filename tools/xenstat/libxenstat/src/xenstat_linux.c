@@ -64,12 +64,14 @@ static const char PROCNETDEV_HEADER[] =
 
 /* We need to get the name of the bridge interface for use with bonding interfaces */
 /* Use excludeName parameter to avoid adding bridges we don't care about, eg. virbr0 */
-void getBridge(char *excludeName, char *result, size_t resultLen)
+char *getBridge(char *excludeName)
 {
 	struct dirent *de;
 	DIR *d;
 
-	char tmp[512] = { 0 };
+	char tmp[256] = { 0 }, *bridge;
+
+	bridge = (char *)malloc(16 * sizeof(char));
 
 	d = opendir("/sys/class/net");
 	while ((de = readdir(d)) != NULL) {
@@ -77,14 +79,14 @@ void getBridge(char *excludeName, char *result, size_t resultLen)
 			&& (strstr(de->d_name, excludeName) == NULL)) {
 				sprintf(tmp, "/sys/class/net/%s/bridge", de->d_name);
 
-				if (access(tmp, F_OK) == 0) {
-					strncpy(result, de->d_name, resultLen - 1);
-					result[resultLen - 1] = 0;
-				}
+				if (access(tmp, F_OK) == 0)
+					bridge = de->d_name;
 		}
 	}
 
 	closedir(d);
+
+	return bridge;
 }
 
 /* parseNetLine provides regular expression based parsing for lines from /proc/net/dev, all the */
@@ -111,7 +113,7 @@ int parseNetDevLine(char *line, char *iface, unsigned long long *rxBytes, unsign
 
 	/* Initialize all variables called has passed as non-NULL to zeros */
 	if (iface != NULL)
-		memset(iface, 0, sizeof(*iface));
+		memset(iface, 0, sizeof(iface));
 	if (rxBytes != NULL)
 		*rxBytes = 0;
 	if (rxPackets != NULL)
@@ -219,11 +221,8 @@ int parseNetDevLine(char *line, char *iface, unsigned long long *rxBytes, unsign
 				}
 				else
 				/* There were errors when parsing this directly in RE. strpbrk() helps */
-				if (iface != NULL) {
-					char *tmp2 = strpbrk(tmp, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
-					if (tmp2 != NULL)
-						strcpy(iface, tmp2);
-				}
+				if (iface != NULL)
+					strcpy(iface, strpbrk(tmp, "abcdefghijklmnopqrstvuwxyz0123456789"));
 
 				memset(tmp, 0, matches[i].rm_eo - matches[i].rm_so);
 			}
@@ -232,29 +231,6 @@ int parseNetDevLine(char *line, char *iface, unsigned long long *rxBytes, unsign
 
 	free(tmp);
 	regfree(&r);
-
-	return 0;
-}
-
-/* Find out the domid and network number given an interface name.
- * Return 0 if the iface cannot be recognized as a Xen VIF. */
-static int get_iface_domid_network(const char *iface, unsigned int *domid_p, unsigned int *netid_p)
-{
-	char nodename_path[48];
-	FILE * nodename_file;
-	int ret;
-
-	snprintf(nodename_path, 48, "/sys/class/net/%s/device/nodename", iface);
-	nodename_file = fopen(nodename_path, "r");
-	if (nodename_file != NULL) {
-		ret = fscanf(nodename_file, "backend/vif/%u/%u", domid_p, netid_p);
-		fclose(nodename_file);
-		if (ret == 2)
-			return 1;
-	}
-
-	if (sscanf(iface, "vif%u.%u", domid_p, netid_p) == 2)
-		return 1;
 
 	return 0;
 }
@@ -303,7 +279,7 @@ int xenstat_collect_networks(xenstat_node * node)
 	      SEEK_SET);
 
 	/* We get the bridge devices for use with bonding interface to get bonding interface stats */
-	getBridge("vir", devBridge, sizeof(devBridge));
+	snprintf(devBridge, 16, "%s", getBridge("vir"));
 	snprintf(devNoBridge, 16, "p%s", devBridge);
 
 	while (fgets(line, 512, priv->procnetdev)) {
@@ -335,7 +311,8 @@ int xenstat_collect_networks(xenstat_node * node)
 			}
 		}
 		else /* Otherwise we need to preserve old behaviour */
-		if (get_iface_domid_network(iface, &domid, &net.id)) {
+		if (strstr(iface, "vif") != NULL) {
+			sscanf(iface, "vif%u.%u", &domid, &net.id);
 
 			net.tbytes = txBytes;
 			net.tpackets = txPackets;
@@ -420,9 +397,6 @@ int xenstat_collect_vbds(xenstat_node * node)
 		}
 	}
 
-	/* Get qdisk statistics */
-	read_attributes_qdisk(node);
-
 	rewinddir(priv->sysfsvbd);
 
 	for(dp = readdir(priv->sysfsvbd); dp != NULL ;
@@ -483,10 +457,18 @@ int xenstat_collect_vbds(xenstat_node * node)
 			continue;
 		}
 
-		if ((xenstat_save_vbd(domain, &vbd)) == NULL) {
-			perror("Allocation error");
-			return 0;
+		if (domain->vbds == NULL) {
+			domain->num_vbds = 1;
+			domain->vbds = malloc(sizeof(xenstat_vbd));
+		} else {
+			domain->num_vbds++;
+			domain->vbds = realloc(domain->vbds,
+					       domain->num_vbds *
+					       sizeof(xenstat_vbd));
 		}
+		if (domain->vbds == NULL)
+			return 0;
+		domain->vbds[domain->num_vbds - 1] = vbd;
 	}
 
 	return 1;	

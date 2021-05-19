@@ -13,7 +13,8 @@
  *  GNU General Public License for more details.
  * 
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <sys/types.h>
@@ -27,14 +28,11 @@
 #include <string.h>
 #include <syslog.h>
 
-#include <xenstore.h>
-
-#include "_paths.h"
+#include <xs.h>
 
 #define DEVTYPE_UNKNOWN 0
 #define DEVTYPE_VIF 1
 #define DEVTYPE_VBD 2
-#define DISABLE_EXEC "libxl/disable_udev"
 
 #define DOMAIN_PATH "/local/domain/0"
 
@@ -46,10 +44,10 @@
 #define VBD_SCRIPT XEN_SCRIPT_DIR"/block"
 #endif
 #ifndef LOG_FILE
-#define LOG_FILE XEN_LOG_DIR "xenbackendd.log"
+#define LOG_FILE "/var/log/xen/xenbackendd.log"
 #endif
 #ifndef PID_FILE
-#define PID_FILE XEN_RUN_DIR "xenbackendd.pid"
+#define PID_FILE "/var/run/xenbackendd.pid"
 #endif
 
 
@@ -151,10 +149,10 @@ main(int argc, char * const argv[])
 	unsigned int num;
 	char *s;
 	int state;
-	char *sstate, *sdisable;
+	char *sstate;
 	char *p;
 	char buf[80];
-	int type;
+	int type = DEVTYPE_UNKNOWN;
 	int ch;
 	int debug_fd;
 	FILE *pidfile_f;
@@ -171,7 +169,7 @@ main(int argc, char * const argv[])
 			log_file = optarg;
 			break;
 		case 'p':
-			pidfile = optarg;
+			pidfile = pidfile;
 		case 's':
 			vbd_script = optarg;
 			break;
@@ -241,15 +239,10 @@ main(int argc, char * const argv[])
 
 	for (;;) {
 		vec = xs_read_watch(xs, &num);
-		dodebug("read from xen watch: %s", *vec);
 		if (!vec) {
 			dolog(LOG_ERR, "xs_read_watch: NULL\n");
 			continue;
 		}
-
-		sdisable = xs_read(xs, XBT_NULL, DISABLE_EXEC, 0);
-		if (sdisable)
-			goto next1;
 
 		if (strlen(vec[XS_WATCH_PATH]) < sizeof("state"))
 			goto next1;
@@ -279,7 +272,6 @@ main(int argc, char * const argv[])
 		if (s != NULL && state != 6 /* XenbusStateClosed */)
 			goto next2;
 
-		type = DEVTYPE_UNKNOWN;
 		if (strncmp(vec[XS_WATCH_PATH],
 		    DOMAIN_PATH "/backend/vif",
 		    strlen(DOMAIN_PATH "/backend/vif")) == 0)
@@ -292,7 +284,8 @@ main(int argc, char * const argv[])
 
 		switch(type) {
 		case DEVTYPE_VIF:
-			free(s);
+			if (s)
+				free(s);
 			snprintf(buf, sizeof(buf), "%s/script",
 			    vec[XS_WATCH_PATH]);
 			s = xs_read(xs, XBT_NULL, buf, 0);
@@ -314,11 +307,11 @@ main(int argc, char * const argv[])
 		}
 
 next2:
-		free(s);
+		if (s)
+			free(s);
 		free(sstate);
 
 next1:
-		free(sdisable);
 		free(vec);
 	}
 

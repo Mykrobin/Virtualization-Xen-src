@@ -1,4 +1,4 @@
-XEN_ROOT := $(CURDIR)/../../..
+XEN_ROOT := ../../..
 include $(XEN_ROOT)/tools/Rules.mk
 
 .PHONY: all
@@ -6,14 +6,9 @@ all:
 
 .PHONY: install
 install:
-	$(INSTALL_DIR) -p $(DESTDIR)$(includedir)
+	$(INSTALL_DIR) -p $(DESTDIR)$(INCLUDEDIR)
 
-.PHONY: uninstall
-.uninstall:
 
 .PHONY: clean
 clean:
 	@:
-
-.PHONY: distclean
-distclean: clean

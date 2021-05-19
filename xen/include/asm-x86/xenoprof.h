@@ -16,15 +16,12 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #ifndef __ASM_X86_XENOPROF_H__
 #define __ASM_X86_XENOPROF_H__
-
-struct vcpu;
-
-#ifdef CONFIG_XENOPROF
 
 int nmi_reserve_counters(void);
 int nmi_setup_events(void);
@@ -43,54 +40,40 @@ int xenoprof_arch_init(int *num_events, char *cpu_type);
 #define xenoprof_arch_disable_virq()            nmi_disable_virq()
 #define xenoprof_arch_release_counters()        nmi_release_counters()
 
-int xenoprof_arch_counter(XEN_GUEST_HANDLE_PARAM(void) arg);
-int compat_oprof_arch_counter(XEN_GUEST_HANDLE_PARAM(void) arg);
-int xenoprof_arch_ibs_counter(XEN_GUEST_HANDLE_PARAM(void) arg);
+int xenoprof_arch_counter(XEN_GUEST_HANDLE(void) arg);
+int compat_oprof_arch_counter(XEN_GUEST_HANDLE(void) arg);
 
+struct vcpu;
 struct cpu_user_regs;
 
-/* AMD IBS support */
-void ibs_init(void);
-extern u32 ibs_caps;
-
-int xenoprofile_get_mode(struct vcpu *, const struct cpu_user_regs *);
+int xenoprofile_get_mode(struct vcpu *v, struct cpu_user_regs * const regs);
 
 static inline int xenoprof_backtrace_supported(void)
 {
     return 1;
 }
 
-void xenoprof_backtrace(struct vcpu *, const struct cpu_user_regs *,
-                        unsigned long depth, int mode);
+void xenoprof_backtrace(
+    struct domain *d, struct vcpu *vcpu, 
+    struct cpu_user_regs *const regs, unsigned long depth, int mode);
 
-int passive_domain_do_rdmsr(unsigned int msr, uint64_t *msr_content);
-int passive_domain_do_wrmsr(unsigned int msr, uint64_t msr_content);
+#define xenoprof_shared_gmfn(d, gmaddr, maddr)                      \
+    do {                                                            \
+        (void)(maddr);                                              \
+        gdprintk(XENLOG_WARNING,                                    \
+                 "xenoprof/x86 with autotranslated mode enabled"    \
+                 "isn't supported yet\n");                          \
+    } while (0)
+int passive_domain_do_rdmsr(struct cpu_user_regs *regs);
+int passive_domain_do_wrmsr(struct cpu_user_regs *regs);
 void passive_domain_destroy(struct vcpu *v);
-
-#else
-
-static inline int passive_domain_do_rdmsr(unsigned int msr,
-                                          uint64_t *msr_content)
-{
-    return 0;
-}
-
-static inline int passive_domain_do_wrmsr(unsigned int msr,
-                                          uint64_t msr_content)
-{
-    return 0;
-}
-
-static inline void passive_domain_destroy(struct vcpu *v) {}
-
-#endif /* CONFIG_XENOPROF */
 
 #endif /* __ASM_X86_XENOPROF_H__ */
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

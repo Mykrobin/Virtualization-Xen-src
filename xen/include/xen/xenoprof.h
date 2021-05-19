@@ -10,15 +10,9 @@
 #ifndef __XEN_XENOPROF_H__
 #define __XEN_XENOPROF_H__
 
-#include <xen/inttypes.h>
+#include <xen/config.h>
 #include <public/xenoprof.h>
 #include <asm/xenoprof.h>
-
-#define PMU_OWNER_NONE          0
-#define PMU_OWNER_XENOPROF      1
-#define PMU_OWNER_HVM           2
-
-#ifdef CONFIG_XENOPROF
 
 #define XENOPROF_DOMAIN_IGNORED    0
 #define XENOPROF_DOMAIN_ACTIVE     1
@@ -70,28 +64,21 @@ struct xenoprof {
 #endif
 
 struct domain;
-
-int acquire_pmu_ownership(int pmu_ownership);
-void release_pmu_ownership(int pmu_ownership);
-
 int is_active(struct domain *d);
 int is_passive(struct domain *d);
 void free_xenoprof_pages(struct domain *d);
 
-int xenoprof_add_trace(struct vcpu *, uint64_t pc, int mode);
+int xenoprof_add_trace(struct domain *d, struct vcpu *v, 
+                       unsigned long eip, int mode);
 
-void xenoprof_log_event(struct vcpu *, const struct cpu_user_regs *,
-                        uint64_t pc, int mode, int event);
+#define PMU_OWNER_NONE          0
+#define PMU_OWNER_XENOPROF      1
+#define PMU_OWNER_HVM           2
+int acquire_pmu_ownship(int pmu_ownership);
+void release_pmu_ownship(int pmu_ownership);
 
-#else
-static inline int acquire_pmu_ownership(int pmu_ownership)
-{
-    return 1;
-}
-
-static inline void release_pmu_ownership(int pmu_ownership)
-{
-}
-#endif /* CONFIG_XENOPROF */
+void xenoprof_log_event(struct vcpu *vcpu,
+                        struct cpu_user_regs * regs, unsigned long eip,
+                        int mode, int event);
 
 #endif  /* __XEN__XENOPROF_H__ */

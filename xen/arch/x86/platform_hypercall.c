@@ -6,6 +6,7 @@
  * Copyright (c) 2002-2006, K Fraser
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
@@ -18,34 +19,16 @@
 #include <xen/iocap.h>
 #include <xen/guest_access.h>
 #include <xen/acpi.h>
-#include <xen/efi.h>
-#include <xen/cpu.h>
-#include <xen/pmstat.h>
-#include <xen/irq.h>
-#include <xen/symbols.h>
 #include <asm/current.h>
 #include <public/platform.h>
 #include <acpi/cpufreq/processor_perf.h>
 #include <asm/edd.h>
 #include <asm/mtrr.h>
-#include <asm/io_apic.h>
-#include <asm/setup.h>
 #include "cpu/mtrr/mtrr.h"
 #include <xsm/xsm.h>
 
-/* Declarations for items shared with the compat mode handler. */
-extern spinlock_t xenpf_lock;
-
-#define RESOURCE_ACCESS_MAX_ENTRIES 3
-struct resource_access {
-    unsigned int nr_done;
-    unsigned int nr_entries;
-    xenpf_resource_entry_t *entries;
-};
-
-long cpu_frequency_change_helper(void *);
-void check_resource_access(struct resource_access *);
-void resource_access(void *);
+extern uint16_t boot_edid_caps;
+extern uint8_t boot_edid_info[];
 
 #ifndef COMPAT
 typedef long ret_t;
@@ -56,134 +39,33 @@ DEFINE_SPINLOCK(xenpf_lock);
 # define copy_to_compat copy_to_guest
 # undef guest_from_compat_handle
 # define guest_from_compat_handle(x,y) ((x)=(y))
-
-long cpu_frequency_change_helper(void *data)
-{
-    return cpu_frequency_change((uint64_t)data);
-}
-
-static bool allow_access_msr(unsigned int msr)
-{
-    switch ( msr )
-    {
-    /* MSR for CMT, refer to chapter 17.14 of Intel SDM. */
-    case MSR_IA32_CMT_EVTSEL:
-    case MSR_IA32_CMT_CTR:
-    case MSR_IA32_TSC:
-        return true;
-    }
-
-    return false;
-}
-
-void check_resource_access(struct resource_access *ra)
-{
-    unsigned int i;
-
-    for ( i = 0; i < ra->nr_entries; i++ )
-    {
-        int ret = 0;
-        xenpf_resource_entry_t *entry = ra->entries + i;
-
-        if ( entry->rsvd )
-        {
-            entry->u.ret = -EINVAL;
-            break;
-        }
-
-        switch ( entry->u.cmd )
-        {
-        case XEN_RESOURCE_OP_MSR_READ:
-        case XEN_RESOURCE_OP_MSR_WRITE:
-            if ( entry->idx >> 32 )
-                ret = -EINVAL;
-            else if ( !allow_access_msr(entry->idx) )
-                ret = -EACCES;
-            break;
-        default:
-            ret = -EOPNOTSUPP;
-            break;
-        }
-
-        if ( ret )
-        {
-           entry->u.ret = ret;
-           break;
-        }
-    }
-
-    ra->nr_done = i;
-}
-
-void resource_access(void *info)
-{
-    struct resource_access *ra = info;
-    unsigned int i;
-    u64 tsc = 0;
-
-    for ( i = 0; i < ra->nr_done; i++ )
-    {
-        int ret;
-        xenpf_resource_entry_t *entry = ra->entries + i;
-
-        switch ( entry->u.cmd )
-        {
-        case XEN_RESOURCE_OP_MSR_READ:
-            if ( unlikely(entry->idx == MSR_IA32_TSC) )
-            {
-                /* Return obfuscated scaled time instead of raw timestamp */
-                entry->val = get_s_time_fixed(tsc)
-                             + SECONDS(boot_random) - boot_random;
-                ret = 0;
-            }
-            else
-            {
-                unsigned long flags = 0;
-                /*
-                 * If next entry is MSR_IA32_TSC read, then the actual rdtsc
-                 * is performed together with current entry, with IRQ disabled.
-                 */
-                bool read_tsc = i < ra->nr_done - 1 &&
-                                unlikely(entry[1].idx == MSR_IA32_TSC);
-
-                if ( unlikely(read_tsc) )
-                    local_irq_save(flags);
-
-                ret = rdmsr_safe(entry->idx, entry->val);
-
-                if ( unlikely(read_tsc) )
-                {
-                    tsc = rdtsc();
-                    local_irq_restore(flags);
-                }
-            }
-            break;
-        case XEN_RESOURCE_OP_MSR_WRITE:
-            if ( unlikely(entry->idx == MSR_IA32_TSC) )
-                ret = -EPERM;
-            else
-                ret = wrmsr_safe(entry->idx, entry->val);
-            break;
-        default:
-            BUG();
-            break;
-        }
-
-        if ( ret )
-        {
-            entry->u.ret = ret;
-            break;
-        }
-    }
-
-    ra->nr_done = i;
-}
+#else
+extern spinlock_t xenpf_lock;
 #endif
 
-ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
+static DEFINE_PER_CPU(uint64_t, freq);
+
+extern int set_px_pminfo(uint32_t cpu, struct xen_processor_performance *perf);
+extern long set_cx_pminfo(uint32_t cpu, struct xen_processor_power *power);
+
+static long cpu_frequency_change_helper(void *data)
 {
-    ret_t ret;
+    return cpu_frequency_change(this_cpu(freq));
+}
+
+static long cpu_down_helper(void *data)
+{
+    int cpu = (unsigned long)data;
+    return cpu_down(cpu);
+}
+
+ret_t do_platform_op(XEN_GUEST_HANDLE(xen_platform_op_t) u_xenpf_op)
+{
+    ret_t ret = 0;
     struct xen_platform_op curop, *op = &curop;
+
+    if ( !IS_PRIV(current->domain) )
+        return -EPERM;
 
     if ( copy_from_guest(op, u_xenpf_op, 1) )
         return -EFAULT;
@@ -191,15 +73,7 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
     if ( op->interface_version != XENPF_INTERFACE_VERSION )
         return -EACCES;
 
-    ret = xsm_platform_op(XSM_PRIV, op->cmd);
-    if ( ret )
-        return ret;
-
-    /*
-     * Trylock here avoids deadlock with an existing platform critical section
-     * which might (for some current or future reason) want to synchronise
-     * with this vcpu.
-     */
+    /* spin_trylock() avoids deadlock with stop_machine_run(). */
     while ( !spin_trylock(&xenpf_lock) )
         if ( hypercall_preempt_check() )
             return hypercall_create_continuation(
@@ -207,23 +81,25 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
 
     switch ( op->cmd )
     {
-    case XENPF_settime32:
-        do_settime(op->u.settime32.secs,
-                   op->u.settime32.nsecs,
-                   op->u.settime32.system_time);
-        break;
+    case XENPF_settime:
+    {
+        ret = xsm_xen_settime();
+        if ( ret )
+            break;
 
-    case XENPF_settime64:
-        if ( likely(!op->u.settime64.mbz) )
-            do_settime(op->u.settime64.secs,
-                       op->u.settime64.nsecs,
-                       op->u.settime64.system_time);
-        else
-            ret = -EINVAL;
-        break;
+        do_settime(op->u.settime.secs, 
+                   op->u.settime.nsecs, 
+                   op->u.settime.system_time);
+        ret = 0;
+    }
+    break;
 
     case XENPF_add_memtype:
     {
+        ret = xsm_memtype(op->cmd);
+        if ( ret )
+            break;
+
         ret = mtrr_add_page(
             op->u.add_memtype.mfn,
             op->u.add_memtype.nr_mfns,
@@ -233,8 +109,7 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
         {
             op->u.add_memtype.handle = 0;
             op->u.add_memtype.reg    = ret;
-            ret = __copy_field_to_guest(u_xenpf_op, op, u.add_memtype) ?
-                  -EFAULT : 0;
+            ret = copy_to_guest(u_xenpf_op, op, 1) ? -EFAULT : 0;
             if ( ret != 0 )
                 mtrr_del_page(ret, 0, 0);
         }
@@ -243,6 +118,10 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
 
     case XENPF_del_memtype:
     {
+        ret = xsm_memtype(op->cmd);
+        if ( ret )
+            break;
+
         if (op->u.del_memtype.handle == 0
             /* mtrr/main.c otherwise does a lookup */
             && (int)op->u.del_memtype.reg >= 0)
@@ -261,6 +140,10 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
         unsigned long mfn, nr_mfns;
         mtrr_type     type;
 
+        ret = xsm_memtype(op->cmd);
+        if ( ret )
+            break;
+
         ret = -EINVAL;
         if ( op->u.read_memtype.reg < num_var_ranges )
         {
@@ -268,8 +151,7 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
             op->u.read_memtype.mfn     = mfn;
             op->u.read_memtype.nr_mfns = nr_mfns;
             op->u.read_memtype.type    = type;
-            ret = __copy_field_to_guest(u_xenpf_op, op, u.read_memtype)
-                  ? -EFAULT : 0;
+            ret = copy_to_guest(u_xenpf_op, op, 1) ? -EFAULT : 0;
         }
     }
     break;
@@ -278,32 +160,23 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
     {
         XEN_GUEST_HANDLE(const_void) data;
 
+        ret = xsm_microcode();
+        if ( ret )
+            break;
+
         guest_from_compat_handle(data, op->u.microcode.data);
-
-        /*
-         * alloc_vcpu() will access data which is modified during
-         * microcode update
-         */
-        while ( !spin_trylock(&vcpu_alloc_lock) )
-        {
-            if ( hypercall_preempt_check() )
-            {
-                ret = hypercall_create_continuation(
-                    __HYPERVISOR_platform_op, "h", u_xenpf_op);
-                goto out;
-            }
-        }
-
-        ret = microcode_update(
-                guest_handle_to_param(data, const_void),
-                op->u.microcode.length);
-        spin_unlock(&vcpu_alloc_lock);
+        ret = microcode_update(data, op->u.microcode.length);
     }
     break;
 
     case XENPF_platform_quirk:
     {
+        extern int opt_noirqbalance;
         int quirk_id = op->u.platform_quirk.quirk_id;
+
+        ret = xsm_platform_quirk(quirk_id);
+        if ( ret )
+            break;
 
         switch ( quirk_id )
         {
@@ -313,10 +186,17 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
             setup_ioapic_dest();
             break;
         case QUIRK_IOAPIC_BAD_REGSEL:
-            dprintk(XENLOG_WARNING,
-                    "Domain 0 thinks that IO-APIC REGSEL is bad\n");
-            break;
         case QUIRK_IOAPIC_GOOD_REGSEL:
+#ifndef sis_apic_bug
+            sis_apic_bug = (quirk_id == QUIRK_IOAPIC_BAD_REGSEL);
+            dprintk(XENLOG_INFO, "Domain 0 says that IO-APIC REGSEL is %s\n",
+                    sis_apic_bug ? "bad" : "good");
+#else
+            if ( sis_apic_bug != (quirk_id == QUIRK_IOAPIC_BAD_REGSEL) )
+                dprintk(XENLOG_WARNING,
+                        "Domain 0 thinks that IO-APIC REGSEL is %s\n",
+                        sis_apic_bug ? "good" : "bad");
+#endif
             break;
         default:
             ret = -EINVAL;
@@ -326,6 +206,10 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
     break;
 
     case XENPF_firmware_info:
+        ret = xsm_firmware_info();
+        if ( ret )
+            break;
+
         switch ( op->u.firmware_info.type )
         {
         case XEN_FW_DISK_INFO: {
@@ -363,8 +247,8 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
             C(legacy_sectors_per_track);
 #undef C
 
-            ret = (__copy_field_to_guest(u_xenpf_op, op,
-                                         u.firmware_info.u.disk_info)
+            ret = (copy_field_to_guest(u_xenpf_op, op,
+                                      u.firmware_info.u.disk_info)
                    ? -EFAULT : 0);
             break;
         }
@@ -381,14 +265,13 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
             op->u.firmware_info.u.disk_mbr_signature.mbr_signature =
                 sig->signature;
 
-            ret = (__copy_field_to_guest(u_xenpf_op, op,
-                                         u.firmware_info.u.disk_mbr_signature)
+            ret = (copy_field_to_guest(u_xenpf_op, op,
+                                      u.firmware_info.u.disk_mbr_signature)
                    ? -EFAULT : 0);
             break;
         }
         case XEN_FW_VBEDDC_INFO:
             ret = -ESRCH;
-#ifdef CONFIG_VIDEO
             if ( op->u.firmware_info.index != 0 )
                 break;
             if ( *(u32 *)bootsym(boot_edid_info) == 0x13131313 )
@@ -400,33 +283,12 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
                 bootsym(boot_edid_caps) >> 8;
 
             ret = 0;
-            if ( __copy_field_to_guest(u_xenpf_op, op, u.firmware_info.
-                                       u.vbeddc_info.capabilities) ||
-                 __copy_field_to_guest(u_xenpf_op, op, u.firmware_info.
-                                       u.vbeddc_info.edid_transfer_time) ||
+            if ( copy_field_to_guest(u_xenpf_op, op, u.firmware_info.
+                                     u.vbeddc_info.capabilities) ||
+                 copy_field_to_guest(u_xenpf_op, op, u.firmware_info.
+                                     u.vbeddc_info.edid_transfer_time) ||
                  copy_to_compat(op->u.firmware_info.u.vbeddc_info.edid,
                                 bootsym(boot_edid_info), 128) )
-                ret = -EFAULT;
-#endif
-            break;
-        case XEN_FW_EFI_INFO:
-            ret = efi_get_info(op->u.firmware_info.index,
-                               &op->u.firmware_info.u.efi_info);
-            if ( ret == 0 &&
-                 __copy_field_to_guest(u_xenpf_op, op,
-                                       u.firmware_info.u.efi_info) )
-                ret = -EFAULT;
-            break;
-        case XEN_FW_KBD_SHIFT_FLAGS:
-            ret = -ESRCH;
-            if ( op->u.firmware_info.index != 0 )
-                break;
-
-            op->u.firmware_info.u.kbd_shift_flags = bootsym(kbd_shift_flags);
-
-            ret = 0;
-            if ( __copy_field_to_guest(u_xenpf_op, op,
-                                       u.firmware_info.u.kbd_shift_flags) )
                 ret = -EFAULT;
             break;
         default:
@@ -435,74 +297,72 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
         }
         break;
 
-    case XENPF_efi_runtime_call:
-        ret = efi_runtime_call(&op->u.efi_runtime_call);
-        if ( ret == 0 &&
-             __copy_field_to_guest(u_xenpf_op, op, u.efi_runtime_call) )
-            ret = -EFAULT;
-        break;
-
     case XENPF_enter_acpi_sleep:
+        ret = xsm_acpi_sleep();
+        if ( ret )
+            break;
+
         ret = acpi_enter_sleep(&op->u.enter_acpi_sleep);
         break;
 
     case XENPF_change_freq:
+        ret = xsm_change_freq();
+        if ( ret )
+            break;
+
         ret = -ENOSYS;
         if ( cpufreq_controller != FREQCTL_dom0_kernel )
             break;
         ret = -EINVAL;
         if ( op->u.change_freq.flags || !cpu_online(op->u.change_freq.cpu) )
             break;
+        per_cpu(freq, op->u.change_freq.cpu) = op->u.change_freq.freq;
         ret = continue_hypercall_on_cpu(op->u.change_freq.cpu,
                                         cpu_frequency_change_helper,
-                                        (void *)op->u.change_freq.freq);
+                                        NULL);
         break;
 
     case XENPF_getidletime:
     {
         uint32_t cpu;
         uint64_t idletime, now = NOW();
-        struct xenctl_bitmap ctlmap;
-        cpumask_var_t cpumap;
+        struct xenctl_cpumap ctlmap;
+        cpumask_t cpumap;
         XEN_GUEST_HANDLE(uint8) cpumap_bitmap;
         XEN_GUEST_HANDLE(uint64) idletimes;
+
+        ret = xsm_getidletime();
+        if ( ret )
+            break;
 
         ret = -ENOSYS;
         if ( cpufreq_controller != FREQCTL_dom0_kernel )
             break;
 
-        ctlmap.nr_bits  = op->u.getidletime.cpumap_nr_cpus;
+        ctlmap.nr_cpus  = op->u.getidletime.cpumap_nr_cpus;
         guest_from_compat_handle(cpumap_bitmap,
                                  op->u.getidletime.cpumap_bitmap);
         ctlmap.bitmap.p = cpumap_bitmap.p; /* handle -> handle_64 conversion */
-        if ( (ret = xenctl_bitmap_to_cpumask(&cpumap, &ctlmap)) != 0 )
+        if ( (ret = xenctl_cpumap_to_cpumask(&cpumap, &ctlmap)) != 0 )
             goto out;
         guest_from_compat_handle(idletimes, op->u.getidletime.idletime);
 
-        for_each_cpu ( cpu, cpumap )
+        for_each_cpu_mask ( cpu, cpumap )
         {
+            if ( idle_vcpu[cpu] == NULL )
+                cpu_clear(cpu, cpumap);
             idletime = get_cpu_idle_time(cpu);
 
-            if ( !idletime )
-            {
-                __cpumask_clear_cpu(cpu, cpumap);
-                continue;
-            }
-
+            ret = -EFAULT;
             if ( copy_to_guest_offset(idletimes, cpu, &idletime, 1) )
-            {
-                ret = -EFAULT;
-                break;
-            }
+                goto out;
         }
 
         op->u.getidletime.now = now;
-        if ( ret == 0 )
-            ret = cpumask_to_xenctl_bitmap(&ctlmap, cpumap);
-        free_cpumask_var(cpumap);
+        if ( (ret = cpumask_to_xenctl_cpumap(&ctlmap, &cpumap)) != 0 )
+            goto out;
 
-        if ( ret == 0 && __copy_field_to_guest(u_xenpf_op, op, u.getidletime) )
-            ret = -EFAULT;
+        ret = copy_to_guest(u_xenpf_op, op, 1) ? -EFAULT : 0;
     }
     break;
 
@@ -536,17 +396,6 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
             ret = -EINVAL;
             break;
 
-        case XEN_PM_PDC:
-        {
-            XEN_GUEST_HANDLE(uint32) pdc;
-
-            guest_from_compat_handle(pdc, op->u.set_pminfo.u.pdc);
-            ret = acpi_set_pdc_bits(
-                    op->u.set_pminfo.id,
-                    guest_handle_to_param(pdc, uint32));
-        }
-        break;
-
         default:
             ret = -EINVAL;
             break;
@@ -559,13 +408,14 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
 
         g_info = &op->u.pcpu_info;
 
-        if ( !get_cpu_maps() )
+        /* spin_trylock() avoids deadlock with stop_machine_run(). */
+        if ( !spin_trylock(&cpu_add_remove_lock) )
         {
             ret = -EBUSY;
             break;
         }
 
-        if ( (g_info->xen_cpuid >= nr_cpu_ids) ||
+        if ( (g_info->xen_cpuid >= NR_CPUS) ||
              !cpu_present(g_info->xen_cpuid) )
         {
             g_info->flags = XEN_PCPU_FLAGS_INVALID;
@@ -580,83 +430,39 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
                 g_info->flags |= XEN_PCPU_FLAGS_ONLINE;
         }
 
-        g_info->max_present = cpumask_last(&cpu_present_map);
+        g_info->max_present = last_cpu(cpu_present_map);
 
-        put_cpu_maps();
+        spin_unlock(&cpu_add_remove_lock);
 
-        ret = __copy_field_to_guest(u_xenpf_op, op, u.pcpu_info) ? -EFAULT : 0;
-    }
-    break;
-
-    case XENPF_get_cpu_version:
-    {
-        struct xenpf_pcpu_version *ver = &op->u.pcpu_version;
-
-        if ( !get_cpu_maps() )
-        {
-            ret = -EBUSY;
-            break;
-        }
-
-        if ( (ver->xen_cpuid >= nr_cpu_ids) || !cpu_online(ver->xen_cpuid) )
-        {
-            memset(ver->vendor_id, 0, sizeof(ver->vendor_id));
-            ver->family = 0;
-            ver->model = 0;
-            ver->stepping = 0;
-        }
-        else
-        {
-            const struct cpuinfo_x86 *c = &cpu_data[ver->xen_cpuid];
-
-            memcpy(ver->vendor_id, c->x86_vendor_id, sizeof(ver->vendor_id));
-            ver->family = c->x86;
-            ver->model = c->x86_model;
-            ver->stepping = c->x86_mask;
-        }
-
-        ver->max_present = cpumask_last(&cpu_present_map);
-
-        put_cpu_maps();
-
-        if ( __copy_field_to_guest(u_xenpf_op, op, u.pcpu_version) )
-            ret = -EFAULT;
+        ret = copy_to_guest(u_xenpf_op, op, 1) ? -EFAULT : 0;
     }
     break;
 
     case XENPF_cpu_online:
     {
-        int cpu = op->u.cpu_ol.cpuid;
+        int cpu;
 
-        ret = xsm_resource_plug_core(XSM_HOOK);
-        if ( ret )
-            break;
-
-        if ( cpu >= nr_cpu_ids || !cpu_present(cpu) ||
-             clocksource_is_tsc() )
+        cpu = op->u.cpu_ol.cpuid;
+        if (cpu >= NR_CPUS || !cpu_present(cpu))
         {
             ret = -EINVAL;
             break;
         }
-
-        if ( cpu_online(cpu) )
+        else if (cpu_online(cpu))
         {
             ret = 0;
             break;
         }
 
-        ret = continue_hypercall_on_cpu(
-            0, cpu_up_helper, (void *)(unsigned long)cpu);
+        ret = cpu_up(cpu);
         break;
     }
 
     case XENPF_cpu_offline:
     {
-        int cpu = op->u.cpu_ol.cpuid;
+        int cpu;
 
-        ret = xsm_resource_unplug_core(XSM_HOOK);
-        if ( ret )
-            break;
+        cpu = op->u.cpu_ol.cpuid;
 
         if ( cpu == 0 )
         {
@@ -664,165 +470,35 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
             break;
         }
 
-        if ( cpu >= nr_cpu_ids || !cpu_present(cpu) )
+        if ( cpu >= NR_CPUS || !cpu_present(cpu) )
         {
             ret = -EINVAL;
             break;
         }
-
-        if ( !cpu_online(cpu) )
+        
+        if (!cpu_online(cpu))
         {
             ret = 0;
             break;
         }
 
         ret = continue_hypercall_on_cpu(
-            0, cpu_down_helper, (void *)(unsigned long)cpu);
+          0, cpu_down_helper, (void *)(unsigned long)cpu);
         break;
     }
     break;
 
     case XENPF_cpu_hotadd:
-        ret = xsm_resource_plug_core(XSM_HOOK);
-        if ( ret )
-            break;
-
         ret = cpu_add(op->u.cpu_add.apic_id,
                       op->u.cpu_add.acpi_id,
                       op->u.cpu_add.pxm);
     break;
 
     case XENPF_mem_hotadd:
-        ret = xsm_resource_plug_core(XSM_HOOK);
-        if ( ret )
-            break;
-
         ret = memory_add(op->u.mem_add.spfn,
                       op->u.mem_add.epfn,
                       op->u.mem_add.pxm);
         break;
-
-    case XENPF_core_parking:
-    {
-        uint32_t idle_nums;
-
-        switch(op->u.core_parking.type)
-        {
-        case XEN_CORE_PARKING_SET:
-            idle_nums = min_t(uint32_t,
-                    op->u.core_parking.idle_nums, num_present_cpus() - 1);
-            ret = continue_hypercall_on_cpu(
-                    0, core_parking_helper, (void *)(unsigned long)idle_nums);
-            break;
-
-        case XEN_CORE_PARKING_GET:
-            op->u.core_parking.idle_nums = get_cur_idle_nums();
-            ret = __copy_field_to_guest(u_xenpf_op, op, u.core_parking) ?
-                  -EFAULT : 0;
-            break;
-
-        default:
-            ret = -EINVAL;
-            break;
-        }
-    }
-    break;
-
-    case XENPF_resource_op:
-    {
-        struct resource_access ra;
-        unsigned int cpu;
-        XEN_GUEST_HANDLE(xenpf_resource_entry_t) guest_entries;
-
-        ra.nr_entries = op->u.resource_op.nr_entries;
-        if ( ra.nr_entries == 0 )
-            break;
-        if ( ra.nr_entries > RESOURCE_ACCESS_MAX_ENTRIES )
-        {
-            ret = -EINVAL;
-            break;
-        }
-
-        ra.entries = xmalloc_array(xenpf_resource_entry_t, ra.nr_entries);
-        if ( !ra.entries )
-        {
-            ret = -ENOMEM;
-            break;
-        }
-
-        guest_from_compat_handle(guest_entries, op->u.resource_op.entries);
-
-        if ( copy_from_guest(ra.entries, guest_entries, ra.nr_entries) )
-        {
-            xfree(ra.entries);
-            ret = -EFAULT;
-            break;
-        }
-
-        /* Do sanity check earlier to omit the potential IPI overhead. */
-        check_resource_access(&ra);
-        if ( ra.nr_done == 0 )
-        {
-            /* Copy the return value for entry 0 if it failed. */
-            if ( __copy_to_guest(guest_entries, ra.entries, 1) )
-                ret = -EFAULT;
-
-            xfree(ra.entries);
-            break;
-        }
-
-        cpu = op->u.resource_op.cpu;
-        if ( (cpu >= nr_cpu_ids) || !cpu_online(cpu) )
-        {
-            xfree(ra.entries);
-            ret = -ENODEV;
-            break;
-        }
-        if ( cpu == smp_processor_id() )
-            resource_access(&ra);
-        else
-            on_selected_cpus(cpumask_of(cpu), resource_access, &ra, 1);
-
-        /* Copy all if succeeded or up to the failed entry. */
-        if ( __copy_to_guest(guest_entries, ra.entries,
-                             ra.nr_done < ra.nr_entries ? ra.nr_done + 1
-                                                        : ra.nr_entries) )
-            ret = -EFAULT;
-        else
-            ret = ra.nr_done;
-
-        xfree(ra.entries);
-    }
-    break;
-
-    case XENPF_get_symbol:
-    {
-        static char name[KSYM_NAME_LEN + 1]; /* protected by xenpf_lock */
-        XEN_GUEST_HANDLE(char) nameh;
-        uint32_t namelen, copylen;
-        unsigned long addr;
-
-        guest_from_compat_handle(nameh, op->u.symdata.name);
-
-        ret = xensyms_read(&op->u.symdata.symnum, &op->u.symdata.type,
-                           &addr, name);
-        op->u.symdata.address = addr;
-        namelen = strlen(name) + 1;
-
-        if ( namelen > op->u.symdata.namelen )
-            copylen = op->u.symdata.namelen;
-        else
-            copylen = namelen;
-
-        op->u.symdata.namelen = namelen;
-
-        if ( !ret && copy_to_guest(nameh, name, copylen) )
-            ret = -EFAULT;
-        if ( !ret && __copy_field_to_guest(u_xenpf_op, op, u.symdata) )
-            ret = -EFAULT;
-    }
-    break;
-
     default:
         ret = -ENOSYS;
         break;
@@ -837,7 +513,7 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

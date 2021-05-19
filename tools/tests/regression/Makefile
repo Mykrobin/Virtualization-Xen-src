@@ -22,8 +22,8 @@ check-python-syntax: runtime-environment
 .PHONY: runtime-environment
 runtime-environment: $(PYTHON_VERSIONS)
 
-.PHONY: distclean
-distclean:
+.PHONY: dist-clean
+dist-clean:
 	rm -fr $(REG_TEST_DIR)/installed $(REG_TEST_DIR)/downloads \
 		$(REG_TEST_DIR)/build
 

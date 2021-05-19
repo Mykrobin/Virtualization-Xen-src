@@ -1,8 +1,6 @@
 #ifndef __ASM_MACH_APIC_H
 #define __ASM_MACH_APIC_H
 
-#include <asm/apic.h>
-#include <asm/io_apic.h>
 #include <asm/genapic.h>
 #include <asm/smp.h>
 
@@ -16,7 +14,7 @@
 #define init_apic_ldr (genapic->init_apic_ldr)
 #define clustered_apic_check (genapic->clustered_apic_check) 
 #define cpu_mask_to_apicid (genapic->cpu_mask_to_apicid)
-#define vector_allocation_cpumask(cpu) (genapic->vector_allocation_cpumask(cpu))
+#define vector_allocation_domain(cpu) (genapic->vector_allocation_domain(cpu))
 
 static inline void enable_apic_mode(void)
 {
@@ -27,6 +25,21 @@ static inline void enable_apic_mode(void)
 #define apicid_to_node(apicid) ((int)apicid_to_node[(u32)apicid])
 
 extern u32 bios_cpu_apicid[];
+
+static inline int mpc_apic_id(struct mpc_config_processor *m, 
+			struct mpc_config_translation *translation_record)
+{
+	printk("Processor #%d %d:%d APIC version %d\n",
+			m->mpc_apicid,
+			(m->mpc_cpufeature & CPU_FAMILY_MASK) >> 8,
+			(m->mpc_cpufeature & CPU_MODEL_MASK) >> 4,
+			m->mpc_apicver);
+	return (m->mpc_apicid);
+}
+
+static inline void setup_portio_remap(void)
+{
+}
 
 static inline int multi_timer_check(int apic, int irq)
 {
@@ -48,24 +61,29 @@ static inline int apic_id_registered(void)
 			    phys_cpu_present_map);
 }
 
-static inline void ioapic_phys_id_map(physid_mask_t *map)
+static inline physid_mask_t ioapic_phys_id_map(physid_mask_t phys_map)
 {
-	*map = phys_cpu_present_map;
+	return phys_map;
 }
 
-static inline int check_apicid_used(const physid_mask_t *map, int apicid)
+static inline unsigned long check_apicid_used(physid_mask_t bitmap, int apicid)
 {
-	return physid_isset(apicid, *map);
+	return physid_isset(apicid, bitmap);
 }
 
-static inline int check_apicid_present(int apicid)
+static inline unsigned long check_apicid_present(int apicid)
 {
 	return physid_isset(apicid, phys_cpu_present_map);
 }
 
-static inline void set_apicid(int phys_apicid, physid_mask_t *map)
+static inline int check_phys_apicid_present(int boot_cpu_physical_apicid)
 {
-	physid_set(phys_apicid, *map);
+	return physid_isset(boot_cpu_physical_apicid, phys_cpu_present_map);
+}
+
+static inline physid_mask_t apicid_to_cpu_present(int phys_apicid)
+{
+	return physid_mask_of_physid(phys_apicid);
 }
 
 #endif /* __ASM_MACH_APIC_H */

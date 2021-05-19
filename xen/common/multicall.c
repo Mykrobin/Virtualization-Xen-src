@@ -2,6 +2,7 @@
  * multicall.c
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
@@ -10,37 +11,21 @@
 #include <xen/multicall.h>
 #include <xen/guest_access.h>
 #include <xen/perfc.h>
-#include <xen/trace.h>
 #include <asm/current.h>
 #include <asm/hardirq.h>
 
 #ifndef COMPAT
+DEFINE_PER_CPU(struct mc_state, mc_state);
 typedef long ret_t;
 #define xlat_multicall_entry(mcs)
-
-static void __trace_multicall_call(multicall_entry_t *call)
-{
-    __trace_hypercall(TRC_PV_HYPERCALL_SUBCALL, call->op, call->args);
-}
 #endif
-
-static void trace_multicall_call(multicall_entry_t *call)
-{
-    if ( !tb_init_done )
-        return;
-
-    __trace_multicall_call(call);
-}
 
 ret_t
 do_multicall(
-    XEN_GUEST_HANDLE_PARAM(multicall_entry_t) call_list, uint32_t nr_calls)
+    XEN_GUEST_HANDLE(multicall_entry_t) call_list, unsigned int nr_calls)
 {
-    struct vcpu *curr = current;
-    struct mc_state *mcs = &curr->mc_state;
-    uint32_t         i;
-    int              rc = 0;
-    enum mc_disposition disp = mc_continue;
+    struct mc_state *mcs = &this_cpu(mc_state);
+    unsigned int     i;
 
     if ( unlikely(__test_and_set_bit(_MCSF_in_multicall, &mcs->flags)) )
     {
@@ -49,29 +34,17 @@ do_multicall(
     }
 
     if ( unlikely(!guest_handle_okay(call_list, nr_calls)) )
-        rc = -EFAULT;
+        goto fault;
 
-    for ( i = 0; !rc && disp == mc_continue && i < nr_calls; i++ )
+    for ( i = 0; i < nr_calls; i++ )
     {
-        if ( i && hypercall_preempt_check() )
+        if ( hypercall_preempt_check() )
             goto preempted;
 
         if ( unlikely(__copy_from_guest(&mcs->call, call_list, 1)) )
-        {
-            rc = -EFAULT;
-            break;
-        }
+            goto fault;
 
-        trace_multicall_call(&mcs->call);
-
-        disp = arch_do_multicall_call(mcs);
-
-        /*
-         * In the unlikely event that a hypercall has left interrupts,
-         * spinlocks, or other things in a bad way, continuing the multicall
-         * will typically lead to far more subtle issues to debug.
-         */
-        ASSERT_NOT_IN_ATOMIC();
+        do_multicall_call(&mcs->call);
 
 #ifndef NDEBUG
         {
@@ -85,38 +58,31 @@ do_multicall(
         }
 #endif
 
-        if ( unlikely(disp == mc_exit) )
-        {
-            if ( __copy_field_to_guest(call_list, &mcs->call, result) )
-                /* nothing, best effort only */;
-            rc = mcs->call.result;
-        }
-        else if ( unlikely(__copy_field_to_guest(call_list, &mcs->call,
-                                                 result)) )
-            rc = -EFAULT;
-        else if ( curr->hcall_preempted )
+        if ( unlikely(__copy_field_to_guest(call_list, &mcs->call, result)) )
+            goto fault;
+
+        if ( test_bit(_MCSF_call_preempted, &mcs->flags) )
         {
             /* Translate sub-call continuation to guest layout */
             xlat_multicall_entry(mcs);
 
             /* Copy the sub-call continuation. */
-            if ( likely(!__copy_to_guest(call_list, &mcs->call, 1)) )
-                goto preempted;
-            else
-                hypercall_cancel_continuation(curr);
-            rc = -EFAULT;
+            (void)__copy_to_guest(call_list, &mcs->call, 1);
+            goto preempted;
         }
-        else
-            guest_handle_add_offset(call_list, 1);
+
+        guest_handle_add_offset(call_list, 1);
     }
 
-    if ( unlikely(disp == mc_preempt) && i < nr_calls )
-        goto preempted;
-
     perfc_incr(calls_to_multicall);
-    perfc_add(calls_from_multicall, i);
+    perfc_add(calls_from_multicall, nr_calls);
     mcs->flags = 0;
-    return rc;
+    return 0;
+
+ fault:
+    perfc_incr(calls_to_multicall);
+    mcs->flags = 0;
+    return -EFAULT;
 
  preempted:
     perfc_add(calls_from_multicall, i);
@@ -128,7 +94,7 @@ do_multicall(
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

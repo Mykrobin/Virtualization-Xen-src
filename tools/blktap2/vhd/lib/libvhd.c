@@ -37,14 +37,9 @@
 #include <iconv.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <langinfo.h>
 
 #include "libvhd.h"
 #include "relative-path.h"
-
-/* VHD uses an epoch of 12:00AM, Jan 1, 2000. This is the Unix timestamp for
- * the start of the VHD epoch. */
-#define VHD_EPOCH_START 946684800
 
 static int libvhd_dbg = 0;
 
@@ -699,10 +694,19 @@ vhd_end_of_data(vhd_context_t *ctx, off_t *end)
 	return 0;
 }
 
-uint32_t inline
+uint32_t
 vhd_time(time_t time)
 {
-	return (uint32_t)(time - VHD_EPOCH_START);
+	struct tm tm;
+	time_t micro_epoch;
+
+	memset(&tm, 0, sizeof(struct tm));
+	tm.tm_year   = 100;
+	tm.tm_mon    = 0;
+	tm.tm_mday   = 1;
+	micro_epoch  = mktime(&tm);
+
+	return (uint32_t)(time - micro_epoch);
 }
 
 /* 
@@ -713,10 +717,20 @@ size_t
 vhd_time_to_string(uint32_t timestamp, char *target)
 {
 	char *cr;
-	time_t unix_timestamp;
+	struct tm tm;
+	time_t t1, t2;
 
-	unix_timestamp = (time_t)timestamp + VHD_EPOCH_START;
-	ctime_r(&unix_timestamp, target);
+	memset(&tm, 0, sizeof(struct tm));
+
+	/* VHD uses an epoch of 12:00AM, Jan 1, 2000.         */
+	/* Need to adjust this to the expected epoch of 1970. */
+	tm.tm_year  = 100;
+	tm.tm_mon   = 0;
+	tm.tm_mday  = 1;
+
+	t1 = mktime(&tm);
+	t2 = t1 + (time_t)timestamp;
+	ctime_r(&t2, target);
 
 	/* handle mad ctime_r newline appending. */
 	if ((cr = strchr(target, '\n')) != NULL)
@@ -1297,7 +1311,6 @@ vhd_macx_encode_location(char *name, char **out, int *outlen)
 	size_t ibl, obl;
 	char *uri, *uri_utf8, *uri_utf8p, *ret;
 	const char *urip;
-	char *codeset;
 
 	err     = 0;
 	ret     = NULL;
@@ -1306,7 +1319,7 @@ vhd_macx_encode_location(char *name, char **out, int *outlen)
 	len     = strlen(name) + strlen("file://");
 
 	ibl     = len;
-	obl     = len * 2;
+	obl     = len;
 
 	urip = uri = malloc(ibl + 1);
 	uri_utf8 = uri_utf8p = malloc(obl);
@@ -1314,8 +1327,7 @@ vhd_macx_encode_location(char *name, char **out, int *outlen)
 	if (!uri || !uri_utf8)
 		return -ENOMEM;
 
-	codeset = nl_langinfo(CODESET);
-	cd = iconv_open("UTF-8", codeset);
+	cd = iconv_open("UTF-8", "ASCII");
 	if (cd == (iconv_t)-1) {
 		err = -errno;
 		goto out;
@@ -1328,7 +1340,7 @@ vhd_macx_encode_location(char *name, char **out, int *outlen)
 	    (char **)
 #endif
 	    &urip, &ibl, &uri_utf8p, &obl) == (size_t)-1 ||
-	    ibl) {
+	    ibl || obl) {
 		err = (errno ? -errno : -EIO);
 		goto out;
 	}
@@ -1360,7 +1372,6 @@ vhd_w2u_encode_location(char *name, char **out, int *outlen)
 	size_t ibl, obl;
 	char *uri, *uri_utf16, *uri_utf16p, *tmp, *ret;
 	const char *urip;
-	char *codeset;
 
 	err     = 0;
 	ret     = NULL;
@@ -1408,8 +1419,7 @@ vhd_w2u_encode_location(char *name, char **out, int *outlen)
 	 * MICROSOFT_COMPAT
 	 * little endian unicode here 
 	 */
-	codeset = nl_langinfo(CODESET);
-	cd = iconv_open("UTF-16LE", codeset);
+	cd = iconv_open("UTF-16LE", "ASCII");
 	if (cd == (iconv_t)-1) {
 		err = -errno;
 		goto out;
@@ -1420,7 +1430,7 @@ vhd_w2u_encode_location(char *name, char **out, int *outlen)
 	    (char **)
 #endif
 	    &urip, &ibl, &uri_utf16p, &obl) == (size_t)-1 ||
-	    ibl) {
+	    ibl || obl) {
 		err = (errno ? -errno : -EIO);
 		goto out;
 	}
@@ -1452,13 +1462,11 @@ vhd_macx_decode_location(const char *in, char *out, int len)
 	iconv_t cd;
 	char *name;
 	size_t ibl, obl;
-	char *codeset;
 
 	name = out;
 	ibl  = obl = len;
 
-	codeset = nl_langinfo(CODESET);
-	cd = iconv_open(codeset, "UTF-8");
+	cd = iconv_open("ASCII", "UTF-8");
 	if (cd == (iconv_t)-1) 
 		return NULL;
 
@@ -1486,13 +1494,11 @@ vhd_w2u_decode_location(const char *in, char *out, int len, char *utf_type)
 	iconv_t cd;
 	char *name, *tmp;
 	size_t ibl, obl;
-	char *codeset;
 
 	tmp = name = out;
 	ibl = obl  = len;
 
-	codeset = nl_langinfo(CODESET);
-	cd = iconv_open(codeset, utf_type);
+	cd = iconv_open("ASCII", utf_type);
 	if (cd == (iconv_t)-1) 
 		return NULL;
 
@@ -2188,7 +2194,7 @@ vhd_write_block(vhd_context_t *ctx, uint32_t block, char *data)
 	if (block >= ctx->bat.entries)
 		return -ERANGE;
 
-	if ((unsigned long)data & (VHD_SECTOR_SIZE -1))
+	if ((unsigned long)data & ~(VHD_SECTOR_SIZE -1))
 		return -EINVAL;
 
 	blk  = ctx->bat.bat[block];
@@ -2448,7 +2454,7 @@ vhd_initialize_footer(vhd_context_t *ctx, int type, uint64_t size)
 	ctx->footer.saved        = 0;
 	ctx->footer.data_offset  = 0xFFFFFFFFFFFFFFFF;
 	strcpy(ctx->footer.crtr_app, "tap");
-	vhd_uuid_generate(&ctx->footer.uuid);
+	blk_uuid_generate(&ctx->footer.uuid);
 }
 
 static int
@@ -2459,7 +2465,6 @@ vhd_initialize_header_parent_name(vhd_context_t *ctx, const char *parent_path)
 	size_t ibl, obl;
 	char *ppath, *dst;
 	const char *pname;
-	char *codeset;
 
 	err   = 0;
 	pname = NULL;
@@ -2469,8 +2474,7 @@ vhd_initialize_header_parent_name(vhd_context_t *ctx, const char *parent_path)
 	 * MICROSOFT_COMPAT
 	 * big endian unicode here 
 	 */
-	codeset = nl_langinfo(CODESET);
-	cd = iconv_open(UTF_16BE, codeset);
+	cd = iconv_open(UTF_16BE, "ASCII");
 	if (cd == (iconv_t)-1) {
 		err = -errno;
 		goto out;
@@ -2565,7 +2569,7 @@ vhd_initialize_header(vhd_context_t *ctx, const char *parent_path,
 			return err;
 
 		ctx->header.prt_ts = vhd_time(stats.st_mtime);
-		vhd_uuid_copy(&ctx->header.prt_uuid, &parent.footer.uuid);
+		blk_uuid_copy(&ctx->header.prt_uuid, &parent.footer.uuid);
 		if (!size)
 			size = parent.footer.curr_size;
 		vhd_close(&parent);
@@ -2647,7 +2651,7 @@ vhd_change_parent(vhd_context_t *child, char *parent_path, int raw)
 	}
 
 	if (raw) {
-		vhd_uuid_clear(&child->header.prt_uuid);
+		blk_uuid_clear(&child->header.prt_uuid);
 	} else {
 		err = vhd_open(&parent, ppath, VHD_OPEN_RDONLY);
 		if (err) {
@@ -2655,7 +2659,7 @@ vhd_change_parent(vhd_context_t *child, char *parent_path, int raw)
 			       ppath, child->file, err);
 			goto out;
 		}
-		vhd_uuid_copy(&child->header.prt_uuid, &parent.footer.uuid);
+		blk_uuid_copy(&child->header.prt_uuid, &parent.footer.uuid);
 		vhd_close(&parent);
 	}
 

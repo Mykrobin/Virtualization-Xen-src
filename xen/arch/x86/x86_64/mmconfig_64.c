@@ -7,14 +7,11 @@
  * copied from Linux
  */
 
-#include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/acpi.h>
 #include <xen/xmalloc.h>
 #include <xen/pci.h>
 #include <xen/pci_regs.h>
-#include <xen/iommu.h>
-#include <xen/rangeset.h>
 
 #include "mmconfig.h"
 
@@ -24,9 +21,9 @@ struct mmcfg_virt {
     char __iomem *virt;
 };
 static struct mmcfg_virt *pci_mmcfg_virt;
-static unsigned int mmcfg_pci_segment_shift;
+static int __initdata mmcfg_pci_segment_shift;
 
-static char __iomem *get_virt(unsigned int seg, unsigned int *bus)
+static char __iomem *get_virt(unsigned int seg, unsigned bus)
 {
     struct acpi_mcfg_allocation *cfg;
     int cfg_num;
@@ -34,11 +31,9 @@ static char __iomem *get_virt(unsigned int seg, unsigned int *bus)
     for (cfg_num = 0; cfg_num < pci_mmcfg_config_num; cfg_num++) {
         cfg = pci_mmcfg_virt[cfg_num].cfg;
         if (cfg->pci_segment == seg &&
-            (cfg->start_bus_number <= *bus) &&
-            (cfg->end_bus_number >= *bus)) {
-            *bus -= cfg->start_bus_number;
+            (cfg->start_bus_number <= bus) &&
+            (cfg->end_bus_number >= bus))
             return pci_mmcfg_virt[cfg_num].virt;
-        }
     }
 
     /* Fall back to type 0 */
@@ -49,7 +44,7 @@ static char __iomem *pci_dev_base(unsigned int seg, unsigned int bus, unsigned i
 {
     char __iomem *addr;
 
-    addr = get_virt(seg, &bus);
+    addr = get_virt(seg, bus);
     if (!addr)
         return NULL;
      return addr + ((bus << 20) | (devfn << 12));
@@ -113,113 +108,33 @@ int pci_mmcfg_write(unsigned int seg, unsigned int bus,
     return 0;
 }
 
-static void __iomem *mcfg_ioremap(const struct acpi_mcfg_allocation *cfg,
-                                  unsigned long idx, unsigned int prot)
+static void __iomem * __init mcfg_ioremap(struct acpi_mcfg_allocation *cfg)
 {
     unsigned long virt, size;
 
-    virt = PCI_MCFG_VIRT_START + (idx << mmcfg_pci_segment_shift) +
+    virt = PCI_MCFG_VIRT_START +
+           ((unsigned long)cfg->pci_segment << mmcfg_pci_segment_shift) +
            (cfg->start_bus_number << 20);
     size = (cfg->end_bus_number - cfg->start_bus_number + 1) << 20;
     if (virt + size < virt || virt + size > PCI_MCFG_VIRT_END)
         return NULL;
 
-    if (map_pages_to_xen(virt,
-                         mfn_add(maddr_to_mfn(cfg->address),
-                                 (cfg->start_bus_number << (20 - PAGE_SHIFT))),
-                         PFN_DOWN(size), prot))
-        return NULL;
+    map_pages_to_xen(virt, cfg->address >> PAGE_SHIFT,
+                     size >> PAGE_SHIFT, PAGE_HYPERVISOR_NOCACHE);
 
     return (void __iomem *) virt;
-}
-
-int pci_mmcfg_arch_enable(unsigned int idx)
-{
-    const typeof(pci_mmcfg_config[0]) *cfg = pci_mmcfg_virt[idx].cfg;
-    unsigned long start_mfn, end_mfn;
-
-    if (pci_mmcfg_virt[idx].virt)
-        return 0;
-    pci_mmcfg_virt[idx].virt = mcfg_ioremap(cfg, idx, PAGE_HYPERVISOR_UC);
-    if (!pci_mmcfg_virt[idx].virt) {
-        printk(KERN_ERR "PCI: Cannot map MCFG aperture for segment %04x\n",
-               cfg->pci_segment);
-        return -ENOMEM;
-    }
-    printk(KERN_INFO "PCI: Using MCFG for segment %04x bus %02x-%02x\n",
-           cfg->pci_segment, cfg->start_bus_number, cfg->end_bus_number);
-
-    start_mfn = PFN_DOWN(cfg->address) + PCI_BDF(cfg->start_bus_number, 0, 0);
-    end_mfn = PFN_DOWN(cfg->address) + PCI_BDF(cfg->end_bus_number, ~0, ~0);
-    if ( rangeset_add_range(mmio_ro_ranges, start_mfn, end_mfn) )
-        printk(XENLOG_ERR
-               "%04x:%02x-%02x: could not mark MCFG (mfns %lx-%lx) read-only\n",
-               cfg->pci_segment, cfg->start_bus_number, cfg->end_bus_number,
-               start_mfn, end_mfn);
-
-    return 0;
-}
-
-void pci_mmcfg_arch_disable(unsigned int idx)
-{
-    const typeof(pci_mmcfg_config[0]) *cfg = pci_mmcfg_virt[idx].cfg;
-
-    pci_mmcfg_virt[idx].virt = NULL;
-    /*
-     * Don't use destroy_xen_mappings() here, or make sure that at least
-     * the necessary L4 entries get populated (so that they get properly
-     * propagated to guest domains' page tables).
-     */
-    mcfg_ioremap(cfg, idx, 0);
-    printk(KERN_WARNING "PCI: Not using MCFG for segment %04x bus %02x-%02x\n",
-           cfg->pci_segment, cfg->start_bus_number, cfg->end_bus_number);
-}
-
-bool_t pci_mmcfg_decode(unsigned long mfn, unsigned int *seg,
-                        unsigned int *bdf)
-{
-    unsigned int idx;
-
-    for (idx = 0; idx < pci_mmcfg_config_num; ++idx) {
-        const struct acpi_mcfg_allocation *cfg = pci_mmcfg_virt[idx].cfg;
-
-        if (pci_mmcfg_virt[idx].virt &&
-            mfn >= PFN_DOWN(cfg->address) + PCI_BDF(cfg->start_bus_number,
-                                                    0, 0) &&
-            mfn <= PFN_DOWN(cfg->address) + PCI_BDF(cfg->end_bus_number,
-                                                    ~0, ~0)) {
-            *seg = cfg->pci_segment;
-            *bdf = mfn - PFN_DOWN(cfg->address);
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-bool_t pci_ro_mmcfg_decode(unsigned long mfn, unsigned int *seg,
-                           unsigned int *bdf)
-{
-    const unsigned long *ro_map;
-
-    return pci_mmcfg_decode(mfn, seg, bdf) &&
-           ((ro_map = pci_get_ro_map(*seg)) == NULL ||
-             !test_bit(*bdf, ro_map));
 }
 
 int __init pci_mmcfg_arch_init(void)
 {
     int i;
 
-    if (pci_mmcfg_virt)
-        return 0;
-
-    pci_mmcfg_virt = xzalloc_array(struct mmcfg_virt, pci_mmcfg_config_num);
+    pci_mmcfg_virt = xmalloc_array(struct mmcfg_virt, pci_mmcfg_config_num);
     if (pci_mmcfg_virt == NULL) {
         printk(KERN_ERR "PCI: Can not allocate memory for mmconfig structures\n");
-        pci_mmcfg_config_num = 0;
         return 0;
     }
+    memset(pci_mmcfg_virt, 0, sizeof(*pci_mmcfg_virt) * pci_mmcfg_config_num);
 
     for (i = 0; i < pci_mmcfg_config_num; ++i) {
         pci_mmcfg_virt[i].cfg = &pci_mmcfg_config[i];
@@ -227,5 +142,34 @@ int __init pci_mmcfg_arch_init(void)
             ++mmcfg_pci_segment_shift;
     }
     mmcfg_pci_segment_shift += 20;
+    for (i = 0; i < pci_mmcfg_config_num; ++i) {
+        pci_mmcfg_virt[i].virt = mcfg_ioremap(&pci_mmcfg_config[i]);
+        if (!pci_mmcfg_virt[i].virt) {
+            printk(KERN_ERR "PCI: Cannot map mmconfig aperture for "
+                    "segment %d\n",
+                pci_mmcfg_config[i].pci_segment);
+            pci_mmcfg_arch_free();
+            return 0;
+        }
+    }
     return 1;
+}
+
+void __init pci_mmcfg_arch_free(void)
+{
+    int i;
+
+    if (pci_mmcfg_virt == NULL)
+        return;
+
+    for (i = 0; i < pci_mmcfg_config_num; ++i) {
+        if (pci_mmcfg_virt[i].virt) {
+            iounmap(pci_mmcfg_virt[i].virt);
+            pci_mmcfg_virt[i].virt = NULL;
+            pci_mmcfg_virt[i].cfg = NULL;
+        }
+    }
+
+    xfree(pci_mmcfg_virt);
+    pci_mmcfg_virt = NULL;
 }

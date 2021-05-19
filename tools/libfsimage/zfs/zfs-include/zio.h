@@ -13,22 +13,23 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 /*
- * Copyright 2010 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef _ZIO_H
 #define	_ZIO_H
 
-#define	ZEC_MAGIC	0x210da7ab10c7a11ULL	/* zio data bloc tail */
+#define	ZBT_MAGIC	0x210da7ab10c7a11ULL	/* zio data bloc tail */
 
-typedef struct zio_eck {
-	uint64_t	zec_magic;	/* for validation, endianness	*/
-	zio_cksum_t	zec_cksum;	/* 256-bit checksum		*/
-} zio_eck_t;
+typedef struct zio_block_tail {
+	uint64_t	zbt_magic;	/* for validation, endianness	*/
+	zio_cksum_t	zbt_cksum;	/* 256-bit checksum		*/
+} zio_block_tail_t;
 
 /*
  * Gang block headers are self-checksumming and contain an array
@@ -36,9 +37,9 @@ typedef struct zio_eck {
  */
 #define	SPA_GANGBLOCKSIZE	SPA_MINBLOCKSIZE
 #define	SPA_GBH_NBLKPTRS	((SPA_GANGBLOCKSIZE - \
-	sizeof (zio_eck_t)) / sizeof (blkptr_t))
+	sizeof (zio_block_tail_t)) / sizeof (blkptr_t))
 #define	SPA_GBH_FILLER		((SPA_GANGBLOCKSIZE - \
-	sizeof (zio_eck_t) - \
+	sizeof (zio_block_tail_t) - \
 	(SPA_GBH_NBLKPTRS * sizeof (blkptr_t))) /\
 	sizeof (uint64_t))
 
@@ -49,7 +50,7 @@ typedef struct zio_eck {
 typedef struct zio_gbh {
 	blkptr_t		zg_blkptr[SPA_GBH_NBLKPTRS];
 	uint64_t		zg_filler[SPA_GBH_FILLER];
-	zio_eck_t		zg_tail;
+	zio_block_tail_t	zg_tail;
 } zio_gbh_phys_t;
 
 enum zio_checksum {
@@ -62,9 +63,11 @@ enum zio_checksum {
 	ZIO_CHECKSUM_FLETCHER_2,
 	ZIO_CHECKSUM_FLETCHER_4,
 	ZIO_CHECKSUM_SHA256,
-	ZIO_CHECKSUM_ZILOG2,
 	ZIO_CHECKSUM_FUNCTIONS
 };
+
+#define	ZIO_CHECKSUM_ON_VALUE	ZIO_CHECKSUM_FLETCHER_2
+#define	ZIO_CHECKSUM_DEFAULT	ZIO_CHECKSUM_ON
 
 enum zio_compress {
 	ZIO_COMPRESS_INHERIT = 0,

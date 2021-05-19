@@ -2,29 +2,16 @@
  * xg_private.c
  *
  * Helper functions for the rest of the library.
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdlib.h>
 #include <unistd.h>
 #include <zlib.h>
+#include <malloc.h>
 
 #include "xg_private.h"
 
-char *xc_read_image(xc_interface *xch,
-                    const char *filename, unsigned long *size)
+char *xc_read_image(const char *filename, unsigned long *size)
 {
     int kernel_fd = -1;
     gzFile kernel_gfd = NULL;
@@ -36,7 +23,7 @@ char *xc_read_image(xc_interface *xch,
 
     if ( (kernel_fd = open(filename, O_RDONLY)) < 0 )
     {
-        PERROR("Could not open kernel image '%s'", filename);
+        PERROR("Could not open kernel image");
         goto out;
     }
 
@@ -69,12 +56,6 @@ char *xc_read_image(xc_interface *xch,
             image = NULL;
             goto out;
         case 0: /* EOF */
-            if ( *size == 0 )
-            {
-                PERROR("Could not read kernel image");
-                free(image);
-                image = NULL;
-            }
             goto out;
         default:
             *size += bytes;
@@ -84,7 +65,13 @@ char *xc_read_image(xc_interface *xch,
 #undef CHUNK
 
  out:
-    if ( image )
+    if ( *size == 0 )
+    {
+        PERROR("Could not read kernel image");
+        free(image);
+        image = NULL;
+    }
+    else if ( image )
     {
         /* Shrink allocation to fit image. */
         tmp = realloc(image, *size);
@@ -99,8 +86,7 @@ char *xc_read_image(xc_interface *xch,
     return image;
 }
 
-char *xc_inflate_buffer(xc_interface *xch,
-                        const char *in_buf, unsigned long in_size,
+char *xc_inflate_buffer(const char *in_buf, unsigned long in_size,
                         unsigned long *out_size)
 {
     int           sts;
@@ -161,14 +147,14 @@ char *xc_inflate_buffer(xc_interface *xch,
 /*******************/
 
 int pin_table(
-    xc_interface *xch, unsigned int type, unsigned long mfn, uint32_t dom)
+    int xc_handle, unsigned int type, unsigned long mfn, domid_t dom)
 {
     struct mmuext_op op;
 
     op.cmd = type;
     op.arg1.mfn = mfn;
 
-    if ( xc_mmuext_op(xch, &op, 1, dom) < 0 )
+    if ( xc_mmuext_op(xc_handle, &op, 1, dom) < 0 )
         return 1;
 
     return 0;
@@ -187,10 +173,20 @@ unsigned long csum_page(void *page)
     return sum ^ (sum>>32);
 }
 
+__attribute__((weak)) 
+    int xc_hvm_build(int xc_handle,
+                     uint32_t domid,
+                     int memsize,
+                     const char *image_name)
+{
+    errno = ENOSYS;
+    return -1;
+}
+
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

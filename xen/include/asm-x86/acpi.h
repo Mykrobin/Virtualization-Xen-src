@@ -18,11 +18,13 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#include <xen/config.h>
 #include <acpi/pdc_intel.h>
 #include <acpi/acconfig.h>
 #include <acpi/actbl.h>
@@ -76,20 +78,39 @@ int __acpi_release_global_lock(unsigned int *lock);
 	    :"=r"(n_hi), "=r"(n_lo)	\
 	    :"0"(n_hi), "1"(n_lo))
 
-extern bool acpi_lapic, acpi_ioapic, acpi_noirq;
-extern bool acpi_force, acpi_ht, acpi_disabled;
+extern int acpi_lapic;
+extern int acpi_ioapic;
+extern int acpi_noirq;
+extern int acpi_strict;
+extern int acpi_disabled;
+extern int acpi_ht;
+extern int acpi_pci_disabled;
+extern int acpi_skip_timer_override;
+extern int acpi_use_timer_override;
 extern u32 acpi_smi_cmd;
 extern u8 acpi_enable_value, acpi_disable_value;
+extern u8 acpi_sci_flags;
+extern int acpi_sci_override_gsi;
 void acpi_pic_sci_set_trigger(unsigned int, u16);
 
 static inline void disable_acpi(void)
 {
 	acpi_disabled = 1;
 	acpi_ht = 0;
+	acpi_pci_disabled = 1;
 	acpi_noirq = 1;
 }
 
+/* Fixmap pages to reserve for ACPI boot-time tables (see fixmap.h) */
+#define FIX_ACPI_PAGES 4
+
 static inline void acpi_noirq_set(void) { acpi_noirq = 1; }
+static inline void acpi_disable_pci(void)
+{
+	acpi_pci_disabled = 1;
+	acpi_noirq_set();
+}
+static inline int acpi_irq_balance_set(char *str) { return 0; }
 
 /* routines for saving/restoring kernel state */
 extern int acpi_save_state_mem(void);
@@ -103,7 +124,7 @@ extern void acpi_reserve_bootmem(void);
 
 #define ARCH_HAS_POWER_INIT	1
 
-extern s8 acpi_numa;
+extern int acpi_numa;
 extern int acpi_scan_nodes(u64 start, u64 end);
 #define NR_NODE_MEMBLKS (MAX_NUMNODES*2)
 
@@ -120,32 +141,20 @@ struct acpi_sleep_info {
     struct acpi_generic_address pm1b_cnt_blk;
     struct acpi_generic_address pm1a_evt_blk;
     struct acpi_generic_address pm1b_evt_blk;
-    struct acpi_generic_address sleep_control;
-    struct acpi_generic_address sleep_status;
-    union {
-        uint16_t pm1a_cnt_val;
-        uint8_t sleep_type_a;
-    };
-    union {
-        uint16_t pm1b_cnt_val;
-        uint8_t sleep_type_b;
-    };
+    uint16_t pm1a_cnt_val;
+    uint16_t pm1b_cnt_val;
     uint32_t sleep_state;
     uint64_t wakeup_vector;
     uint32_t vector_width;
-    bool_t sleep_extended;
 };
 
 #endif /* CONFIG_ACPI_SLEEP */
 
-#define MAX_MADT_ENTRIES	MAX(256, 2 * NR_CPUS)
-extern u32 x86_acpiid_to_apicid[];
-#define MAX_LOCAL_APIC		MAX(256, 4 * NR_CPUS)
-
-#define INVALID_ACPIID		(-1U)
+#define MAX_MADT_ENTRIES	256
+extern u8 x86_acpiid_to_apicid[];
+#define MAX_LOCAL_APIC 256
 
 extern u32 pmtmr_ioport;
-extern unsigned int pmtmr_width;
 
 int acpi_dmar_init(void);
 void acpi_mmcfg_init(void);
@@ -154,12 +163,9 @@ void acpi_mmcfg_init(void);
 extern uint32_t system_reset_counter;
 
 void hvm_acpi_power_button(struct domain *d);
-void hvm_acpi_sleep_button(struct domain *d);
 
 /* suspend/resume */
 void save_rest_processor_state(void);
 void restore_rest_processor_state(void);
-
-#define ACPI_MAP_MEM_ATTR	PAGE_HYPERVISOR_UCMINUS
 
 #endif /*__X86_ASM_ACPI_H*/

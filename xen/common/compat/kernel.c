@@ -2,16 +2,17 @@
  * kernel.c
  */
 
-asm(".file \"" __FILE__ "\"");
-
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/version.h>
 #include <xen/sched.h>
+#include <xen/nmi.h>
 #include <xen/guest_access.h>
 #include <asm/current.h>
 #include <compat/xen.h>
+#include <compat/nmi.h>
 #include <compat/version.h>
 
 extern xen_commandline_t saved_cmdline;
@@ -37,10 +38,8 @@ CHECK_TYPE(capabilities_info);
 
 CHECK_TYPE(domain_handle);
 
-#ifdef COMPAT_VM_ASSIST_VALID
-#undef VM_ASSIST_VALID
-#define VM_ASSIST_VALID COMPAT_VM_ASSIST_VALID
-#endif
+#define xennmi_callback compat_nmi_callback
+#define xennmi_callback_t compat_nmi_callback_t
 
 #define DO(fn) int compat_##fn
 #define COMPAT
@@ -50,7 +49,7 @@ CHECK_TYPE(domain_handle);
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

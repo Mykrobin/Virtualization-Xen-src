@@ -14,7 +14,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 #include <stdarg.h>
 #include <stdint.h>
@@ -438,7 +439,7 @@ uint32_t get_s3_waking_vector(void)
 {
     struct acpi_20_rsdp *rsdp = find_rsdp();
     struct acpi_20_xsdt *xsdt;
-    struct acpi_fadt *fadt;
+    struct acpi_20_fadt *fadt;
     struct acpi_20_facs *facs;
     uint32_t vector;
 
@@ -449,8 +450,8 @@ uint32_t get_s3_waking_vector(void)
     if (!xsdt)
         return 0;
 
-    fadt = (struct acpi_fadt *)(long)xsdt->entry[0];
-    if (!fadt || (fadt->header.signature != ACPI_FADT_SIGNATURE))
+    fadt = (struct acpi_20_fadt *)(long)xsdt->entry[0];
+    if (!fadt || (fadt->header.signature != ACPI_2_0_FADT_SIGNATURE))
         return 0;
 
     facs = (struct acpi_20_facs *)(long)fadt->x_firmware_ctrl;

@@ -1,9 +1,10 @@
-XEN_ROOT = $(CURDIR)/../..
+XEN_ROOT = ../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-SUBDIRS-y := utils
-SUBDIRS-$(FLASK_POLICY) += policy
+SUBDIRS :=
+SUBDIRS += libflask
+SUBDIRS += utils
 
-.PHONY: all clean install distclean uninstall
-all clean install distclean uninstall: %: subdirs-%
+.PHONY: all clean install
+all clean install: %: subdirs-%
 

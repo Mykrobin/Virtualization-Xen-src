@@ -9,7 +9,7 @@
 #define FLEX_SCANNER
 #define YY_FLEX_MAJOR_VERSION 2
 #define YY_FLEX_MINOR_VERSION 5
-#define YY_FLEX_SUBMINOR_VERSION 39
+#define YY_FLEX_SUBMINOR_VERSION 35
 #if YY_FLEX_SUBMINOR_VERSION > 0
 #define FLEX_BETA
 #endif
@@ -179,11 +179,6 @@ typedef void* yyscan_t;
 typedef struct yy_buffer_state *YY_BUFFER_STATE;
 #endif
 
-#ifndef YY_TYPEDEF_YY_SIZE_T
-#define YY_TYPEDEF_YY_SIZE_T
-typedef size_t yy_size_t;
-#endif
-
 #define EOB_ACT_CONTINUE_SCAN 0
 #define EOB_ACT_END_OF_FILE 1
 #define EOB_ACT_LAST_MATCH 2
@@ -200,13 +195,6 @@ typedef size_t yy_size_t;
                 int yyl;\
                 for ( yyl = n; yyl < yyleng; ++yyl )\
                     if ( yytext[yyl] == '\n' )\
-                        --yylineno;\
-            }while(0)
-    #define YY_LINENO_REWIND_TO(dst) \
-            do {\
-                const char *p;\
-                for ( p = yy_cp-1; p >= (dst); --p)\
-                    if ( *p == '\n' )\
                         --yylineno;\
             }while(0)
     
@@ -226,6 +214,11 @@ typedef size_t yy_size_t;
 
 #define unput(c) yyunput( c, yyg->yytext_ptr , yyscanner )
 
+#ifndef YY_TYPEDEF_YY_SIZE_T
+#define YY_TYPEDEF_YY_SIZE_T
+typedef size_t yy_size_t;
+#endif
+
 #ifndef YY_STRUCT_YY_BUFFER_STATE
 #define YY_STRUCT_YY_BUFFER_STATE
 struct yy_buffer_state
@@ -243,7 +236,7 @@ struct yy_buffer_state
 	/* Number of characters read into yy_ch_buf, not including EOB
 	 * characters.
 	 */
-	yy_size_t yy_n_chars;
+	int yy_n_chars;
 
 	/* Whether we "own" the buffer - i.e., we know we created it,
 	 * and can realloc() it to grow it, and should free() it to
@@ -322,7 +315,7 @@ static void xlu__cfg_yy_init_buffer (YY_BUFFER_STATE b,FILE *file ,yyscan_t yysc
 
 YY_BUFFER_STATE xlu__cfg_yy_scan_buffer (char *base,yy_size_t size ,yyscan_t yyscanner );
 YY_BUFFER_STATE xlu__cfg_yy_scan_string (yyconst char *yy_str ,yyscan_t yyscanner );
-YY_BUFFER_STATE xlu__cfg_yy_scan_bytes (yyconst char *bytes,yy_size_t len ,yyscan_t yyscanner );
+YY_BUFFER_STATE xlu__cfg_yy_scan_bytes (yyconst char *bytes,int len ,yyscan_t yyscanner );
 
 void *xlu__cfg_yyalloc (yy_size_t ,yyscan_t yyscanner );
 void *xlu__cfg_yyrealloc (void *,yy_size_t ,yyscan_t yyscanner );
@@ -352,7 +345,7 @@ void xlu__cfg_yyfree (void * ,yyscan_t yyscanner );
 
 #define YY_AT_BOL() (YY_CURRENT_BUFFER_LVALUE->yy_at_bol)
 
-#define xlu__cfg_yywrap(yyscanner) 1
+#define xlu__cfg_yywrap(n) 1
 #define YY_SKIP_YYWRAP
 
 typedef unsigned char YY_CHAR;
@@ -377,8 +370,8 @@ static void yy_fatal_error (yyconst char msg[] ,yyscan_t yyscanner );
 	*yy_cp = '\0'; \
 	yyg->yy_c_buf_p = yy_cp;
 
-#define YY_NUM_RULES 16
-#define YY_END_OF_BUFFER 17
+#define YY_NUM_RULES 15
+#define YY_END_OF_BUFFER 16
 /* This struct is not used in this scanner,
    but its presence is necessary. */
 struct yy_trans_info
@@ -386,12 +379,12 @@ struct yy_trans_info
 	flex_int32_t yy_verify;
 	flex_int32_t yy_nxt;
 	};
-static yyconst flex_int16_t yy_accept[35] =
+static yyconst flex_int16_t yy_accept[34] =
     {   0,
-        0,    0,   14,   14,   17,   13,    3,    9,   13,   13,
-       13,   12,    4,    2,    8,    7,    5,    6,    1,   14,
-       14,   15,    0,   11,    0,    0,    9,    0,   10,    0,
-        2,    1,   14,    0
+        0,    0,   13,   13,   16,   12,    3,    9,   12,   12,
+       12,    4,    2,    8,    7,    5,    6,    1,   13,   13,
+       14,    0,   11,    0,    0,    9,    0,   10,    0,    2,
+        1,   13,    0
     } ;
 
 static yyconst flex_int32_t yy_ec[256] =
@@ -399,17 +392,17 @@ static yyconst flex_int32_t yy_ec[256] =
         1,    1,    1,    1,    1,    1,    1,    1,    2,    3,
         1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
         1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-        1,    2,    1,    4,    5,    1,    1,    1,    6,    7,
-        7,    1,    7,    8,    7,    9,    1,   10,   10,   10,
-       10,   10,   10,   10,   10,   10,   10,    7,   11,    1,
-       12,    1,    1,    1,    1,    1,    1,    1,    1,    1,
+        1,    2,    1,    4,    5,    1,    1,    1,    6,    1,
+        1,    1,    1,    7,    1,    1,    1,    8,    8,    8,
+        8,    8,    8,    8,    8,    8,    8,    1,    9,    1,
+       10,    1,    1,    1,    1,    1,    1,    1,    1,    1,
         1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
         1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-       13,   14,   15,    1,   16,    1,   17,   17,   17,   17,
+       11,   12,   13,    1,   14,    1,   15,   15,   15,   15,
 
-       17,   17,   18,   18,   18,   18,   18,   18,   18,   18,
-       18,   18,   18,   18,   18,   18,   18,   18,   18,   17,
-       18,   18,    1,    1,    1,    1,    1,    1,    1,    1,
+       15,   15,   16,   16,   16,   16,   16,   16,   16,   16,
+       16,   16,   16,   16,   16,   16,   16,   16,   16,   15,
+       16,   16,    1,    1,    1,    1,    1,    1,    1,    1,
         1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
         1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
         1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
@@ -426,56 +419,54 @@ static yyconst flex_int32_t yy_ec[256] =
         1,    1,    1,    1,    1
     } ;
 
-static yyconst flex_int32_t yy_meta[19] =
+static yyconst flex_int32_t yy_meta[17] =
     {   0,
-        1,    2,    3,    1,    1,    1,    1,    1,    4,    4,
-        1,    1,    1,    1,    1,    4,    4,    4
+        1,    2,    3,    1,    1,    1,    1,    4,    1,    1,
+        1,    1,    1,    4,    4,    4
     } ;
 
-static yyconst flex_int16_t yy_base[41] =
+static yyconst flex_int16_t yy_base[40] =
     {   0,
-        0,    0,   17,   19,   44,   58,   58,   58,   19,   28,
-       18,   58,   58,   17,   58,   58,   58,   58,    0,    0,
-       58,   58,   21,   58,    0,   26,   58,   22,   58,    0,
-       20,    0,    0,   58,   37,   41,   45,   49,   22,   53
+        0,    0,   15,   17,   51,   54,   54,   54,   17,   45,
+       16,   54,   15,   54,   54,   54,   54,    0,    0,   54,
+       54,   20,   54,    0,   37,   54,   19,   54,    0,   18,
+        0,    0,   54,   33,   37,   41,   45,   23,   49
     } ;
 
-static yyconst flex_int16_t yy_def[41] =
+static yyconst flex_int16_t yy_def[40] =
     {   0,
-       34,    1,   35,   35,   34,   34,   34,   34,   36,   37,
-       38,   34,   34,   34,   34,   34,   34,   34,   39,   40,
-       34,   34,   36,   34,   36,   37,   34,   38,   34,   38,
-       34,   39,   40,    0,   34,   34,   34,   34,   34,   34
+       33,    1,   34,   34,   33,   33,   33,   33,   35,   36,
+       37,   33,   33,   33,   33,   33,   33,   38,   39,   33,
+       33,   35,   33,   35,   36,   33,   37,   33,   37,   33,
+       38,   39,    0,   33,   33,   33,   33,   33,   33
     } ;
 
-static yyconst flex_int16_t yy_nxt[77] =
+static yyconst flex_int16_t yy_nxt[71] =
     {   0,
-        6,    7,    8,    9,   10,   11,   12,   13,   12,   14,
-       15,   16,   17,    6,   18,    6,   19,   19,   21,   22,
-       21,   22,   24,   29,   24,   32,   31,   29,   27,   31,
-       27,   30,   25,   31,   25,   30,   31,   20,   20,   20,
-       20,   23,   23,   34,   23,   26,   26,   26,   26,   28,
-       28,   34,   28,   33,   34,   34,   33,    5,   34,   34,
-       34,   34,   34,   34,   34,   34,   34,   34,   34,   34,
-       34,   34,   34,   34,   34,   34
+        6,    7,    8,    9,   10,   11,   12,   13,   14,   15,
+       16,    6,   17,    6,   18,   18,   20,   21,   20,   21,
+       23,   28,   30,   23,   28,   30,   31,   29,   24,   30,
+       29,   24,   30,   19,   19,   19,   19,   22,   22,   26,
+       22,   25,   25,   25,   25,   27,   27,   26,   27,   32,
+       33,   33,   32,    5,   33,   33,   33,   33,   33,   33,
+       33,   33,   33,   33,   33,   33,   33,   33,   33,   33
     } ;
 
-static yyconst flex_int16_t yy_chk[77] =
+static yyconst flex_int16_t yy_chk[71] =
     {   0,
         1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-        1,    1,    1,    1,    1,    1,    1,    1,    3,    3,
-        4,    4,    9,   11,   23,   39,   14,   28,   26,   31,
-       10,   11,    9,   14,   23,   28,   31,   35,   35,   35,
-       35,   36,   36,    5,   36,   37,   37,   37,   37,   38,
-       38,    0,   38,   40,    0,    0,   40,   34,   34,   34,
-       34,   34,   34,   34,   34,   34,   34,   34,   34,   34,
-       34,   34,   34,   34,   34,   34
+        1,    1,    1,    1,    1,    1,    3,    3,    4,    4,
+        9,   11,   13,   22,   27,   30,   38,   11,    9,   13,
+       27,   22,   30,   34,   34,   34,   34,   35,   35,   25,
+       35,   36,   36,   36,   36,   37,   37,   10,   37,   39,
+        5,    0,   39,   33,   33,   33,   33,   33,   33,   33,
+       33,   33,   33,   33,   33,   33,   33,   33,   33,   33
     } ;
 
 /* Table of booleans, true if rule could match eol. */
-static yyconst flex_int32_t yy_rule_can_match_eol[17] =
+static yyconst flex_int32_t yy_rule_can_match_eol[16] =
     {   0,
-0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0,     };
+0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,     };
 
 /* The intent behind this definition is that it'll catch
  * any uses of REJECT which flex missed.
@@ -486,23 +477,7 @@ static yyconst flex_int32_t yy_rule_can_match_eol[17] =
 #define YY_RESTORE_YY_MORE_OFFSET
 #line 1 "libxlu_cfg_l.l"
 /* -*- fundamental -*- */
-/*
- * libxlu_cfg_l.l - xl configuration file parsing: lexer
- *
- * Copyright (C) 2010      Citrix Ltd.
- * Author Ian Jackson <ian.jackson@eu.citrix.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published
- * by the Free Software Foundation; version 2.1 only. with the special
- * exception on linking described in file LICENSE.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
- */
-#line 20 "libxlu_cfg_l.l"
+#line 4 "libxlu_cfg_l.l"
 #include "libxlu_cfg_i.h"
 
 #define ctx ((CfgParseContext*)yyextra)
@@ -513,15 +488,8 @@ static yyconst flex_int32_t yy_rule_can_match_eol[17] =
     return (x);                   \
   }while(0)
 
-/* Some versions of flex have a bug (Fedora bugzilla 612465) which causes
- * it to fail to declare these functions, which it defines.  So declare
- * them ourselves.  Hopefully we won't have to simultaneously support
- * a flex version which declares these differently somehow. */
-int xlu__cfg_yyget_column(yyscan_t yyscanner);
-void xlu__cfg_yyset_column(int  column_no, yyscan_t yyscanner);
 
-
-#line 525 "libxlu_cfg_l.c"
+#line 493 "libxlu_cfg_l.c"
 
 #define INITIAL 0
 #define lexerr 1
@@ -551,8 +519,8 @@ struct yyguts_t
     size_t yy_buffer_stack_max; /**< capacity of stack. */
     YY_BUFFER_STATE * yy_buffer_stack; /**< Stack as an array. */
     char yy_hold_char;
-    yy_size_t yy_n_chars;
-    yy_size_t yyleng_r;
+    int yy_n_chars;
+    int yyleng_r;
     char *yy_c_buf_p;
     int yy_init;
     int yy_start;
@@ -609,17 +577,13 @@ FILE *xlu__cfg_yyget_out (yyscan_t yyscanner );
 
 void xlu__cfg_yyset_out  (FILE * out_str ,yyscan_t yyscanner );
 
-yy_size_t xlu__cfg_yyget_leng (yyscan_t yyscanner );
+int xlu__cfg_yyget_leng (yyscan_t yyscanner );
 
 char *xlu__cfg_yyget_text (yyscan_t yyscanner );
 
 int xlu__cfg_yyget_lineno (yyscan_t yyscanner );
 
 void xlu__cfg_yyset_lineno (int line_number ,yyscan_t yyscanner );
-
-int xlu__cfg_yyget_column  (yyscan_t yyscanner );
-
-void xlu__cfg_yyset_column (int column_no ,yyscan_t yyscanner );
 
 YYSTYPE * xlu__cfg_yyget_lval (yyscan_t yyscanner );
 
@@ -685,7 +649,7 @@ static int input (yyscan_t yyscanner );
 	if ( YY_CURRENT_BUFFER_LVALUE->yy_is_interactive ) \
 		{ \
 		int c = '*'; \
-		int n; \
+		size_t n; \
 		for ( n = 0; n < max_size && \
 			     (c = getc( yyin )) != EOF && c != '\n'; ++n ) \
 			buf[n] = (char) c; \
@@ -698,7 +662,7 @@ static int input (yyscan_t yyscanner );
 	else \
 		{ \
 		errno=0; \
-		while ( (result = fread(buf, 1, (yy_size_t) max_size, yyin)) == 0 && ferror(yyin)) \
+		while ( (result = fread(buf, 1, max_size, yyin))==0 && ferror(yyin)) \
 			{ \
 			if( errno != EINTR) \
 				{ \
@@ -770,6 +734,11 @@ YY_DECL
 	register int yy_act;
     struct yyguts_t * yyg = (struct yyguts_t*)yyscanner;
 
+#line 30 "libxlu_cfg_l.l"
+
+
+#line 741 "libxlu_cfg_l.c"
+
     yylval = yylval_param;
 
     yylloc = yylloc_param;
@@ -800,12 +769,6 @@ YY_DECL
 		xlu__cfg_yy_load_buffer_state(yyscanner );
 		}
 
-	{
-#line 53 "libxlu_cfg_l.l"
-
-
-#line 808 "libxlu_cfg_l.c"
-
 	while ( 1 )		/* loops until end-of-file is reached */
 		{
 		yyg->yy_more_len = 0;
@@ -828,7 +791,7 @@ YY_DECL
 yy_match:
 		do
 			{
-			register YY_CHAR yy_c = yy_ec[YY_SC_TO_UI(*yy_cp)] ;
+			register YY_CHAR yy_c = yy_ec[YY_SC_TO_UI(*yy_cp)];
 			if ( yy_accept[yy_current_state] )
 				{
 				yyg->yy_last_accepting_state = yy_current_state;
@@ -837,13 +800,13 @@ yy_match:
 			while ( yy_chk[yy_base[yy_current_state] + yy_c] != yy_current_state )
 				{
 				yy_current_state = (int) yy_def[yy_current_state];
-				if ( yy_current_state >= 35 )
+				if ( yy_current_state >= 34 )
 					yy_c = yy_meta[(unsigned int) yy_c];
 				}
 			yy_current_state = yy_nxt[yy_base[yy_current_state] + (unsigned int) yy_c];
 			++yy_cp;
 			}
-		while ( yy_current_state != 34 );
+		while ( yy_current_state != 33 );
 		yy_cp = yyg->yy_last_accepting_cpos;
 		yy_current_state = yyg->yy_last_accepting_state;
 
@@ -854,7 +817,7 @@ yy_find_action:
 
 		if ( yy_act != YY_END_OF_BUFFER && yy_rule_can_match_eol[yy_act] )
 			{
-			yy_size_t yyl;
+			int yyl;
 			for ( yyl = yyg->yy_more_len; yyl < yyleng; ++yyl )
 				if ( yytext[yyl] == '\n' )
 					   
@@ -877,7 +840,7 @@ do_action:	/* This label is used only to access EOF actions. */
 
 case 1:
 YY_RULE_SETUP
-#line 55 "libxlu_cfg_l.l"
+#line 32 "libxlu_cfg_l.l"
 {
                           yylval->string= xlu__cfgl_strdup(ctx,yytext);
                           GOT(IDENT);
@@ -885,7 +848,7 @@ YY_RULE_SETUP
 	YY_BREAK
 case 2:
 YY_RULE_SETUP
-#line 59 "libxlu_cfg_l.l"
+#line 36 "libxlu_cfg_l.l"
 {
                           yylval->string= xlu__cfgl_strdup(ctx,yytext);
                           GOT(NUMBER);
@@ -893,43 +856,43 @@ YY_RULE_SETUP
 	YY_BREAK
 case 3:
 YY_RULE_SETUP
-#line 64 "libxlu_cfg_l.l"
+#line 41 "libxlu_cfg_l.l"
 
 	YY_BREAK
 case 4:
 YY_RULE_SETUP
-#line 66 "libxlu_cfg_l.l"
+#line 43 "libxlu_cfg_l.l"
 { GOT(','); }
 	YY_BREAK
 case 5:
 YY_RULE_SETUP
-#line 67 "libxlu_cfg_l.l"
+#line 44 "libxlu_cfg_l.l"
 { GOT('['); }
 	YY_BREAK
 case 6:
 YY_RULE_SETUP
-#line 68 "libxlu_cfg_l.l"
+#line 45 "libxlu_cfg_l.l"
 { GOT(']'); }
 	YY_BREAK
 case 7:
 YY_RULE_SETUP
-#line 69 "libxlu_cfg_l.l"
+#line 46 "libxlu_cfg_l.l"
 { GOT('='); }
 	YY_BREAK
 case 8:
 YY_RULE_SETUP
-#line 70 "libxlu_cfg_l.l"
+#line 47 "libxlu_cfg_l.l"
 { GOT(';'); }
 	YY_BREAK
 case 9:
 /* rule 9 can match eol */
 YY_RULE_SETUP
-#line 72 "libxlu_cfg_l.l"
+#line 49 "libxlu_cfg_l.l"
 { yylloc->first_line= yylineno-1; return NEWLINE; }
 	YY_BREAK
 case 10:
 YY_RULE_SETUP
-#line 74 "libxlu_cfg_l.l"
+#line 51 "libxlu_cfg_l.l"
 {
                           yylval->string= xlu__cfgl_dequote(ctx,yytext);
                           GOT(STRING);
@@ -937,7 +900,7 @@ YY_RULE_SETUP
 	YY_BREAK
 case 11:
 YY_RULE_SETUP
-#line 78 "libxlu_cfg_l.l"
+#line 55 "libxlu_cfg_l.l"
 {
                           yylval->string= xlu__cfgl_dequote(ctx,yytext);
                           GOT(STRING);
@@ -945,45 +908,36 @@ YY_RULE_SETUP
 	YY_BREAK
 case 12:
 YY_RULE_SETUP
-#line 83 "libxlu_cfg_l.l"
+#line 60 "libxlu_cfg_l.l"
 {
-                          ctx->likely_python= 1;
                           BEGIN(lexerr);
                           yymore();
                         }
 	YY_BREAK
 case 13:
 YY_RULE_SETUP
-#line 89 "libxlu_cfg_l.l"
-{
-                          BEGIN(lexerr);
-                          yymore();
-                        }
-	YY_BREAK
-case 14:
-YY_RULE_SETUP
-#line 94 "libxlu_cfg_l.l"
+#line 65 "libxlu_cfg_l.l"
 {
                           xlu__cfgl_lexicalerror(ctx,"lexical error");
                           BEGIN(0);
                         }
 	YY_BREAK
-case 15:
-/* rule 15 can match eol */
+case 14:
+/* rule 14 can match eol */
 YY_RULE_SETUP
-#line 99 "libxlu_cfg_l.l"
+#line 70 "libxlu_cfg_l.l"
 {
                           xlu__cfgl_lexicalerror(ctx,"lexical error");
                           BEGIN(0);
                           GOT(NEWLINE);
                         }
 	YY_BREAK
-case 16:
+case 15:
 YY_RULE_SETUP
-#line 104 "libxlu_cfg_l.l"
+#line 75 "libxlu_cfg_l.l"
 YY_FATAL_ERROR( "flex scanner jammed" );
 	YY_BREAK
-#line 987 "libxlu_cfg_l.c"
+#line 941 "libxlu_cfg_l.c"
 case YY_STATE_EOF(INITIAL):
 case YY_STATE_EOF(lexerr):
 	yyterminate();
@@ -1116,7 +1070,6 @@ case YY_STATE_EOF(lexerr):
 			"fatal flex scanner internal error--no action found" );
 	} /* end of action switch */
 		} /* end of scanning one token */
-	} /* end of user's declarations */
 } /* end of xlu__cfg_yylex */
 
 /* yy_get_next_buffer - try to read in a new buffer
@@ -1180,14 +1133,14 @@ static int yy_get_next_buffer (yyscan_t yyscanner)
 			{ /* Not enough room in the buffer - grow it. */
 
 			/* just a shorter name for the current buffer */
-			YY_BUFFER_STATE b = YY_CURRENT_BUFFER_LVALUE;
+			YY_BUFFER_STATE b = YY_CURRENT_BUFFER;
 
 			int yy_c_buf_p_offset =
 				(int) (yyg->yy_c_buf_p - b->yy_ch_buf);
 
 			if ( b->yy_is_our_buffer )
 				{
-				yy_size_t new_size = b->yy_buf_size * 2;
+				int new_size = b->yy_buf_size * 2;
 
 				if ( new_size <= 0 )
 					b->yy_buf_size += b->yy_buf_size / 8;
@@ -1218,7 +1171,7 @@ static int yy_get_next_buffer (yyscan_t yyscanner)
 
 		/* Read in more data. */
 		YY_INPUT( (&YY_CURRENT_BUFFER_LVALUE->yy_ch_buf[number_to_move]),
-			yyg->yy_n_chars, num_to_read );
+			yyg->yy_n_chars, (size_t) num_to_read );
 
 		YY_CURRENT_BUFFER_LVALUE->yy_n_chars = yyg->yy_n_chars;
 		}
@@ -1280,7 +1233,7 @@ static int yy_get_next_buffer (yyscan_t yyscanner)
 		while ( yy_chk[yy_base[yy_current_state] + yy_c] != yy_current_state )
 			{
 			yy_current_state = (int) yy_def[yy_current_state];
-			if ( yy_current_state >= 35 )
+			if ( yy_current_state >= 34 )
 				yy_c = yy_meta[(unsigned int) yy_c];
 			}
 		yy_current_state = yy_nxt[yy_base[yy_current_state] + (unsigned int) yy_c];
@@ -1309,13 +1262,12 @@ static int yy_get_next_buffer (yyscan_t yyscanner)
 	while ( yy_chk[yy_base[yy_current_state] + yy_c] != yy_current_state )
 		{
 		yy_current_state = (int) yy_def[yy_current_state];
-		if ( yy_current_state >= 35 )
+		if ( yy_current_state >= 34 )
 			yy_c = yy_meta[(unsigned int) yy_c];
 		}
 	yy_current_state = yy_nxt[yy_base[yy_current_state] + (unsigned int) yy_c];
-	yy_is_jam = (yy_current_state == 34);
+	yy_is_jam = (yy_current_state == 33);
 
-	(void)yyg;
 	return yy_is_jam ? 0 : yy_current_state;
 }
 
@@ -1344,7 +1296,7 @@ static int yy_get_next_buffer (yyscan_t yyscanner)
 
 		else
 			{ /* need more input */
-			yy_size_t offset = yyg->yy_c_buf_p - yyg->yytext_ptr;
+			int offset = yyg->yy_c_buf_p - yyg->yytext_ptr;
 			++yyg->yy_c_buf_p;
 
 			switch ( yy_get_next_buffer( yyscanner ) )
@@ -1515,6 +1467,10 @@ static void xlu__cfg_yy_load_buffer_state  (yyscan_t yyscanner)
 	xlu__cfg_yyfree((void *) b ,yyscanner );
 }
 
+#ifndef __cplusplus
+extern int isatty (int );
+#endif /* __cplusplus */
+    
 /* Initializes or reinitializes a buffer.
  * This function is sometimes called more than once on the same buffer,
  * such as during a xlu__cfg_yyrestart() or at EOF.
@@ -1631,7 +1587,7 @@ void xlu__cfg_yypop_buffer_state (yyscan_t yyscanner)
  */
 static void xlu__cfg_yyensure_buffer_stack (yyscan_t yyscanner)
 {
-	yy_size_t num_to_alloc;
+	int num_to_alloc;
     struct yyguts_t * yyg = (struct yyguts_t*)yyscanner;
 
 	if (!yyg->yy_buffer_stack) {
@@ -1729,12 +1685,12 @@ YY_BUFFER_STATE xlu__cfg_yy_scan_string (yyconst char * yystr , yyscan_t yyscann
  * @param yyscanner The scanner object.
  * @return the newly allocated buffer state object.
  */
-YY_BUFFER_STATE xlu__cfg_yy_scan_bytes  (yyconst char * yybytes, yy_size_t  _yybytes_len , yyscan_t yyscanner)
+YY_BUFFER_STATE xlu__cfg_yy_scan_bytes  (yyconst char * yybytes, int  _yybytes_len , yyscan_t yyscanner)
 {
 	YY_BUFFER_STATE b;
 	char *buf;
 	yy_size_t n;
-	yy_size_t i;
+	int i;
     
 	/* Get memory for full buffer, including space for trailing EOB's. */
 	n = _yybytes_len + 2;
@@ -1844,7 +1800,7 @@ FILE *xlu__cfg_yyget_out  (yyscan_t yyscanner)
 /** Get the length of the current token.
  * @param yyscanner The scanner object.
  */
-yy_size_t xlu__cfg_yyget_leng  (yyscan_t yyscanner)
+int xlu__cfg_yyget_leng  (yyscan_t yyscanner)
 {
     struct yyguts_t * yyg = (struct yyguts_t*)yyscanner;
     return yyleng;
@@ -1880,7 +1836,7 @@ void xlu__cfg_yyset_lineno (int  line_number , yyscan_t yyscanner)
 
         /* lineno is only valid if an input buffer exists. */
         if (! YY_CURRENT_BUFFER )
-           YY_FATAL_ERROR( "xlu__cfg_yyset_lineno called with no buffer" );
+           yy_fatal_error( "xlu__cfg_yyset_lineno called with no buffer" , yyscanner); 
     
     yylineno = line_number;
 }
@@ -1895,7 +1851,7 @@ void xlu__cfg_yyset_column (int  column_no , yyscan_t yyscanner)
 
         /* column is only valid if an input buffer exists. */
         if (! YY_CURRENT_BUFFER )
-           YY_FATAL_ERROR( "xlu__cfg_yyset_column called with no buffer" );
+           yy_fatal_error( "xlu__cfg_yyset_column called with no buffer" , yyscanner); 
     
     yycolumn = column_no;
 }
@@ -2131,4 +2087,4 @@ void xlu__cfg_yyfree (void * ptr , yyscan_t yyscanner)
 
 #define YYTABLES_NAME "yytables"
 
-#line 103 "libxlu_cfg_l.l"
+#line 75 "libxlu_cfg_l.l"

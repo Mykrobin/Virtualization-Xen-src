@@ -1,19 +1,21 @@
 /******************************************************************************
  * string.c
- *
+ * 
  * These provide something for compiler-emitted string operations to link
  * against.
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 
-void *(memcpy)(void *dest, const void *src, size_t n)
+#undef memcpy
+void *memcpy(void *dest, const void *src, size_t n)
 {
     long d0, d1, d2;
 
     asm volatile (
         "   rep ; movs"__OS" ; "
-        "   mov %k4,%k3      ; "
+        "   mov %4,%3        ; "
         "   rep ; movsb        "
         : "=&c" (d0), "=&D" (d1), "=&S" (d2)
         : "0" (n/BYTES_PER_LONG), "r" (n%BYTES_PER_LONG), "1" (dest), "2" (src)
@@ -22,7 +24,8 @@ void *(memcpy)(void *dest, const void *src, size_t n)
     return dest;
 }
 
-void *(memset)(void *s, int c, size_t n)
+#undef memset
+void *memset(void *s, int c, size_t n)
 {
     long d0, d1;
 
@@ -35,12 +38,10 @@ void *(memset)(void *s, int c, size_t n)
     return s;
 }
 
-void *(memmove)(void *dest, const void *src, size_t n)
+#undef memmove
+void *memmove(void *dest, const void *src, size_t n)
 {
     long d0, d1, d2;
-
-    if ( unlikely(!n) )
-        return dest;
 
     if ( dest < src )
         return memcpy(dest, src, n);
@@ -59,7 +60,7 @@ void *(memmove)(void *dest, const void *src, size_t n)
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

@@ -3,6 +3,7 @@
  *
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
 #include <xen/domain.h>
@@ -10,12 +11,14 @@
 #include <xen/hypercall.h>
 #include <compat/tmem.h>
 
-CHECK_tmem_oid;
+#define xen_tmem_op tmem_op
+/*CHECK_tmem_op;*/
+#undef xen_tmem_op
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

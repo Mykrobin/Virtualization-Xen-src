@@ -10,10 +10,6 @@
 
 #define do_sched_op compat_sched_op
 
-#define xen_sched_pin_override sched_pin_override
-CHECK_sched_pin_override;
-#undef xen_sched_pin_override
-
 #define xen_sched_shutdown sched_shutdown
 CHECK_sched_shutdown;
 #undef xen_sched_shutdown
@@ -47,7 +43,7 @@ int compat_set_timer_op(u32 lo, s32 hi)
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

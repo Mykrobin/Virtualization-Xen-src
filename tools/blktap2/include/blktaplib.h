@@ -33,9 +33,17 @@
 #define __BLKTAPLIB_H__
 
 #include <syslog.h>
-#include <sys/time.h>
 #include <xenctrl.h>
 #include <xen/io/blkif.h>
+
+#if 1
+#define DPRINTF(_f, _a...) syslog(LOG_INFO, _f, ##_a)
+#else
+#define DPRINTF(_f, _a...) ((void)0)
+#endif
+
+#define EPRINTF(_f, _a...) syslog(LOG_ERR, "tap-err:%s: " _f, __func__, ##_a)
+#define PERROR(_f, _a...)  EPRINTF(_f ": %s", ##_a, strerror(errno))
 
 #define BLK_RING_SIZE __CONST_RING_SIZE(blkif, XC_PAGE_SIZE)
 

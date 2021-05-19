@@ -14,7 +14,8 @@
  *  Lesser General Public License for more details.
  *
  *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ *  License along with this library; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  *
  * Copyright (C) IBM Corporation, 2006
  *
@@ -330,7 +331,7 @@ uint32_t tcpa_extend_acpi_log(uint32_t entry_ptr)
 	uint32_t res = 0;
 	unsigned char *lasa_last = tcpa_get_lasa_last_ptr();
 	unsigned char *lasa_base = tcpa_get_lasa_base_ptr();
-	uint32_t size = 0;
+	uint32_t size;
 	uint16_t entry_count = tcpa_acpi.entry_count;
 	struct pcpes *pcpes = (struct pcpes *)entry_ptr;
 
@@ -427,7 +428,7 @@ uint32_t tcpa_get_laml(void)
  *  data       : pointer to the data (i.e., string) to be added to the log
  *  length     : length of the data
  */
-static uint32_t
+static uint16_t
 tcpa_add_measurement_to_log(uint32_t pcrIndex,
                             uint32_t event_type,
                             uint32_t event_id,
@@ -1062,7 +1063,7 @@ uint32_t HashLogEvent32(struct hlei *hlei, struct hleo *hleo,
 {
 	uint32_t rc = 0;
 	uint16_t size;
-	uint32_t logdataptr = 0;
+	uint32_t logdataptr;
 	uint32_t logdatalen;
 	uint32_t hashdataptr;
 	uint32_t hashdatalen;
@@ -1100,7 +1101,7 @@ uint32_t HashLogEvent32(struct hlei *hlei, struct hleo *hleo,
 	}
 
 	if (rc == 0) {
-		uint32_t entry = 0;
+		uint32_t entry;
 		hashdataptr = hlei->hashdataptr;
 		hashdatalen = hlei->hashdatalen;
 

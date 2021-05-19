@@ -13,23 +13,21 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #ifndef __ASM_X86_HVM_ASID_H__
 #define __ASM_X86_HVM_ASID_H__
 
+#include <xen/config.h>
 
 struct vcpu;
-struct hvm_vcpu_asid;
 
 /* Initialise ASID management for the current physical CPU. */
 void hvm_asid_init(int nasids);
 
-/* Invalidate a particular ASID allocation: forces re-allocation. */
-void hvm_asid_flush_vcpu_asid(struct hvm_vcpu_asid *asid);
-
-/* Invalidate all ASID allocations for specified VCPU: forces re-allocation. */
+/* Invalidate a VCPU's current ASID allocation: forces re-allocation. */
 void hvm_asid_flush_vcpu(struct vcpu *v);
 
 /* Flush all ASIDs on this processor core. */
@@ -37,14 +35,14 @@ void hvm_asid_flush_core(void);
 
 /* Called before entry to guest context. Checks ASID allocation, returns a
  * boolean indicating whether all ASIDs must be flushed. */
-bool_t hvm_asid_handle_vmenter(struct hvm_vcpu_asid *asid);
+bool_t hvm_asid_handle_vmenter(void);
 
 #endif /* __ASM_X86_HVM_ASID_H__ */
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

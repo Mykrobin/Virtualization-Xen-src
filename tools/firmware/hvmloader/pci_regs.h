@@ -105,16 +105,4 @@
 #define PCI_MIN_GNT  0x3e /* 8 bits */
 #define PCI_MAX_LAT  0x3f /* 8 bits */
 
-#define PCI_INTEL_OPREGION 0xfc /* 4 bits */
-
 #endif /* __HVMLOADER_PCI_REGS_H__ */
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * tab-width: 4
- * indent-tabs-mode: nil
- * End:
- */

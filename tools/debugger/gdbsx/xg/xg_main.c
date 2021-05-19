@@ -11,7 +11,9 @@
  * General Public License for more details.
  *
  * You should have received a copy of the GNU General Public
- * License along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this program; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 021110-1307, USA.
  */
 
 /* This is the main module to interface with xen. This module exports APIs that
@@ -32,7 +34,6 @@
  *  XGTRC(): generic trace utility
  */
 
-#include <sys/types.h>
 #include <stdio.h>
 #include <stddef.h>
 #include <stdarg.h>
@@ -126,11 +127,9 @@ xg_init()
     int flags, saved_errno;
 
     XGTRC("E\n");
-    if ((_dom0_fd=open("/dev/xen/privcmd", O_RDWR)) == -1) {
-        if ((_dom0_fd=open("/proc/xen/privcmd", O_RDWR)) == -1) {
-            perror("Failed to open /dev/xen/privcmd or /proc/xen/privcmd\n");
-            return -1;
-        }
+    if ((_dom0_fd=open("/proc/xen/privcmd", O_RDWR)) == -1) {
+        perror("Failed to open /proc/xen/privcmd\n");
+        return -1;
     }
     /* Although we return the file handle as the 'xc handle' the API
      * does not specify / guarentee that this integer is in fact
@@ -179,7 +178,7 @@ _domctl_hcall(uint32_t cmd,            /* which domctl hypercall */
     hypercall.op = __HYPERVISOR_domctl;
     hypercall.arg[0] = (unsigned long)&domctl;
 
-    rc = ioctl(_dom0_fd, IOCTL_PRIVCMD_HYPERCALL, &hypercall);
+    rc = ioctl(_dom0_fd, IOCTL_PRIVCMD_HYPERCALL, (ulong)&hypercall);
     if (domctlarg && sz)
         munlock(domctlarg, sz);
     return rc;
@@ -219,7 +218,7 @@ _check_hyp(int guest_bitness)
     hypercall.arg[0] = (unsigned long)XENVER_capabilities;
     hypercall.arg[1] = (unsigned long)&xen_caps;
 
-    rc = ioctl(_dom0_fd, IOCTL_PRIVCMD_HYPERCALL, &hypercall);
+    rc = ioctl(_dom0_fd, IOCTL_PRIVCMD_HYPERCALL, (ulong)&hypercall);
     munlock(&xen_caps, sizeof(xen_caps));
     XGTRC("XENCAPS:%s\n", xen_caps);
 
@@ -773,7 +772,7 @@ xg_read_mem(uint64_t guestva, char *tobuf, int tobuf_len, uint64_t pgd3val)
 {
     struct xen_domctl_gdbsx_memio *iop = &domctl.u.gdbsx_guest_memio;
     union {uint64_t llbuf8; char buf8[8];} u = {0};
-    int i, rc;
+    int i;
 
     XGTRC("E:gva:%llx tobuf:%lx len:%d\n", guestva, tobuf, tobuf_len);
 
@@ -784,11 +783,7 @@ xg_read_mem(uint64_t guestva, char *tobuf, int tobuf_len, uint64_t pgd3val)
     iop->len = tobuf_len;
     iop->gwr = 0;       /* not writing to guest */
 
-    if ( (rc = _domctl_hcall(XEN_DOMCTL_gdbsx_guestmemio, tobuf, tobuf_len)) )
-    {
-        XGTRC("ERROR: failed to read bytes. errno:%d rc:%d\n", errno, rc);
-        return tobuf_len;
-    }
+    _domctl_hcall(XEN_DOMCTL_gdbsx_guestmemio, tobuf, tobuf_len);
 
     for(i=0; i < XGMIN(8, tobuf_len); u.buf8[i]=tobuf[i], i++);
     XGTRC("X:remain:%d buf8:0x%llx\n", iop->remain, u.llbuf8);
@@ -818,19 +813,8 @@ xg_write_mem(uint64_t guestva, char *frombuf, int buflen, uint64_t pgd3val)
     iop->gwr = 1;       /* writing to guest */
 
     if ((rc=_domctl_hcall(XEN_DOMCTL_gdbsx_guestmemio, frombuf, buflen)))
-    {
-        XGERR("ERROR: failed to write bytes to %llx. errno:%d rc:%d\n",
-              guestva, errno, rc);
-        return buflen;
-    }
+        XGERR("ERROR: failed to write %d bytes. errno:%d rc:%d\n", 
+              iop->remain, errno, rc);
     return iop->remain;
 }
 
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * indent-tabs-mode: nil
- * End:
- */

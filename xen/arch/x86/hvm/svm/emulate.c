@@ -12,10 +12,11 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
-#include <xen/err.h>
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/trace.h>
@@ -26,22 +27,56 @@
 #include <asm/hvm/svm/vmcb.h>
 #include <asm/hvm/svm/emulate.h>
 
+#define MAX_INST_LEN 15
+
+static unsigned int is_prefix(u8 opc)
+{
+    switch ( opc )
+    {
+    case 0x66:
+    case 0x67:
+    case 0x2E:
+    case 0x3E:
+    case 0x26:
+    case 0x64:
+    case 0x65:
+    case 0x36:
+    case 0xF0:
+    case 0xF3:
+    case 0xF2:
+#if __x86_64__
+    case 0x40 ... 0x4f:
+#endif /* __x86_64__ */
+        return 1;
+    }
+    return 0;
+}
+
+static unsigned long svm_rip2pointer(struct vcpu *v)
+{
+    struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
+    unsigned long p = vmcb->cs.base + guest_cpu_user_regs()->eip;
+    if ( !(vmcb->cs.attr.fields.l && hvm_long_mode_enabled(v)) )
+        return (u32)p; /* mask to 32 bits */
+    return p;
+}
+
 static unsigned long svm_nextrip_insn_length(struct vcpu *v)
 {
     struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
 
-    if ( !cpu_has_svm_nrips )
+    if ( !cpu_has_svm_nrips || (vmcb->nextrip <= vmcb->rip) )
         return 0;
 
 #ifndef NDEBUG
     switch ( vmcb->exitcode )
     {
-    case VMEXIT_CR0_READ ... VMEXIT_DR15_WRITE:
+    case VMEXIT_CR0_READ... VMEXIT_DR15_WRITE:
         /* faults due to instruction intercepts */
         /* (exitcodes 84-95) are reserved */
     case VMEXIT_IDTR_READ ... VMEXIT_TR_WRITE:
     case VMEXIT_RDTSC ... VMEXIT_MSR:
-    case VMEXIT_VMRUN ... VMEXIT_XSETBV:
+    case VMEXIT_VMRUN ...  VMEXIT_MWAIT_CONDITIONAL:
         /* ...and the rest of the #VMEXITs */
     case VMEXIT_CR0_SEL_WRITE:
     case VMEXIT_EXCEPTION_BP:
@@ -54,169 +89,127 @@ static unsigned long svm_nextrip_insn_length(struct vcpu *v)
     return vmcb->nextrip - vmcb->rip;
 }
 
-static const struct {
-    unsigned int opcode;
-    struct {
-        unsigned int rm:3;
-        unsigned int reg:3;
-        unsigned int mod:2;
-#define MODRM(mod, reg, rm) { rm, reg, mod }
-    } modrm;
-} opc_tab[INSTR_MAX_COUNT] = {
-    [INSTR_PAUSE]   = { X86EMUL_OPC_F3(0, 0x90) },
-    [INSTR_INT3]    = { X86EMUL_OPC(   0, 0xcc) },
-    [INSTR_ICEBP]   = { X86EMUL_OPC(   0, 0xf1) },
-    [INSTR_HLT]     = { X86EMUL_OPC(   0, 0xf4) },
-    [INSTR_XSETBV]  = { X86EMUL_OPC(0x0f, 0x01), MODRM(3, 2, 1) },
-    [INSTR_VMRUN]   = { X86EMUL_OPC(0x0f, 0x01), MODRM(3, 3, 0) },
-    [INSTR_VMCALL]  = { X86EMUL_OPC(0x0f, 0x01), MODRM(3, 3, 1) },
-    [INSTR_VMLOAD]  = { X86EMUL_OPC(0x0f, 0x01), MODRM(3, 3, 2) },
-    [INSTR_VMSAVE]  = { X86EMUL_OPC(0x0f, 0x01), MODRM(3, 3, 3) },
-    [INSTR_STGI]    = { X86EMUL_OPC(0x0f, 0x01), MODRM(3, 3, 4) },
-    [INSTR_CLGI]    = { X86EMUL_OPC(0x0f, 0x01), MODRM(3, 3, 5) },
-    [INSTR_INVLPGA] = { X86EMUL_OPC(0x0f, 0x01), MODRM(3, 3, 7) },
-    [INSTR_RDTSCP]  = { X86EMUL_OPC(0x0f, 0x01), MODRM(3, 7, 1) },
-    [INSTR_INVD]    = { X86EMUL_OPC(0x0f, 0x08) },
-    [INSTR_WBINVD]  = { X86EMUL_OPC(0x0f, 0x09) },
-    [INSTR_WRMSR]   = { X86EMUL_OPC(0x0f, 0x30) },
-    [INSTR_RDTSC]   = { X86EMUL_OPC(0x0f, 0x31) },
-    [INSTR_RDMSR]   = { X86EMUL_OPC(0x0f, 0x32) },
-    [INSTR_CPUID]   = { X86EMUL_OPC(0x0f, 0xa2) },
+/* First byte: Length. Following bytes: Opcode bytes. */
+#define MAKE_INSTR(nm, ...) static const u8 OPCODE_##nm[] = { __VA_ARGS__ }
+MAKE_INSTR(INVD,   2, 0x0f, 0x08);
+MAKE_INSTR(WBINVD, 2, 0x0f, 0x09);
+MAKE_INSTR(CPUID,  2, 0x0f, 0xa2);
+MAKE_INSTR(RDMSR,  2, 0x0f, 0x32);
+MAKE_INSTR(WRMSR,  2, 0x0f, 0x30);
+MAKE_INSTR(VMCALL, 3, 0x0f, 0x01, 0xd9);
+MAKE_INSTR(HLT,    1, 0xf4);
+MAKE_INSTR(INT3,   1, 0xcc);
+MAKE_INSTR(RDTSC,  2, 0x0f, 0x31);
+MAKE_INSTR(PAUSE,  1, 0x90);
+
+static const u8 *opc_bytes[INSTR_MAX_COUNT] = 
+{
+    [INSTR_INVD]   = OPCODE_INVD,
+    [INSTR_WBINVD] = OPCODE_WBINVD,
+    [INSTR_CPUID]  = OPCODE_CPUID,
+    [INSTR_RDMSR]  = OPCODE_RDMSR,
+    [INSTR_WRMSR]  = OPCODE_WRMSR,
+    [INSTR_VMCALL] = OPCODE_VMCALL,
+    [INSTR_HLT]    = OPCODE_HLT,
+    [INSTR_INT3]   = OPCODE_INT3,
+    [INSTR_RDTSC]  = OPCODE_RDTSC,
+    [INSTR_PAUSE]  = OPCODE_PAUSE,
 };
 
+static int fetch(struct vcpu *v, u8 *buf, unsigned long addr, int len)
+{
+    uint32_t pfec = (v->arch.hvm_svm.vmcb->cpl == 3) ? PFEC_user_mode : 0;
+
+    switch ( hvm_fetch_from_guest_virt(buf, addr, len, pfec) )
+    {
+    case HVMCOPY_okay:
+        break;
+    case HVMCOPY_bad_gva_to_gfn:
+        /* OK just to give up; we'll have injected #PF already */
+        return 0;
+    default:
+        /* Not OK: fetches from non-RAM pages are not supportable. */
+        gdprintk(XENLOG_WARNING, "Bad instruction fetch at %#lx (%#lx)\n",
+                 (unsigned long) guest_cpu_user_regs()->eip, addr);
+        hvm_inject_exception(TRAP_gp_fault, 0, 0);
+        return 0;
+    }
+    return 1;
+}
+
 int __get_instruction_length_from_list(struct vcpu *v,
-        const enum instruction_index *list, unsigned int list_count)
+        enum instruction_index *list, unsigned int list_count)
 {
     struct vmcb_struct *vmcb = v->arch.hvm_svm.vmcb;
-    struct hvm_emulate_ctxt ctxt;
-    struct x86_emulate_state *state;
-    unsigned long inst_len, j;
-    unsigned int modrm_rm, modrm_reg;
-    int modrm_mod;
+    unsigned int i, j, inst_len = 0;
+    enum instruction_index instr = 0;
+    u8 buf[MAX_INST_LEN];
+    const u8 *opcode = NULL;
+    unsigned long fetch_addr;
+    unsigned int fetch_len;
 
-    /*
-     * In debug builds, always use x86_decode_insn() and compare with
-     * hardware.
-     */
-#ifdef NDEBUG
-    if ( (inst_len = svm_nextrip_insn_length(v)) > MAX_INST_LEN )
-        gprintk(XENLOG_WARNING, "NRip reported inst_len %lu\n", inst_len);
-    else if ( inst_len != 0 )
+    if ( (inst_len = svm_nextrip_insn_length(v)) != 0 )
         return inst_len;
 
-    if ( vmcb->exitcode == VMEXIT_IOIO )
-        return vmcb->exitinfo2 - vmcb->rip;
-#endif
-
-    ASSERT(v == current);
-    hvm_emulate_init_once(&ctxt, NULL, guest_cpu_user_regs());
-    hvm_emulate_init_per_insn(&ctxt, NULL, 0);
-    state = x86_decode_insn(&ctxt.ctxt, hvmemul_insn_fetch);
-    if ( IS_ERR_OR_NULL(state) )
+    /* Fetch up to the next page break; we'll fetch from the next page
+     * later if we have to. */
+    fetch_addr = svm_rip2pointer(v);
+    fetch_len = min_t(unsigned int, MAX_INST_LEN,
+                      PAGE_SIZE - (fetch_addr & ~PAGE_MASK));
+    if ( !fetch(v, buf, fetch_addr, fetch_len) )
         return 0;
 
-    inst_len = x86_insn_length(state, &ctxt.ctxt);
-    modrm_mod = x86_insn_modrm(state, &modrm_rm, &modrm_reg);
-    x86_emulate_free_state(state);
-#ifndef NDEBUG
-    if ( vmcb->exitcode == VMEXIT_IOIO )
-        j = vmcb->exitinfo2 - vmcb->rip;
-    else
-        j = svm_nextrip_insn_length(v);
-    if ( j && j != inst_len )
+    while ( (inst_len < MAX_INST_LEN) && is_prefix(buf[inst_len]) )
     {
-        gprintk(XENLOG_WARNING, "insn-len[%02x]=%lu (exp %lu)\n",
-                ctxt.ctxt.opcode, inst_len, j);
-        return j;
+        inst_len++;
+        if ( inst_len >= fetch_len )
+        {
+            if ( !fetch(v, buf + fetch_len, fetch_addr + fetch_len,
+                        MAX_INST_LEN - fetch_len) )
+                return 0;
+            fetch_len = MAX_INST_LEN;
+        }
     }
-#endif
 
     for ( j = 0; j < list_count; j++ )
     {
-        unsigned int instr = list[j];
+        instr = list[j];
+        opcode = opc_bytes[instr];
 
-        if ( instr >= ARRAY_SIZE(opc_tab) )
+        for ( i = 0; (i < opcode[0]) && ((inst_len + i) < MAX_INST_LEN); i++ )
         {
-            ASSERT_UNREACHABLE();
-            break;
-        }
-        if ( opc_tab[instr].opcode == ctxt.ctxt.opcode )
-        {
-            if ( !opc_tab[instr].modrm.mod )
-                return inst_len;
+            if ( (inst_len + i) >= fetch_len ) 
+            { 
+                if ( !fetch(v, buf + fetch_len, 
+                            fetch_addr + fetch_len, 
+                            MAX_INST_LEN - fetch_len) ) 
+                    return 0;
+                fetch_len = MAX_INST_LEN;
+            }
 
-            if ( modrm_mod == opc_tab[instr].modrm.mod &&
-                 (modrm_rm & 7) == opc_tab[instr].modrm.rm &&
-                 (modrm_reg & 7) == opc_tab[instr].modrm.reg )
-                return inst_len;
+            if ( buf[inst_len+i] != opcode[i+1] )
+                goto mismatch;
         }
+        goto done;
+    mismatch: ;
     }
 
     gdprintk(XENLOG_WARNING,
-             "%s: Mismatch between expected and actual instruction: "
+             "%s: Mismatch between expected and actual instruction bytes: "
              "eip = %lx\n",  __func__, (unsigned long)vmcb->rip);
-    hvm_inject_hw_exception(TRAP_gp_fault, 0);
+    hvm_inject_exception(TRAP_gp_fault, 0, 0);
     return 0;
-}
 
-/*
- * TASK_SWITCH vmexits never provide an instruction length.  We must always
- * decode under %rip to find the answer.
- */
-unsigned int svm_get_task_switch_insn_len(void)
-{
-    struct hvm_emulate_ctxt ctxt;
-    struct x86_emulate_state *state;
-    unsigned int emul_len, modrm_reg;
-
-    hvm_emulate_init_once(&ctxt, NULL, guest_cpu_user_regs());
-    hvm_emulate_init_per_insn(&ctxt, NULL, 0);
-    state = x86_decode_insn(&ctxt.ctxt, hvmemul_insn_fetch);
-    if ( IS_ERR_OR_NULL(state) )
-        return 0;
-
-    emul_len = x86_insn_length(state, &ctxt.ctxt);
-
-    /*
-     * Check for an instruction which can cause a task switch.  Any far
-     * jmp/call/ret, any software interrupt/exception with trap semantics
-     * (except icebp - handled specially), and iret.
-     */
-    switch ( ctxt.ctxt.opcode )
-    {
-    case 0xff: /* Grp 5 */
-        /* call / jmp (far, absolute indirect) */
-        if ( (unsigned int)x86_insn_modrm(state, NULL, &modrm_reg) >= 3 ||
-             (modrm_reg != 3 && modrm_reg != 5) )
-        {
-    default:
-            printk(XENLOG_G_WARNING "Bad instruction for task switch\n");
-            hvm_dump_emulation_state(XENLOG_G_WARNING, "SVM Insn len",
-                                     &ctxt, X86EMUL_UNHANDLEABLE);
-            emul_len = 0;
-            break;
-        }
-        /* Fallthrough */
-    case 0x9a: /* call (far, absolute) */
-    case 0xca: /* ret imm16 (far) */
-    case 0xcb: /* ret (far) */
-    case 0xcc: /* int3 */
-    case 0xcd: /* int imm8 */
-    case 0xce: /* into */
-    case 0xcf: /* iret */
-    case 0xea: /* jmp (far, absolute) */
-        break;
-    }
-
-    x86_emulate_free_state(state);
-
-    return emul_len;
+ done:
+    inst_len += opcode[0];
+    ASSERT(inst_len <= MAX_INST_LEN);
+    return inst_len;
 }
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

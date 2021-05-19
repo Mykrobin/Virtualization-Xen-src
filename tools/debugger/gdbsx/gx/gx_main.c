@@ -11,7 +11,9 @@
  * General Public License for more details.
  *
  * You should have received a copy of the GNU General Public
- * License along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * License along with this program; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 021110-1307, USA.
  */
 
 /* This module is the main module for gdbsx implementation. gdbsx is a remote
@@ -382,7 +384,7 @@ prepare_stop_reply(enum target_signal sig, char *buf, vcpuid_t vcpu)
 
     /* TBD: check if we stopped because of watchpoint */
     if (watchpoint_stop()) {
-        memcpy(buf, "watch:", 6);
+        strncpy(buf, "watch:", 6);
         buf += 6;
         /* TBD: **/
     }

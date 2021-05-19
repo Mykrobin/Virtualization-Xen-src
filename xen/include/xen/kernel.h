@@ -5,8 +5,6 @@
  * 'kernel.h' contains some often-used function prototypes etc
  */
 
-#include <xen/types.h>
-
 /*
  * min()/max() macros that also do
  * strict type-checking.. See the
@@ -35,13 +33,6 @@
 #define max_t(type,x,y) \
         ({ type __x = (x); type __y = (y); __x > __y ? __x: __y; })
 
-/*
- * pre-processor, array size, and bit field width suitable variants;
- * please don't use in "normal" expressions.
- */
-#define MIN(x,y) ((x) < (y) ? (x) : (y))
-#define MAX(x,y) ((x) > (y) ? (x) : (y))
-
 /**
  * container_of - cast a member of a structure out to the containing structure
  *
@@ -65,40 +56,23 @@
 	1;                                      \
 })
 
-extern char _start[], _end[], start[];
+extern char _start[], _end[];
 #define is_kernel(p) ({                         \
     char *__p = (char *)(unsigned long)(p);     \
-    (__p >= _start) && (__p < _end);            \
+    (__p >= _start) && (__p <= _end);           \
 })
 
 extern char _stext[], _etext[];
 #define is_kernel_text(p) ({                    \
     char *__p = (char *)(unsigned long)(p);     \
-    (__p >= _stext) && (__p < _etext);          \
-})
-
-extern const char _srodata[], _erodata[];
-#define is_kernel_rodata(p) ({                  \
-    const char *__p = (const char *)(unsigned long)(p);     \
-    (__p >= _srodata) && (__p < _erodata);      \
+    (__p >= _stext) && (__p <= _etext);         \
 })
 
 extern char _sinittext[], _einittext[];
 #define is_kernel_inittext(p) ({                \
     char *__p = (char *)(unsigned long)(p);     \
-    (__p >= _sinittext) && (__p < _einittext);  \
+    (__p >= _sinittext) && (__p <= _einittext); \
 })
-
-extern enum system_state {
-    SYS_STATE_early_boot,
-    SYS_STATE_boot,
-    SYS_STATE_smp_boot,
-    SYS_STATE_active,
-    SYS_STATE_suspend,
-    SYS_STATE_resume
-} system_state;
-
-bool_t is_active_kernel_text(unsigned long addr);
 
 #endif /* _LINUX_KERNEL_H */
 

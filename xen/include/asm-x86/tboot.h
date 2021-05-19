@@ -39,6 +39,10 @@
 
 #include <xen/acpi.h>
 
+#ifndef __packed
+#define __packed   __attribute__ ((packed))
+#endif
+
 typedef struct __packed {
   uint32_t    data1;
   uint16_t    data2;
@@ -81,7 +85,7 @@ typedef struct __packed {
 typedef struct __packed {
     /* version 3+ fields: */
     uuid_t    uuid;              /* {663C8DFF-E8B3-4b82-AABF-19EA4D057A08} */
-    uint32_t  version;           /* Version number; currently supports 0.6 */
+    uint32_t  version;           /* Version number; currently supports 0.4 */
     uint32_t  log_addr;          /* physical addr of tb_log_t log */
     uint32_t  shutdown_entry;    /* entry point for tboot shutdown */
     uint32_t  shutdown_type;     /* type of shutdown (TB_SHUTDOWN_*) */
@@ -95,13 +99,6 @@ typedef struct __packed {
     /* version 4+ fields: */
                                  /* populated by tboot; will be encrypted */
     uint8_t   s3_key[TB_KEY_SIZE];
-    /* version 5+ fields: */
-    uint8_t   reserved_align[3]; /* used to 4byte-align num_in_wfs */
-    uint32_t  num_in_wfs;        /* number of processors in wait-for-SIPI */
-    /* version 6+ fields: */
-    uint32_t  flags;
-    uint64_t  ap_wake_addr;      /* phys addr of kernel/VMM SIPI vector */
-    uint32_t  ap_wake_trigger;   /* kernel/VMM writes APIC ID to wake AP */
 } tboot_shared_t;
 
 #define TB_SHUTDOWN_REBOOT      0
@@ -110,49 +107,25 @@ typedef struct __packed {
 #define TB_SHUTDOWN_S3          3
 #define TB_SHUTDOWN_HALT        4
 
-#define TB_FLAG_AP_WAKE_SUPPORT   0x00000001  /* kernel/VMM use INIT-SIPI-SIPI
-                                                 if clear, ap_wake_* if set */
-
 /* {663C8DFF-E8B3-4b82-AABF-19EA4D057A08} */
 #define TBOOT_SHARED_UUID    { 0x663c8dff, 0xe8b3, 0x4b82, 0xaabf, \
                                { 0x19, 0xea, 0x4d, 0x5, 0x7a, 0x8 } };
 
 extern tboot_shared_t *g_tboot_shared;
 
-#ifdef CONFIG_TBOOT
 void tboot_probe(void);
 void tboot_shutdown(uint32_t shutdown_type);
 int tboot_in_measured_env(void);
 int tboot_protect_mem_regions(void);
 int tboot_parse_dmar_table(acpi_table_handler dmar_handler);
 int tboot_s3_resume(void);
-void tboot_s3_error(int error);
-int tboot_wake_ap(int apicid, unsigned long sipi_vec);
-#else
-static inline void tboot_probe(void) {}
-static inline void tboot_shutdown(uint32_t shutdown_type) {}
-static inline int tboot_in_measured_env(void) { return 0; }
-static inline int tboot_protect_mem_regions(void) { return 1; }
-
-static inline int tboot_parse_dmar_table(acpi_table_handler dmar_handler)
-{
-    return acpi_table_parse(ACPI_SIG_DMAR, dmar_handler);
-}
-
-static inline int tboot_s3_resume(void) { return 0; }
-static inline void tboot_s3_error(int error) {}
-static inline int tboot_wake_ap(int apicid, unsigned long sipi_vec)
-{
-    return 1;
-}
-#endif /* CONFIG_TBOOT */
 
 #endif /* __TBOOT_H__ */
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

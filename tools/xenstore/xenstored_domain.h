@@ -13,7 +13,8 @@
     GNU General Public License for more details.
 
     You should have received a copy of the GNU General Public License
-    along with this program; If not, see <http://www.gnu.org/licenses/>.
+    along with this program; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
 #ifndef _XENSTORED_DOMAIN_H
@@ -22,27 +23,25 @@
 void handle_event(void);
 
 /* domid, mfn, eventchn, path */
-int do_introduce(struct connection *conn, struct buffered_data *in);
+void do_introduce(struct connection *conn, struct buffered_data *in);
 
 /* domid */
-int do_is_domain_introduced(struct connection *conn, struct buffered_data *in);
+void do_is_domain_introduced(struct connection *conn, const char *domid_str);
 
 /* domid */
-int do_release(struct connection *conn, struct buffered_data *in);
+void do_release(struct connection *conn, const char *domid_str);
 
 /* domid */
-int do_resume(struct connection *conn, struct buffered_data *in);
+void do_resume(struct connection *conn, const char *domid_str);
 
 /* domid, target */
-int do_set_target(struct connection *conn, struct buffered_data *in);
+void do_set_target(struct connection *conn, struct buffered_data *in);
 
 /* domid */
-int do_get_domain_path(struct connection *conn, struct buffered_data *in);
+void do_get_domain_path(struct connection *conn, const char *domid_str);
 
-/* Allow guest to reset all watches */
-int do_reset_watches(struct connection *conn, struct buffered_data *in);
-
-void domain_init(void);
+/* Returns the event channel handle */
+int domain_init(void);
 
 /* Returns the implicit path of a connection (only domains have this) */
 const char *get_implicit_path(const struct connection *conn);
@@ -59,37 +58,10 @@ bool domain_is_unprivileged(struct connection *conn);
 /* Quota manipulation */
 void domain_entry_inc(struct connection *conn, struct node *);
 void domain_entry_dec(struct connection *conn, struct node *);
-int domain_entry_fix(unsigned int domid, int num, bool update);
+void domain_entry_fix(unsigned int domid, int num);
 int domain_entry(struct connection *conn);
 void domain_watch_inc(struct connection *conn);
 void domain_watch_dec(struct connection *conn);
 int domain_watch(struct connection *conn);
-
-/* Write rate limiting */
-
-#define WRL_FACTOR   1000 /* for fixed-point arithmetic */
-#define WRL_RATE      200
-#define WRL_DBURST     10
-#define WRL_GBURST   1000
-#define WRL_NEWDOMS     5
-#define WRL_LOGEVERY  120 /* seconds */
-
-struct wrl_timestampt {
-	time_t sec;
-	int msec;
-};
-
-extern long wrl_ntransactions;
-
-void wrl_gettime_now(struct wrl_timestampt *now_ts);
-void wrl_domain_new(struct domain *domain);
-void wrl_domain_destroy(struct domain *domain);
-void wrl_credit_update(struct domain *domain, struct wrl_timestampt now);
-void wrl_check_timeout(struct domain *domain,
-                       struct wrl_timestampt now,
-                       int *ptimeout);
-void wrl_log_periodic(struct wrl_timestampt now);
-void wrl_apply_debit_direct(struct connection *conn);
-void wrl_apply_debit_trans_commit(struct connection *conn);
 
 #endif /* _XENSTORED_DOMAIN_H */

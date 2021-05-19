@@ -10,41 +10,33 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 
-XEN_ROOT=$(CURDIR)/../../..
+XEN_ROOT=../../..
 include $(XEN_ROOT)/tools/Rules.mk
 
 ifneq ($(XENSTAT_XENTOP),y)
-.PHONY: all install xentop uninstall
-all install xentop uninstall:
+.PHONY: all install xentop
+all install xentop:
 else
 
-CFLAGS += -DGCC_PRINTF -Werror $(CFLAGS_libxenstat)
-LDLIBS += $(LDLIBS_libxenstat) $(CURSES_LIBS) $(TINFO_LIBS) $(SOCKET_LIBS) -lm
+CFLAGS += -DGCC_PRINTF -Wall -Werror -I$(XEN_LIBXENSTAT)
+LDFLAGS += -L$(XEN_LIBXENSTAT)
+LDLIBS += -lxenstat $(CURSES_LIBS) $(SOCKET_LIBS)
 CFLAGS += -DHOST_$(XEN_OS)
-
-# Include configure output (config.h)
-CFLAGS += -include $(XEN_ROOT)/tools/config.h
-LDFLAGS += $(APPEND_LDFLAGS)
 
 .PHONY: all
 all: xentop
 
 .PHONY: install
-install: xentop
-	$(INSTALL_DIR) $(DESTDIR)$(sbindir)
-	$(INSTALL_PROG) xentop $(DESTDIR)$(sbindir)/xentop
-
-.PHONY: uninstall
-uninstall:
-	rm -f $(DESTDIR)$(sbindir)/xentop
+install: xentop xentop.1
+	$(INSTALL_DIR) $(DESTDIR)$(SBINDIR)
+	$(INSTALL_PROG) xentop $(DESTDIR)$(SBINDIR)/xentop
+	$(INSTALL_DIR) $(DESTDIR)$(MAN1DIR)
+	$(INSTALL_DATA) xentop.1 $(DESTDIR)$(MAN1DIR)/xentop.1
 
 endif
 
 .PHONY: clean
 clean:
-	rm -f xentop xentop.o $(DEPS_RM)
+	rm -f xentop xentop.o $(DEPS)
 
-.PHONY: distclean
-distclean: clean
-
--include $(DEPS_INCLUDE)
+-include $(DEPS)

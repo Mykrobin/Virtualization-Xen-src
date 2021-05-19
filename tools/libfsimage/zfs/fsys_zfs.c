@@ -13,11 +13,18 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 /*
- * Copyright 2010 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ */
+
+/*
+ * All files in the zfs directory are derived from the OpenSolaris
+ * zfs grub files.  All files in the zfs-include directory were
+ * included without changes.
  */
 
 /*
@@ -41,37 +48,59 @@
  *	    +--------------------------------------------+
  */
 
-#ifdef	FSYS_ZFS
+#include <stdio.h>
+#include <strings.h>
 
-#include "shared.h"
-#include "filesys.h"
+/* From "shared.h" */
+#include "mb_info.h"
+
+/* Boot signature related defines for the findroot command */
+#define	BOOTSIGN_DIR	"/boot/grub/bootsign"
+#define	BOOTSIGN_BACKUP	"/etc/bootsign"
+
+/* Maybe redirect memory requests through grub_scratch_mem. */
+#define	RAW_ADDR(x) (x)
+#define	RAW_SEG(x) (x)
+
+/* ZFS will use the top 4 Meg of physical memory (below 4Gig) for sratch */
+#define	ZFS_SCRATCH_SIZE 0x400000
+
+#define	MIN(x, y) ((x) < (y) ? (x) : (y))
+/* End from shared.h */
+
 #include "fsys_zfs.h"
 
 /* cache for a file block of the currently zfs_open()-ed file */
-static void *file_buf = NULL;
-static uint64_t file_start = 0;
-static uint64_t file_end = 0;
+#define	file_buf zfs_ba->zfs_file_buf
+#define	file_start zfs_ba->zfs_file_start
+#define	file_end zfs_ba->zfs_file_end
 
 /* cache for a dnode block */
-static dnode_phys_t *dnode_buf = NULL;
-static dnode_phys_t *dnode_mdn = NULL;
-static uint64_t dnode_start = 0;
-static uint64_t dnode_end = 0;
+#define	dnode_buf zfs_ba->zfs_dnode_buf
+#define	dnode_mdn zfs_ba->zfs_dnode_mdn
+#define	dnode_start zfs_ba->zfs_dnode_start
+#define	dnode_end zfs_ba->zfs_dnode_end
 
-static uint64_t pool_guid = 0;
-static uberblock_t current_uberblock;
-static char *stackbase;
+#define	stackbase zfs_ba->zfs_stackbase
 
 decomp_entry_t decomp_table[ZIO_COMPRESS_FUNCTIONS] =
 {
-	{"inherit", 0},			/* ZIO_COMPRESS_INHERIT */
+	{"noop", 0},
 	{"on", lzjb_decompress}, 	/* ZIO_COMPRESS_ON */
-	{"off", 0},			/* ZIO_COMPRESS_OFF */
-	{"lzjb", lzjb_decompress},	/* ZIO_COMPRESS_LZJB */
-	{"empty", 0}			/* ZIO_COMPRESS_EMPTY */
+	{"off", 0},
+	{"lzjb", lzjb_decompress}	/* ZIO_COMPRESS_LZJB */
 };
 
-static int zio_read_data(blkptr_t *bp, void *buf, char *stack);
+/* From disk_io.c */
+/* ZFS root filesystem for booting */
+#define	current_bootpath zfs_ba->zfs_current_bootpath
+#define	current_rootpool zfs_ba->zfs_current_rootpool
+#define	current_bootfs zfs_ba->zfs_current_bootfs
+#define	current_bootfs_obj zfs_ba->zfs_current_bootfs_obj
+#define	is_zfs_mount (*fsig_int1(ffi))
+/* End from disk_io.c */
+
+#define	is_zfs_open zfs_ba->zfs_open
 
 /*
  * Our own version of bcmp().
@@ -79,8 +108,8 @@ static int zio_read_data(blkptr_t *bp, void *buf, char *stack);
 static int
 zfs_bcmp(const void *s1, const void *s2, size_t n)
 {
-	const uint8_t *ps1 = s1;
-	const uint8_t *ps2 = s2;
+	const unsigned char *ps1 = s1;
+	const unsigned char *ps2 = s2;
 
 	if (s1 != s2 && n != 0) {
 		do {
@@ -117,16 +146,15 @@ zio_checksum_off(const void *buf, uint64_t size, zio_cksum_t *zcp)
 
 /* Checksum Table and Values */
 zio_checksum_info_t zio_checksum_table[ZIO_CHECKSUM_FUNCTIONS] = {
-	{ { NULL, NULL }, 0, 0, "inherit" },
-	{ { NULL, NULL }, 0, 0, "on" },
-	{ { zio_checksum_off, zio_checksum_off }, 0, 0, "off" },
-	{ { zio_checksum_SHA256, zio_checksum_SHA256 }, 1, 1, "label" },
-	{ { zio_checksum_SHA256, zio_checksum_SHA256 }, 1, 1, "gang_header" },
-	{ { NULL, NULL }, 0, 0, "zilog" },
-	{ { fletcher_2_native, fletcher_2_byteswap }, 0, 0, "fletcher2" },
-	{ { fletcher_4_native, fletcher_4_byteswap }, 1, 0, "fletcher4" },
-	{ { zio_checksum_SHA256, zio_checksum_SHA256 }, 1, 0, "SHA256" },
-	{ { NULL, NULL }, 0, 0, "zilog2" }
+	{{NULL,			NULL},			0, 0,	"inherit"},
+	{{NULL,			NULL},			0, 0,	"on"},
+	{{zio_checksum_off,	zio_checksum_off},	0, 0,	"off"},
+	{{zio_checksum_SHA256,	zio_checksum_SHA256},	1, 1,	"label"},
+	{{zio_checksum_SHA256,	zio_checksum_SHA256},	1, 1,	"gang_header"},
+	{{fletcher_2_native,	fletcher_2_byteswap},	0, 1,	"zilog"},
+	{{fletcher_2_native,	fletcher_2_byteswap},	0, 0,	"fletcher2"},
+	{{fletcher_4_native,	fletcher_4_byteswap},	1, 0,	"fletcher4"},
+	{{zio_checksum_SHA256,	zio_checksum_SHA256},	1, 0,	"SHA256"}
 };
 
 /*
@@ -142,9 +170,10 @@ static int
 zio_checksum_verify(blkptr_t *bp, char *data, int size)
 {
 	zio_cksum_t zc = bp->blk_cksum;
-	uint32_t checksum = BP_GET_CHECKSUM(bp);
+	uint32_t checksum = BP_IS_GANG(bp) ? ZIO_CHECKSUM_GANG_HEADER :
+	    BP_GET_CHECKSUM(bp);
 	int byteswap = BP_SHOULD_BYTESWAP(bp);
-	zio_eck_t *zec = (zio_eck_t *)(data + size) - 1;
+	zio_block_tail_t *zbt = (zio_block_tail_t *)(data + size) - 1;
 	zio_checksum_info_t *ci = &zio_checksum_table[checksum];
 	zio_cksum_t actual_cksum, expected_cksum;
 
@@ -155,14 +184,28 @@ zio_checksum_verify(blkptr_t *bp, char *data, int size)
 	if (checksum >= ZIO_CHECKSUM_FUNCTIONS || ci->ci_func[0] == NULL)
 		return (-1);
 
-	if (ci->ci_eck) {
-		expected_cksum = zec->zec_cksum;
-		zec->zec_cksum = zc;
-		ci->ci_func[0](data, size, &actual_cksum);
-		zec->zec_cksum = expected_cksum;
+	if (ci->ci_zbt) {
+		if (checksum == ZIO_CHECKSUM_GANG_HEADER) {
+			/*
+			 * 'gang blocks' is not supported.
+			 */
+			return (-1);
+		}
+
+		if (zbt->zbt_magic == BSWAP_64(ZBT_MAGIC)) {
+			/* byte swapping is not supported */
+			return (-1);
+		} else {
+			expected_cksum = zbt->zbt_cksum;
+			zbt->zbt_cksum = zc;
+			ci->ci_func[0](data, size, &actual_cksum);
+			zbt->zbt_cksum = expected_cksum;
+		}
 		zc = expected_cksum;
 
 	} else {
+		if (BP_IS_GANG(bp))
+			return (-1);
 		ci->ci_func[byteswap](data, size, &actual_cksum);
 	}
 
@@ -176,14 +219,30 @@ zio_checksum_verify(blkptr_t *bp, char *data, int size)
 }
 
 /*
- * vdev_label_start returns the physical disk offset (in bytes) of
- * label "l".
+ * vdev_label_offset takes "offset" (the offset within a vdev_label) and
+ * returns its physical disk offset (starting from the beginning of the vdev).
+ *
+ * Input:
+ *	psize	: Physical size of this vdev
+ *      l	: Label Number (0-3)
+ *	offset	: The offset with a vdev_label in which we want the physical
+ *		  address
+ * Return:
+ * 	Success : physical disk offset
+ * 	Failure : errnum = ERR_BAD_ARGUMENT, return value is meaningless
  */
 static uint64_t
-vdev_label_start(uint64_t psize, int l)
+vdev_label_offset(fsi_file_t *ffi, uint64_t psize, int l, uint64_t offset)
 {
-	return (l * sizeof (vdev_label_t) + (l < VDEV_LABELS / 2 ?
+	/* XXX Need to add back label support! */
+	if (l >= VDEV_LABELS/2 || offset > sizeof (vdev_label_t)) {
+		errnum = ERR_BAD_ARGUMENT;
+		return (0);
+	}
+
+	return (offset + l * sizeof (vdev_label_t) + (l < VDEV_LABELS / 2 ?
 	    0 : psize - VDEV_LABELS * sizeof (vdev_label_t)));
+
 }
 
 /*
@@ -224,7 +283,7 @@ vdev_uberblock_compare(uberblock_t *ub1, uberblock_t *ub2)
  *    -1 - Failure
  */
 static int
-uberblock_verify(uberblock_phys_t *ub, uint64_t offset)
+uberblock_verify(uberblock_phys_t *ub, int offset)
 {
 
 	uberblock_t *uber = &ub->ubp_uberblock;
@@ -238,8 +297,7 @@ uberblock_verify(uberblock_phys_t *ub, uint64_t offset)
 	if (zio_checksum_verify(&bp, (char *)ub, UBERBLOCK_SIZE) != 0)
 		return (-1);
 
-	if (uber->ub_magic == UBERBLOCK_MAGIC &&
-	    uber->ub_version > 0 && uber->ub_version <= SPA_VERSION)
+	if (uber->ub_magic == UBERBLOCK_MAGIC && uber->ub_version > 0)
 		return (0);
 
 	return (-1);
@@ -252,15 +310,16 @@ uberblock_verify(uberblock_phys_t *ub, uint64_t offset)
  *    Failure - NULL
  */
 static uberblock_phys_t *
-find_bestub(uberblock_phys_t *ub_array, uint64_t sector)
+find_bestub(fsi_file_t *ffi, uberblock_phys_t *ub_array, int label)
 {
 	uberblock_phys_t *ubbest = NULL;
-	uint64_t offset;
-	int i;
+	int i, offset;
 
 	for (i = 0; i < (VDEV_UBERBLOCK_RING >> VDEV_UBERBLOCK_SHIFT); i++) {
-		offset = (sector << SPA_MINBLOCKSHIFT) +
-		    VDEV_UBERBLOCK_OFFSET(i);
+		offset = vdev_label_offset(ffi, 0, label,
+		    VDEV_UBERBLOCK_OFFSET(i));
+		if (errnum == ERR_BAD_ARGUMENT)
+			return (NULL);
 		if (uberblock_verify(&ub_array[i], offset) == 0) {
 			if (ubbest == NULL) {
 				ubbest = &ub_array[i];
@@ -276,142 +335,58 @@ find_bestub(uberblock_phys_t *ub_array, uint64_t sector)
 }
 
 /*
- * Read a block of data based on the gang block address dva,
- * and put its data in buf.
- *
- * Return:
- *	0 - success
- *	1 - failure
- */
-static int
-zio_read_gang(blkptr_t *bp, dva_t *dva, void *buf, char *stack)
-{
-	zio_gbh_phys_t *zio_gb;
-	uint64_t offset, sector;
-	blkptr_t tmpbp;
-	int i;
-
-	zio_gb = (zio_gbh_phys_t *)stack;
-	stack += SPA_GANGBLOCKSIZE;
-	offset = DVA_GET_OFFSET(dva);
-	sector =  DVA_OFFSET_TO_PHYS_SECTOR(offset);
-
-	/* read in the gang block header */
-	if (devread(sector, 0, SPA_GANGBLOCKSIZE, (char *)zio_gb) == 0) {
-		grub_printf("failed to read in a gang block header\n");
-		return (1);
-	}
-
-	/* self checksuming the gang block header */
-	BP_ZERO(&tmpbp);
-	BP_SET_CHECKSUM(&tmpbp, ZIO_CHECKSUM_GANG_HEADER);
-	BP_SET_BYTEORDER(&tmpbp, ZFS_HOST_BYTEORDER);
-	ZIO_SET_CHECKSUM(&tmpbp.blk_cksum, DVA_GET_VDEV(dva),
-	    DVA_GET_OFFSET(dva), bp->blk_birth, 0);
-	if (zio_checksum_verify(&tmpbp, (char *)zio_gb, SPA_GANGBLOCKSIZE)) {
-		grub_printf("failed to checksum a gang block header\n");
-		return (1);
-	}
-
-	for (i = 0; i < SPA_GBH_NBLKPTRS; i++) {
-		if (zio_gb->zg_blkptr[i].blk_birth == 0)
-			continue;
-
-		if (zio_read_data(&zio_gb->zg_blkptr[i], buf, stack))
-			return (1);
-		buf += BP_GET_PSIZE(&zio_gb->zg_blkptr[i]);
-	}
-
-	return (0);
-}
-
-/*
- * Read in a block of raw data to buf.
- *
- * Return:
- *	0 - success
- *	1 - failure
- */
-static int
-zio_read_data(blkptr_t *bp, void *buf, char *stack)
-{
-	int i, psize;
-
-	psize = BP_GET_PSIZE(bp);
-
-	/* pick a good dva from the block pointer */
-	for (i = 0; i < SPA_DVAS_PER_BP; i++) {
-		uint64_t offset, sector;
-
-		if (bp->blk_dva[i].dva_word[0] == 0 &&
-		    bp->blk_dva[i].dva_word[1] == 0)
-			continue;
-
-		if (DVA_GET_GANG(&bp->blk_dva[i])) {
-			if (zio_read_gang(bp, &bp->blk_dva[i], buf, stack) == 0)
-				return (0);
-		} else {
-			/* read in a data block */
-			offset = DVA_GET_OFFSET(&bp->blk_dva[i]);
-			sector =  DVA_OFFSET_TO_PHYS_SECTOR(offset);
-			if (devread(sector, 0, psize, buf))
-				return (0);
-		}
-	}
-
-	return (1);
-}
-
-/*
- * Read in a block of data, verify its checksum, decompress if needed,
- * and put the uncompressed data in buf.
+ * Read in a block and put its uncompressed data in buf.
  *
  * Return:
  *	0 - success
  *	errnum - failure
  */
 static int
-zio_read(blkptr_t *bp, void *buf, char *stack)
+zio_read(fsi_file_t *ffi, blkptr_t *bp, void *buf, char *stack)
 {
-	int lsize, psize, comp;
-	char *retbuf;
+	uint64_t offset, sector;
+	int psize, lsize;
+	int i, comp, cksum;
 
-	comp = BP_GET_COMPRESS(bp);
-	lsize = BP_GET_LSIZE(bp);
 	psize = BP_GET_PSIZE(bp);
+	lsize = BP_GET_LSIZE(bp);
+	comp = BP_GET_COMPRESS(bp);
+	cksum = BP_GET_CHECKSUM(bp);
 
 	if ((unsigned int)comp >= ZIO_COMPRESS_FUNCTIONS ||
 	    (comp != ZIO_COMPRESS_OFF &&
-	    decomp_table[comp].decomp_func == NULL)) {
-		grub_printf("compression algorithm not supported\n");
+	    decomp_table[comp].decomp_func == NULL))
 		return (ERR_FSYS_CORRUPT);
+
+	/* pick a good dva from the block pointer */
+	for (i = 0; i < SPA_DVAS_PER_BP; i++) {
+
+		if (bp->blk_dva[i].dva_word[0] == 0 &&
+		    bp->blk_dva[i].dva_word[1] == 0)
+			continue;
+
+		/* read in a block */
+		offset = DVA_GET_OFFSET(&bp->blk_dva[i]);
+		sector =  DVA_OFFSET_TO_PHYS_SECTOR(offset);
+
+		if (comp != ZIO_COMPRESS_OFF) {
+
+			if (devread(ffi, sector, 0, psize, stack) == 0)
+				continue;
+			if (zio_checksum_verify(bp, stack, psize) != 0)
+				continue;
+			decomp_table[comp].decomp_func(stack, buf, psize,
+			    lsize);
+		} else {
+			if (devread(ffi, sector, 0, psize, buf) == 0)
+				continue;
+			if (zio_checksum_verify(bp, buf, psize) != 0)
+				continue;
+		}
+		return (0);
 	}
 
-	if ((char *)buf < stack && ((char *)buf) + lsize > stack) {
-		grub_printf("not enough memory allocated\n");
-		return (ERR_WONT_FIT);
-	}
-
-	retbuf = buf;
-	if (comp != ZIO_COMPRESS_OFF) {
-		buf = stack;
-		stack += psize;
-	}
-
-	if (zio_read_data(bp, buf, stack)) {
-		grub_printf("zio_read_data failed\n");
-		return (ERR_FSYS_CORRUPT);
-	}
-
-	if (zio_checksum_verify(bp, buf, psize) != 0) {
-		grub_printf("checksum verification failed\n");
-		return (ERR_FSYS_CORRUPT);
-	}
-
-	if (comp != ZIO_COMPRESS_OFF)
-		decomp_table[comp].decomp_func(buf, retbuf, psize, lsize);
-
-	return (0);
+	return (ERR_FSYS_CORRUPT);
 }
 
 /*
@@ -423,7 +398,8 @@ zio_read(blkptr_t *bp, void *buf, char *stack)
  * 	errnum - failure
  */
 static int
-dmu_read(dnode_phys_t *dn, uint64_t blkid, void *buf, char *stack)
+dmu_read(fsi_file_t *ffi, dnode_phys_t *dn, uint64_t blkid, void *buf,
+    char *stack)
 {
 	int idx, level;
 	blkptr_t *bp_array = dn->dn_blkptr;
@@ -445,10 +421,9 @@ dmu_read(dnode_phys_t *dn, uint64_t blkid, void *buf, char *stack)
 			grub_memset(buf, 0,
 			    dn->dn_datablkszsec << SPA_MINBLOCKSHIFT);
 			break;
-		} else if ((errnum = zio_read(bp, tmpbuf, stack))) {
+		} else if ((errnum = zio_read(ffi, bp, tmpbuf, stack))) {
 			return (errnum);
 		}
-
 		bp_array = tmpbuf;
 	}
 
@@ -472,7 +447,7 @@ mzap_lookup(mzap_phys_t *zapobj, int objsize, char *name,
 
 	chunks = objsize/MZAP_ENT_LEN - 1;
 	for (i = 0; i < chunks; i++) {
-		if (grub_strcmp(mzap_ent[i].mze_name, name) == 0) {
+		if (strcmp(mzap_ent[i].mze_name, name) == 0) {
 			*value = mzap_ent[i].mze_value;
 			return (0);
 		}
@@ -482,7 +457,7 @@ mzap_lookup(mzap_phys_t *zapobj, int objsize, char *name,
 }
 
 static uint64_t
-zap_hash(uint64_t salt, const char *name)
+zap_hash(fsi_file_t *ffi, uint64_t salt, const char *name)
 {
 	static uint64_t table[256];
 	const uint8_t *cp;
@@ -513,7 +488,7 @@ zap_hash(uint64_t salt, const char *name)
 	 * those are the onces that we first pay attention to when
 	 * chosing the bucket.
 	 */
-	crc &= ~((1ULL << (64 - 28)) - 1);
+	crc &= ~((1ULL << (64 - ZAP_HASHBITS)) - 1);
 
 	return (crc);
 }
@@ -615,7 +590,7 @@ zap_leaf_lookup(zap_leaf_phys_t *l, int blksft, uint64_t h,
  *	errnum - failure
  */
 static int
-fzap_lookup(dnode_phys_t *zap_dnode, zap_phys_t *zap,
+fzap_lookup(fsi_file_t *ffi, dnode_phys_t *zap_dnode, zap_phys_t *zap,
     char *name, uint64_t *value, char *stack)
 {
 	zap_leaf_phys_t *l;
@@ -623,11 +598,10 @@ fzap_lookup(dnode_phys_t *zap_dnode, zap_phys_t *zap,
 	int blksft = zfs_log2(zap_dnode->dn_datablkszsec << DNODE_SHIFT);
 
 	/* Verify if this is a fat zap header block */
-	if (zap->zap_magic != (uint64_t)ZAP_MAGIC ||
-	    zap->zap_flags != 0)
+	if (zap->zap_magic != (uint64_t)ZAP_MAGIC)
 		return (ERR_FSYS_CORRUPT);
 
-	hash = zap_hash(zap->zap_salt, name);
+	hash = zap_hash(ffi, zap->zap_salt, name);
 	if (errnum)
 		return (errnum);
 
@@ -642,9 +616,7 @@ fzap_lookup(dnode_phys_t *zap_dnode, zap_phys_t *zap,
 	/* Get the leaf block */
 	l = (zap_leaf_phys_t *)stack;
 	stack += 1<<blksft;
-	if ((1<<blksft) < sizeof (zap_leaf_phys_t))
-		return (ERR_FSYS_CORRUPT);
-	if ((errnum = dmu_read(zap_dnode, blkid, l, stack)))
+	if ((errnum = dmu_read(ffi, zap_dnode, blkid, l, stack)))
 		return (errnum);
 
 	return (zap_leaf_lookup(l, blksft, hash, name, value));
@@ -659,7 +631,8 @@ fzap_lookup(dnode_phys_t *zap_dnode, zap_phys_t *zap,
  *	errnum - failure
  */
 static int
-zap_lookup(dnode_phys_t *zap_dnode, char *name, uint64_t *val, char *stack)
+zap_lookup(fsi_file_t *ffi, dnode_phys_t *zap_dnode, char *name,
+    uint64_t *val, char *stack)
 {
 	uint64_t block_type;
 	int size;
@@ -669,8 +642,7 @@ zap_lookup(dnode_phys_t *zap_dnode, char *name, uint64_t *val, char *stack)
 	zapbuf = stack;
 	size = zap_dnode->dn_datablkszsec << SPA_MINBLOCKSHIFT;
 	stack += size;
-
-	if ((errnum = dmu_read(zap_dnode, 0, zapbuf, stack)))
+	if ((errnum = dmu_read(ffi, zap_dnode, 0, zapbuf, stack)))
 		return (errnum);
 
 	block_type = *((uint64_t *)zapbuf);
@@ -679,7 +651,7 @@ zap_lookup(dnode_phys_t *zap_dnode, char *name, uint64_t *val, char *stack)
 		return (mzap_lookup(zapbuf, size, name, val));
 	} else if (block_type == ZBT_HEADER) {
 		/* this is a fat zap */
-		return (fzap_lookup(zap_dnode, zapbuf, name,
+		return (fzap_lookup(ffi, zap_dnode, zapbuf, name,
 		    val, stack));
 	}
 
@@ -700,13 +672,14 @@ zap_lookup(dnode_phys_t *zap_dnode, char *name, uint64_t *val, char *stack)
  *	errnum - failure
  */
 static int
-dnode_get(dnode_phys_t *mdn, uint64_t objnum, uint8_t type, dnode_phys_t *buf,
-	char *stack)
+dnode_get(fsi_file_t *ffi, dnode_phys_t *mdn, uint64_t objnum,
+    uint8_t type, dnode_phys_t *buf, char *stack)
 {
 	uint64_t blkid, blksz; /* the block id this object dnode is in */
 	int epbs; /* shift of number of dnodes in a block */
 	int idx; /* index within a block */
 	dnode_phys_t *dnbuf;
+	zfs_bootarea_t *zfs_ba = (zfs_bootarea_t *)ffi->ff_fsi->f_data;
 
 	blksz = mdn->dn_datablkszsec << SPA_MINBLOCKSHIFT;
 	epbs = zfs_log2(blksz) - DNODE_SHIFT;
@@ -730,7 +703,7 @@ dnode_get(dnode_phys_t *mdn, uint64_t objnum, uint8_t type, dnode_phys_t *buf,
 		stack += blksz;
 	}
 
-	if ((errnum = dmu_read(mdn, blkid, (char *)dnbuf, stack)))
+	if ((errnum = dmu_read(ffi, mdn, blkid, (char *)dnbuf, stack)))
 		return (errnum);
 
 	grub_memmove(buf, &dnbuf[idx], DNODE_SIZE);
@@ -750,16 +723,16 @@ is_top_dataset_file(char *str)
 {
 	char *tptr;
 
-	if ((tptr = grub_strstr(str, "menu.lst")) &&
+	if (((tptr = strstr(str, "menu.lst"))) &&
 	    (tptr[8] == '\0' || tptr[8] == ' ') &&
 	    *(tptr-1) == '/')
 		return (1);
 
-	if (grub_strncmp(str, BOOTSIGN_DIR"/",
-	    grub_strlen(BOOTSIGN_DIR) + 1) == 0)
+	if (strncmp(str, BOOTSIGN_DIR"/",
+	    strlen(BOOTSIGN_DIR) + 1) == 0)
 		return (1);
 
-	if (grub_strcmp(str, BOOTSIGN_BACKUP) == 0)
+	if (strcmp(str, BOOTSIGN_BACKUP) == 0)
 		return (1);
 
 	return (0);
@@ -775,25 +748,23 @@ is_top_dataset_file(char *str)
  *	errnum - failure
  */
 static int
-dnode_get_path(dnode_phys_t *mdn, char *path, dnode_phys_t *dn,
-    char *stack)
+dnode_get_path(fsi_file_t *ffi, dnode_phys_t *mdn, char *path,
+    dnode_phys_t *dn, char *stack)
 {
 	uint64_t objnum, version;
 	char *cname, ch;
 
-	if ((errnum = dnode_get(mdn, MASTER_NODE_OBJ, DMU_OT_MASTER_NODE,
+	if ((errnum = dnode_get(ffi, mdn, MASTER_NODE_OBJ, DMU_OT_MASTER_NODE,
 	    dn, stack)))
 		return (errnum);
 
-	if ((errnum = zap_lookup(dn, ZPL_VERSION_STR, &version, stack)))
-		return (errnum);
-	if (version > ZPL_VERSION)
-		return (-1);
-
-	if ((errnum = zap_lookup(dn, ZFS_ROOT_OBJ, &objnum, stack)))
+	if ((errnum = zap_lookup(ffi, dn, ZPL_VERSION_STR, &version, stack)))
 		return (errnum);
 
-	if ((errnum = dnode_get(mdn, objnum, DMU_OT_DIRECTORY_CONTENTS,
+	if ((errnum = zap_lookup(ffi, dn, ZFS_ROOT_OBJ, &objnum, stack)))
+		return (errnum);
+
+	if ((errnum = dnode_get(ffi, mdn, objnum, DMU_OT_DIRECTORY_CONTENTS,
 	    dn, stack)))
 		return (errnum);
 
@@ -810,11 +781,11 @@ dnode_get_path(dnode_phys_t *mdn, char *path, dnode_phys_t *dn,
 		ch = *path;
 		*path = 0;   /* ensure null termination */
 
-		if ((errnum = zap_lookup(dn, cname, &objnum, stack)))
+		if ((errnum = zap_lookup(ffi, dn, cname, &objnum, stack)))
 			return (errnum);
 
 		objnum = ZFS_DIRENT_OBJ(objnum);
-		if ((errnum = dnode_get(mdn, objnum, 0, dn, stack)))
+		if ((errnum = dnode_get(ffi, mdn, objnum, 0, dn, stack)))
 			return (errnum);
 
 		*path = ch;
@@ -836,13 +807,14 @@ dnode_get_path(dnode_phys_t *mdn, char *path, dnode_phys_t *dn,
  *	errnum -failure
  */
 static int
-get_default_bootfsobj(dnode_phys_t *mosmdn, uint64_t *obj, char *stack)
+get_default_bootfsobj(fsi_file_t *ffi, dnode_phys_t *mosmdn,
+    uint64_t *obj, char *stack)
 {
 	uint64_t objnum = 0;
 	dnode_phys_t *dn = (dnode_phys_t *)stack;
 	stack += DNODE_SIZE;
 
-	if ((errnum = dnode_get(mosmdn, DMU_POOL_DIRECTORY_OBJECT,
+	if ((errnum = dnode_get(ffi, mosmdn, DMU_POOL_DIRECTORY_OBJECT,
 	    DMU_OT_OBJECT_DIRECTORY, dn, stack)))
 		return (errnum);
 
@@ -850,17 +822,19 @@ get_default_bootfsobj(dnode_phys_t *mosmdn, uint64_t *obj, char *stack)
 	 * find the object number for 'pool_props', and get the dnode
 	 * of the 'pool_props'.
 	 */
-	if (zap_lookup(dn, DMU_POOL_PROPS, &objnum, stack))
+	if (zap_lookup(ffi, dn, DMU_POOL_PROPS, &objnum, stack))
 		return (ERR_FILESYSTEM_NOT_FOUND);
 
-	if ((errnum = dnode_get(mosmdn, objnum, DMU_OT_POOL_PROPS, dn, stack)))
+	if ((errnum = dnode_get(ffi, mosmdn, objnum, DMU_OT_POOL_PROPS, dn,
+	    stack)))
 		return (errnum);
 
-	if (zap_lookup(dn, ZPOOL_PROP_BOOTFS, &objnum, stack))
+	if (zap_lookup(ffi, dn, ZPOOL_PROP_BOOTFS, &objnum, stack))
 		return (ERR_FILESYSTEM_NOT_FOUND);
 
 	if (!objnum)
 		return (ERR_FILESYSTEM_NOT_FOUND);
+
 
 	*obj = objnum;
 	return (0);
@@ -880,30 +854,29 @@ get_default_bootfsobj(dnode_phys_t *mosmdn, uint64_t *obj, char *stack)
  *	errnum - failure
  */
 static int
-get_objset_mdn(dnode_phys_t *mosmdn, char *fsname, uint64_t *obj,
-    dnode_phys_t *mdn, char *stack)
+get_objset_mdn(fsi_file_t *ffi, dnode_phys_t *mosmdn, char *fsname,
+    uint64_t *obj, dnode_phys_t *mdn, char *stack)
 {
 	uint64_t objnum, headobj;
 	char *cname, ch;
 	blkptr_t *bp;
 	objset_phys_t *osp;
-	int issnapshot = 0;
-	char *snapname = NULL;
 
 	if (fsname == NULL && obj) {
 		headobj = *obj;
 		goto skip;
 	}
 
-	if ((errnum = dnode_get(mosmdn, DMU_POOL_DIRECTORY_OBJECT,
+	if ((errnum = dnode_get(ffi, mosmdn, DMU_POOL_DIRECTORY_OBJECT,
 	    DMU_OT_OBJECT_DIRECTORY, mdn, stack)))
 		return (errnum);
 
-	if ((errnum = zap_lookup(mdn, DMU_POOL_ROOT_DATASET, &objnum,
+	if ((errnum = zap_lookup(ffi, mdn, DMU_POOL_ROOT_DATASET, &objnum,
 	    stack)))
 		return (errnum);
 
-	if ((errnum = dnode_get(mosmdn, objnum, DMU_OT_DSL_DIR, mdn, stack)))
+	if ((errnum = dnode_get(ffi, mosmdn, objnum, DMU_OT_DSL_DIR, mdn,
+	    stack)))
 		return (errnum);
 
 	if (fsname == NULL) {
@@ -928,59 +901,36 @@ get_objset_mdn(dnode_phys_t *mosmdn, char *fsname, uint64_t *obj,
 		ch = *fsname;
 		*fsname = 0;
 
-		snapname = cname;
-		while (*snapname && !isspace((uint8_t)*snapname) && *snapname != '@')
-			snapname++;
-		if (*snapname == '@') {
-			issnapshot = 1;
-			*snapname = 0;
-		}
 		childobj =
 		    ((dsl_dir_phys_t *)DN_BONUS(mdn))->dd_child_dir_zapobj;
-		if ((errnum = dnode_get(mosmdn, childobj,
+		if ((errnum = dnode_get(ffi, mosmdn, childobj,
 		    DMU_OT_DSL_DIR_CHILD_MAP, mdn, stack)))
 			return (errnum);
 
-		if (zap_lookup(mdn, cname, &objnum, stack))
+		if (zap_lookup(ffi, mdn, cname, &objnum, stack))
 			return (ERR_FILESYSTEM_NOT_FOUND);
 
-		if ((errnum = dnode_get(mosmdn, objnum, DMU_OT_DSL_DIR,
+		if ((errnum = dnode_get(ffi, mosmdn, objnum, DMU_OT_DSL_DIR,
 		    mdn, stack)))
 			return (errnum);
 
 		*fsname = ch;
-		if (issnapshot)
-			*snapname = '@';
 	}
 	headobj = ((dsl_dir_phys_t *)DN_BONUS(mdn))->dd_head_dataset_obj;
 	if (obj)
 		*obj = headobj;
 
 skip:
-	if ((errnum = dnode_get(mosmdn, headobj, DMU_OT_DSL_DATASET, mdn, stack)))
+	if ((errnum = dnode_get(ffi, mosmdn, headobj, DMU_OT_DSL_DATASET, mdn,
+	    stack)))
 		return (errnum);
-	if (issnapshot) {
-		uint64_t snapobj;
 
-		snapobj = ((dsl_dataset_phys_t *)DN_BONUS(mdn))->
-		    ds_snapnames_zapobj;
-
-		if ((errnum = dnode_get(mosmdn, snapobj,
-		    DMU_OT_DSL_DS_SNAP_MAP, mdn, stack)))
-			return (errnum);
-		if (zap_lookup(mdn, snapname + 1, &headobj, stack))
-			return (ERR_FILESYSTEM_NOT_FOUND);
-		if ((errnum = dnode_get(mosmdn, headobj,
-		    DMU_OT_DSL_DATASET, mdn, stack)))
-			return (errnum);
-		if (obj)
-			*obj = headobj;
-	}
+	/* TODO: Add snapshot support here - for fsname=snapshot-name */
 
 	bp = &((dsl_dataset_phys_t *)DN_BONUS(mdn))->ds_bp;
 	osp = (objset_phys_t *)stack;
 	stack += sizeof (objset_phys_t);
-	if ((errnum = zio_read(bp, osp, stack)))
+	if ((errnum = zio_read(ffi, bp, osp, stack)))
 		return (errnum);
 
 	grub_memmove((char *)mdn, (char *)&osp->os_meta_dnode, DNODE_SIZE);
@@ -1069,11 +1019,11 @@ nvlist_lookup_value(char *nvlist, char *name, void *val, int valtype,
 		type = BSWAP_32(*(uint32_t *)nvpair);
 		nvpair += 4;
 
-		if ((grub_strncmp(nvp_name, name, name_len) == 0) &&
-		    type == valtype) {
+		if (((strncmp(nvp_name, name, name_len) == 0) &&
+		    type == valtype)) {
 			int nelm;
 
-			if ((nelm = BSWAP_32(*(uint32_t *)nvpair)) < 1)
+			if (((nelm = BSWAP_32(*(uint32_t *)nvpair)) < 1))
 				return (1);
 			nvpair += 4;
 
@@ -1119,6 +1069,8 @@ vdev_validate(char *nv)
 	    DATA_TYPE_UINT64, NULL) == 0 ||
 	    nvlist_lookup_value(nv, ZPOOL_CONFIG_FAULTED, &ival,
 	    DATA_TYPE_UINT64, NULL) == 0 ||
+	    nvlist_lookup_value(nv, ZPOOL_CONFIG_DEGRADED, &ival,
+	    DATA_TYPE_UINT64, NULL) == 0 ||
 	    nvlist_lookup_value(nv, ZPOOL_CONFIG_REMOVED, &ival,
 	    DATA_TYPE_UINT64, NULL) == 0)
 		return (ERR_DEV_VALUES);
@@ -1127,58 +1079,26 @@ vdev_validate(char *nv)
 }
 
 /*
- * Get a valid vdev pathname/devid from the boot device.
- * The caller should already allocate MAXPATHLEN memory for bootpath and devid.
+ * Get a list of valid vdev pathname from the boot device.
+ * The caller should already allocate MAXNAMELEN memory for bootpath.
  */
 static int
-vdev_get_bootpath(char *nv, uint64_t inguid, char *devid, char *bootpath,
-    int is_spare)
+vdev_get_bootpath(char *nv, char *bootpath)
 {
 	char type[16];
 
+	bootpath[0] = '\0';
 	if (nvlist_lookup_value(nv, ZPOOL_CONFIG_TYPE, &type, DATA_TYPE_STRING,
 	    NULL))
 		return (ERR_FSYS_CORRUPT);
 
 	if (strcmp(type, VDEV_TYPE_DISK) == 0) {
-		uint64_t guid;
-
-		if (vdev_validate(nv) != 0)
+		if (vdev_validate(nv) != 0 ||
+		    nvlist_lookup_value(nv, ZPOOL_CONFIG_PHYS_PATH, bootpath,
+		    DATA_TYPE_STRING, NULL) != 0)
 			return (ERR_NO_BOOTPATH);
 
-		if (nvlist_lookup_value(nv, ZPOOL_CONFIG_GUID,
-		    &guid, DATA_TYPE_UINT64, NULL) != 0)
-			return (ERR_NO_BOOTPATH);
-
-		if (guid != inguid)
-			return (ERR_NO_BOOTPATH);
-
-		/* for a spare vdev, pick the disk labeled with "is_spare" */
-		if (is_spare) {
-			uint64_t spare = 0;
-			(void) nvlist_lookup_value(nv, ZPOOL_CONFIG_IS_SPARE,
-			    &spare, DATA_TYPE_UINT64, NULL);
-			if (!spare)
-				return (ERR_NO_BOOTPATH);
-		}
-
-		if (nvlist_lookup_value(nv, ZPOOL_CONFIG_PHYS_PATH,
-		    bootpath, DATA_TYPE_STRING, NULL) != 0)
-			bootpath[0] = '\0';
-
-		if (nvlist_lookup_value(nv, ZPOOL_CONFIG_DEVID,
-		    devid, DATA_TYPE_STRING, NULL) != 0)
-			devid[0] = '\0';
-
-		if (strlen(bootpath) >= MAXPATHLEN ||
-		    strlen(devid) >= MAXPATHLEN)
-			return (ERR_WONT_FIT);
-
-		return (0);
-
-	} else if (strcmp(type, VDEV_TYPE_MIRROR) == 0 ||
-	    strcmp(type, VDEV_TYPE_REPLACING) == 0 ||
-	    (is_spare = (strcmp(type, VDEV_TYPE_SPARE) == 0))) {
+	} else if (strcmp(type, VDEV_TYPE_MIRROR) == 0) {
 		int nelm, i;
 		char *child;
 
@@ -1187,16 +1107,28 @@ vdev_get_bootpath(char *nv, uint64_t inguid, char *devid, char *bootpath,
 			return (ERR_FSYS_CORRUPT);
 
 		for (i = 0; i < nelm; i++) {
+			char tmp_path[MAXNAMELEN];
 			char *child_i;
 
 			child_i = nvlist_array(child, i);
-			if (vdev_get_bootpath(child_i, inguid, devid,
-			    bootpath, is_spare) == 0)
-				return (0);
+			if (vdev_validate(child_i) != 0)
+				continue;
+
+			if (nvlist_lookup_value(child_i, ZPOOL_CONFIG_PHYS_PATH,
+			    tmp_path, DATA_TYPE_STRING, NULL) != 0)
+				return (ERR_NO_BOOTPATH);
+
+			if ((strlen(bootpath) + strlen(tmp_path)) > MAXNAMELEN)
+				return (ERR_WONT_FIT);
+
+			if (strlen(bootpath) == 0)
+				sprintf(bootpath, "%s", tmp_path);
+			else
+				sprintf(bootpath, "%s %s", bootpath, tmp_path);
 		}
 	}
 
-	return (ERR_NO_BOOTPATH);
+	return (strlen(bootpath) > 0 ? 0 : ERR_NO_BOOTPATH);
 }
 
 /*
@@ -1206,24 +1138,22 @@ vdev_get_bootpath(char *nv, uint64_t inguid, char *devid, char *bootpath,
  *	0 - success
  *	ERR_* - failure
  */
-int
-check_pool_label(uint64_t sector, char *stack, char *outdevid,
-    char *outpath, uint64_t *outguid)
+static int
+check_pool_label(fsi_file_t *ffi, int label, char *stack)
 {
 	vdev_phys_t *vdev;
-	uint64_t pool_state, txg = 0;
+	uint64_t sector, pool_state, txg = 0;
 	char *nvlist, *nv;
-	uint64_t diskguid;
-	uint64_t version;
+	zfs_bootarea_t *zfs_ba = (zfs_bootarea_t *)ffi->ff_fsi->f_data;
 
-	sector += (VDEV_SKIP_SIZE >> SPA_MINBLOCKSHIFT);
+	sector = (label * sizeof (vdev_label_t) + VDEV_SKIP_SIZE +
+	    VDEV_BOOT_HEADER_SIZE) >> SPA_MINBLOCKSHIFT;
 
 	/* Read in the vdev name-value pair list (112K). */
-	if (devread(sector, 0, VDEV_PHYS_SIZE, stack) == 0)
+	if (devread(ffi, sector, 0, VDEV_PHYS_SIZE, stack) == 0)
 		return (ERR_READ);
 
 	vdev = (vdev_phys_t *)stack;
-	stack += sizeof (vdev_phys_t);
 
 	if (nvlist_unpack(vdev->vp_nvlist, &nvlist))
 		return (ERR_FSYS_CORRUPT);
@@ -1247,22 +1177,13 @@ check_pool_label(uint64_t sector, char *stack, char *outdevid,
 	if (txg == 0)
 		return (ERR_NO_BOOTPATH);
 
-	if (nvlist_lookup_value(nvlist, ZPOOL_CONFIG_VERSION, &version,
-	    DATA_TYPE_UINT64, NULL))
-		return (ERR_FSYS_CORRUPT);
-	if (version > SPA_VERSION)
-		return (ERR_NEWER_VERSION);
 	if (nvlist_lookup_value(nvlist, ZPOOL_CONFIG_VDEV_TREE, &nv,
 	    DATA_TYPE_NVLIST, NULL))
 		return (ERR_FSYS_CORRUPT);
-	if (nvlist_lookup_value(nvlist, ZPOOL_CONFIG_GUID, &diskguid,
-	    DATA_TYPE_UINT64, NULL))
-		return (ERR_FSYS_CORRUPT);
-	if (vdev_get_bootpath(nv, diskguid, outdevid, outpath, 0))
+
+	if (vdev_get_bootpath(nv, current_bootpath))
 		return (ERR_NO_BOOTPATH);
-	if (nvlist_lookup_value(nvlist, ZPOOL_CONFIG_POOL_GUID, outguid,
-	    DATA_TYPE_UINT64, NULL))
-		return (ERR_FSYS_CORRUPT);
+
 	return (0);
 }
 
@@ -1274,23 +1195,34 @@ check_pool_label(uint64_t sector, char *stack, char *outdevid,
  *	1 - success
  *	0 - failure
  */
-int
-zfs_mount(void)
+static int
+zfs_mount(fsi_file_t *ffi, const char *options)
 {
 	char *stack;
 	int label = 0;
-	uberblock_phys_t *ub_array, *ubbest;
+	uberblock_phys_t *ub_array, *ubbest = NULL;
 	objset_phys_t *osp;
-	char tmp_bootpath[MAXNAMELEN];
-	char tmp_devid[MAXNAMELEN];
-	uint64_t tmp_guid;
-	uint64_t adjpl = (uint64_t)part_length << SPA_MINBLOCKSHIFT;
-	int err = errnum; /* preserve previous errnum state */
+	zfs_bootarea_t *zfs_ba;
 
-	/* if it's our first time here, zero the best uberblock out */
-	if (best_drive == 0 && best_part == 0 && find_best_root) {
-		grub_memset(&current_uberblock, 0, sizeof (uberblock_t));
-		pool_guid = 0;
+	/* if zfs is already mounted, don't do it again */
+	if (is_zfs_mount == 1)
+		return (1);
+
+	/* get much bigger data block for zfs */
+	if (((zfs_ba = malloc(sizeof (zfs_bootarea_t))) == NULL)) {
+		return (1);
+	}
+	bzero(zfs_ba, sizeof (zfs_bootarea_t));
+
+	/* replace small data area in fsi with big one */
+	free(ffi->ff_fsi->f_data);
+	ffi->ff_fsi->f_data = (void *)zfs_ba;
+
+	/* If an boot filesystem is passed in, set it to current_bootfs */
+	if (options != NULL) {
+		if (strlen(options) < MAXNAMELEN) {
+			strcpy(current_bootfs, options);
+		}
 	}
 
 	stackbase = ZFS_SCRATCH;
@@ -1300,71 +1232,43 @@ zfs_mount(void)
 
 	osp = (objset_phys_t *)stack;
 	stack += sizeof (objset_phys_t);
-	adjpl = P2ALIGN(adjpl, (uint64_t)sizeof (vdev_label_t));
 
-	for (label = 0; label < VDEV_LABELS; label++) {
+	/* XXX add back labels support? */
+	for (label = 0; ubbest == NULL && label < (VDEV_LABELS/2); label++) {
+		uint64_t sector = (label * sizeof (vdev_label_t) +
+		    VDEV_SKIP_SIZE + VDEV_BOOT_HEADER_SIZE +
+		    VDEV_PHYS_SIZE) >> SPA_MINBLOCKSHIFT;
 
-		uint64_t sector;
-
-		/*
-		 * some eltorito stacks don't give us a size and
-		 * we end up setting the size to MAXUINT, further
-		 * some of these devices stop working once a single
-		 * read past the end has been issued. Checking
-		 * for a maximum part_length and skipping the backup
-		 * labels at the end of the slice/partition/device
-		 * avoids breaking down on such devices.
-		 */
-		if (part_length == MAXUINT && label == 2)
-			break;
-
-		sector = vdev_label_start(adjpl,
-		    label) >> SPA_MINBLOCKSHIFT;
 
 		/* Read in the uberblock ring (128K). */
-		if (devread(sector  +
-		    ((VDEV_SKIP_SIZE + VDEV_PHYS_SIZE) >>
-		    SPA_MINBLOCKSHIFT), 0, VDEV_UBERBLOCK_RING,
+		if (devread(ffi, sector, 0, VDEV_UBERBLOCK_RING,
 		    (char *)ub_array) == 0)
 			continue;
 
-		if ((ubbest = find_bestub(ub_array, sector)) != NULL &&
-		    zio_read(&ubbest->ubp_uberblock.ub_rootbp, osp, stack)
+		if ((ubbest = find_bestub(ffi, ub_array, label)) != NULL &&
+		    zio_read(ffi, &ubbest->ubp_uberblock.ub_rootbp, osp, stack)
 		    == 0) {
 
 			VERIFY_OS_TYPE(osp, DMU_OST_META);
 
-			if (check_pool_label(sector, stack, tmp_devid,
-			    tmp_bootpath, &tmp_guid))
-				continue;
-			if (pool_guid == 0)
-				pool_guid = tmp_guid;
-
-			if (find_best_root && ((pool_guid != tmp_guid) ||
-			    vdev_uberblock_compare(&ubbest->ubp_uberblock,
-			    &(current_uberblock)) <= 0))
-				continue;
-
 			/* Got the MOS. Save it at the memory addr MOS. */
 			grub_memmove(MOS, &osp->os_meta_dnode, DNODE_SIZE);
-			grub_memmove(&current_uberblock,
-			    &ubbest->ubp_uberblock, sizeof (uberblock_t));
-			grub_memmove(current_bootpath, tmp_bootpath,
-			    MAXNAMELEN);
-			grub_memmove(current_devid, tmp_devid,
-			    grub_strlen(tmp_devid));
+
+			if (check_pool_label(ffi, label, stack))
+				return (0);
+
+			/*
+			 * Copy fsi->f_data to ffi->ff_data since
+			 * fsig_mount copies from ff_data to f_data
+			 * overwriting fsi->f_data.
+			 */
+			bcopy(zfs_ba, fsig_file_buf(ffi), FSYS_BUFLEN);
+
 			is_zfs_mount = 1;
 			return (1);
 		}
 	}
 
-	/*
-	 * While some fs impls. (tftp) rely on setting and keeping
-	 * global errnums set, others won't reset it and will break
-	 * when issuing rawreads. The goal here is to simply not
-	 * have zfs mount attempts impact the previous state.
-	 */
-	errnum = err;
 	return (0);
 }
 
@@ -1376,11 +1280,13 @@ zfs_mount(void)
  *	1 - success
  *	0 - failure
  */
-int
-zfs_open(char *filename)
+static int
+zfs_open(fsi_file_t *ffi, char *filename)
 {
 	char *stack;
 	dnode_phys_t *mdn;
+	char *bootstring;
+	zfs_bootarea_t *zfs_ba = (zfs_bootarea_t *)ffi->ff_fsi->f_data;
 
 	file_buf = NULL;
 	stackbase = ZFS_SCRATCH;
@@ -1398,72 +1304,62 @@ zfs_open(char *filename)
 	 * do not goto 'current_bootfs'.
 	 */
 	if (is_top_dataset_file(filename)) {
-		if ((errnum = get_objset_mdn(MOS, NULL, NULL, mdn, stack)))
+		if ((errnum = get_objset_mdn(ffi, MOS, NULL, NULL, mdn, stack)))
 			return (0);
 
 		current_bootfs_obj = 0;
 	} else {
 		if (current_bootfs[0] == '\0') {
 			/* Get the default root filesystem object number */
-			if ((errnum = get_default_bootfsobj(MOS,
+			if ((errnum = get_default_bootfsobj(ffi, MOS,
 			    &current_bootfs_obj, stack)))
 				return (0);
-
-			if ((errnum = get_objset_mdn(MOS, NULL,
+			if ((errnum = get_objset_mdn(ffi, MOS, NULL,
 			    &current_bootfs_obj, mdn, stack)))
 				return (0);
 		} else {
-			if ((errnum = get_objset_mdn(MOS, current_bootfs,
-			    &current_bootfs_obj, mdn, stack))) {
-				grub_memset(current_bootfs, 0, MAXNAMELEN);
+			if ((errnum = get_objset_mdn(ffi, MOS,
+			    current_bootfs, &current_bootfs_obj, mdn, stack)))
 				return (0);
+		}
+
+		/*
+		 * Put zfs rootpool and boot obj number into bootstring.
+		 */
+		if (is_zfs_open == 0) {
+			char temp[25];		/* needs to hold long long */
+			int alloc_size;
+			char zfs_bootstr[] = "zfs-bootfs=";
+			char zfs_bootpath[] = ",bootpath='";
+
+			snprintf(temp, sizeof(temp), "%llu", (unsigned long long)
+			    current_bootfs_obj);
+			alloc_size = strlen(zfs_bootstr) +
+			    strlen(current_rootpool) +
+			    strlen(temp) + strlen(zfs_bootpath) +
+			    strlen(current_bootpath) + 3;
+			bootstring = fsi_bootstring_alloc(ffi->ff_fsi,
+			    alloc_size);
+			if (bootstring != NULL) {
+				strcpy(bootstring, zfs_bootstr);
+				strcat(bootstring, current_rootpool);
+				strcat(bootstring, "/");
+				strcat(bootstring, temp);
+				strcat(bootstring, zfs_bootpath);
+				strcat(bootstring, current_bootpath);
+				strcat(bootstring, "'");
+				is_zfs_open = 1;
 			}
 		}
 	}
 
-	if (dnode_get_path(mdn, filename, DNODE, stack)) {
+	if (dnode_get_path(ffi, mdn, filename, DNODE, stack)) {
 		errnum = ERR_FILE_NOT_FOUND;
 		return (0);
 	}
 
 	/* get the file size and set the file position to 0 */
-
-	/*
-	 * For DMU_OT_SA we will need to locate the SIZE attribute
-	 * attribute, which could be either in the bonus buffer
-	 * or the "spill" block.
-	 */
-	if (DNODE->dn_bonustype == DMU_OT_SA) {
-		sa_hdr_phys_t *sahdrp;
-		int hdrsize;
-
-		if (DNODE->dn_bonuslen != 0) {
-			sahdrp = (sa_hdr_phys_t *)DN_BONUS(DNODE);
-		} else {
-			if (DNODE->dn_flags & DNODE_FLAG_SPILL_BLKPTR) {
-				blkptr_t *bp = &DNODE->dn_spill;
-				void *buf;
-
-				buf = (void *)stack;
-				stack += BP_GET_LSIZE(bp);
-
-				/* reset errnum to rawread() failure */
-				errnum = 0;
-				if (zio_read(bp, buf, stack) != 0) {
-					return (0);
-				}
-				sahdrp = buf;
-			} else {
-				errnum = ERR_FSYS_CORRUPT;
-				return (0);
-			}
-		}
-		hdrsize = SA_HDR_SIZE(sahdrp);
-		filemax = *(uint64_t *)((char *)sahdrp + hdrsize +
-		    SA_SIZE_OFFSET);
-	} else {
-		filemax = ((znode_phys_t *)DN_BONUS(DNODE))->zp_size;
-	}
+	filemax = ((znode_phys_t *)DN_BONUS(DNODE))->zp_size;
 	filepos = 0;
 
 	dnode_buf = NULL;
@@ -1477,11 +1373,12 @@ zfs_open(char *filename)
  *	len - the length successfully read in to the buffer
  *	0   - failure
  */
-int
-zfs_read(char *buf, int len)
+static int
+zfs_read(fsi_file_t *ffi, char *buf, int len)
 {
 	char *stack;
 	int blksz, length, movesize;
+	zfs_bootarea_t *zfs_ba = (zfs_bootarea_t *)ffi->ff_fsi->f_data;
 
 	if (file_buf == NULL) {
 		file_buf = stackbase;
@@ -1514,7 +1411,7 @@ zfs_read(char *buf, int len)
 		 */
 		uint64_t blkid = filepos / blksz;
 
-		if ((errnum = dmu_read(DNODE, blkid, file_buf, stack)))
+		if ((errnum = dmu_read(ffi, DNODE, blkid, file_buf, stack)))
 			return (0);
 
 		file_start = blkid * blksz;
@@ -1541,4 +1438,16 @@ zfs_embed(int *start_sector, int needed_sectors)
 	return (1);
 }
 
-#endif /* FSYS_ZFS */
+fsi_plugin_ops_t *
+fsi_init_plugin(int version, fsi_plugin_t *fp, const char **name)
+{
+	static fsig_plugin_ops_t ops = {
+		FSIMAGE_PLUGIN_VERSION,
+		.fpo_mount = zfs_mount,
+		.fpo_dir = zfs_open,
+		.fpo_read = zfs_read
+	};
+
+	*name = "zfs";
+	return (fsig_init(fp, &ops));
+}

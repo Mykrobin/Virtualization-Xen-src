@@ -38,29 +38,29 @@
 #include <memshr.h>
 #endif
 
+#include "libvhd.h"
 #include "tapdisk-image.h"
 #include "tapdisk-driver.h"
 #include "tapdisk-server.h"
 #include "tapdisk-interface.h"
-#include "tapdisk-disktype.h"
 #include "tapdisk-vbd.h"
 #include "blktap2.h"
 
 #define DBG(_level, _f, _a...) tlog_write(_level, _f, ##_a)
 #define ERR(_err, _f, _a...) tlog_error(_err, _f, ##_a)
 
-#if 1
+#if 1                                                                        
 #define ASSERT(p)							\
 	do {								\
 		if (!(p)) {						\
 			DPRINTF("Assertion '%s' failed, line %d, "	\
 				"file %s", #p, __LINE__, __FILE__);	\
-			abort();					\
+			*(int*)0 = 0;					\
 		}							\
 	} while (0)
 #else
 #define ASSERT(p) ((void)0)
-#endif
+#endif 
 
 
 #define TD_VBD_EIO_RETRIES          10
@@ -81,31 +81,28 @@ tapdisk_vbd_initialize_vreq(td_vbd_request_t *vreq)
 	INIT_LIST_HEAD(&vreq->next);
 }
 
-void
-tapdisk_vbd_free(td_vbd_t *vbd)
+int
+tapdisk_vbd_initialize(int rfd, int wfd, uint16_t uuid)
 {
-	if (vbd) {
-		tapdisk_vbd_free_stack(vbd);
-		list_del_init(&vbd->next);
-		free(vbd->name);
-		free(vbd);
-	}
-}
-
-td_vbd_t*
-tapdisk_vbd_create(uint16_t uuid)
-{
-	td_vbd_t *vbd;
 	int i;
+	td_vbd_t *vbd;
+
+	vbd = tapdisk_server_get_vbd(uuid);
+	if (vbd) {
+		EPRINTF("duplicate vbds! %u\n", uuid);
+		return -EEXIST;
+	}
 
 	vbd = calloc(1, sizeof(td_vbd_t));
 	if (!vbd) {
 		EPRINTF("failed to allocate tapdisk state\n");
-		return NULL;
+		return -ENOMEM;
 	}
 
 	vbd->uuid     = uuid;
-	vbd->minor    = -1;
+	vbd->ipc.rfd  = rfd;
+	vbd->ipc.wfd  = wfd;
+	vbd->ipc.uuid = uuid;
 	vbd->ring.fd  = -1;
 
 	/* default blktap ring completion */
@@ -127,22 +124,6 @@ tapdisk_vbd_create(uint16_t uuid)
 
 	for (i = 0; i < MAX_REQUESTS; i++)
 		tapdisk_vbd_initialize_vreq(vbd->request_list + i);
-
-	return vbd;
-}
-
-int
-tapdisk_vbd_initialize(uint16_t uuid)
-{
-	td_vbd_t *vbd;
-
-	vbd = tapdisk_server_get_vbd(uuid);
-	if (vbd) {
-		EPRINTF("duplicate vbds! %u\n", uuid);
-		return -EEXIST;
-	}
-
-	vbd = tapdisk_vbd_create(uuid);
 
 	tapdisk_server_add_vbd(vbd);
 
@@ -191,8 +172,6 @@ tapdisk_vbd_close_vdi(td_vbd_t *vbd)
 
 	INIT_LIST_HEAD(&vbd->images);
 	td_flag_set(vbd->state, TD_VBD_CLOSED);
-
-	tapdisk_vbd_free_stack(vbd);
 }
 
 static int
@@ -304,37 +283,337 @@ fail:
 	return err;
 }
 
+/*
+ * LVHD hack: have to rescan LVM metadata on pool
+ * slaves to register lvchanges made on master.  FIXME.
+ */
 static int
-tapdisk_vbd_open_level(td_vbd_t *vbd, struct list_head *head,
-		       const char *params, int driver_type,
-		       td_disk_info_t *driver_info, td_flag_t flags)
+tapdisk_vbd_reactivate_volume(const char *name)
 {
-	const char *name;
+	int err;
+	char *cmd;
+
+	DPRINTF("reactivating %s\n", name);
+
+	err = asprintf(&cmd, "lvchange -an %s", name);
+	if (err == - 1) {
+		EPRINTF("failed to deactivate %s\n", name);
+		return -errno;
+	}
+
+	err = system(cmd);
+	if (err) {
+		/* 
+		 * Assume that LV deactivation failed because the LV is open, 
+		 * in which case the LVM information should be up-to-date and 
+		 * we don't need this step anyways (so ignore the error). If 
+		 * the failure is due to a non-existent LV, the next command 
+		 * (lvchange -ay) will catch it.
+		 * If we want to be more prudent/paranoid, we can instead check 
+		 * whether the LV is currently open (a bit more work).
+		 */
+	}
+
+	free(cmd);
+	err = asprintf(&cmd, "lvchange -ay --refresh %s", name);
+	if (err == - 1) {
+		EPRINTF("failed to activate %s\n", name);
+		return -errno;
+	}
+
+	err = system(cmd);
+	if (err)
+		EPRINTF("%s failed: %d\n", cmd, err);
+	free(cmd);
+	return err;
+}
+
+static int
+tapdisk_vbd_reactivate_volumes(td_vbd_t *vbd, int resume)
+{
+	int i, cnt, err;
+	char *name, *new;
+	vhd_context_t vhd;
+	vhd_parent_locator_t *loc;
+
+	new  = NULL;
+	name = NULL;
+
+	if (vbd->storage != TAPDISK_STORAGE_TYPE_LVM)
+		return 0;
+
+	if (!resume && vbd->reactivated)
+		return 0;
+
+	name = strdup(vbd->name);
+	if (!name) {
+		EPRINTF("%s: nomem\n", vbd->name);
+		return -ENOMEM;
+	}
+
+	for (cnt = 0; 1; cnt++) {
+
+		/* only need to reactivate child and parent during resume */
+		if (resume && cnt == 2)
+			break;
+
+		err = tapdisk_vbd_reactivate_volume(name);
+		if (err)
+			goto fail;
+
+		if (!strstr(name, "VHD"))
+			break;
+
+		for (i = 0; i < TD_VBD_EIO_RETRIES; i++) {
+			err = vhd_open(&vhd, name, VHD_OPEN_RDONLY);
+			if (!err)
+				break;
+
+			libvhd_set_log_level(1);
+			sleep(TD_VBD_EIO_SLEEP);
+		}
+		libvhd_set_log_level(0);
+		if (err)
+			goto fail;
+
+		if (vhd.footer.type != HD_TYPE_DIFF) {
+			vhd_close(&vhd);
+			break;
+		}
+
+		loc = NULL;
+		for (i = 0; i < 8; i++)
+			if (vhd.header.loc[i].code == PLAT_CODE_MACX) {
+				loc = vhd.header.loc + i;
+				break;
+			}
+
+		if (!loc) {
+			vhd_close(&vhd);
+			err = -EINVAL;
+			goto fail;
+		}
+
+		free(name);
+		err = vhd_parent_locator_read(&vhd, loc, &name);
+		vhd_close(&vhd);
+
+		if (err) {
+			name = NULL;
+			goto fail;
+		}
+
+		/*
+		 * vhd_parent_locator_read returns path relative to child:
+		 * ./VG_XenStorage--<sr-uuid>-VHD--<vdi-uuid>
+		 * we have to convert this to absolute path for lvm
+		 */
+		err = asprintf(&new, "/dev/mapper/%s", name + 2);
+		if (err == -1) {
+			err  = -errno;
+			goto fail;
+		}
+
+		free(name);
+		name = new;
+	}
+
+	err = 0;
+	vbd->reactivated = 1;
+
+out:
+	free(name);
+	return err;
+
+fail:
+	EPRINTF("failed to reactivate %s: %d\n", vbd->name, err);
+	goto out;
+}
+
+/*
+ * LVHD hack: 
+ * raw volumes are named /dev/<sr-vg-name>-<sr-uuid>/LV-<sr-uuid>
+ * vhd volumes are named /dev/<sr-vg-name>-<sr-uuid>/VHD-<sr-uuid>
+ *
+ * a live snapshot of a raw volume will result in the writeable volume's
+ * name changing from the raw to vhd format, but this change will not be
+ * reflected by xenstore.  hence this mess.
+ */
+static int
+tapdisk_vbd_check_file(td_vbd_t *vbd)
+{
+	int i, err;
+	regex_t re;
+	size_t len, max;
+	regmatch_t matches[4];
+	char *new, *src, *dst, error[256];
+
+	if (vbd->storage != TAPDISK_STORAGE_TYPE_LVM)
+		return 0;
+
+	err = tapdisk_vbd_reactivate_volume(vbd->name);
+	if (!err)
+		return 0;
+	else
+		DPRINTF("reactivating %s failed\n", vbd->name);
+
+#define HEX   "[A-Za-z0-9]"
+#define UUID  HEX"\\{8\\}-"HEX"\\{4\\}-"HEX"\\{4\\}-"HEX"\\{4\\}-"HEX"\\{12\\}"
+#define VG    "VG_"HEX"\\+"
+#define TYPE  "\\(LV\\|VHD\\)"
+#define RE    "\\(/dev/"VG"-"UUID"/\\)"TYPE"\\(-"UUID"\\)"
+
+	err = regcomp(&re, RE, 0);
+	if (err)
+		goto regerr;
+
+#undef HEX
+#undef UUID
+#undef VG
+#undef TYPE
+#undef RE
+
+	err = regexec(&re, vbd->name, 4, matches, 0);
+	if (err)
+		goto regerr;
+
+	max = strlen("VHD") + 1;
+	for (i = 1; i < 4; i++) {
+		if (matches[i].rm_so == -1 || matches[i].rm_eo == -1) {
+			EPRINTF("%s: failed to tokenize name\n", vbd->name);
+			err = -EINVAL;
+			goto out;
+		}
+
+		max += matches[i].rm_eo - matches[i].rm_so;
+	}
+
+	new = malloc(max);
+	if (!new) {
+		EPRINTF("%s: failed to allocate new name\n", vbd->name);
+		err = -ENOMEM;
+		goto out;
+	}
+
+	src = new;
+	for (i = 1; i < 4; i++) {
+		dst = vbd->name + matches[i].rm_so;
+		len = matches[i].rm_eo - matches[i].rm_so;
+
+		if (i == 2) {
+			if (memcmp(dst, "LV", len)) {
+				EPRINTF("%s: bad name format\n", vbd->name);
+				free(new);
+				err = -EINVAL;
+				goto out;
+			}
+
+			src += sprintf(src, "VHD");
+			continue;
+		}
+
+		memcpy(src, dst, len + 1);
+		src += len;
+	}
+
+	*src = '\0';
+
+	err = tapdisk_vbd_reactivate_volume(new);
+	if (err)
+		DPRINTF("reactivating %s failed\n", new);
+
+	err = access(new, F_OK);
+	if (err == -1) {
+		EPRINTF("neither %s nor %s accessible\n",
+			vbd->name, new);
+		err = -errno;
+		free(new);
+		goto out;
+	}
+
+	DPRINTF("couldn't find %s, trying %s\n", vbd->name, new);
+
+	err = 0;
+	free(vbd->name);
+	vbd->name = new;
+	vbd->type = DISK_TYPE_VHD;
+
+out:
+	regfree(&re);
+	return err;
+
+regerr:
+	regerror(err, &re, error, sizeof(error));
+	EPRINTF("%s: regex failed: %s\n", vbd->name, error);
+	err = -EINVAL;
+	goto out;
+}
+
+/* TODO: ugh, lets not call it parent info... */
+static struct list_head *
+tapdisk_vbd_open_level(td_vbd_t *vbd, char* params, int driver_type, td_disk_info_t *parent_info, td_flag_t flags)
+{
+	char *name;
 	int type, err;
 	td_image_t *image;
 	td_disk_id_t id;
+	struct  list_head *images;
 	td_driver_t *driver;
 
-	name    = params;
-	id.name = NULL;
-	type    = driver_type;
-	INIT_LIST_HEAD(head);
+	images = calloc(1, sizeof(struct list_head));
+	INIT_LIST_HEAD(images);
+
+	name   = params;
+	type   = driver_type;
 
 	for (;;) {
 		err   = -ENOMEM;
 		image = tapdisk_image_allocate(name, type,
 					       vbd->storage, flags, vbd);
 
-		free(id.name);
+		/* free 'name' if it was created by td_get_parent_id() */
+		if (name != params) {
+			free(name);
+			name = NULL;
+		}
 
 		if (!image)
-			goto out;
+			return NULL;
 
 
-		/* this breaks if a driver modifies its info within a layer */
-		err = __td_open(image, driver_info);
-		if (err)
-			goto out;
+		/* We have to do this to set the driver info for child drivers.  this conflicts with td_open */
+		driver = image->driver;
+		if (!driver) {
+			driver = tapdisk_driver_allocate(image->type,
+							 image->name,
+							 image->flags,
+							 image->storage);
+			if (!driver)
+				return NULL;
+		}
+		/* the image has a driver, set the info and driver */
+		image->driver = driver;
+		image->info = driver->info;
+
+		/* XXX: we don't touch driver->refcount, broken? */
+		/* XXX: we've replicated about 90% of td_open() gross! */
+		/* XXX: this breaks if a driver modifies its info within a layer */
+
+		/* if the parent info is set, pass it to the child */
+		if(parent_info)
+		{
+			image->driver->info = *parent_info;
+		}
+
+		err = td_load(image);
+		if (err) {
+			if (err != -ENODEV)
+				return NULL;
+
+			err = td_open(image);
+			if (err)
+				return NULL;
+		}
 
 		/* TODO: non-sink drivers that don't care about their child
 		 * currently return EINVAL. Could return TD_PARENT_OK or
@@ -343,54 +622,48 @@ tapdisk_vbd_open_level(td_vbd_t *vbd, struct list_head *head,
 		err = td_get_parent_id(image, &id);
 		if (err && (err != TD_NO_PARENT && err != -EINVAL)) {
 			td_close(image);
-			goto out;
+			return NULL;
 		}
 
+		if (!image->storage)
+			image->storage = vbd->storage;
+
 		/* add this image to the end of the list */
-		list_add_tail(&image->next, head);
+		list_add_tail(&image->next, images);
+
 		image = NULL;
 
 		/* if the image does not have a parent we return the
 		 * list of images generated by this level of the stack */
-		if (err == TD_NO_PARENT || err == -EINVAL) {
-			err = 0;
-			goto out;
-		}
+		if (err == TD_NO_PARENT || err == -EINVAL)
+			break;
 
 		name   = id.name;
 		type   = id.drivertype;
-
+#if 0
+		/* catch this by validate, not here */
 		flags |= (TD_OPEN_RDONLY | TD_OPEN_SHAREABLE);
+#endif
 	}
-
-out:
-	if (err) {
-		if (image) {
-			td_close(image);
-			tapdisk_image_free(image);
-		}
-		while (!list_empty(head)) {
-			image = list_entry(&head->next, td_image_t, next);
-			td_close(image);
-			tapdisk_image_free(image);
-		}
-	}
-
-	return err;
+	return images;
 }
 
 static int
 __tapdisk_vbd_open_vdi(td_vbd_t *vbd, td_flag_t extra_flags)
 {
-	int err;
+	char *file;
+	int err, type;
 	td_flag_t flags;
+	td_disk_id_t id;
 	td_image_t *tmp;
+	struct tfilter *filter = NULL;
 	td_vbd_driver_info_t *driver_info;
 	struct list_head *images;
 	td_disk_info_t *parent_info = NULL;
 
-	if (list_empty(&vbd->driver_stack))
-		return -ENOENT;
+	err = tapdisk_vbd_reactivate_volumes(vbd, 0);
+	if (err)
+		return err;
 
 	flags = (vbd->flags & ~TD_OPEN_SHAREABLE) | extra_flags;
 
@@ -398,18 +671,15 @@ __tapdisk_vbd_open_vdi(td_vbd_t *vbd, td_flag_t extra_flags)
 	 * NOTE: driver_info is in reverse order. That is, the first
 	 * item is the 'parent' or 'sink' driver */
 	list_for_each_entry(driver_info, &vbd->driver_stack, next) {
-		LIST_HEAD(images);
+		file = driver_info->params;
+		type = driver_info->type;
+		images = tapdisk_vbd_open_level(vbd, file, type, parent_info, flags);
+		if (!images)
+			return -EINVAL;
 
-		err = tapdisk_vbd_open_level(vbd, &images,
-					     driver_info->params,
-					     driver_info->type,
-					     parent_info, flags);
-		if (err)
-			goto fail;
-
-		/* after each loop, 
-		 * append the created stack to the result stack */
-		list_splice(&images, &vbd->images);
+		/* after each loop, append the created stack to the result stack */
+		list_splice(images, &vbd->images);
+		free(images);
 
 		/* set the parent_info to the first diskinfo on the stack */
 		tmp = tapdisk_vbd_first_image(vbd);
@@ -426,7 +696,7 @@ __tapdisk_vbd_open_vdi(td_vbd_t *vbd, td_flag_t extra_flags)
 		err = tapdisk_vbd_add_block_cache(vbd);
 		if (err)
 			goto fail;
-	}
+	}		
 
 	err = tapdisk_vbd_validate_chain(vbd);
 	if (err)
@@ -437,7 +707,16 @@ __tapdisk_vbd_open_vdi(td_vbd_t *vbd, td_flag_t extra_flags)
 	return 0;
 
 fail:
+
+/* TODO: loop over vbd to free images? maybe do that in vbd_close_vdi */
+#if 0
+	if (image)
+		tapdisk_image_free(image);
+#endif
+
+	/* TODO: handle partial stack creation? */
 	tapdisk_vbd_close_vdi(vbd);
+
 	return err;
 }
 
@@ -449,74 +728,50 @@ tapdisk_vbd_parse_stack(td_vbd_t *vbd, const char *path)
 	char *params, *driver_str;
 	td_vbd_driver_info_t *driver;
 
+	/* make a copy of path */
+	/* TODO: check against MAX_NAME_LEM ? */
 	err = tapdisk_namedup(&params, path);
-	if (err)
-		return err;
+	if(err)
+		goto error;
+
 
 	/* tokenize params based on pipe '|' */
 	driver_str = strtok(params, "|");
-	while (driver_str != NULL) {
-		const char *path;
-		int type;
-
+	while(driver_str != NULL)
+	{
 		/* parse driver info and add to vbd */
 		driver = calloc(1, sizeof(td_vbd_driver_info_t));
-		if (!driver) {
-			PERROR("malloc");
-			err = -errno;
-			goto out;
-		}
 		INIT_LIST_HEAD(&driver->next);
+		err = tapdisk_parse_disk_type(driver_str, &driver->params, &driver->type);
+		if(err)
+			goto error;
 
-		err = tapdisk_parse_disk_type(driver_str, &path, &type);
-		if (err) {
-			free(driver);
-			goto out;
-		}
-
-		driver->type   = type;
-		driver->params = strdup(path);
-		if (!driver->params) {
-			err = -ENOMEM;
-			free(driver);
-			goto out;
-		}
-
-		/* build the list backwards as the last driver will be the
-		 * first driver to open in the stack */
+		/* build the list backwards as the last driver will be the first
+		 * driver to open in the stack */
 		list_add(&driver->next, &vbd->driver_stack);
 
 		/* get next driver string */
 		driver_str = strtok(NULL, "|");
 	}
 
-out:
-	free(params);
-	if (err)
-		tapdisk_vbd_free_stack(vbd);
+	return 0;
+
+	/* error: free any driver_info's and params */
+ error:
+	while(!list_empty(&vbd->driver_stack)) {
+		driver = list_entry(vbd->driver_stack.next, td_vbd_driver_info_t, next);
+		list_del(&driver->next);
+		free(driver);
+	}
 
 	return err;
 }
 
-void
-tapdisk_vbd_free_stack(td_vbd_t *vbd)
-{
-	td_vbd_driver_info_t *driver;
-
-	while (!list_empty(&vbd->driver_stack)) {
-		driver = list_entry(vbd->driver_stack.next,
-				    td_vbd_driver_info_t, next);
-		list_del(&driver->next);
-		free(driver->params);
-		free(driver);
-	}
-}
-
 /* NOTE: driver type, etc. must be set */
-int
+static int
 tapdisk_vbd_open_stack(td_vbd_t *vbd, uint16_t storage, td_flag_t flags)
 {
-	int i, err = 0;
+	int i, err;
 
 	vbd->flags   = flags;
 	vbd->storage = storage;
@@ -542,9 +797,9 @@ tapdisk_vbd_open_vdi(td_vbd_t *vbd, const char *path,
 		     uint16_t drivertype, uint16_t storage, td_flag_t flags)
 {
 	int i, err;
-	const struct tap_disk *ops;
+	struct tap_disk *ops;
 
-	ops = tapdisk_disk_drivers[drivertype];
+	ops = tapdisk_server_find_driver_interface(drivertype);
 	if (!ops)
 		return -EINVAL;
 	DPRINTF("Loaded %s driver for vbd %u %s 0x%08x\n",
@@ -556,6 +811,7 @@ tapdisk_vbd_open_vdi(td_vbd_t *vbd, const char *path,
 
 	vbd->flags   = flags;
 	vbd->storage = storage;
+	vbd->type    = drivertype;
 
 	for (i = 0; i < TD_VBD_EIO_RETRIES; i++) {
 		err = __tapdisk_vbd_open_vdi(vbd, 0);
@@ -658,42 +914,9 @@ tapdisk_vbd_unmap_device(td_vbd_t *vbd)
 	return 0;
 }
 
-void
-tapdisk_vbd_detach(td_vbd_t *vbd)
-{
-	tapdisk_vbd_unregister_events(vbd);
-
-	tapdisk_vbd_unmap_device(vbd);
-	vbd->minor = -1;
-}
-
-
-int
-tapdisk_vbd_attach(td_vbd_t *vbd, const char *devname, int minor)
-{
-	int err;
-
-	err = tapdisk_vbd_map_device(vbd, devname);
-	if (err)
-		goto fail;
-
-	err = tapdisk_vbd_register_event_watches(vbd);
-	if (err)
-		goto fail;
-
-	vbd->minor = minor;
-
-	return 0;
-
-fail:
-	tapdisk_vbd_detach(vbd);
-
-	return err;
-}
-
 int
 tapdisk_vbd_open(td_vbd_t *vbd, const char *name, uint16_t type,
-		 uint16_t storage, int minor, const char *ring, td_flag_t flags)
+		 uint16_t storage, const char *ring, td_flag_t flags)
 {
 	int err;
 
@@ -701,15 +924,20 @@ tapdisk_vbd_open(td_vbd_t *vbd, const char *name, uint16_t type,
 	if (err)
 		goto out;
 
-	err = tapdisk_vbd_attach(vbd, ring, minor);
+	err = tapdisk_vbd_map_device(vbd, ring);
+	if (err)
+		goto out;
+
+	err = tapdisk_vbd_register_event_watches(vbd);
 	if (err)
 		goto out;
 
 	return 0;
 
 out:
-	tapdisk_vbd_detach(vbd);
 	tapdisk_vbd_close_vdi(vbd);
+	tapdisk_vbd_unmap_device(vbd);
+	tapdisk_vbd_unregister_events(vbd);
 	free(vbd->name);
 	vbd->name = NULL;
 	return err;
@@ -767,9 +995,12 @@ tapdisk_vbd_shutdown(td_vbd_t *vbd)
 		vbd->kicked);
 
 	tapdisk_vbd_close_vdi(vbd);
-	tapdisk_vbd_detach(vbd);
+	tapdisk_ipc_write(&vbd->ipc, TAPDISK_MESSAGE_CLOSE_RSP);
+	tapdisk_vbd_unregister_events(vbd);
+	tapdisk_vbd_unmap_device(vbd);
 	tapdisk_server_remove_vbd(vbd);
-	tapdisk_vbd_free(vbd);
+	free(vbd->name);
+	free(vbd);
 
 	tlog_print_errors();
 
@@ -932,7 +1163,7 @@ tapdisk_vbd_open_image(td_vbd_t *vbd, td_image_t *image)
 static int
 tapdisk_vbd_close_and_reopen_image(td_vbd_t *vbd, td_image_t *image)
 {
-	int i, err = 0;
+	int i, err;
 
 	td_close(image);
 
@@ -965,6 +1196,7 @@ tapdisk_vbd_pause(td_vbd_t *vbd)
 
 	td_flag_clear(vbd->state, TD_VBD_PAUSE_REQUESTED);
 	td_flag_set(vbd->state, TD_VBD_PAUSED);
+	tapdisk_ipc_write(&vbd->ipc, TAPDISK_MESSAGE_PAUSE_RSP);
 
 	return 0;
 }
@@ -972,37 +1204,52 @@ tapdisk_vbd_pause(td_vbd_t *vbd)
 int
 tapdisk_vbd_resume(td_vbd_t *vbd, const char *path, uint16_t drivertype)
 {
-	int i, err = 0;
+	int i, err;
 
 	if (!td_flag_test(vbd->state, TD_VBD_PAUSED)) {
 		EPRINTF("resume request for unpaused vbd %s\n", vbd->name);
+		tapdisk_ipc_write(&vbd->ipc, TAPDISK_MESSAGE_ERROR);
 		return -EINVAL;
 	}
 
-	if (path) {
-		free(vbd->name);
-		vbd->name = strdup(path);
-		if (!vbd->name) {
-			EPRINTF("copying new vbd %s name failed\n", path);
-			return -EINVAL;
-		}
+	free(vbd->name);
+	vbd->name = strdup(path);
+	if (!vbd->name) {
+		EPRINTF("copying new vbd %s name failed\n", path);
+		tapdisk_ipc_write(&vbd->ipc, TAPDISK_MESSAGE_ERROR);
+		return -EINVAL;
 	}
+	vbd->type = drivertype;
 
 	for (i = 0; i < TD_VBD_EIO_RETRIES; i++) {
+		err = tapdisk_vbd_check_file(vbd);
+		if (err)
+			goto sleep;
+
+		err = tapdisk_vbd_reactivate_volumes(vbd, 1);
+		if (err) {
+			EPRINTF("failed to reactivate %s: %d\n",
+				vbd->name, err);
+			goto sleep;
+		}
+
 		err = __tapdisk_vbd_open_vdi(vbd, TD_OPEN_STRICT);
-		if (err != -EIO)
+		if (!err)
 			break;
 
+	sleep:
 		sleep(TD_VBD_EIO_SLEEP);
 	}
 
-	if (err)
+	if (err) {
+		tapdisk_ipc_write(&vbd->ipc, TAPDISK_MESSAGE_ERROR);
 		return err;
+	}
 
 	tapdisk_vbd_start_queue(vbd);
 	td_flag_clear(vbd->state, TD_VBD_PAUSED);
 	td_flag_clear(vbd->state, TD_VBD_PAUSE_REQUESTED);
-	tapdisk_vbd_check_state(vbd);
+	tapdisk_ipc_write(&vbd->ipc, TAPDISK_MESSAGE_RESUME_RSP);
 
 	return 0;
 }
@@ -1218,14 +1465,14 @@ __tapdisk_vbd_complete_td_request(td_vbd_t *vbd, td_vbd_request_t *vreq,
 #ifdef MEMSHR
 		if (treq.op == TD_OP_READ
 		   && td_flag_test(image->flags, TD_OPEN_RDONLY)) {
-			share_tuple_t hnd = treq.memshr_hnd;
+			uint64_t hnd  = treq.memshr_hnd;
 			uint16_t uid  = image->memshr_id;
 			blkif_request_t *breq = &vreq->req;
 			uint64_t sec  = tapdisk_vbd_breq_get_sector(breq, treq);
 			int secs = breq->seg[treq.sidx].last_sect -
 			    breq->seg[treq.sidx].first_sect + 1;
 
-			if (hnd.handle != 0)
+			if (hnd != 0)
 				memshr_vbd_complete_ro_request(hnd, uid,
 								sec, secs);
 		}
@@ -1297,7 +1544,7 @@ __tapdisk_vbd_reissue_td_request(td_vbd_t *vbd,
 				/* Reset memshr handle. This'll prevent
 				 * memshr_vbd_complete_ro_request being called
 				 */
-				treq.memshr_hnd.handle = 0;
+				treq.memshr_hnd = 0;
 				td_complete_request(treq, 0);
 			} else
 				td_queue_read(parent, treq);
@@ -1618,8 +1865,7 @@ static int
 tapdisk_vbd_resume_ring(td_vbd_t *vbd)
 {
 	int i, err, type;
-	char message[BLKTAP2_MAX_MESSAGE_LEN];
-	const char *path;
+	char *path, message[BLKTAP2_MAX_MESSAGE_LEN];
 
 	memset(message, 0, sizeof(message));
 
@@ -1647,8 +1893,15 @@ tapdisk_vbd_resume_ring(td_vbd_t *vbd)
 		err = -ENOMEM;
 		goto out;
 	}
+	vbd->type = type;
 
 	tapdisk_vbd_start_queue(vbd);
+
+	err = tapdisk_vbd_reactivate_volumes(vbd, 1);
+	if (err) {
+		EPRINTF("failed to reactivate %s, %d\n", vbd->name, err);
+		goto out;
+	}
 
 	for (i = 0; i < TD_VBD_EIO_RETRIES; i++) {
 		err = __tapdisk_vbd_open_vdi(vbd, TD_OPEN_STRICT);
@@ -1668,8 +1921,7 @@ out:
 
 		params.sector_size = image.secsize;
 		params.capacity    = image.size;
-		snprintf(params.name, sizeof(params.name),
-			 "%.*s", (int)sizeof(params.name) - 1, message);
+		snprintf(params.name, sizeof(params.name) - 1, "%s", message);
 
 		ioctl(vbd->ring.fd, BLKTAP2_IOCTL_SET_PARAMS, &params);
 		td_flag_clear(vbd->state, TD_VBD_PAUSED);
@@ -1685,7 +1937,7 @@ tapdisk_vbd_check_ring_message(td_vbd_t *vbd)
 	if (!vbd->ring.sring)
 		return -EINVAL;
 
-	switch (vbd->ring.sring->pvt.tapif_user.msg) {
+	switch (vbd->ring.sring->private.tapif_user.msg) {
 	case 0:
 		return 0;
 

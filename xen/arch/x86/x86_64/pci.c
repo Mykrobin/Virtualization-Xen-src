@@ -12,14 +12,13 @@
     (0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | (reg & ~3))
 
 uint8_t pci_conf_read8(
-    unsigned int seg, unsigned int bus, unsigned int dev, unsigned int func,
-    unsigned int reg)
+    unsigned int bus, unsigned int dev, unsigned int func, unsigned int reg)
 {
     u32 value;
 
-    if ( seg || reg > 255 )
+    if ( reg > 255 )
     {
-        pci_mmcfg_read(seg, bus, PCI_DEVFN(dev, func), reg, 1, &value);
+        pci_mmcfg_read(0, bus, PCI_DEVFN(dev, func), reg, 1, &value);
         return value;
     }
     else
@@ -30,14 +29,13 @@ uint8_t pci_conf_read8(
 }
 
 uint16_t pci_conf_read16(
-    unsigned int seg, unsigned int bus, unsigned int dev, unsigned int func,
-    unsigned int reg)
+    unsigned int bus, unsigned int dev, unsigned int func, unsigned int reg)
 {
     u32 value;
 
-    if ( seg || reg > 255 )
+    if ( reg > 255 )
     {
-        pci_mmcfg_read(seg, bus, PCI_DEVFN(dev, func), reg, 2, &value);
+        pci_mmcfg_read(0, bus, PCI_DEVFN(dev, func), reg, 2, &value);
         return value;
     }
     else
@@ -48,14 +46,13 @@ uint16_t pci_conf_read16(
 }
 
 uint32_t pci_conf_read32(
-    unsigned int seg, unsigned int bus, unsigned int dev, unsigned int func,
-    unsigned int reg)
+    unsigned int bus, unsigned int dev, unsigned int func, unsigned int reg)
 {
     u32 value;
 
-    if ( seg || reg > 255 )
+    if ( reg > 255 )
     {
-        pci_mmcfg_read(seg, bus, PCI_DEVFN(dev, func), reg, 4, &value);
+        pci_mmcfg_read(0, bus, PCI_DEVFN(dev, func), reg, 4, &value);
         return value;
     }
     else
@@ -66,11 +63,11 @@ uint32_t pci_conf_read32(
 }
 
 void pci_conf_write8(
-    unsigned int seg, unsigned int bus, unsigned int dev, unsigned int func,
-    unsigned int reg, uint8_t data)
+    unsigned int bus, unsigned int dev, unsigned int func, unsigned int reg,
+    uint8_t data)
 {
-    if ( seg || reg > 255 )
-        pci_mmcfg_write(seg, bus, PCI_DEVFN(dev, func), reg, 1, data);
+    if ( reg > 255 )
+        pci_mmcfg_write(0, bus, PCI_DEVFN(dev, func), reg, 1, data);
     else
     {
         BUG_ON((bus > 255) || (dev > 31) || (func > 7));
@@ -79,11 +76,11 @@ void pci_conf_write8(
 }
 
 void pci_conf_write16(
-    unsigned int seg, unsigned int bus, unsigned int dev, unsigned int func,
-    unsigned int reg, uint16_t data)
+    unsigned int bus, unsigned int dev, unsigned int func, unsigned int reg,
+    uint16_t data)
 {
-    if ( seg || reg > 255 )
-        pci_mmcfg_write(seg, bus, PCI_DEVFN(dev, func), reg, 2, data);
+    if ( reg > 255 )
+        pci_mmcfg_write(0, bus, PCI_DEVFN(dev, func), reg, 2, data);
     else
     {
         BUG_ON((bus > 255) || (dev > 31) || (func > 7));
@@ -92,11 +89,11 @@ void pci_conf_write16(
 }
 
 void pci_conf_write32(
-    unsigned int seg, unsigned int bus, unsigned int dev, unsigned int func,
-    unsigned int reg, uint32_t data)
+    unsigned int bus, unsigned int dev, unsigned int func, unsigned int reg,
+    uint32_t data)
 {
-    if ( seg || reg > 255 )
-        pci_mmcfg_write(seg, bus, PCI_DEVFN(dev, func), reg, 4, data);
+    if ( reg > 255 )
+        pci_mmcfg_write(0, bus, PCI_DEVFN(dev, func), reg, 4, data);
     else
     {
         BUG_ON((bus > 255) || (dev > 31) || (func > 7));

@@ -10,6 +10,7 @@
  * we have to worry about.
  */
 
+#include <xen/config.h>
 #include <xen/delay.h>
 #include <xen/time.h>
 #include <asm/msr.h>
@@ -20,10 +21,10 @@ void __udelay(unsigned long usecs)
     unsigned long ticks = usecs * (cpu_khz / 1000);
     unsigned long s, e;
 
-    s = rdtsc_ordered();
+    rdtscl(s);
     do
     {
         rep_nop();
-        e = rdtsc_ordered();
+        rdtscl(e);
     } while ((e-s) < ticks);
 }

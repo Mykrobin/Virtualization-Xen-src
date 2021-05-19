@@ -1,23 +1,3 @@
-/*
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
- *
- * Some of the field descriptions were copied from "The Multiboot
- * Specification", Copyright 1995, 96 Bryan Ford <baford@cs.utah.edu>,
- * Erich Stefan Boleyn <erich@uruk.org> Copyright 1999, 2000, 2001, 2002
- * Free Software Foundation, Inc.
- */
-
 /******************************************************************************
  *
  * Loads simple binary images. It's like a .COM file in MS-DOS. No headers are
@@ -77,6 +57,10 @@
  * - entry_addr
  *   The virtual address at which to start execution of the loaded image.
  *
+ * Some of the field descriptions were copied from "The Multiboot
+ * Specification", Copyright 1995, 96 Bryan Ford <baford@cs.utah.edu>,
+ * Erich Stefan Boleyn <erich@uruk.org> Copyright 1999, 2000, 2001, 2002
+ * Free Software Foundation, Inc.
  */
 
 #include <stdlib.h>
@@ -122,13 +106,10 @@ static struct xen_bin_image_table *find_table(struct xc_dom_image *dom)
     uint32_t *probe_ptr;
     uint32_t *probe_end;
 
-    if ( dom->kernel_size < sizeof(*table) )
-        return NULL;
     probe_ptr = dom->kernel_blob;
-    if ( dom->kernel_size > (8192 + sizeof(*table)) )
+    probe_end = dom->kernel_blob + dom->kernel_size - sizeof(*table);
+    if ( (void*)probe_end > (dom->kernel_blob + 8192) )
         probe_end = dom->kernel_blob + 8192;
-    else
-        probe_end = dom->kernel_blob + dom->kernel_size - sizeof(*table);
 
     for ( table = NULL; probe_ptr < probe_end; probe_ptr++ )
     {
@@ -162,20 +143,20 @@ static int xc_dom_parse_bin_kernel(struct xc_dom_image *dom)
     if ( !image_info )
         return -EINVAL;
 
-    DOMPRINTF("%s: multiboot header fields", __FUNCTION__);
-    DOMPRINTF("  flags:         0x%" PRIx32 "", image_info->flags);
-    DOMPRINTF("  header_addr:   0x%" PRIx32 "", image_info->header_addr);
-    DOMPRINTF("  load_addr:     0x%" PRIx32 "", image_info->load_addr);
-    DOMPRINTF("  load_end_addr: 0x%" PRIx32 "", image_info->load_end_addr);
-    DOMPRINTF("  bss_end_addr:  0x%" PRIx32 "", image_info->bss_end_addr);
-    DOMPRINTF("  entry_addr:    0x%" PRIx32 "", image_info->entry_addr);
+    xc_dom_printf("%s: multiboot header fields\n", __FUNCTION__);
+    xc_dom_printf("  flags:         0x%" PRIx32 "\n", image_info->flags);
+    xc_dom_printf("  header_addr:   0x%" PRIx32 "\n", image_info->header_addr);
+    xc_dom_printf("  load_addr:     0x%" PRIx32 "\n", image_info->load_addr);
+    xc_dom_printf("  load_end_addr: 0x%" PRIx32 "\n", image_info->load_end_addr);
+    xc_dom_printf("  bss_end_addr:  0x%" PRIx32 "\n", image_info->bss_end_addr);
+    xc_dom_printf("  entry_addr:    0x%" PRIx32 "\n", image_info->entry_addr);
 
     /* Check the flags */
     if ( (image_info->flags & FLAGS_MASK) != FLAGS_REQUIRED )
     {
-        xc_dom_panic(dom->xch, XC_INVALID_KERNEL,
+        xc_dom_panic(XC_INVALID_KERNEL,
                      "%s: xen_bin_image_table flags required "
-                     "0x%08" PRIx32 " found 0x%08" PRIx32 "",
+                     "0x%08" PRIx32 " found 0x%08" PRIx32 "\n",
                      __FUNCTION__, FLAGS_REQUIRED, image_info->flags & FLAGS_MASK);
         return -EINVAL;
     }
@@ -185,7 +166,7 @@ static int xc_dom_parse_bin_kernel(struct xc_dom_image *dom)
          ((char *) image_info - image) <
          (image_info->header_addr - image_info->load_addr) )
     {
-        xc_dom_panic(dom->xch, XC_INVALID_KERNEL, "%s: Invalid header_addr.",
+        xc_dom_panic(XC_INVALID_KERNEL, "%s: Invalid header_addr.",
                      __FUNCTION__);
         return -EINVAL;
     }
@@ -194,21 +175,21 @@ static int xc_dom_parse_bin_kernel(struct xc_dom_image *dom)
     load_end_addr = image_info->load_end_addr ?: start_addr + image_size;
     bss_end_addr = image_info->bss_end_addr ?: load_end_addr;
 
-    DOMPRINTF("%s: calculated addresses", __FUNCTION__);
-    DOMPRINTF("  start_addr:    0x%" PRIx32 "", start_addr);
-    DOMPRINTF("  load_end_addr: 0x%" PRIx32 "", load_end_addr);
-    DOMPRINTF("  bss_end_addr:  0x%" PRIx32 "", bss_end_addr);
+    xc_dom_printf("%s: calculated addresses\n", __FUNCTION__);
+    xc_dom_printf("  start_addr:    0x%" PRIx32 "\n", start_addr);
+    xc_dom_printf("  load_end_addr: 0x%" PRIx32 "\n", load_end_addr);
+    xc_dom_printf("  bss_end_addr:  0x%" PRIx32 "\n", bss_end_addr);
 
     if ( (start_addr + image_size) < load_end_addr )
     {
-        xc_dom_panic(dom->xch, XC_INVALID_KERNEL, "%s: Invalid load_end_addr.",
+        xc_dom_panic(XC_INVALID_KERNEL, "%s: Invalid load_end_addr.\n",
                      __FUNCTION__);
         return -EINVAL;
     }
 
     if ( bss_end_addr < load_end_addr)
     {
-        xc_dom_panic(dom->xch, XC_INVALID_KERNEL, "%s: Invalid bss_end_addr.",
+        xc_dom_panic(XC_INVALID_KERNEL, "%s: Invalid bss_end_addr.\n",
                      __FUNCTION__);
         return -EINVAL;
     }
@@ -236,9 +217,9 @@ static int xc_dom_parse_bin_kernel(struct xc_dom_image *dom)
         dom->guest_type = "xen-3.0-x86_32";
         if ( strstr(dom->xen_caps, "xen-3.0-x86_32p") )
         {
-            DOMPRINTF("%s: PAE fixup", __FUNCTION__);
+            xc_dom_printf("%s: PAE fixup\n", __FUNCTION__);
             dom->guest_type = "xen-3.0-x86_32p";
-            dom->parms.pae  = XEN_PAE_EXTCR3;
+            dom->parms.pae  = 2;
         }
         break;
     }
@@ -251,7 +232,6 @@ static int xc_dom_load_bin_kernel(struct xc_dom_image *dom)
     char *image = dom->kernel_blob;
     char *dest;
     size_t image_size = dom->kernel_size;
-    size_t dest_size;
     uint32_t start_addr;
     uint32_t load_end_addr;
     uint32_t bss_end_addr;
@@ -270,34 +250,12 @@ static int xc_dom_load_bin_kernel(struct xc_dom_image *dom)
     text_size = load_end_addr - image_info->load_addr;
     bss_size = bss_end_addr - load_end_addr;
 
-    DOMPRINTF("%s: calculated sizes", __FUNCTION__);
-    DOMPRINTF("  skip:      0x%" PRIx32 "", skip);
-    DOMPRINTF("  text_size: 0x%" PRIx32 "", text_size);
-    DOMPRINTF("  bss_size:  0x%" PRIx32 "", bss_size);
+    xc_dom_printf("%s: calculated sizes\n", __FUNCTION__);
+    xc_dom_printf("  skip:      0x%" PRIx32 "\n", skip);
+    xc_dom_printf("  text_size: 0x%" PRIx32 "\n", text_size);
+    xc_dom_printf("  bss_size:  0x%" PRIx32 "\n", bss_size);
 
-    dest = xc_dom_vaddr_to_ptr(dom, dom->kernel_seg.vstart, &dest_size);
-    if ( dest == NULL )
-    {
-        DOMPRINTF("%s: xc_dom_vaddr_to_ptr(dom, dom->kernel_seg.vstart)"
-                  " => NULL", __FUNCTION__);
-        return -EINVAL;
-    }
-
-    if ( dest_size < text_size ||
-         dest_size - text_size < bss_size )
-    {
-        DOMPRINTF("%s: mapped region is too small for image", __FUNCTION__);
-        return -EINVAL;
-    }
-
-    if ( image_size < skip ||
-         image_size - skip < text_size )
-    {
-        DOMPRINTF("%s: image is too small for declared text size",
-                  __FUNCTION__);
-        return -EINVAL;
-    }
-
+    dest = xc_dom_vaddr_to_ptr(dom, dom->kernel_seg.vstart);
     memcpy(dest, image + skip, text_size);
     memset(dest + text_size, 0, bss_size);
 
@@ -321,7 +279,7 @@ static void __init register_loader(void)
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

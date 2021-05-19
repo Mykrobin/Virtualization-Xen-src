@@ -13,7 +13,7 @@
 #include <asm/io.h>
 #include <asm/apic.h>
 #include <asm/processor.h>
-#include <xen/xenoprof.h>
+#include <xen/sched.h>
 #include <asm/regs.h>
 #include <asm/current.h>
 
@@ -40,13 +40,19 @@ static unsigned int num_counters = NUM_COUNTERS_NON_HT;
    kernel boot-time. */
 static inline void setup_num_counters(void)
 {
+#ifdef CONFIG_SMP
 	if (boot_cpu_data.x86_num_siblings == 2) 	/* XXX */
 		num_counters = NUM_COUNTERS_HT2;
+#endif
 }
 
 static int inline addr_increment(void)
 {
+#ifdef CONFIG_SMP
 	return boot_cpu_data.x86_num_siblings == 2 ? 2 : 1;
+#else
+	return 1;
+#endif
 }
 
 
@@ -341,35 +347,35 @@ static const struct p4_event_binding p4_events[NUM_EVENTS] = {
 };
 
 
-#define MISC_PMC_ENABLED_P(x) ((x) & 1ULL << 7)
+#define MISC_PMC_ENABLED_P(x) ((x) & 1 << 7)
 
-#define ESCR_RESERVED_BITS 0x80000003ULL
+#define ESCR_RESERVED_BITS 0x80000003
 #define ESCR_CLEAR(escr) ((escr) &= ESCR_RESERVED_BITS)
-#define ESCR_SET_USR_0(escr, usr) ((escr) |= (((usr) & 1ULL) << 2))
-#define ESCR_SET_OS_0(escr, os) ((escr) |= (((os) & 1ULL) << 3))
-#define ESCR_SET_USR_1(escr, usr) ((escr) |= (((usr) & 1ULL)))
-#define ESCR_SET_OS_1(escr, os) ((escr) |= (((os) & 1ULL) << 1))
-#define ESCR_SET_EVENT_SELECT(escr, sel) ((escr) |= (((sel) & 0x3fULL) << 25))
-#define ESCR_SET_EVENT_MASK(escr, mask) ((escr) |= (((mask) & 0xffffULL) << 9))
-#define ESCR_READ(escr,ev,i) do {rdmsrl(ev->bindings[(i)].escr_address, (escr));} while (0)
-#define ESCR_WRITE(escr,ev,i) do {wrmsrl(ev->bindings[(i)].escr_address, (escr));} while (0)
+#define ESCR_SET_USR_0(escr, usr) ((escr) |= (((usr) & 1) << 2))
+#define ESCR_SET_OS_0(escr, os) ((escr) |= (((os) & 1) << 3))
+#define ESCR_SET_USR_1(escr, usr) ((escr) |= (((usr) & 1)))
+#define ESCR_SET_OS_1(escr, os) ((escr) |= (((os) & 1) << 1))
+#define ESCR_SET_EVENT_SELECT(escr, sel) ((escr) |= (((sel) & 0x3f) << 25))
+#define ESCR_SET_EVENT_MASK(escr, mask) ((escr) |= (((mask) & 0xffff) << 9))
+#define ESCR_READ(escr,high,ev,i) do {rdmsr(ev->bindings[(i)].escr_address, (escr), (high));} while (0)
+#define ESCR_WRITE(escr,high,ev,i) do {wrmsr(ev->bindings[(i)].escr_address, (escr), (high));} while (0)
 
-#define CCCR_RESERVED_BITS 0x38030FFFULL
+#define CCCR_RESERVED_BITS 0x38030FFF
 #define CCCR_CLEAR(cccr) ((cccr) &= CCCR_RESERVED_BITS)
-#define CCCR_SET_REQUIRED_BITS(cccr) ((cccr) |= 0x00030000ULL)
-#define CCCR_SET_ESCR_SELECT(cccr, sel) ((cccr) |= (((sel) & 0x07ULL) << 13))
-#define CCCR_SET_PMI_OVF_0(cccr) ((cccr) |= (1ULL<<26))
-#define CCCR_SET_PMI_OVF_1(cccr) ((cccr) |= (1ULL<<27))
-#define CCCR_SET_ENABLE(cccr) ((cccr) |= (1ULL<<12))
-#define CCCR_SET_DISABLE(cccr) ((cccr) &= ~(1ULL<<12))
-#define CCCR_READ(msr_content, i) do {rdmsrl(p4_counters[(i)].cccr_address, (msr_content));} while (0)
-#define CCCR_WRITE(msr_content, i) do {wrmsrl(p4_counters[(i)].cccr_address, (msr_content));} while (0)
-#define CCCR_OVF_P(cccr) ((cccr) & (1ULL<<31))
-#define CCCR_CLEAR_OVF(cccr) ((cccr) &= (~(1ULL<<31)))
+#define CCCR_SET_REQUIRED_BITS(cccr) ((cccr) |= 0x00030000)
+#define CCCR_SET_ESCR_SELECT(cccr, sel) ((cccr) |= (((sel) & 0x07) << 13))
+#define CCCR_SET_PMI_OVF_0(cccr) ((cccr) |= (1<<26))
+#define CCCR_SET_PMI_OVF_1(cccr) ((cccr) |= (1<<27))
+#define CCCR_SET_ENABLE(cccr) ((cccr) |= (1<<12))
+#define CCCR_SET_DISABLE(cccr) ((cccr) &= ~(1<<12))
+#define CCCR_READ(low, high, i) do {rdmsr(p4_counters[(i)].cccr_address, (low), (high));} while (0)
+#define CCCR_WRITE(low, high, i) do {wrmsr(p4_counters[(i)].cccr_address, (low), (high));} while (0)
+#define CCCR_OVF_P(cccr) ((cccr) & (1U<<31))
+#define CCCR_CLEAR_OVF(cccr) ((cccr) &= (~(1U<<31)))
 
-#define CTR_READ(msr_content,i) do {rdmsrl(p4_counters[(i)].counter_address, (msr_content));} while (0)
-#define CTR_WRITE(msr_content,i) do {wrmsrl(p4_counters[(i)].counter_address, -(msr_content));} while (0)
-#define CTR_OVERFLOW_P(ctr) (!((ctr) & 0x80000000ULL))
+#define CTR_READ(l,h,i) do {rdmsr(p4_counters[(i)].counter_address, (l), (h));} while (0)
+#define CTR_WRITE(l,i) do {wrmsr(p4_counters[(i)].counter_address, -(u32)(l), -1);} while (0)
+#define CTR_OVERFLOW_P(ctr) (!((ctr) & 0x80000000))
 
 
 /* this assigns a "stagger" to the current CPU, which is used throughout
@@ -377,8 +383,11 @@ static const struct p4_event_binding p4_events[NUM_EVENTS] = {
    or "odd" part of all the divided resources. */
 static unsigned int get_stagger(void)
 {
+#ifdef CONFIG_SMP
 	int cpu = smp_processor_id();
-	return (cpu != cpumask_first(per_cpu(cpu_sibling_mask, cpu)));
+	return (cpu != first_cpu(per_cpu(cpu_sibling_map, cpu)));
+#endif	
+	return 0;
 }
 
 
@@ -472,8 +481,9 @@ static void pmc_setup_one_p4_counter(unsigned int ctr)
 {
 	int i;
 	int const maxbind = 2;
-	uint64_t cccr = 0;
-	uint64_t escr = 0;
+	unsigned int cccr = 0;
+	unsigned int escr = 0;
+	unsigned int high = 0;
 	unsigned int counter_bit;
 	const struct p4_event_binding *ev = NULL;
 	unsigned int stag;
@@ -485,7 +495,8 @@ static void pmc_setup_one_p4_counter(unsigned int ctr)
 	
 	/* find our event binding structure. */
 	if (counter_config[ctr].event <= 0 || counter_config[ctr].event > NUM_EVENTS) {
-		printk(KERN_ERR "oprofile: P4 event code %#lx out of range\n",
+		printk(KERN_ERR 
+		       "oprofile: P4 event code 0x%lx out of range\n", 
 		       counter_config[ctr].event);
 		return;
 	}
@@ -496,7 +507,7 @@ static void pmc_setup_one_p4_counter(unsigned int ctr)
 		if (ev->bindings[i].virt_counter & counter_bit) {
 
 			/* modify ESCR */
-			ESCR_READ(escr, ev, i);
+			ESCR_READ(escr, high, ev, i);
 			ESCR_CLEAR(escr);
 			if (stag == 0) {
 				ESCR_SET_USR_0(escr, counter_config[ctr].user);
@@ -507,10 +518,10 @@ static void pmc_setup_one_p4_counter(unsigned int ctr)
 			}
 			ESCR_SET_EVENT_SELECT(escr, ev->event_select);
 			ESCR_SET_EVENT_MASK(escr, counter_config[ctr].unit_mask);			
-			ESCR_WRITE(escr, ev, i);
+			ESCR_WRITE(escr, high, ev, i);
 		       
 			/* modify CCCR */
-			CCCR_READ(cccr, VIRT_CTR(stag, ctr));
+			CCCR_READ(cccr, high, VIRT_CTR(stag, ctr));
 			CCCR_CLEAR(cccr);
 			CCCR_SET_REQUIRED_BITS(cccr);
 			CCCR_SET_ESCR_SELECT(cccr, ev->escr_select);
@@ -519,13 +530,13 @@ static void pmc_setup_one_p4_counter(unsigned int ctr)
 			} else {
 				CCCR_SET_PMI_OVF_1(cccr);
 			}
-			CCCR_WRITE(cccr, VIRT_CTR(stag, ctr));
+			CCCR_WRITE(cccr, high, VIRT_CTR(stag, ctr));
 			return;
 		}
 	}
 
 	printk(KERN_ERR 
-	       "oprofile: P4 event code %#lx no binding, stag %d ctr %d\n",
+	       "oprofile: P4 event code 0x%lx no binding, stag %d ctr %d\n",
 	       counter_config[ctr].event, stag, ctr);
 }
 
@@ -533,68 +544,68 @@ static void pmc_setup_one_p4_counter(unsigned int ctr)
 static void p4_setup_ctrs(struct op_msrs const * const msrs)
 {
 	unsigned int i;
-	uint64_t msr_content;
+	unsigned int low, high;
 	unsigned int addr;
 	unsigned int stag;
 
 	stag = get_stagger();
 
-	rdmsrl(MSR_IA32_MISC_ENABLE, msr_content);
-	if (! MISC_PMC_ENABLED_P(msr_content)) {
+	rdmsr(MSR_IA32_MISC_ENABLE, low, high);
+	if (! MISC_PMC_ENABLED_P(low)) {
 		printk(KERN_ERR "oprofile: P4 PMC not available\n");
 		return;
 	}
 
 	/* clear the cccrs we will use */
 	for (i = 0 ; i < num_counters ; i++) {
-		rdmsrl(p4_counters[VIRT_CTR(stag, i)].cccr_address, msr_content);
-		CCCR_CLEAR(msr_content);
-		CCCR_SET_REQUIRED_BITS(msr_content);
-		wrmsrl(p4_counters[VIRT_CTR(stag, i)].cccr_address, msr_content);
+		rdmsr(p4_counters[VIRT_CTR(stag, i)].cccr_address, low, high);
+		CCCR_CLEAR(low);
+		CCCR_SET_REQUIRED_BITS(low);
+		wrmsr(p4_counters[VIRT_CTR(stag, i)].cccr_address, low, high);
 	}
 
 	/* clear cccrs outside our concern */
 	for (i = stag ; i < NUM_UNUSED_CCCRS ; i += addr_increment()) {
-		rdmsrl(p4_unused_cccr[i], msr_content);
-		CCCR_CLEAR(msr_content);
-		CCCR_SET_REQUIRED_BITS(msr_content);
-		wrmsrl(p4_unused_cccr[i], msr_content);
+		rdmsr(p4_unused_cccr[i], low, high);
+		CCCR_CLEAR(low);
+		CCCR_SET_REQUIRED_BITS(low);
+		wrmsr(p4_unused_cccr[i], low, high);
 	}
 
 	/* clear all escrs (including those outside our concern) */
 	for (addr = MSR_P4_BSU_ESCR0 + stag;
 	     addr <  MSR_P4_IQ_ESCR0; addr += addr_increment()) {
-		wrmsrl(addr, 0x0ULL);
+		wrmsr(addr, 0, 0);
 	}
 
 	/* On older models clear also MSR_P4_IQ_ESCR0/1 */
 	if (boot_cpu_data.x86_model < 0x3) {
-		wrmsrl(MSR_P4_IQ_ESCR0, 0x0ULL);
-		wrmsrl(MSR_P4_IQ_ESCR1, 0x0ULL);
+		wrmsr(MSR_P4_IQ_ESCR0, 0, 0);
+		wrmsr(MSR_P4_IQ_ESCR1, 0, 0);
 	}
 
 	for (addr = MSR_P4_RAT_ESCR0 + stag;
 	     addr <= MSR_P4_SSU_ESCR0; ++i, addr += addr_increment()) {
-		wrmsrl(addr, 0x0ULL);
+		wrmsr(addr, 0, 0);
 	}
 	
 	for (addr = MSR_P4_MS_ESCR0 + stag;
 	     addr <= MSR_P4_TC_ESCR1; addr += addr_increment()){ 
-		wrmsrl(addr, 0x0ULL);
+		wrmsr(addr, 0, 0);
 	}
 	
 	for (addr = MSR_P4_IX_ESCR0 + stag;
 	     addr <= MSR_P4_CRU_ESCR3; addr += addr_increment()){ 
-		wrmsrl(addr, 0x0ULL);
+		wrmsr(addr, 0, 0);
 	}
 
 	if (num_counters == NUM_COUNTERS_NON_HT) {		
-		wrmsrl(MSR_P4_CRU_ESCR4, 0x0ULL);
-		wrmsrl(MSR_P4_CRU_ESCR5, 0x0ULL);
+		wrmsr(MSR_P4_CRU_ESCR4, 0, 0);
+		wrmsr(MSR_P4_CRU_ESCR5, 0, 0);
 	} else if (stag == 0) {
-		wrmsrl(MSR_P4_CRU_ESCR4, 0x0ULL);
+		wrmsr(MSR_P4_CRU_ESCR4, 0, 0);
 	} else {
-		wrmsrl(MSR_P4_CRU_ESCR5, 0x0ULL);
+		wrmsr(MSR_P4_CRU_ESCR5, 0, 0);
 	}		
 	
 	/* setup all counters */
@@ -611,13 +622,12 @@ static void p4_setup_ctrs(struct op_msrs const * const msrs)
 
 static int p4_check_ctrs(unsigned int const cpu,
                          struct op_msrs const * const msrs,
-                         struct cpu_user_regs const * const regs)
+                         struct cpu_user_regs * const regs)
 {
-	unsigned long ctr, stag, real;
-	uint64_t msr_content;
+	unsigned long ctr, low, high, stag, real;
 	int i;
 	int ovf = 0;
-	unsigned long eip = regs->rip;
+	unsigned long eip = regs->eip;
 	int mode = xenoprofile_get_mode(current, regs);
 
 	stag = get_stagger();
@@ -646,13 +656,13 @@ static int p4_check_ctrs(unsigned int const cpu,
 		
 		real = VIRT_CTR(stag, i);
 
-		CCCR_READ(msr_content, real);
- 		CTR_READ(ctr, real);
-		if (CCCR_OVF_P(msr_content) || CTR_OVERFLOW_P(ctr)) {
+		CCCR_READ(low, high, real);
+ 		CTR_READ(ctr, high, real);
+		if (CCCR_OVF_P(low) || CTR_OVERFLOW_P(ctr)) {
 			xenoprof_log_event(current, regs, eip, mode, i);
 			CTR_WRITE(reset_value[i], real);
-			CCCR_CLEAR_OVF(msr_content);
-			CCCR_WRITE(msr_content, real);
+			CCCR_CLEAR_OVF(low);
+			CCCR_WRITE(low, high, real);
  			CTR_WRITE(reset_value[i], real);
 			ovf = 1;
 		}
@@ -667,8 +677,7 @@ static int p4_check_ctrs(unsigned int const cpu,
 
 static void p4_start(struct op_msrs const * const msrs)
 {
-	unsigned int stag;
-	uint64_t msr_content;
+	unsigned int low, high, stag;
 	int i;
 
 	stag = get_stagger();
@@ -676,29 +685,29 @@ static void p4_start(struct op_msrs const * const msrs)
 	for (i = 0; i < num_counters; ++i) {
 		if (!reset_value[i])
 			continue;
-		CCCR_READ(msr_content, VIRT_CTR(stag, i));
-		CCCR_SET_ENABLE(msr_content);
-		CCCR_WRITE(msr_content, VIRT_CTR(stag, i));
+		CCCR_READ(low, high, VIRT_CTR(stag, i));
+		CCCR_SET_ENABLE(low);
+		CCCR_WRITE(low, high, VIRT_CTR(stag, i));
 	}
 }
 
 
 static void p4_stop(struct op_msrs const * const msrs)
 {
-	unsigned int stag;
-	uint64_t msr_content;
+	unsigned int low, high, stag;
 	int i;
 
 	stag = get_stagger();
 
 	for (i = 0; i < num_counters; ++i) {
-		CCCR_READ(msr_content, VIRT_CTR(stag, i));
-		CCCR_SET_DISABLE(msr_content);
-		CCCR_WRITE(msr_content, VIRT_CTR(stag, i));
+		CCCR_READ(low, high, VIRT_CTR(stag, i));
+		CCCR_SET_DISABLE(low);
+		CCCR_WRITE(low, high, VIRT_CTR(stag, i));
 	}
 }
 
 
+#ifdef CONFIG_SMP
 struct op_x86_model_spec const op_p4_ht2_spec = {
 	.num_counters = NUM_COUNTERS_HT2,
 	.num_controls = NUM_CONTROLS_HT2,
@@ -708,7 +717,7 @@ struct op_x86_model_spec const op_p4_ht2_spec = {
 	.start = &p4_start,
 	.stop = &p4_stop
 };
-
+#endif
 
 struct op_x86_model_spec const op_p4_spec = {
 	.num_counters = NUM_COUNTERS_NON_HT,

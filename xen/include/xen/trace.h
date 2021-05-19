@@ -23,6 +23,7 @@
 
 extern int tb_init_done;
 
+#include <xen/config.h>
 #include <public/sysctl.h>
 #include <public/trace.h>
 #include <asm/trace.h>
@@ -43,9 +44,6 @@ static inline void trace_var(u32 event, int cycles, int extra,
     if ( unlikely(tb_init_done) )
         __trace_var(event, cycles, extra, extra_data);
 }
-
-void __trace_hypercall(uint32_t event, unsigned long op,
-                       const xen_ulong_t *args);
 
 /* Convenience macros for calling the trace function. */
 #define TRACE_0D(_e)                            \

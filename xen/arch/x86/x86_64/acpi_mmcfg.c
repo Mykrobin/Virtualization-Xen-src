@@ -17,13 +17,15 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  *
  * copied from Linux
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/init.h>
 #include <xen/acpi.h>
@@ -45,29 +47,6 @@
 /* The physical address of the MMCONFIG aperture.  Set from ACPI tables. */
 struct acpi_mcfg_allocation *pci_mmcfg_config;
 int pci_mmcfg_config_num;
-
-static int __init acpi_mcfg_check_entry(struct acpi_table_mcfg *mcfg,
-                                        struct acpi_mcfg_allocation *cfg)
-{
-    int year;
-
-    if (cfg->address < 0xFFFFFFFF)
-        return 0;
-
-    if (!strncmp(mcfg->header.oem_id, "SGI", 3))
-        return 0;
-
-    if (mcfg->header.revision >= 1 &&
-        dmi_get_date(DMI_BIOS_DATE, &year, NULL, NULL) &&
-        year >= 2010)
-            return 0;
-
-    printk(KERN_ERR "MCFG region for %04x:%02x-%02x at %#"PRIx64
-                    " (above 4GB) ignored\n",
-           cfg->pci_segment, cfg->start_bus_number, cfg->end_bus_number,
-           cfg->address);
-    return -EINVAL;
-}
 
 int __init acpi_parse_mcfg(struct acpi_table_header *header)
 {
@@ -96,7 +75,6 @@ int __init acpi_parse_mcfg(struct acpi_table_header *header)
     if (!pci_mmcfg_config) {
         printk(KERN_WARNING PREFIX
                "No memory for MCFG config tables\n");
-        pci_mmcfg_config_num = 0;
         return -ENOMEM;
     }
 
@@ -104,12 +82,13 @@ int __init acpi_parse_mcfg(struct acpi_table_header *header)
            pci_mmcfg_config_num * sizeof(*pci_mmcfg_config));
 
     for (i = 0; i < pci_mmcfg_config_num; ++i) {
-        if (acpi_mcfg_check_entry(mcfg, &pci_mmcfg_config[i])) {
+        if (pci_mmcfg_config[i].address > 0xFFFFFFFF) {
+            printk(KERN_ERR PREFIX
+                   "MMCONFIG not in low 4GB of memory\n");
             xfree(pci_mmcfg_config);
             pci_mmcfg_config_num = 0;
             return -ENODEV;
         }
-        pci_add_segment(pci_mmcfg_config[i].pci_segment);
     }
 
     return 0;

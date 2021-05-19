@@ -8,72 +8,104 @@
  *  Gareth Hughes <gareth@valinux.com>, May 2000
  */
 
+#include <xen/config.h>
 #include <xen/sched.h>
 #include <asm/current.h>
 #include <asm/processor.h>
 #include <asm/hvm/support.h>
 #include <asm/i387.h>
-#include <asm/xstate.h>
 #include <asm/asm_defns.h>
-#include <asm/spec_ctrl.h>
 
-/*******************************/
-/*     FPU Restore Functions   */
-/*******************************/
-/* Restore x87 extended state */
-static inline void fpu_xrstor(struct vcpu *v, uint64_t mask)
+void init_fpu(void)
 {
-    bool ok;
-
-    ASSERT(v->arch.xsave_area);
-    /*
-     * XCR0 normally represents what guest OS set. In case of Xen itself, 
-     * we set the accumulated feature mask before doing save/restore.
-     */
-    ok = set_xcr0(v->arch.xcr0_accum | XSTATE_FP_SSE);
-    ASSERT(ok);
-    xrstor(v, mask);
-    ok = set_xcr0(v->arch.xcr0 ?: XSTATE_FP_SSE);
-    ASSERT(ok);
+    asm volatile ( "fninit" );
+    if ( cpu_has_xmm )
+        load_mxcsr(0x1f80);
+    current->fpu_initialised = 1;
 }
 
-/* Restor x87 FPU, MMX, SSE and SSE2 state */
-static inline void fpu_fxrstor(struct vcpu *v)
+void save_init_fpu(struct vcpu *v)
 {
-    const typeof(v->arch.xsave_area->fpu_sse) *fpu_ctxt = v->arch.fpu_ctxt;
+    unsigned long cr0 = read_cr0();
+    char *fpu_ctxt = v->arch.guest_context.fpu_ctxt.x;
 
-    /*
-     * AMD CPUs don't save/restore FDP/FIP/FOP unless an exception
-     * is pending. Clear the x87 state here by setting it to fixed
-     * values. The hypervisor data segment can be sometimes 0 and
-     * sometimes new user value. Both should be ok. Use the FPU saved
-     * data block as a safe address because it should be in L1.
-     */
-    if ( !(fpu_ctxt->fsw & ~fpu_ctxt->fcw & 0x003f) &&
-         boot_cpu_data.x86_vendor == X86_VENDOR_AMD )
+    /* This can happen, if a paravirtualised guest OS has set its CR0.TS. */
+    if ( cr0 & X86_CR0_TS )
+        clts();
+
+    if ( cpu_has_xsave && is_hvm_vcpu(v) )
     {
-        asm volatile ( "fnclex\n\t"
-                       "ffree %%st(7)\n\t" /* clear stack tag */
-                       "fildl %0"          /* load to clear state */
-                       : : "m" (*fpu_ctxt) );
+        xsave(v);
     }
+    else if ( cpu_has_fxsr )
+    {
+#ifdef __i386__
+        asm volatile (
+            "fxsave %0"
+            : "=m" (*fpu_ctxt) );
+#else /* __x86_64__ */
+        /*
+         * The only way to force fxsaveq on a wide range of gas versions. On 
+         * older versions the rex64 prefix works only if we force an
+         * addressing mode that doesn't require extended registers.
+         */
+        asm volatile (
+            REX64_PREFIX "fxsave (%1)"
+            : "=m" (*fpu_ctxt) : "cdaSDb" (fpu_ctxt) );
+#endif
+
+        /* Clear exception flags if FSW.ES is set. */
+        if ( unlikely(fpu_ctxt[2] & 0x80) )
+            asm volatile ("fnclex");
+
+        /*
+         * AMD CPUs don't save/restore FDP/FIP/FOP unless an exception
+         * is pending. Clear the x87 state here by setting it to fixed
+         * values. The hypervisor data segment can be sometimes 0 and
+         * sometimes new user value. Both should be ok. Use the FPU saved
+         * data block as a safe address because it should be in L1.
+         */
+        if ( boot_cpu_data.x86_vendor == X86_VENDOR_AMD )
+        {
+            asm volatile (
+                "emms\n\t"  /* clear stack tags */
+                "fildl %0"  /* load to clear state */
+                : : "m" (*fpu_ctxt) );
+        }
+    }
+    else
+    {
+        /* FWAIT is required to make FNSAVE synchronous. */
+        asm volatile ( "fnsave %0 ; fwait" : "=m" (*fpu_ctxt) );
+    }
+
+    v->fpu_dirtied = 0;
+    write_cr0(cr0|X86_CR0_TS);
+}
+
+void restore_fpu(struct vcpu *v)
+{
+    char *fpu_ctxt = v->arch.guest_context.fpu_ctxt.x;
 
     /*
      * FXRSTOR can fault if passed a corrupted data block. We handle this
      * possibility, which may occur if the block was passed to us by control
-     * tools or through VCPUOP_initialise, by silently clearing the block.
+     * tools, by silently clearing the block.
      */
-    switch ( __builtin_expect(fpu_ctxt->x[FPU_WORD_SIZE_OFFSET], 8) )
+    if ( cpu_has_fxsr )
     {
-    default:
         asm volatile (
-            /* See below for why the operands/constraints are this way. */
+#ifdef __i386__
+            "1: fxrstor %0            \n"
+#else /* __x86_64__ */
+            /* See above for why the operands/constraints are this way. */
             "1: " REX64_PREFIX "fxrstor (%2)\n"
+#endif
             ".section .fixup,\"ax\"   \n"
             "2: push %%"__OP"ax       \n"
             "   push %%"__OP"cx       \n"
             "   push %%"__OP"di       \n"
-            "   mov  %2,%%"__OP"di    \n"
+            "   lea  %0,%%"__OP"di    \n"
             "   mov  %1,%%ecx         \n"
             "   xor  %%eax,%%eax      \n"
             "   rep ; stosl           \n"
@@ -82,274 +114,105 @@ static inline void fpu_fxrstor(struct vcpu *v)
             "   pop  %%"__OP"ax       \n"
             "   jmp  1b               \n"
             ".previous                \n"
-            _ASM_EXTABLE(1b, 2b)
-            :
-            : "m" (*fpu_ctxt), "i" (sizeof(*fpu_ctxt) / 4), "R" (fpu_ctxt) );
-        break;
-    case 4: case 2:
-        asm volatile (
-            "1: fxrstor %0         \n"
-            ".section .fixup,\"ax\"\n"
-            "2: push %%"__OP"ax    \n"
-            "   push %%"__OP"cx    \n"
-            "   push %%"__OP"di    \n"
-            "   lea  %0,%%"__OP"di \n"
-            "   mov  %1,%%ecx      \n"
-            "   xor  %%eax,%%eax   \n"
-            "   rep ; stosl        \n"
-            "   pop  %%"__OP"di    \n"
-            "   pop  %%"__OP"cx    \n"
-            "   pop  %%"__OP"ax    \n"
-            "   jmp  1b            \n"
-            ".previous             \n"
-            _ASM_EXTABLE(1b, 2b)
-            :
-            : "m" (*fpu_ctxt), "i" (sizeof(*fpu_ctxt) / 4) );
-        break;
-    }
-}
-
-/*******************************/
-/*      FPU Save Functions     */
-/*******************************/
-
-static inline uint64_t vcpu_xsave_mask(const struct vcpu *v)
-{
-    if ( v->fpu_dirtied )
-        return v->arch.nonlazy_xstate_used ? XSTATE_ALL : XSTATE_LAZY;
-
-    ASSERT(v->arch.nonlazy_xstate_used);
-
-    /*
-     * The offsets of components which live in the extended region of
-     * compact xsave area are not fixed. Xsave area may be overwritten
-     * when a xsave with v->fpu_dirtied set is followed by one with
-     * v->fpu_dirtied clear.
-     * In such case, if hypervisor uses compact xsave area and guest
-     * has ever used lazy states (checking xcr0_accum excluding
-     * XSTATE_FP_SSE), vcpu_xsave_mask will return XSTATE_ALL. Otherwise
-     * return XSTATE_NONLAZY.
-     */
-    return xstate_all(v) ? XSTATE_ALL : XSTATE_NONLAZY;
-}
-
-/* Save x87 extended state */
-static inline void fpu_xsave(struct vcpu *v)
-{
-    bool ok;
-    uint64_t mask = vcpu_xsave_mask(v);
-
-    ASSERT(mask);
-    ASSERT(v->arch.xsave_area);
-    /*
-     * XCR0 normally represents what guest OS set. In case of Xen itself,
-     * we set the accumulated feature mask before doing save/restore.
-     */
-    ok = set_xcr0(v->arch.xcr0_accum | XSTATE_FP_SSE);
-    ASSERT(ok);
-    xsave(v, mask);
-    ok = set_xcr0(v->arch.xcr0 ?: XSTATE_FP_SSE);
-    ASSERT(ok);
-}
-
-/* Save x87 FPU, MMX, SSE and SSE2 state */
-static inline void fpu_fxsave(struct vcpu *v)
-{
-    typeof(v->arch.xsave_area->fpu_sse) *fpu_ctxt = v->arch.fpu_ctxt;
-    unsigned int fip_width = v->domain->arch.x87_fip_width;
-
-    if ( fip_width != 4 )
-    {
-        /*
-         * The only way to force fxsaveq on a wide range of gas versions.
-         * On older versions the rex64 prefix works only if we force an
-         * addressing mode that doesn't require extended registers.
-         */
-        asm volatile ( REX64_PREFIX "fxsave (%1)"
-                       : "=m" (*fpu_ctxt) : "R" (fpu_ctxt) );
-
-        /*
-         * AMD CPUs don't save/restore FDP/FIP/FOP unless an exception
-         * is pending.
-         */
-        if ( !(fpu_ctxt->fsw & 0x0080) &&
-             boot_cpu_data.x86_vendor == X86_VENDOR_AMD )
-            return;
-
-        /*
-         * If the FIP/FDP[63:32] are both zero, it is safe to use the
-         * 32-bit restore to also restore the selectors.
-         */
-        if ( !fip_width &&
-             !((fpu_ctxt->fip.addr | fpu_ctxt->fdp.addr) >> 32) )
-        {
-            struct ix87_env fpu_env;
-
-            asm volatile ( "fnstenv %0" : "=m" (fpu_env) );
-            fpu_ctxt->fip.sel = fpu_env.fcs;
-            fpu_ctxt->fdp.sel = fpu_env.fds;
-            fip_width = 4;
-        }
-        else
-            fip_width = 8;
+            ".section __ex_table,\"a\"\n"
+            "   "__FIXUP_ALIGN"       \n"
+            "   "__FIXUP_WORD" 1b,2b  \n"
+            ".previous                \n"
+            : 
+            : "m" (*fpu_ctxt),
+              "i" (sizeof(v->arch.guest_context.fpu_ctxt)/4)
+#ifdef __x86_64__
+             ,"cdaSDb" (fpu_ctxt)
+#endif
+            );
     }
     else
     {
-        asm volatile ( "fxsave %0" : "=m" (*fpu_ctxt) );
-        fip_width = 4;
+        asm volatile ( "frstor %0" : : "m" (v->arch.guest_context.fpu_ctxt) );
     }
-
-    fpu_ctxt->x[FPU_WORD_SIZE_OFFSET] = fip_width;
 }
 
-/*******************************/
-/*       VCPU FPU Functions    */
-/*******************************/
-/* Restore FPU state whenever VCPU is schduled in. */
-void vcpu_restore_fpu_nonlazy(struct vcpu *v, bool need_stts)
-{
-    /* Restore nonlazy extended state (i.e. parts not tracked by CR0.TS). */
-    if ( !v->arch.fully_eager_fpu && !v->arch.nonlazy_xstate_used )
-        goto maybe_stts;
+#define XSTATE_CPUID 0xd
 
-    ASSERT(!is_idle_vcpu(v));
-
-    /* Avoid recursion */
-    clts();
-
-    /*
-     * When saving full state even with !v->fpu_dirtied (see vcpu_xsave_mask()
-     * above) we also need to restore full state, to prevent subsequently
-     * saving state belonging to another vCPU.
-     */
-    if ( v->arch.fully_eager_fpu || (v->arch.xsave_area && xstate_all(v)) )
-    {
-        if ( cpu_has_xsave )
-            fpu_xrstor(v, XSTATE_ALL);
-        else
-            fpu_fxrstor(v);
-
-        v->fpu_initialised = 1;
-        v->fpu_dirtied = 1;
-
-        /* Xen doesn't need TS set, but the guest might. */
-        need_stts = is_pv_vcpu(v) && (v->arch.pv_vcpu.ctrlreg[0] & X86_CR0_TS);
-    }
-    else
-    {
-        fpu_xrstor(v, XSTATE_NONLAZY);
-        need_stts = true;
-    }
-
- maybe_stts:
-    if ( need_stts )
-        stts();
-}
-
-/* 
- * Restore FPU state when #NM is triggered.
+/*
+ * Maximum size (in byte) of the XSAVE/XRSTOR save area required by all
+ * the supported and enabled features on the processor, including the
+ * XSAVE.HEADER. We only enable XCNTXT_MASK that we have known.
  */
-void vcpu_restore_fpu_lazy(struct vcpu *v)
+u32 xsave_cntxt_size;
+
+/* A 64-bit bitmask of the XSAVE/XRSTOR features supported by processor. */
+u32 xfeature_low, xfeature_high;
+
+void xsave_init(void)
 {
-    ASSERT(!is_idle_vcpu(v));
+    u32 eax, ebx, ecx, edx;
+    int cpu = smp_processor_id();
+    u32 min_size;
 
-    /* Avoid recursion. */
-    clts();
-
-    if ( v->fpu_dirtied )
+    if ( boot_cpu_data.cpuid_level < XSTATE_CPUID ) {
+        printk(XENLOG_ERR "XSTATE_CPUID missing\n");
         return;
-
-    ASSERT(!v->arch.fully_eager_fpu);
-
-    if ( cpu_has_xsave )
-        fpu_xrstor(v, XSTATE_LAZY);
-    else
-        fpu_fxrstor(v);
-
-    v->fpu_initialised = 1;
-    v->fpu_dirtied = 1;
-}
-
-/* 
- * On each context switch, save the necessary FPU info of VCPU being switch 
- * out. It dispatches saving operation based on CPU's capability.
- */
-static bool _vcpu_save_fpu(struct vcpu *v)
-{
-    if ( !v->fpu_dirtied && !v->arch.nonlazy_xstate_used )
-        return false;
-
-    ASSERT(!is_idle_vcpu(v));
-
-    /* This can happen, if a paravirtualised guest OS has set its CR0.TS. */
-    clts();
-
-    if ( cpu_has_xsave )
-        fpu_xsave(v);
-    else
-        fpu_fxsave(v);
-
-    v->fpu_dirtied = 0;
-
-    return true;
-}
-
-void vcpu_save_fpu(struct vcpu *v)
-{
-    _vcpu_save_fpu(v);
-    stts();
-}
-
-void save_fpu_enable(void)
-{
-    if ( !_vcpu_save_fpu(current) )
-        clts();
-}
-
-/* Initialize FPU's context save area */
-int vcpu_init_fpu(struct vcpu *v)
-{
-    int rc;
-    
-    v->arch.fully_eager_fpu = opt_eager_fpu;
-
-    if ( (rc = xstate_alloc_save_area(v)) != 0 )
-        return rc;
-
-    if ( v->arch.xsave_area )
-        v->arch.fpu_ctxt = &v->arch.xsave_area->fpu_sse;
-    else
-    {
-        BUILD_BUG_ON(__alignof(v->arch.xsave_area->fpu_sse) < 16);
-        v->arch.fpu_ctxt = _xzalloc(sizeof(v->arch.xsave_area->fpu_sse),
-                                    __alignof(v->arch.xsave_area->fpu_sse));
-        if ( v->arch.fpu_ctxt )
-        {
-            typeof(v->arch.xsave_area->fpu_sse) *fpu_sse = v->arch.fpu_ctxt;
-
-            fpu_sse->fcw = FCW_DEFAULT;
-            fpu_sse->mxcsr = MXCSR_DEFAULT;
-        }
-        else
-            rc = -ENOMEM;
     }
 
-    return rc;
+    cpuid_count(XSTATE_CPUID, 0, &eax, &ebx, &ecx, &edx);
+
+    printk("%s: cpu%d: cntxt_max_size: 0x%x and states: %08x:%08x\n",
+        __func__, cpu, ecx, edx, eax);
+
+    if ( ((eax & XSTATE_FP_SSE) != XSTATE_FP_SSE) ||
+         ((eax & XSTATE_YMM) && !(eax & XSTATE_SSE)) )
+    {
+        BUG();
+    }
+
+    /* FP/SSE, XSAVE.HEADER, YMM */
+    min_size =  512 + 64 + ((eax & XSTATE_YMM) ? XSTATE_YMM_SIZE : 0);
+    BUG_ON(ecx < min_size);
+
+    /*
+     * We will only enable the features we know for hvm guest. Here we use
+     * set/clear CR4_OSXSAVE and re-run cpuid to get xsave_cntxt_size.
+     */
+    set_in_cr4(X86_CR4_OSXSAVE);
+    set_xcr0(eax & XCNTXT_MASK);
+    cpuid_count(XSTATE_CPUID, 0, &eax, &ebx, &ecx, &edx);
+    clear_in_cr4(X86_CR4_OSXSAVE);
+
+    if ( cpu == 0 )
+    {
+        /*
+         * xsave_cntxt_size is the max size required by enabled features.
+         * We know FP/SSE and YMM about eax, and nothing about edx at present.
+         */
+        xsave_cntxt_size = ebx;
+        xfeature_low = eax & XCNTXT_MASK;
+        xfeature_high = 0;
+        printk("%s: using cntxt_size: 0x%x and states: %08x:%08x\n",
+            __func__, xsave_cntxt_size, xfeature_high, xfeature_low);
+    }
+    else
+    {
+        BUG_ON(xsave_cntxt_size != ebx);
+        BUG_ON(xfeature_low != (eax & XCNTXT_MASK));
+    }
 }
 
-/* Free FPU's context save area */
-void vcpu_destroy_fpu(struct vcpu *v)
+void xsave_init_save_area(void *save_area)
 {
-    if ( v->arch.xsave_area )
-        xstate_free_save_area(v);
-    else
-        xfree(v->arch.fpu_ctxt);
+    memset(save_area, 0, xsave_cntxt_size);
+
+    ((u16 *)save_area)[0] = 0x37f;   /* FCW   */
+    ((u16 *)save_area)[2] = 0xffff;  /* FTW   */
+    ((u32 *)save_area)[6] = 0x1f80;  /* MXCSR */
+
+    ((struct xsave_struct *)save_area)->xsave_hdr.xstate_bv = XSTATE_FP_SSE;
 }
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

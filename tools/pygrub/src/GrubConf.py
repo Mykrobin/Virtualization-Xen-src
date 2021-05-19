@@ -9,7 +9,8 @@
 # general public license.
 #
 # You should have received a copy of the GNU General Public License
-# along with this program; If not, see <http://www.gnu.org/licenses/>.
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #
 
 import os, sys
@@ -66,11 +67,7 @@ class GrubDiskPart(object):
         return self._disk
     def set_disk(self, val):
         val = val.replace("(", "").replace(")", "")
-        if val.startswith("/dev/xvd"):
-            disk = val[len("/dev/xvd")]
-            self._disk = ord(disk)-ord('a')
-        else:
-            self._disk = int(val[2:])
+        self._disk = int(val[2:])
     disk = property(get_disk, set_disk)
 
     def get_part(self):
@@ -82,8 +79,6 @@ class GrubDiskPart(object):
         val = val.replace("(", "").replace(")", "")
         if val[:5] == "msdos":
             val = val[5:]
-        if val[:3] == "gpt":
-            val = val[3:]
         self._part = int(val)
     part = property(get_part, set_part)
 
@@ -230,7 +225,7 @@ class _GrubConfigFile(object):
         if val == "saved":
             self._default = 0
         else:
-            self._default = val
+            self._default = int(val)
 
         if self._default < 0:
             raise ValueError, "default must be positive number"
@@ -347,9 +342,7 @@ class Grub2Image(_GrubImage):
                 
     commands = {'set:root': 'root',
                 'linux': 'kernel',
-                'linux16': 'kernel',
                 'initrd': 'initrd',
-                'initrd16': 'initrd',
                 'echo': None,
                 'insmod': None,
                 'search': None}
@@ -375,7 +368,6 @@ class Grub2ConfigFile(_GrubConfigFile):
         in_function = False
         img = None
         title = ""
-        menu_level=0
         for l in lines:
             l = l.strip()
             # skip blank lines
@@ -395,25 +387,17 @@ class Grub2ConfigFile(_GrubConfigFile):
                 continue
 
             # new image
-            title_match = re.match('^menuentry ["\'](.*?)["\'] (.*){', l)
+            title_match = re.match('^menuentry ["\'](.*)["\'] (.*){', l)
             if title_match:
                 if img is not None:
                     raise RuntimeError, "syntax error: cannot nest menuentry (%d %s)" % (len(img),img)
                 img = []
                 title = title_match.group(1)
                 continue
-
-            if l.startswith("submenu"):
-                menu_level += 1
-                continue
-
+            
             if l.startswith("}"):
                 if img is None:
-                    if menu_level > 0:
-                        menu_level -= 1
-                        continue
-                    else:
-                        raise RuntimeError, "syntax error: closing brace without menuentry"
+                    raise RuntimeError, "syntax error: closing brace without menuentry"
 
                 self.add_image(Grub2Image(title, img))
                 img = None
@@ -430,11 +414,7 @@ class Grub2ConfigFile(_GrubConfigFile):
                 
             if self.commands.has_key(com):
                 if self.commands[com] is not None:
-                    arg_strip = arg.strip()
-                    if arg_strip == "${saved_entry}" or arg_strip == "${next_entry}":
-                        logging.warning("grub2's saved_entry/next_entry not supported")
-                        arg = "0"
-                    setattr(self, self.commands[com], arg_strip)
+                    setattr(self, self.commands[com], arg.strip())
                 else:
                     logging.info("Ignored directive %s" %(com,))
             elif com.startswith('set:'):
@@ -461,7 +441,7 @@ class Grub2ConfigFile(_GrubConfigFile):
                 }
         
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
+    if sys.argv < 3:
         raise RuntimeError, "Need a grub version (\"grub\" or \"grub2\") and a grub.conf or grub.cfg to read"
     if sys.argv[1] == "grub":
         g = GrubConfigFile(sys.argv[2])

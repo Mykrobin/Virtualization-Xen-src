@@ -17,16 +17,17 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/init.h>
 #include <xen/acpi.h>
 #include <xen/irq.h>
-#include <xen/mm.h>
 #include <xen/dmi.h>
 #include <asm/fixmap.h>
 #include <asm/page.h>
@@ -42,24 +43,100 @@
 #include <mach_apic.h>
 #include <mach_mpparse.h>
 
+int sbf_port;
+#define CONFIG_ACPI_PCI
+
+#define BAD_MADT_ENTRY(entry, end) (					    \
+		(!entry) || (unsigned long)entry + sizeof(*entry) > end ||  \
+		((struct acpi_subtable_header *)entry)->length != sizeof(*entry))
+
 #define PREFIX			"ACPI: "
 
-bool __initdata acpi_noirq;     /* skip ACPI IRQ initialization */
-bool __initdata acpi_ht = true; /* enable HT */
+#ifdef CONFIG_ACPI_PCI
+int acpi_noirq __initdata;	/* skip ACPI IRQ initialization */
+int acpi_pci_disabled __initdata; /* skip ACPI PCI scan and IRQ initialization */
+#else
+int acpi_noirq __initdata = 1;
+int acpi_pci_disabled __initdata = 1;
+#endif
+int acpi_ht __initdata = 1;	/* enable HT */
 
-bool __initdata acpi_lapic;
-bool __initdata acpi_ioapic;
+int acpi_lapic;
+int acpi_ioapic;
+int acpi_strict;
+EXPORT_SYMBOL(acpi_strict);
 
-/* acpi_skip_timer_override: Skip IRQ0 overrides. */
-static bool __initdata acpi_skip_timer_override;
-boolean_param("acpi_skip_timer_override", acpi_skip_timer_override);
+u8 acpi_sci_flags __initdata;
+int acpi_sci_override_gsi __initdata;
+int acpi_skip_timer_override __initdata;
 
+#ifdef CONFIG_X86_LOCAL_APIC
 static u64 acpi_lapic_addr __initdata = APIC_DEFAULT_PHYS_BASE;
+#endif
+
+u32 acpi_smi_cmd;
+u8 acpi_enable_value, acpi_disable_value;
+
+#ifndef __HAVE_ARCH_CMPXCHG
+#warning ACPI uses CMPXCHG, i486 and later hardware
+#endif
+
+u8 x86_acpiid_to_apicid[MAX_MADT_ENTRIES] =
+    {[0 ... MAX_MADT_ENTRIES - 1] = 0xff };
+EXPORT_SYMBOL(x86_acpiid_to_apicid);
 
 /* --------------------------------------------------------------------------
                               Boot-time Configuration
    -------------------------------------------------------------------------- */
 
+/*
+ * The default interrupt routing model is PIC (8259).  This gets
+ * overriden if IOAPICs are enumerated (below).
+ */
+enum acpi_irq_model_id		acpi_irq_model = ACPI_IRQ_MODEL_PIC;
+
+/*
+ * Temporarily use the virtual area starting from FIX_IO_APIC_BASE_END,
+ * to map the target physical address. The problem is that set_fixmap()
+ * provides a single page, and it is possible that the page is not
+ * sufficient.
+ * By using this area, we can map up to MAX_IO_APICS pages temporarily,
+ * i.e. until the next __va_range() call.
+ *
+ * Important Safety Note:  The fixed I/O APIC page numbers are *subtracted*
+ * from the fixed base.  That's why we start at FIX_IO_APIC_BASE_END and
+ * count idx down while incrementing the phys address.
+ */
+char *__acpi_map_table(unsigned long phys, unsigned long size)
+{
+	unsigned long base, offset, mapped_size;
+	int idx;
+
+	/* XEN: RAM holes above 1MB are not permanently mapped. */
+	if ((phys + size) <= (1 * 1024 * 1024))
+		return __va(phys);
+
+	offset = phys & (PAGE_SIZE - 1);
+	mapped_size = PAGE_SIZE - offset;
+	set_fixmap(FIX_ACPI_END, phys);
+	base = fix_to_virt(FIX_ACPI_END);
+
+	/*
+	 * Most cases can be covered by the below.
+	 */
+	idx = FIX_ACPI_END;
+	while (mapped_size < size) {
+		if (--idx < FIX_ACPI_BEGIN)
+			return NULL;	/* cannot handle this */
+		phys += PAGE_SIZE;
+		set_fixmap(idx, phys);
+		mapped_size += PAGE_SIZE;
+	}
+
+	return ((char *) base + offset);
+}
+
+#ifdef CONFIG_X86_LOCAL_APIC
 static int __init acpi_parse_madt(struct acpi_table_header *table)
 {
 	struct acpi_table_madt *madt;
@@ -79,73 +156,20 @@ static int __init acpi_parse_madt(struct acpi_table_header *table)
 }
 
 static int __init
-acpi_parse_x2apic(struct acpi_subtable_header *header, const unsigned long end)
-{
-	struct acpi_madt_local_x2apic *processor =
-		container_of(header, struct acpi_madt_local_x2apic, header);
-	bool enabled = false, log = false;
-
-	if (BAD_MADT_ENTRY(processor, end))
-		return -EINVAL;
-
-	if ((processor->lapic_flags & ACPI_MADT_ENABLED) ||
-	    processor->local_apic_id != 0xffffffff || opt_cpu_info) {
-		acpi_table_print_madt_entry(header);
-		log = true;
-	}
-
-	/* Record local apic id only when enabled and fitting. */
-	if (processor->local_apic_id >= MAX_APICS ||
-	    processor->uid >= MAX_MADT_ENTRIES) {
-		if (log)
-			printk("%sAPIC ID %#x and/or ACPI ID %#x beyond limit"
-			       " - processor ignored\n",
-			       processor->lapic_flags & ACPI_MADT_ENABLED
-			       ? KERN_WARNING "WARNING: " : KERN_INFO,
-			       processor->local_apic_id, processor->uid);
-		/*
-		 * Must not return an error here, to prevent
-		 * acpi_table_parse_entries() from terminating early.
-		 */
-		return 0 /* -ENOSPC */;
-	}
-	if (processor->lapic_flags & ACPI_MADT_ENABLED) {
-		x86_acpiid_to_apicid[processor->uid] =
-			processor->local_apic_id;
-		enabled = true;
-	}
-
-	/*
-	 * We need to register disabled CPU as well to permit
-	 * counting disabled CPUs. This allows us to size
-	 * cpus_possible_map more accurately, to permit
-	 * to not preallocating memory for all NR_CPUS
-	 * when we use CPU hotplug.
-	 */
-	mp_register_lapic(processor->local_apic_id, enabled, 0);
-
-	return 0;
-}
-
-static int __init
 acpi_parse_lapic(struct acpi_subtable_header * header, const unsigned long end)
 {
-	struct acpi_madt_local_apic *processor =
-		container_of(header, struct acpi_madt_local_apic, header);
-	bool enabled = false;
+	struct acpi_table_lapic *processor = NULL;
+
+	processor = (struct acpi_table_lapic *)header;
 
 	if (BAD_MADT_ENTRY(processor, end))
 		return -EINVAL;
 
-	if ((processor->lapic_flags & ACPI_MADT_ENABLED) ||
-	    processor->id != 0xff || opt_cpu_info)
-		acpi_table_print_madt_entry(header);
+	acpi_table_print_madt_entry(header);
 
 	/* Record local apic id only when enabled */
-	if (processor->lapic_flags & ACPI_MADT_ENABLED) {
-		x86_acpiid_to_apicid[processor->processor_id] = processor->id;
-		enabled = true;
-	}
+	if (processor->flags.enabled)
+		x86_acpiid_to_apicid[processor->acpi_id] = processor->id;
 
 	/*
 	 * We need to register disabled CPU as well to permit
@@ -154,7 +178,8 @@ acpi_parse_lapic(struct acpi_subtable_header * header, const unsigned long end)
 	 * to not preallocating memory for all NR_CPUS
 	 * when we use CPU hotplug.
 	 */
-	mp_register_lapic(processor->id, enabled, 0);
+	mp_register_lapic(processor->id,	/* APIC ID */
+			  processor->flags.enabled);	/* Enabled? */
 
 	return 0;
 }
@@ -163,9 +188,9 @@ static int __init
 acpi_parse_lapic_addr_ovr(struct acpi_subtable_header * header,
 			  const unsigned long end)
 {
-	struct acpi_madt_local_apic_override *lapic_addr_ovr =
-		container_of(header, struct acpi_madt_local_apic_override,
-			     header);
+	struct acpi_table_lapic_addr_ovr *lapic_addr_ovr = NULL;
+
+	lapic_addr_ovr = (struct acpi_table_lapic_addr_ovr *)header;
 
 	if (BAD_MADT_ENTRY(lapic_addr_ovr, end))
 		return -EINVAL;
@@ -176,29 +201,11 @@ acpi_parse_lapic_addr_ovr(struct acpi_subtable_header * header,
 }
 
 static int __init
-acpi_parse_x2apic_nmi(struct acpi_subtable_header *header,
-		      const unsigned long end)
-{
-	struct acpi_madt_local_x2apic_nmi *x2apic_nmi =
-		container_of(header, struct acpi_madt_local_x2apic_nmi,
-			     header);
-
-	if (BAD_MADT_ENTRY(x2apic_nmi, end))
-		return -EINVAL;
-
-	acpi_table_print_madt_entry(header);
-
-	if (x2apic_nmi->lint != 1)
-		printk(KERN_WARNING PREFIX "NMI not connected to LINT 1!\n");
-
-	return 0;
-}
-
-static int __init
 acpi_parse_lapic_nmi(struct acpi_subtable_header * header, const unsigned long end)
 {
-	struct acpi_madt_local_apic_nmi *lapic_nmi =
-		container_of(header, struct acpi_madt_local_apic_nmi, header);
+	struct acpi_table_lapic_nmi *lapic_nmi = NULL;
+
+	lapic_nmi = (struct acpi_table_lapic_nmi *)header;
 
 	if (BAD_MADT_ENTRY(lapic_nmi, end))
 		return -EINVAL;
@@ -211,11 +218,16 @@ acpi_parse_lapic_nmi(struct acpi_subtable_header * header, const unsigned long e
 	return 0;
 }
 
+#endif				/*CONFIG_X86_LOCAL_APIC */
+
+#if defined(CONFIG_X86_IO_APIC) /*&& defined(CONFIG_ACPI_INTERPRETER)*/
+
 static int __init
 acpi_parse_ioapic(struct acpi_subtable_header * header, const unsigned long end)
 {
-	struct acpi_madt_io_apic *ioapic =
-		container_of(header, struct acpi_madt_io_apic, header);
+	struct acpi_table_ioapic *ioapic = NULL;
+
+	ioapic = (struct acpi_table_ioapic *)header;
 
 	if (BAD_MADT_ENTRY(ioapic, end))
 		return -EINVAL;
@@ -232,9 +244,9 @@ static int __init
 acpi_parse_int_src_ovr(struct acpi_subtable_header * header,
 		       const unsigned long end)
 {
-	struct acpi_madt_interrupt_override *intsrc =
-		container_of(header, struct acpi_madt_interrupt_override,
-			     header);
+	struct acpi_table_int_src_ovr *intsrc = NULL;
+
+	intsrc = (struct acpi_table_int_src_ovr *)header;
 
 	if (BAD_MADT_ENTRY(intsrc, end))
 		return -EINVAL;
@@ -242,15 +254,14 @@ acpi_parse_int_src_ovr(struct acpi_subtable_header * header,
 	acpi_table_print_madt_entry(header);
 
 	if (acpi_skip_timer_override &&
-	    intsrc->source_irq == 0 && intsrc->global_irq == 2) {
+		intsrc->bus_irq == 0 && intsrc->global_irq == 2) {
 			printk(PREFIX "BIOS IRQ0 pin2 override ignored.\n");
 			return 0;
 	}
 
-	mp_override_legacy_irq(intsrc->source_irq,
-			       ACPI_MADT_GET_POLARITY(intsrc->inti_flags),
-			       ACPI_MADT_GET_TRIGGER(intsrc->inti_flags),
-			       intsrc->global_irq);
+	mp_override_legacy_irq(intsrc->bus_irq,
+			       intsrc->flags.polarity,
+			       intsrc->flags.trigger, intsrc->global_irq);
 
 	return 0;
 }
@@ -258,8 +269,9 @@ acpi_parse_int_src_ovr(struct acpi_subtable_header * header,
 static int __init
 acpi_parse_nmi_src(struct acpi_subtable_header * header, const unsigned long end)
 {
-	struct acpi_madt_nmi_source *nmi_src =
-		container_of(header, struct acpi_madt_nmi_source, header);
+	struct acpi_table_nmi_src *nmi_src = NULL;
+
+	nmi_src = (struct acpi_table_nmi_src *)header;
 
 	if (BAD_MADT_ENTRY(nmi_src, end))
 		return -EINVAL;
@@ -271,39 +283,47 @@ acpi_parse_nmi_src(struct acpi_subtable_header * header, const unsigned long end
 	return 0;
 }
 
+#endif /* CONFIG_X86_IO_APIC */
+
+static int __init acpi_parse_sbf(struct acpi_table_header *table)
+{
+	struct acpi_table_boot *sb;
+
+	sb = (struct acpi_table_boot *)table;
+	if (!sb) {
+		printk(KERN_WARNING PREFIX "Unable to map SBF\n");
+		return -ENODEV;
+	}
+
+	sbf_port = sb->cmos_index;	/* Save CMOS port */
+
+	return 0;
+}
+
 #ifdef CONFIG_HPET_TIMER
 
 static int __init acpi_parse_hpet(struct acpi_table_header *table)
 {
 	struct acpi_table_hpet *hpet_tbl = (struct acpi_table_hpet *)table;
 
-	if (hpet_tbl->address.space_id != ACPI_ADR_SPACE_SYSTEM_MEMORY) {
+	if (hpet_tbl->address.space_id != ACPI_SPACE_MEM) {
 		printk(KERN_WARNING PREFIX "HPET timers must be located in "
 		       "memory.\n");
 		return -1;
 	}
 
-	/*
-	 * Some BIOSes provide multiple HPET tables.  Sometimes this is a BIOS
-	 * bug; the intended way of supporting more than 1 HPET is to use AML
-	 * entries.
-	 *
-	 * If someone finds a real system with two genuine HPET tables, perhaps
-	 * they will be kind and implement support.  Until then however, warn
-	 * that we will ignore subsequent tables.
-	 */
-	if (hpet_address)
-	{
-		printk(KERN_WARNING PREFIX
-		       "Found multiple HPET tables. Only using first\n");
-		return -1;
-	}
+#if 0/*def	CONFIG_X86_64*/
+	vxtime.hpet_address = hpet_tbl->address.address;
 
-	hpet_address = hpet_tbl->address.address;
-	hpet_blockid = hpet_tbl->sequence;
-	hpet_flags = hpet_tbl->flags;
 	printk(KERN_INFO PREFIX "HPET id: %#x base: %#lx\n",
-	       hpet_tbl->id, hpet_address);
+	       hpet_tbl->id, vxtime.hpet_address);
+#else	/* X86 */
+	{
+		hpet_address = hpet_tbl->address.address;
+		printk(KERN_INFO PREFIX "HPET id: %#x base: %#lx\n",
+		       hpet_tbl->id, hpet_address);
+	}
+#endif	/* X86 */
 
 	return 0;
 }
@@ -311,38 +331,16 @@ static int __init acpi_parse_hpet(struct acpi_table_header *table)
 #define	acpi_parse_hpet	NULL
 #endif
 
-static int __init acpi_invalidate_bgrt(struct acpi_table_header *table)
-{
-	struct acpi_table_bgrt *bgrt_tbl =
-		container_of(table, struct acpi_table_bgrt, header);
-
-	if (table->length < sizeof(*bgrt_tbl))
-		return -1;
-
-	if (bgrt_tbl->version == 1 && bgrt_tbl->image_address
-	    && !page_is_ram_type(PFN_DOWN(bgrt_tbl->image_address),
-				 RAM_TYPE_CONVENTIONAL))
-		return 0;
-
-	printk(KERN_INFO PREFIX "BGRT: invalidating v%d image at %#"PRIx64"\n",
-	       bgrt_tbl->version, bgrt_tbl->image_address);
-	bgrt_tbl->image_address = 0;
-	bgrt_tbl->status &= ~1;
-
-	return 0;
-}
-
 #ifdef CONFIG_ACPI_SLEEP
 #define acpi_fadt_copy_address(dst, src, len) do {			\
-	if (fadt->header.revision >= FADT2_REVISION_ID &&		\
-	    fadt->header.length >= ACPI_FADT_V2_SIZE)			\
+	if (fadt->header.revision >= FADT2_REVISION_ID)			\
 		acpi_sinfo.dst##_blk = fadt->x##src##_block;		\
 	if (!acpi_sinfo.dst##_blk.address) {				\
 		acpi_sinfo.dst##_blk.address      = fadt->src##_block;	\
 		acpi_sinfo.dst##_blk.space_id     = ACPI_ADR_SPACE_SYSTEM_IO; \
 		acpi_sinfo.dst##_blk.bit_width    = fadt->len##_length << 3; \
 		acpi_sinfo.dst##_blk.bit_offset   = 0;			\
-		acpi_sinfo.dst##_blk.access_width = fadt->len##_length;	\
+		acpi_sinfo.dst##_blk.access_width = 0;			\
 	} \
 } while (0)
 
@@ -353,59 +351,17 @@ acpi_fadt_parse_sleep_info(struct acpi_table_fadt *fadt)
 	struct acpi_table_facs *facs = NULL;
 	uint64_t facs_pa;
 
-	if (fadt->header.revision >= 5 &&
-	    fadt->header.length >= ACPI_FADT_V5_SIZE) {
-		acpi_sinfo.sleep_control = fadt->sleep_control;
-		acpi_sinfo.sleep_status = fadt->sleep_status;
-
-		printk(KERN_INFO PREFIX
-		       "v5 SLEEP INFO: control[%d:%"PRIx64"],"
-		       " status[%d:%"PRIx64"]\n",
-		       acpi_sinfo.sleep_control.space_id,
-		       acpi_sinfo.sleep_control.address,
-		       acpi_sinfo.sleep_status.space_id,
-		       acpi_sinfo.sleep_status.address);
-
-		if ((fadt->sleep_control.address &&
-		     (fadt->sleep_control.bit_offset ||
-		      fadt->sleep_control.bit_width !=
-		      fadt->sleep_control.access_width * 8)) ||
-		    (fadt->sleep_status.address &&
-		     (fadt->sleep_status.bit_offset ||
-		      fadt->sleep_status.bit_width !=
-		      fadt->sleep_status.access_width * 8))) {
-			printk(KERN_WARNING PREFIX
-			       "Invalid sleep control/status register data:"
-			       " %#x:%#x:%#x %#x:%#x:%#x\n",
-			       fadt->sleep_control.bit_offset,
-			       fadt->sleep_control.bit_width,
-			       fadt->sleep_control.access_width,
-			       fadt->sleep_status.bit_offset,
-			       fadt->sleep_status.bit_width,
-			       fadt->sleep_status.access_width);
-			fadt->sleep_control.address = 0;
-			fadt->sleep_status.address = 0;
-		}
-	}
-
-	if (fadt->flags & ACPI_FADT_HW_REDUCED)
-		goto bad;
-
 	acpi_fadt_copy_address(pm1a_cnt, pm1a_control, pm1_control);
 	acpi_fadt_copy_address(pm1b_cnt, pm1b_control, pm1_control);
 	acpi_fadt_copy_address(pm1a_evt, pm1a_event, pm1_event);
 	acpi_fadt_copy_address(pm1b_evt, pm1b_event, pm1_event);
 
 	printk(KERN_INFO PREFIX
-	       "SLEEP INFO: pm1x_cnt[%d:%"PRIx64",%d:%"PRIx64"], "
-	       "pm1x_evt[%d:%"PRIx64",%d:%"PRIx64"]\n",
-	       acpi_sinfo.pm1a_cnt_blk.space_id,
+	       "ACPI SLEEP INFO: pm1x_cnt[%"PRIx64",%"PRIx64"], "
+	       "pm1x_evt[%"PRIx64",%"PRIx64"]\n",
 	       acpi_sinfo.pm1a_cnt_blk.address,
-	       acpi_sinfo.pm1b_cnt_blk.space_id,
 	       acpi_sinfo.pm1b_cnt_blk.address,
-	       acpi_sinfo.pm1a_evt_blk.space_id,
 	       acpi_sinfo.pm1a_evt_blk.address,
-	       acpi_sinfo.pm1b_evt_blk.space_id,
 	       acpi_sinfo.pm1b_evt_blk.address);
 
 	/* Now FACS... */
@@ -418,8 +374,6 @@ acpi_fadt_parse_sleep_info(struct acpi_table_fadt *fadt)
 		       fadt->facs, facs_pa);
 		facs_pa = (uint64_t)fadt->facs;
 	}
-	if (!facs_pa)
-		goto bad;
 
 	facs = (struct acpi_table_facs *)
 		__acpi_map_table(facs_pa, sizeof(struct acpi_table_facs));
@@ -433,14 +387,14 @@ acpi_fadt_parse_sleep_info(struct acpi_table_fadt *fadt)
 	}
 
 	if (facs->length < 24) {
-		printk(KERN_ERR PREFIX "Invalid FACS table length: %#x",
+		printk(KERN_ERR PREFIX "Invalid FACS table length: 0x%x",
 			facs->length);
 		goto bad;
 	}
 
 	if (facs->length < 64)
 		printk(KERN_WARNING PREFIX
-			"FACS is shorter than ACPI spec allow: %#x",
+			"FACS is shorter than ACPI spec allow: 0x%x",
 			facs->length);
 
 	acpi_sinfo.wakeup_vector = facs_pa + 
@@ -448,14 +402,11 @@ acpi_fadt_parse_sleep_info(struct acpi_table_fadt *fadt)
 	acpi_sinfo.vector_width = 32;
 
 	printk(KERN_INFO PREFIX
-	       "            wakeup_vec[%"PRIx64"], vec_size[%x]\n",
+	       "                 wakeup_vec[%"PRIx64"], vec_size[%x]\n",
 	       acpi_sinfo.wakeup_vector, acpi_sinfo.vector_width);
 	return;
 bad:
-	memset(&acpi_sinfo, 0,
-	       offsetof(struct acpi_sleep_info, sleep_control));
-	memset(&acpi_sinfo.sleep_status + 1, 0,
-	       (long)(&acpi_sinfo + 1) - (long)(&acpi_sinfo.sleep_status + 1));
+	memset(&acpi_sinfo, 0, sizeof(acpi_sinfo));
 }
 #endif
 
@@ -478,23 +429,22 @@ static int __init acpi_parse_fadt(struct acpi_table_header *table)
 	if (fadt->header.revision >= FADT2_REVISION_ID) {
 		/* FADT rev. 2 */
 		if (fadt->xpm_timer_block.space_id ==
-		    ACPI_ADR_SPACE_SYSTEM_IO) {
+		    ACPI_ADR_SPACE_SYSTEM_IO)
 			pmtmr_ioport = fadt->xpm_timer_block.address;
-			pmtmr_width = fadt->xpm_timer_block.bit_width;
-		}
-	}
-	/*
-	 * "X" fields are optional extensions to the original V1.0
-	 * fields, so we must selectively expand V1.0 fields if the
-	 * corresponding X field is zero.
- 	 */
-	if (!pmtmr_ioport) {
+		/*
+		 * "X" fields are optional extensions to the original V1.0
+		 * fields, so we must selectively expand V1.0 fields if the
+		 * corresponding X field is zero.
+	 	 */
+		if (!pmtmr_ioport)
+			pmtmr_ioport = fadt->pm_timer_block;
+	} else {
+		/* FADT rev. 1 */
 		pmtmr_ioport = fadt->pm_timer_block;
-		pmtmr_width = fadt->pm_timer_length == 4 ? 24 : 0;
 	}
 	if (pmtmr_ioport)
-		printk(KERN_INFO PREFIX "PM-Timer IO Port: %#x (%u bits)\n",
-		       pmtmr_ioport, pmtmr_width);
+		printk(KERN_INFO PREFIX "PM-Timer IO Port: %#x\n",
+		       pmtmr_ioport);
 #endif
 
 	acpi_smi_cmd       = fadt->smi_command;
@@ -508,13 +458,14 @@ static int __init acpi_parse_fadt(struct acpi_table_header *table)
 	return 0;
 }
 
+#ifdef	CONFIG_X86_LOCAL_APIC
 /*
  * Parse LAPIC entries in MADT
  * returns 0 on success, < 0 on error
  */
 static int __init acpi_parse_madt_lapic_entries(void)
 {
-	int count, x2count;
+	int count;
 
 	if (!cpu_has_apic)
 		return -ENODEV;
@@ -525,7 +476,7 @@ static int __init acpi_parse_madt_lapic_entries(void)
 	 */
 
 	count =
-	    acpi_table_parse_madt(ACPI_MADT_TYPE_LOCAL_APIC_OVERRIDE,
+	    acpi_table_parse_madt(ACPI_MADT_LAPIC_ADDR_OVR,
 				  acpi_parse_lapic_addr_ovr, 0);
 	if (count < 0) {
 		printk(KERN_ERR PREFIX
@@ -535,35 +486,30 @@ static int __init acpi_parse_madt_lapic_entries(void)
 
 	mp_register_lapic_address(acpi_lapic_addr);
 
-	BUILD_BUG_ON(MAX_APICS != MAX_LOCAL_APIC);
-	count = acpi_table_parse_madt(ACPI_MADT_TYPE_LOCAL_APIC, 
-                                      acpi_parse_lapic, MAX_APICS);
-	x2count = acpi_table_parse_madt(ACPI_MADT_TYPE_LOCAL_X2APIC, 
-                                        acpi_parse_x2apic, MAX_APICS);
-	if (!count && !x2count) {
+	count = acpi_table_parse_madt(ACPI_MADT_LAPIC, acpi_parse_lapic,
+				      MAX_APICS);
+	if (!count) {
 		printk(KERN_ERR PREFIX "No LAPIC entries present\n");
 		/* TBD: Cleanup to allow fallback to MPS */
 		return -ENODEV;
-	} else if (count < 0 || x2count < 0) {
+	} else if (count < 0) {
 		printk(KERN_ERR PREFIX "Error parsing LAPIC entry\n");
 		/* TBD: Cleanup to allow fallback to MPS */
-		return count < 0 ? count : x2count;
+		return count;
 	}
 
 	count =
-	    acpi_table_parse_madt(ACPI_MADT_TYPE_LOCAL_APIC_NMI, 
-                                  acpi_parse_lapic_nmi, 0);
-	x2count =
-	    acpi_table_parse_madt(ACPI_MADT_TYPE_LOCAL_X2APIC_NMI,
-				  acpi_parse_x2apic_nmi, 0);
-	if (count < 0 || x2count < 0) {
+	    acpi_table_parse_madt(ACPI_MADT_LAPIC_NMI, acpi_parse_lapic_nmi, 0);
+	if (count < 0) {
 		printk(KERN_ERR PREFIX "Error parsing LAPIC NMI entry\n");
 		/* TBD: Cleanup to allow fallback to MPS */
-		return count < 0 ? count : x2count;
+		return count;
 	}
 	return 0;
 }
+#endif /* CONFIG_X86_LOCAL_APIC */
 
+#if defined(CONFIG_X86_IO_APIC) /*&& defined(CONFIG_ACPI_INTERPRETER)*/
 /*
  * Parse IOAPIC related entries in MADT
  * returns 0 on success, < 0 on error
@@ -595,7 +541,7 @@ static int __init acpi_parse_madt_ioapic_entries(void)
 	}
 
 	count =
-	    acpi_table_parse_madt(ACPI_MADT_TYPE_IO_APIC, acpi_parse_ioapic,
+	    acpi_table_parse_madt(ACPI_MADT_IOAPIC, acpi_parse_ioapic,
 				  MAX_IO_APICS);
 	if (!count) {
 		printk(KERN_ERR PREFIX "No IOAPIC entries present\n");
@@ -606,8 +552,8 @@ static int __init acpi_parse_madt_ioapic_entries(void)
 	}
 
 	count =
-	    acpi_table_parse_madt(ACPI_MADT_TYPE_INTERRUPT_OVERRIDE,
-                                  acpi_parse_int_src_ovr, MAX_IRQ_SOURCES);
+	    acpi_table_parse_madt(ACPI_MADT_INT_SRC_OVR, acpi_parse_int_src_ovr,
+				  MAX_IRQ_SOURCES);
 	if (count < 0) {
 		printk(KERN_ERR PREFIX
 		       "Error parsing interrupt source overrides entry\n");
@@ -615,12 +561,21 @@ static int __init acpi_parse_madt_ioapic_entries(void)
 		return count;
 	}
 
+#ifdef CONFIG_ACPI_INTERPRETER
+	/*
+	 * If BIOS did not supply an INT_SRC_OVR for the SCI
+	 * pretend we got one so we can set the SCI flags.
+	 */
+	if (!acpi_sci_override_gsi)
+		acpi_sci_ioapic_setup(acpi_fadt.sci_int, 0, 0);
+#endif
+
 	/* Fill in identity legacy mapings where no override */
 	mp_config_acpi_legacy_irqs();
 
 	count =
-	    acpi_table_parse_madt(ACPI_MADT_TYPE_NMI_SOURCE, 
-                                  acpi_parse_nmi_src, MAX_IRQ_SOURCES);
+	    acpi_table_parse_madt(ACPI_MADT_NMI_SRC, acpi_parse_nmi_src,
+				  MAX_IRQ_SOURCES);
 	if (count < 0) {
 		printk(KERN_ERR PREFIX "Error parsing NMI SRC entry\n");
 		/* TBD: Cleanup to allow fallback to MPS */
@@ -629,9 +584,17 @@ static int __init acpi_parse_madt_ioapic_entries(void)
 
 	return 0;
 }
+#else
+static inline int acpi_parse_madt_ioapic_entries(void)
+{
+	return -1;
+}
+#endif /* !(CONFIG_X86_IO_APIC && CONFIG_ACPI_INTERPRETER) */
+
 
 static void __init acpi_process_madt(void)
 {
+#ifdef CONFIG_X86_LOCAL_APIC
 	int error;
 
 	if (!acpi_table_parse(ACPI_SIG_MADT, acpi_parse_madt)) {
@@ -641,7 +604,7 @@ static void __init acpi_process_madt(void)
 		 */
 		error = acpi_parse_madt_lapic_entries();
 		if (!error) {
-			acpi_lapic = true;
+			acpi_lapic = 1;
 			generic_bigsmp_probe();
  
 			/*
@@ -649,9 +612,11 @@ static void __init acpi_process_madt(void)
 			 */
 			error = acpi_parse_madt_ioapic_entries();
 			if (!error) {
-				acpi_ioapic = true;
+				acpi_irq_model = ACPI_IRQ_MODEL_IOAPIC;
+				acpi_irq_balance_set(NULL);
+				acpi_ioapic = 1;
 
-				smp_found_config = true;
+				smp_found_config = 1;
 				clustered_apic_check();
 			}
 		}
@@ -664,7 +629,221 @@ static void __init acpi_process_madt(void)
 			disable_acpi();
 		}
 	}
+#endif
+	return;
 }
+
+extern int acpi_force;
+
+#ifdef __i386__
+
+static int __init disable_acpi_irq(struct dmi_system_id *d)
+{
+	if (!acpi_force) {
+		printk(KERN_NOTICE "%s detected: force use of acpi=noirq\n",
+		       d->ident);
+		acpi_noirq_set();
+	}
+	return 0;
+}
+
+static int __init disable_acpi_pci(struct dmi_system_id *d)
+{
+	if (!acpi_force) {
+		printk(KERN_NOTICE "%s detected: force use of pci=noacpi\n",
+		       d->ident);
+		/*acpi_disable_pci();*/
+	}
+	return 0;
+}
+
+static int __init dmi_disable_acpi(struct dmi_system_id *d)
+{
+	if (!acpi_force) {
+		printk(KERN_NOTICE "%s detected: acpi off\n", d->ident);
+		disable_acpi();
+	} else {
+		printk(KERN_NOTICE
+		       "Warning: DMI blacklist says broken, but acpi forced\n");
+	}
+	return 0;
+}
+
+/*
+ * Limit ACPI to CPU enumeration for HT
+ */
+static int __init force_acpi_ht(struct dmi_system_id *d)
+{
+	if (!acpi_force) {
+		printk(KERN_NOTICE "%s detected: force use of acpi=ht\n",
+		       d->ident);
+		disable_acpi();
+		acpi_ht = 1;
+	} else {
+		printk(KERN_NOTICE
+		       "Warning: acpi=force overrules DMI blacklist: acpi=ht\n");
+	}
+	return 0;
+}
+
+/*
+ * If your system is blacklisted here, but you find that acpi=force
+ * works for you, please contact acpi-devel@sourceforge.net
+ */
+static struct dmi_system_id __initdata acpi_dmi_table[] = {
+	/*
+	 * Boxes that need ACPI disabled
+	 */
+	{
+	 .callback = dmi_disable_acpi,
+	 .ident = "IBM Thinkpad",
+	 .matches = {
+		     DMI_MATCH(DMI_BOARD_VENDOR, "IBM"),
+		     DMI_MATCH(DMI_BOARD_NAME, "2629H1G"),
+		     },
+	 },
+
+	/*
+	 * Boxes that need acpi=ht
+	 */
+	{
+	 .callback = force_acpi_ht,
+	 .ident = "FSC Primergy T850",
+	 .matches = {
+		     DMI_MATCH(DMI_SYS_VENDOR, "FUJITSU SIEMENS"),
+		     DMI_MATCH(DMI_PRODUCT_NAME, "PRIMERGY T850"),
+		     },
+	 },
+	{
+	 .callback = force_acpi_ht,
+	 .ident = "DELL GX240",
+	 .matches = {
+		     DMI_MATCH(DMI_BOARD_VENDOR, "Dell Computer Corporation"),
+		     DMI_MATCH(DMI_BOARD_NAME, "OptiPlex GX240"),
+		     },
+	 },
+	{
+	 .callback = force_acpi_ht,
+	 .ident = "HP VISUALIZE NT Workstation",
+	 .matches = {
+		     DMI_MATCH(DMI_BOARD_VENDOR, "Hewlett-Packard"),
+		     DMI_MATCH(DMI_PRODUCT_NAME, "HP VISUALIZE NT Workstation"),
+		     },
+	 },
+	{
+	 .callback = force_acpi_ht,
+	 .ident = "Compaq Workstation W8000",
+	 .matches = {
+		     DMI_MATCH(DMI_SYS_VENDOR, "Compaq"),
+		     DMI_MATCH(DMI_PRODUCT_NAME, "Workstation W8000"),
+		     },
+	 },
+	{
+	 .callback = force_acpi_ht,
+	 .ident = "ASUS P4B266",
+	 .matches = {
+		     DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK Computer INC."),
+		     DMI_MATCH(DMI_BOARD_NAME, "P4B266"),
+		     },
+	 },
+	{
+	 .callback = force_acpi_ht,
+	 .ident = "ASUS P2B-DS",
+	 .matches = {
+		     DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK Computer INC."),
+		     DMI_MATCH(DMI_BOARD_NAME, "P2B-DS"),
+		     },
+	 },
+	{
+	 .callback = force_acpi_ht,
+	 .ident = "ASUS CUR-DLS",
+	 .matches = {
+		     DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK Computer INC."),
+		     DMI_MATCH(DMI_BOARD_NAME, "CUR-DLS"),
+		     },
+	 },
+	{
+	 .callback = force_acpi_ht,
+	 .ident = "ABIT i440BX-W83977",
+	 .matches = {
+		     DMI_MATCH(DMI_BOARD_VENDOR, "ABIT <http://www.abit.com>"),
+		     DMI_MATCH(DMI_BOARD_NAME, "i440BX-W83977 (BP6)"),
+		     },
+	 },
+	{
+	 .callback = force_acpi_ht,
+	 .ident = "IBM Bladecenter",
+	 .matches = {
+		     DMI_MATCH(DMI_BOARD_VENDOR, "IBM"),
+		     DMI_MATCH(DMI_BOARD_NAME, "IBM eServer BladeCenter HS20"),
+		     },
+	 },
+	{
+	 .callback = force_acpi_ht,
+	 .ident = "IBM eServer xSeries 360",
+	 .matches = {
+		     DMI_MATCH(DMI_BOARD_VENDOR, "IBM"),
+		     DMI_MATCH(DMI_BOARD_NAME, "eServer xSeries 360"),
+		     },
+	 },
+	{
+	 .callback = force_acpi_ht,
+	 .ident = "IBM eserver xSeries 330",
+	 .matches = {
+		     DMI_MATCH(DMI_BOARD_VENDOR, "IBM"),
+		     DMI_MATCH(DMI_BOARD_NAME, "eserver xSeries 330"),
+		     },
+	 },
+	{
+	 .callback = force_acpi_ht,
+	 .ident = "IBM eserver xSeries 440",
+	 .matches = {
+		     DMI_MATCH(DMI_BOARD_VENDOR, "IBM"),
+		     DMI_MATCH(DMI_PRODUCT_NAME, "eserver xSeries 440"),
+		     },
+	 },
+
+	/*
+	 * Boxes that need ACPI PCI IRQ routing disabled
+	 */
+	{
+	 .callback = disable_acpi_irq,
+	 .ident = "ASUS A7V",
+	 .matches = {
+		     DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK Computer INC"),
+		     DMI_MATCH(DMI_BOARD_NAME, "<A7V>"),
+		     /* newer BIOS, Revision 1011, does work */
+		     DMI_MATCH(DMI_BIOS_VERSION,
+			       "ASUS A7V ACPI BIOS Revision 1007"),
+		     },
+	 },
+
+	/*
+	 * Boxes that need ACPI PCI IRQ routing and PCI scan disabled
+	 */
+	{			/* _BBN 0 bug */
+	 .callback = disable_acpi_pci,
+	 .ident = "ASUS PR-DLS",
+	 .matches = {
+		     DMI_MATCH(DMI_BOARD_VENDOR, "ASUSTeK Computer INC."),
+		     DMI_MATCH(DMI_BOARD_NAME, "PR-DLS"),
+		     DMI_MATCH(DMI_BIOS_VERSION,
+			       "ASUS PR-DLS ACPI BIOS Revision 1010"),
+		     DMI_MATCH(DMI_BIOS_DATE, "03/21/2003")
+		     },
+	 },
+	{
+	 .callback = disable_acpi_pci,
+	 .ident = "Acer TravelMate 36x Laptop",
+	 .matches = {
+		     DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
+		     DMI_MATCH(DMI_PRODUCT_NAME, "TravelMate 360"),
+		     },
+	 },
+	{}
+};
+
+#endif				/* __i386__ */
 
 /*
  * acpi_boot_table_init() and acpi_boot_init()
@@ -677,9 +856,11 @@ static void __init acpi_process_madt(void)
  * other side effects.
  *
  * side effects of acpi_boot_init:
- *	acpi_lapic = true if LAPIC found
- *	acpi_ioapic = true if IOAPIC found
- *	if (acpi_lapic && acpi_ioapic) smp_found_config = true;
+ *	acpi_lapic = 1 if LAPIC found
+ *	acpi_ioapic = 1 if IOAPIC found
+ *	if (acpi_lapic && acpi_ioapic) smp_found_config = 1;
+ *	if acpi_blacklisted() acpi_disabled = 1;
+ *	acpi_irq_model=...
  *	...
  *
  * return value: (currently ignored)
@@ -690,6 +871,10 @@ static void __init acpi_process_madt(void)
 int __init acpi_boot_table_init(void)
 {
 	int error;
+
+#ifdef __i386__
+	dmi_check_system(acpi_dmi_table);
+#endif
 
 	/*
 	 * If acpi_disabled, bail out
@@ -707,6 +892,22 @@ int __init acpi_boot_table_init(void)
 		return error;
 	}
 
+	acpi_table_parse(ACPI_SIG_BOOT, acpi_parse_sbf);
+
+	/*
+	 * blacklist may disable ACPI entirely
+	 */
+	error = acpi_blacklisted();
+	if (error) {
+		if (acpi_force) {
+			printk(KERN_WARNING PREFIX "acpi=force override\n");
+		} else {
+			printk(KERN_WARNING PREFIX "Disabling ACPI support\n");
+			disable_acpi();
+			return error;
+		}
+	}
+
 	return 0;
 }
 
@@ -718,6 +919,8 @@ int __init acpi_boot_init(void)
 	 */
 	if (acpi_disabled && !acpi_ht)
 		return 1;
+
+	acpi_table_parse(ACPI_SIG_BOOT, acpi_parse_sbf);
 
 	/*
 	 * set sci_int and PM timer address
@@ -733,11 +936,21 @@ int __init acpi_boot_init(void)
 
 	acpi_dmar_init();
 
-	erst_init();
-
-	acpi_hest_init();
-
-	acpi_table_parse(ACPI_SIG_BGRT, acpi_invalidate_bgrt);
+	acpi_mmcfg_init();
 
 	return 0;
+}
+
+unsigned int acpi_get_processor_id(unsigned int cpu)
+{
+	unsigned int acpiid, apicid;
+
+	if ((apicid = x86_cpu_to_apicid[cpu]) == 0xff)
+		return 0xff;
+
+	for (acpiid = 0; acpiid < ARRAY_SIZE(x86_acpiid_to_apicid); acpiid++)
+		if (x86_acpiid_to_apicid[acpiid] == apicid)
+			return acpiid;
+
+	return 0xff;
 }

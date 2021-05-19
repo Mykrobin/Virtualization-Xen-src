@@ -12,7 +12,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  * Copyright (C) IBM Corporation, 2001
  *
@@ -35,9 +36,6 @@
 #include <xen/spinlock.h>
 #include <xen/percpu.h>
 #include <xen/cpumask.h>
-#include <xen/preempt.h>
-
-#define __rcu
 
 /**
  * struct rcu_head - callback structure for use with RCU
@@ -55,6 +53,60 @@ struct rcu_head {
        (ptr)->next = NULL; (ptr)->func = NULL; \
 } while (0)
 
+
+
+/* Global control variables for rcupdate callback mechanism. */
+struct rcu_ctrlblk {
+    long cur;           /* Current batch number.                      */
+    long completed;     /* Number of the last completed batch         */
+    int  next_pending;  /* Is the next batch already waiting?         */
+
+    spinlock_t  lock __cacheline_aligned;
+    cpumask_t   cpumask; /* CPUs that need to switch in order    */
+    /* for current batch to proceed.        */
+} __cacheline_aligned;
+
+/* Is batch a before batch b ? */
+static inline int rcu_batch_before(long a, long b)
+{
+    return (a - b) < 0;
+}
+
+/* Is batch a after batch b ? */
+static inline int rcu_batch_after(long a, long b)
+{
+    return (a - b) > 0;
+}
+
+/*
+ * Per-CPU data for Read-Copy Update.
+ * nxtlist - new callbacks are added here
+ * curlist - current batch for which quiescent cycle started if any
+ */
+struct rcu_data {
+    /* 1) quiescent state handling : */
+    long quiescbatch;    /* Batch # for grace period */
+    int  qs_pending;     /* core waits for quiesc state */
+
+    /* 2) batch handling */
+    long            batch;            /* Batch # for current RCU batch */
+    struct rcu_head *nxtlist;
+    struct rcu_head **nxttail;
+    long            qlen;             /* # of queued callbacks */
+    struct rcu_head *curlist;
+    struct rcu_head **curtail;
+    struct rcu_head *donelist;
+    struct rcu_head **donetail;
+    long            blimit;           /* Upper limit on a processed batch */
+    int cpu;
+    struct rcu_head barrier;
+#ifdef CONFIG_SMP
+    long            last_rs_qlen;     /* qlen during the last resched */
+#endif
+};
+
+DECLARE_PER_CPU(struct rcu_data, rcu_data);
+extern struct rcu_ctrlblk rcu_ctrlblk;
 
 int rcu_pending(int cpu);
 int rcu_needs_cpu(int cpu);
@@ -93,14 +145,14 @@ typedef struct _rcu_read_lock rcu_read_lock_t;
  *
  * It is illegal to block while in an RCU read-side critical section.
  */
-#define rcu_read_lock(x)       ({ ((void)(x)); preempt_disable(); })
+#define rcu_read_lock(x)       do { } while (0)
 
 /**
  * rcu_read_unlock - marks the end of an RCU read-side critical section.
  *
  * See rcu_read_lock() for more information.
  */
-#define rcu_read_unlock(x)     ({ ((void)(x)); preempt_enable(); })
+#define rcu_read_unlock(x)     do { } while (0)
 
 /*
  * So where is rcu_write_lock()?  It does not exist, as there is no
@@ -138,18 +190,11 @@ typedef struct _rcu_read_lock rcu_read_lock_t;
 #define rcu_assign_pointer(p, v) ({ smp_wmb(); (p) = (v); })
 
 void rcu_init(void);
+void __devinit rcu_online_cpu(int cpu);
 void rcu_check_callbacks(int cpu);
 
 /* Exported interfaces */
-void call_rcu(struct rcu_head *head, 
-              void (*func)(struct rcu_head *head));
-
-int rcu_barrier(void);
-
-void rcu_idle_enter(unsigned int cpu);
-void rcu_idle_exit(unsigned int cpu);
-
-void rcu_idle_timer_start(void);
-void rcu_idle_timer_stop(void);
+void fastcall call_rcu(struct rcu_head *head, 
+                       void (*func)(struct rcu_head *head));
 
 #endif /* __XEN_RCUPDATE_H */

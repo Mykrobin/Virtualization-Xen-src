@@ -1,42 +1,28 @@
 
 override XEN_TARGET_ARCH = x86_32
-XEN_ROOT = $(CURDIR)/../../..
+XEN_ROOT = ../../..
 include $(XEN_ROOT)/tools/Rules.mk
 include Config
 
-ifeq ($(GIT_HTTP),y)
-IPXE_GIT_URL ?= http://git.ipxe.org/ipxe.git
-else
-IPXE_GIT_URL ?= git://git.ipxe.org/ipxe.git
-endif
+D=gpxe
+T=gpxe-git-snapshot.tar.gz
 
-IPXE_GIT_TAG := 356f6c1b64d7a97746d1816cef8ca22bdd8d0b5d
-
-IPXE_TARBALL_URL ?= $(XEN_EXTFILES_URL)/ipxe-git-$(IPXE_GIT_TAG).tar.gz
-
-D=ipxe
-T=ipxe.tar.gz
-
-ROMS = $(addprefix $D/src/bin/, $(addsuffix .rom, $(ETHERBOOT_NICS)))
-
-.NOTPARALLEL:
+ROMS = $(addprefix $D/src/bin/, $(addsuffix .rom, $(NICS)))
 
 .PHONY: all
-all: $(ROMS)
+all: eb-roms.h
 
-%.rom: $D/src/arch/i386/Makefile
+%.rom: $D/src/arch/i386/Config
 	$(MAKE) -C $D/src bin/$(*F).rom
 
-$T:
-	if ! $(FETCHER) _$T $(IPXE_TARBALL_URL); then \
-		$(GIT) clone $(IPXE_GIT_URL) $D.git; \
-		(cd $D.git && $(GIT) archive --format=tar --prefix=$D/ \
-		$(IPXE_GIT_TAG) | gzip -n >../_$T); \
-		rm -rf $D.git; \
-	fi
-	mv _$T $T
+eb-roms.h.new: $(ROMS)
+	cat $^ | ../hvmloader/mkhex etherboot >$@
 
-$D/src/arch/i386/Makefile: $T Config
+eb-roms.h: Config
+	$(MAKE) $@.new
+	mv -f $@.new $@
+
+$D/src/arch/i386/Config: $T Config
 	rm -rf $D
 	gzip -dc $T | tar xf -
 	for i in $$(cat patches/series) ; do                 \
@@ -44,13 +30,9 @@ $D/src/arch/i386/Makefile: $T Config
 	done
 	cat Config >>$@
 
-$D/src/bin/NIC: $D/src/arch/i386/Makefile
+$D/src/bin/NIC: $D/src/arch/i386/Config
 	$(MAKE) -C $D/src bin/NIC
 
 .PHONY: clean
 clean:
-	rm -rf $D $D.git *~ _$T $T
-
-.PHONY: distclean
-distclean: clean
-	rm -rf $T
+	rm -rf $D *~

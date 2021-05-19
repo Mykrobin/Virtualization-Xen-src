@@ -14,12 +14,11 @@
  *  GNU General Public License for more details.
  * 
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 \*/
 
-#include <sys/file.h>
 #include <sys/types.h>
-#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <stdio.h>
@@ -34,20 +33,17 @@
 #include <getopt.h>
 #include <sys/select.h>
 #include <err.h>
+#include <errno.h>
 #include <string.h>
 #ifdef __sun__
 #include <sys/stropts.h>
 #endif
 
-#include <xenstore.h>
-#include "xenctrl.h"
-#include "_paths.h"
+#include "xs.h"
 
 #define ESCAPE_CHARACTER 0x1d
 
 static volatile sig_atomic_t received_signal = 0;
-static char lockfile[sizeof (XEN_LOCK_DIR "/xenconsole.") + 8] = { 0 };
-static int lockfd = -1;
 
 static void sighandler(int signum)
 {
@@ -76,8 +72,6 @@ static void usage(const char *program) {
 	       "\n"
 	       "  -h, --help       display this help and exit\n"
 	       "  -n, --num N      use console number N\n"
-	       "  --type TYPE      console type. must be 'pv', 'serial' or 'vuart'\n"
-	       "  --start-notify-fd N file descriptor used to notify parent\n"
 	       , program);
 }
 
@@ -120,12 +114,15 @@ static int get_pty_fd(struct xs_handle *xs, char *path, int seconds)
 			/* We only watch for one thing, so no need to 
 			 * disambiguate: just read the pty path */
 			pty_path = xs_read(xs, XBT_NULL, path, &len);
-			if (pty_path != NULL && pty_path[0] != '\0') {
+			if (pty_path != NULL) {
+				if (access(pty_path, R_OK|W_OK) != 0)
+					continue;
 				pty_fd = open(pty_path, O_RDWR | O_NOCTTY);
-				if (pty_fd == -1)
-					warn("Could not open tty `%s'", pty_path);
+				if (pty_fd == -1) 
+					err(errno, "Could not open tty `%s'", 
+					    pty_path);
+				free(pty_path);
 			}
-			free(pty_path);
 		}
 	} while (pty_fd == -1 && (now = time(NULL)) < start + seconds);
 
@@ -174,19 +171,16 @@ static void restore_term(int fd, struct termios *old)
 	tcsetattr(fd, TCSANOW, old);
 }
 
-static int console_loop(int fd, struct xs_handle *xs, char *pty_path,
-		        bool interactive)
+static int console_loop(int fd, struct xs_handle *xs, char *pty_path)
 {
-	int ret, xs_fd = xs_fileno(xs), max_fd = -1;
+	int ret, xs_fd = xs_fileno(xs), max_fd;
 
 	do {
 		fd_set fds;
 
 		FD_ZERO(&fds);
-		if (interactive) {
-			FD_SET(STDIN_FILENO, &fds);
-			max_fd = STDIN_FILENO;
-		}
+		FD_SET(STDIN_FILENO, &fds);
+		max_fd = STDIN_FILENO;
 		FD_SET(xs_fd, &fds);
 		if (xs_fd > max_fd) max_fd = xs_fd;
 		if (fd != -1) FD_SET(fd, &fds);
@@ -260,67 +254,6 @@ static int console_loop(int fd, struct xs_handle *xs, char *pty_path,
 	return 0;
 }
 
-typedef enum {
-       CONSOLE_INVAL,
-       CONSOLE_PV,
-       CONSOLE_SERIAL,
-       CONSOLE_VUART,
-} console_type;
-
-static struct termios stdin_old_attr;
-
-static void restore_term_stdin(void)
-{
-	restore_term(STDIN_FILENO, &stdin_old_attr);
-}
-
-/* The following locking strategy is based on that from
- * libxl__domain_userdata_lock(), with the difference that we want to fail if we
- * cannot acquire the lock rather than wait indefinitely.
- */
-static void console_lock(int domid)
-{
-	struct stat stab, fstab;
-	int fd;
-
-	snprintf(lockfile, sizeof lockfile, "%s%d", XEN_LOCK_DIR "/xenconsole.", domid);
-
-	while (true) {
-		fd = open(lockfile, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
-		if (fd < 0)
-			err(errno, "Could not open %s", lockfile);
-
-		while (flock(fd, LOCK_EX | LOCK_NB)) {
-			if (errno == EINTR)
-				continue;
-			else
-				err(errno, "Could not lock %s", lockfile);
-		}
-		if (fstat(fd, &fstab))
-			err(errno, "Could not fstat %s", lockfile);
-		if (stat(lockfile, &stab)) {
-			if (errno != ENOENT)
-				err(errno, "Could not stat %s", lockfile);
-		} else {
-			if (stab.st_dev == fstab.st_dev && stab.st_ino == fstab.st_ino)
-				break;
-		}
-
-		close(fd);
-	}
-
-	lockfd = fd;
-	return;
-}
-
-static void console_unlock(void)
-{
-	if (lockfile[0] && lockfd != -1) {
-		unlink(lockfile);
-		close(lockfd);
-	}
-}
-
 int main(int argc, char **argv)
 {
 	struct termios attr;
@@ -329,23 +262,16 @@ int main(int argc, char **argv)
 	int ch;
 	unsigned int num = 0;
 	int opt_ind=0;
-	int start_notify_fd = -1;
 	struct option lopt[] = {
-		{ "type",     1, 0, 't' },
 		{ "num",     1, 0, 'n' },
 		{ "help",    0, 0, 'h' },
-		{ "start-notify-fd", 1, 0, 's' },
-		{ "interactive", 0, 0, 'i' },
 		{ 0 },
 
 	};
-	char *dom_path = NULL, *path = NULL, *test = NULL;
+	char *dom_path = NULL, *path = NULL;
 	int spty, xsfd;
 	struct xs_handle *xs;
 	char *end;
-	console_type type = CONSOLE_INVAL;
-	bool interactive = 0;
-	char *console_names = "serial, pv, vuart";
 
 	while((ch = getopt_long(argc, argv, sopt, lopt, &opt_ind)) != -1) {
 		switch(ch) {
@@ -355,26 +281,6 @@ int main(int argc, char **argv)
 			break;
 		case 'n':
 			num = atoi(optarg);
-			break;
-		case 't':
-			if (!strcmp(optarg, "serial"))
-				type = CONSOLE_SERIAL;
-			else if (!strcmp(optarg, "pv"))
-				type = CONSOLE_PV;
-			else if (!strcmp(optarg, "vuart"))
-				type = CONSOLE_VUART;
-			else {
-				fprintf(stderr, "Invalid type argument\n");
-				fprintf(stderr, "Console types supported are: %s\n",
-					console_names);
-				exit(EINVAL);
-			}
-			break;
-		case 's':
-			start_notify_fd = atoi(optarg);
-			break;
-		case 'i':
-			interactive = 1;
 			break;
 		default:
 			fprintf(stderr, "Invalid argument\n");
@@ -408,44 +314,10 @@ int main(int argc, char **argv)
 	dom_path = xs_get_domain_path(xs, domid);
 	if (dom_path == NULL)
 		err(errno, "xs_get_domain_path()");
-	if (type == CONSOLE_INVAL) {
-		xc_dominfo_t xcinfo;
-		xc_interface *xc_handle = xc_interface_open(0,0,0);
-		if (xc_handle == NULL)
-			err(errno, "Could not open xc interface");
-		if ( (xc_domain_getinfo(xc_handle, domid, 1, &xcinfo) != 1) ||
-		     (xcinfo.domid != domid) ) {
-			xc_interface_close(xc_handle);
-			err(errno, "Failed to get domain information");
-		}
-		/* default to pv console for pv guests and serial for hvm guests */
-		if (xcinfo.hvm)
-			type = CONSOLE_SERIAL;
-		else
-			type = CONSOLE_PV;
-		xc_interface_close(xc_handle);
-	}
-	path = malloc(strlen(dom_path) + strlen("/device/console/0/tty") + 5);
+	path = malloc(strlen(dom_path) + strlen("/serial/0/tty") + 5);
 	if (path == NULL)
 		err(ENOMEM, "malloc");
-	if (type == CONSOLE_SERIAL) {
-		snprintf(path, strlen(dom_path) + strlen("/serial/0/tty") + 5, "%s/serial/%d/tty", dom_path, num);
-		test = xs_read(xs, XBT_NULL, path, NULL);
-		free(test);
-		if (test == NULL)
-			type = CONSOLE_PV;
-	}
-	if (type == CONSOLE_PV) {
-
-		if (num == 0)
-			snprintf(path, strlen(dom_path) + strlen("/console/tty") + 1, "%s/console/tty", dom_path);
-		else
-			snprintf(path, strlen(dom_path) + strlen("/device/console/%d/tty") + 5, "%s/device/console/%d/tty", dom_path, num);
-	}
-	if (type == CONSOLE_VUART) {
-		snprintf(path, strlen(dom_path) + strlen("/vuart/0/tty") + 1,
-			 "%s/vuart/0/tty", dom_path);
-	}
+	snprintf(path, strlen(dom_path) + strlen("/serial/0/tty") + 5, "%s/serial/%d/tty", dom_path, num);
 
 	/* FIXME consoled currently does not assume domain-0 doesn't have a
 	   console which is good when we break domain-0 up.  To keep us
@@ -455,9 +327,6 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Can't specify Domain-0\n");
 		exit(EINVAL);
 	}
-
-	console_lock(domid);
-	atexit(console_unlock);
 
 	/* Set a watch on this domain's console pty */
 	if (!xs_watch(xs, path, ""))
@@ -474,28 +343,9 @@ int main(int argc, char **argv)
 	}
 
 	init_term(spty, &attr);
-	if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
-		interactive = 1;
-		init_term(STDIN_FILENO, &stdin_old_attr);
-		atexit(restore_term_stdin); /* if this fails, oh dear */
-	}
-
-	if (start_notify_fd != -1) {
-		/* Write 0x00 to notify parent about client's readiness */
-		static const char msg[] = { 0x00 };
-		int r;
-
-		do {
-			r = write(start_notify_fd, msg, 1);
-		} while ((r == -1 && errno == EINTR) || r == 0);
-
-		if (r == -1)
-			err(errno, "Could not notify parent with fd %d",
-			    start_notify_fd);
-		close(start_notify_fd);
-	}
-
-	console_loop(spty, xs, path, interactive);
+	init_term(STDIN_FILENO, &attr);
+	console_loop(spty, xs, path);
+	restore_term(STDIN_FILENO, &attr);
 
 	free(path);
 	free(dom_path);

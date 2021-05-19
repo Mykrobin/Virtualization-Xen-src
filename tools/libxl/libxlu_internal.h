@@ -17,67 +17,32 @@
 #define LIBXLU_INTERNAL_H
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <errno.h>
 #include <string.h>
 #include <assert.h>
-#include <regex.h>
+
+#define XLU_ConfigList XLU_ConfigSetting
 
 #include "libxlutil.h"
 
-struct XLU_ConfigList {
-    int avalues; /* available slots */
-    int nvalues; /* actual occupied slots */
-    XLU_ConfigValue **values;
-};
-
-typedef struct YYLTYPE
-{
-  int first_line;
-  int first_column;
-  int last_line;
-  int last_column;
-} YYLTYPE;
-#define YYLTYPE_IS_DECLARED
-
-struct XLU_ConfigValue {
-    enum XLU_ConfigValueType type;
-    union {
-        char *string;
-        XLU_ConfigList list;
-    } u;
-    YYLTYPE loc;
-};
-
-typedef struct XLU_ConfigSetting { /* transparent */
+struct XLU_ConfigSetting { /* transparent */
     struct XLU_ConfigSetting *next;
     char *name;
-    XLU_ConfigValue *value;
+    int nvalues, avalues; /* lists have avalues>1 */
+    char **values;
     int lineno;
-} XLU_ConfigSetting;
+};
 
 struct XLU_Config {
     XLU_ConfigSetting *settings;
     FILE *report;
-    char *config_source;
+    char *filename;
 };
 
 typedef struct {
     XLU_Config *cfg;
-    int err, lexerrlineno, likely_python;
+    int err, lexerrlineno;
     void *scanner;
 } CfgParseContext;
 
-
-#define STRINGIFY(x) #x
-#define TOSTRING(x) STRINGIFY(x)
-
 #endif /*LIBXLU_INTERNAL_H*/
-
-/*
- * Local variables:
- * mode: C
- * c-basic-offset: 4
- * indent-tabs-mode: nil
- * End:
- */

@@ -28,9 +28,7 @@
 #include <blkfront.h>
 #include <netfront.h>
 #include <fbfront.h>
-#include <tpmfront.h>
 #include <shared.h>
-#include <byteswap.h>
 
 #include "mini-os.h"
 
@@ -53,32 +51,8 @@ static unsigned long *pages_mfns;
 static xen_pfn_t *pages_moved2pfns;
 static unsigned long allocated;
 
-int pin_table(xc_interface *xc_handle, unsigned int type, unsigned long mfn,
+int pin_table(int xc_handle, unsigned int type, unsigned long mfn,
               domid_t dom);
-
-#define TPM_TAG_RQU_COMMAND 0xC1
-#define TPM_ORD_Extend 20
-
-struct pcr_extend_cmd {
-	uint16_t tag;
-	uint32_t size;
-	uint32_t ord;
-
-	uint32_t pcr;
-	unsigned char hash[20];
-} __attribute__((packed));
-
-struct pcr_extend_rsp {
-	uint16_t tag;
-	uint32_t size;
-	uint32_t status;
-
-	unsigned char hash[20];
-} __attribute__((packed));
-
-/* Not imported from polarssl's header since the prototype unhelpfully defines
- * the input as unsigned char, which causes pointer type mismatches */
-void sha1(const void *input, size_t ilen, unsigned char output[20]);
 
 /* We need mfn to appear as target_pfn, so exchange with the MFN there */
 static void do_exchange(struct xc_dom_image *dom, xen_pfn_t target_pfn, xen_pfn_t source_mfn)
@@ -100,9 +74,9 @@ static void do_exchange(struct xc_dom_image *dom, xen_pfn_t target_pfn, xen_pfn_
     dom->p2m_host[target_pfn] = source_mfn;
 }
 
-int kexec_allocate(struct xc_dom_image *dom)
+int kexec_allocate(struct xc_dom_image *dom, xen_vaddr_t up_to)
 {
-    unsigned long new_allocated = dom->pfn_alloc_end - dom->rambase_pfn;
+    unsigned long new_allocated = (up_to - dom->parms.virt_base) / PAGE_SIZE;
     unsigned long i;
 
     pages = realloc(pages, new_allocated * sizeof(*pages));
@@ -143,79 +117,13 @@ int kexec_allocate(struct xc_dom_image *dom)
     return 0;
 }
 
-/* Filled from mini-os command line or left as NULL */
-char *vtpm_label;
-
-static void tpm_hash2pcr(struct xc_dom_image *dom, char *cmdline)
-{
-	struct tpmfront_dev* tpm = init_tpmfront(NULL);
-	struct pcr_extend_rsp *resp;
-	size_t resplen = 0;
-	struct pcr_extend_cmd cmd;
-	int rv;
-
-	/*
-	 * If vtpm_label was specified on the command line, require a vTPM to be
-	 * attached and for the domain providing the vTPM to have the given
-	 * label.
-	 */
-	if (vtpm_label) {
-		char ctx[128];
-		if (!tpm) {
-			printf("No TPM found and vtpm_label specified, aborting!\n");
-			do_exit();
-		}
-		rv = evtchn_get_peercontext(tpm->evtchn, ctx, sizeof(ctx) - 1);
-		if (rv < 0) {
-			printf("Could not verify vtpm_label: %d\n", rv);
-			do_exit();
-		}
-		ctx[127] = 0;
-		rv = strcmp(ctx, vtpm_label);
-		if (rv && vtpm_label[0] == '*') {
-			int match_len = strlen(vtpm_label) - 1;
-			int offset = strlen(ctx) - match_len;
-			if (offset > 0)
-				rv = strcmp(ctx + offset, vtpm_label + 1);
-		}
-
-		if (rv) {
-			printf("Mismatched vtpm_label: '%s' != '%s'\n", ctx, vtpm_label);
-			do_exit();
-		}
-	} else if (!tpm) {
-		return;
-	}
-
-	cmd.tag = bswap_16(TPM_TAG_RQU_COMMAND);
-	cmd.size = bswap_32(sizeof(cmd));
-	cmd.ord = bswap_32(TPM_ORD_Extend);
-	cmd.pcr = bswap_32(4); // PCR #4 for kernel
-	sha1(dom->kernel_blob, dom->kernel_size, cmd.hash);
-
-	rv = tpmfront_cmd(tpm, (void*)&cmd, sizeof(cmd), (void*)&resp, &resplen);
-	ASSERT(rv == 0 && resp->status == 0);
-
-	cmd.pcr = bswap_32(5); // PCR #5 for cmdline
-	sha1(cmdline, strlen(cmdline), cmd.hash);
-	rv = tpmfront_cmd(tpm, (void*)&cmd, sizeof(cmd), (void*)&resp, &resplen);
-	ASSERT(rv == 0 && resp->status == 0);
-
-	cmd.pcr = bswap_32(5); // PCR #5 for initrd
-	sha1(dom->modules[0].blob, dom->modules[0].size, cmd.hash);
-	rv = tpmfront_cmd(tpm, (void*)&cmd, sizeof(cmd), (void*)&resp, &resplen);
-	ASSERT(rv == 0 && resp->status == 0);
-
-	shutdown_tpmfront(tpm);
-}
-
 void kexec(void *kernel, long kernel_size, void *module, long module_size, char *cmdline, unsigned long flags)
 {
     struct xc_dom_image *dom;
     int rc;
     domid_t domid = DOMID_SELF;
     xen_pfn_t pfn;
-    xc_interface *xc_handle;
+    int xc_handle;
     unsigned long i;
     void *seg;
     xen_pfn_t boot_page_mfn = virt_to_mfn(&_boot_page);
@@ -224,72 +132,62 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
     unsigned long nr_m2p_updates;
 
     DEBUG("booting with cmdline %s\n", cmdline);
-    xc_handle = xc_interface_open(0,0,0);
+    xc_handle = xc_interface_open();
 
-    dom = xc_dom_allocate(xc_handle, cmdline, features);
+    dom = xc_dom_allocate(cmdline, features);
     dom->allocate = kexec_allocate;
-
-    /* We are using guest owned memory, therefore no limits. */
-    xc_dom_kernel_max_size(dom, 0);
-    xc_dom_module_max_size(dom, 0);
 
     dom->kernel_blob = kernel;
     dom->kernel_size = kernel_size;
 
-    xc_dom_module_mem(dom, module, module_size, NULL);
+    dom->ramdisk_blob = module;
+    dom->ramdisk_size = module_size;
 
     dom->flags = flags;
     dom->console_evtchn = start_info.console.domU.evtchn;
     dom->xenstore_evtchn = start_info.store_evtchn;
 
-    tpm_hash2pcr(dom, cmdline);
-
     if ( (rc = xc_dom_boot_xen_init(dom, xc_handle, domid)) != 0 ) {
-        printk("xc_dom_boot_xen_init returned %d\n", rc);
+        grub_printf("xc_dom_boot_xen_init returned %d\n", rc);
         errnum = ERR_BOOT_FAILURE;
         goto out;
     }
     if ( (rc = xc_dom_parse_image(dom)) != 0 ) {
-        printk("xc_dom_parse_image returned %d\n", rc);
+        grub_printf("xc_dom_parse_image returned %d\n", rc);
         errnum = ERR_BOOT_FAILURE;
         goto out;
     }
 
 #ifdef __i386__
     if (strcmp(dom->guest_type, "xen-3.0-x86_32p")) {
-        printk("can only boot x86 32 PAE kernels, not %s\n", dom->guest_type);
+        grub_printf("can only boot x86 32 PAE kernels, not %s\n", dom->guest_type);
         errnum = ERR_EXEC_FORMAT;
         goto out;
     }
 #endif
 #ifdef __x86_64__
     if (strcmp(dom->guest_type, "xen-3.0-x86_64")) {
-        printk("can only boot x86 64 kernels, not %s\n", dom->guest_type);
+        grub_printf("can only boot x86 64 kernels, not %s\n", dom->guest_type);
         errnum = ERR_EXEC_FORMAT;
         goto out;
     }
 #endif
 
     /* equivalent of xc_dom_mem_init */
-    if (xc_dom_set_arch_hooks(dom)) {
-        printk("xc_dom_set_arch_hooks failed\n");
-        errnum = ERR_EXEC_FORMAT;
-        goto out;
-    }
+    dom->arch_hooks = xc_dom_find_arch_hooks(dom->guest_type);
     dom->total_pages = start_info.nr_pages;
 
     /* equivalent of arch_setup_meminit */
-    dom->p2m_size = dom->total_pages;
 
     /* setup initial p2m */
-    dom->p2m_host = malloc(sizeof(*dom->p2m_host) * dom->p2m_size);
+    dom->p2m_host = malloc(sizeof(*dom->p2m_host) * dom->total_pages);
 
     /* Start with our current P2M */
-    for (i = 0; i < dom->p2m_size; i++)
+    for (i = 0; i < dom->total_pages; i++)
         dom->p2m_host[i] = pfn_to_mfn(i);
 
     if ( (rc = xc_dom_build_image(dom)) != 0 ) {
-        printk("xc_dom_build_image returned %d\n", rc);
+        grub_printf("xc_dom_build_image returned %d\n", rc);
         errnum = ERR_BOOT_FAILURE;
         goto out;
     }
@@ -305,7 +203,7 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
     dom->shared_info_mfn = PHYS_PFN(start_info.shared_info);
 
     if (!xc_dom_compat_check(dom)) {
-        printk("xc_dom_compat_check failed\n");
+        grub_printf("xc_dom_compat_check failed\n");
         errnum = ERR_EXEC_FORMAT;
         goto out;
     }
@@ -322,15 +220,17 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
 
     /* Make sure the bootstrap page table does not RW-map any of our current
      * page table frames */
+    kexec_allocate(dom, dom->virt_pgtab_end);
+
     if ( (rc = xc_dom_update_guest_p2m(dom))) {
-        printk("xc_dom_update_guest_p2m returned %d\n", rc);
+        grub_printf("xc_dom_update_guest_p2m returned %d\n", rc);
         errnum = ERR_BOOT_FAILURE;
         goto out;
     }
 
     if ( dom->arch_hooks->setup_pgtables )
         if ( (rc = dom->arch_hooks->setup_pgtables(dom))) {
-            printk("setup_pgtables returned %d\n", rc);
+            grub_printf("setup_pgtables returned %d\n", rc);
             errnum = ERR_BOOT_FAILURE;
             goto out;
         }
@@ -346,25 +246,23 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
     /* Unmap libxc's projection of the boot page table */
     seg = xc_dom_seg_to_ptr(dom, &dom->pgtables_seg);
     munmap(seg, dom->pgtables_seg.vend - dom->pgtables_seg.vstart);
-    seg = xc_dom_seg_to_ptr(dom, &dom->p2m_seg);
-    munmap(seg, dom->p2m_seg.vend - dom->p2m_seg.vstart);
 
     /* Unmap day0 pages to avoid having a r/w mapping of the future page table */
     for (pfn = 0; pfn < allocated; pfn++)
         munmap((void*) pages[pfn], PAGE_SIZE);
 
     /* Pin the boot page table base */
-    if ( (rc = pin_table(dom->xch,
+    if ( (rc = pin_table(dom->guest_xc, 
 #ifdef __i386__
                 MMUEXT_PIN_L3_TABLE,
 #endif
 #ifdef __x86_64__
                 MMUEXT_PIN_L4_TABLE,
 #endif
-                xc_dom_p2m(dom, dom->pgtables_seg.pfn),
+                xc_dom_p2m_host(dom, dom->pgtables_seg.pfn),
                 dom->guest_domid)) != 0 ) {
-        printk("pin_table(%lx) returned %d\n", xc_dom_p2m(dom,
-               dom->pgtables_seg.pfn), rc);
+        grub_printf("pin_table(%lx) returned %d\n", xc_dom_p2m_host(dom,
+                    dom->pgtables_seg.pfn), rc);
         errnum = ERR_BOOT_FAILURE;
         goto out_remap;
     }

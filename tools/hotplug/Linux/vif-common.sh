@@ -11,7 +11,8 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public
-# License along with this library; If not, see <http://www.gnu.org/licenses/>.
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #
 
 
@@ -30,6 +31,12 @@ then
   exit 1
 fi
 
+case "$command" in
+    add | remove)
+        exit 0
+        ;;
+esac
+
 
 # Parameters may be read from the environment, the command line arguments, and
 # the store, with overriding in that order.  The environment is given by the
@@ -38,135 +45,40 @@ fi
 
 evalVariables "$@"
 
-# Older versions of Xen do not pass in the type as an argument,
-# so the default value is vif.
-: ${type_if:=vif}
-
-case "$type_if" in
-    vif)
-        dev=$vif
-        ;;
-    tap)
-        dev=$INTERFACE
-        ;;
-    *)
-        log err "unknown interface type $type_if"
-        exit 1
-        ;;
-esac
-
-case "$command" in
-    online | offline)
-        test "$type_if" != vif && exit 0
-        ;;
-    add | remove)
-        test "$type_if" != tap && exit 0
-        ;;
-esac
-
-rename_vif() {
-    local dev=$1
-    local vifname=$2
-
-    # if a custom vifname was chosen and a link with that desired name
-    # already exists, then stop, before messing up whatever is using
-    # that interface (e.g. another running domU) because it's likely a
-    # configuration error
-    if ip link show "$vifname" >&/dev/null
-    then
-        fatal "Cannot rename interface $dev. An interface with name $vifname already exists."
-    fi
-    do_or_die ip link set "$dev" name "$vifname"
-}
-
-if [ "$type_if" = vif ]; then
-    # Check presence of compulsory args.
-    XENBUS_PATH="${XENBUS_PATH:?}"
-    dev="${dev:?}"
-
-    vifname=$(xenstore_read_default "$XENBUS_PATH/vifname" "")
-    if [ "$vifname" ]
-    then
-        if [ "$command" == "online" ]
-        then
-            rename_vif "$dev" "$vifname"
-        fi
-        dev="$vifname"
-    fi
-elif [ "$type_if" = tap ]; then
-    # Check presence of compulsory args.
-    : ${INTERFACE:?}
-
-    # Get xenbus_path from device name.
-    # The name is built like that: "vif${domid}.${devid}-emu".
-    dev_=${dev#vif}
-    dev_=${dev_%-emu}
-    domid=${dev_%.*}
-    devid=${dev_#*.}
-
-    XENBUS_PATH="/local/domain/0/backend/vif/$domid/$devid"
-    vifname=$(xenstore_read_default "$XENBUS_PATH/vifname" "")
-    if [ "$vifname" ]
-    then
-        vifname="${vifname}-emu"
-        if [ "$command" == "add" ]
-        then
-            rename_vif "$dev" "$vifname"
-        fi
-        dev="$vifname"
-    fi
-fi
-
 ip=${ip:-}
 ip=$(xenstore_read_default "$XENBUS_PATH/ip" "$ip")
 
-IPTABLES_WAIT_RUNE="-w"
-IPTABLES_WAIT_RUNE_CHECKED=false
+# Check presence of compulsory args.
+XENBUS_PATH="${XENBUS_PATH:?}"
+vif="${vif:?}"
 
-# When iptables introduced locking, in the event of lock contention,
-# they made "fail" rather than "wait for the lock" the default
-# behavior.  In order to select "wait for the lock" behavior, you have
-# to add the '-w' parameter.  Unfortunately, both the locking and the
-# option were only introduced in 2013, and older versions of iptables
-# will fail if the '-w' parameter is included (since they don't
-# recognize it).  So check to see if it's supported the first time we
-# use it.
-iptables_w()
-{
-    if ! $IPTABLES_WAIT_RUNE_CHECKED ; then
-	iptables $IPTABLES_WAIT_RUNE -L -n >& /dev/null
-	if [[ $? == 0 ]] ; then
-	    # If we succeed, then -w is supported; don't check again
-	    IPTABLES_WAIT_RUNE_CHECKED=true
-	elif [[ $? == 2 ]] ; then
-	    iptables -L -n >& /dev/null
-	    if [[ $? != 2 ]] ; then
-		# If we fail with PARAMETER_PROBLEM (2) with -w and
-		# don't fail with PARAMETER_PROBLEM without it, then
-		# it's the -w option
-		IPTABLES_WAIT_RUNE_CHECKED=true
-		IPTABLES_WAIT_RUNE=""
-	    fi
-	fi
-    fi
-    iptables $IPTABLES_WAIT_RUNE "$@"
-}
+
+vifname=$(xenstore_read_default "$XENBUS_PATH/vifname" "")
+if [ "$vifname" ]
+then
+  if [ "$command" == "online" ] && ! ip link show "$vifname" >&/dev/null
+  then
+    do_or_die ip link set "$vif" name "$vifname"
+  fi
+  vif="$vifname"
+fi
+
 
 frob_iptable()
 {
-  if [ "$command" == "online" -o "$command" == "add" ]
+  if [ "$command" == "online" ]
   then
     local c="-I"
   else
     local c="-D"
   fi
 
-  iptables_w "$c" FORWARD -m physdev --physdev-is-bridged --physdev-in "$dev" \
+  iptables "$c" FORWARD -m physdev --physdev-is-bridged --physdev-in "$vif" \
     "$@" -j ACCEPT 2>/dev/null &&
-  iptables_w "$c" FORWARD -m physdev --physdev-is-bridged --physdev-out "$dev" \
+  iptables "$c" FORWARD -m physdev --physdev-is-bridged --physdev-out "$vif" \
     -j ACCEPT 2>/dev/null
 
-  if [ \( "$command" == "online" -o "$command" == "add" \) -a $? -ne 0 ]
+  if [ "$command" == "online" -a $? -ne 0 ]
   then
     log err "iptables setup failed. This may affect guest networking."
   fi
@@ -186,7 +98,7 @@ handle_iptable()
   # binary is not sufficient, because the user may not have the appropriate
   # modules installed.  If iptables is not working, then there's no need to do
   # anything with it, so we can just return.
-  if ! iptables_w -L -n >&/dev/null
+  if ! iptables -L -n >&/dev/null
   then
     return
   fi
@@ -220,7 +132,7 @@ handle_iptable()
 #
 ip_of()
 {
-  ip -4 -o addr show primary dev "$1" | awk '$3 == "inet" {split($4,i,"/"); print i[1]; exit}'
+  ip addr show "$1" | awk "/^.*inet.*$1\$/{print \$2}" | sed -n '1 s,/.*,,p'
 }
 
 
@@ -238,7 +150,7 @@ dom0_ip()
   local result=$(ip_of "$nd")
   if [ -z "$result" ]
   then
-      fatal \
+      fatal
 "$netdev is not up.  Bring it up or specify another interface with " \
 "netdev=<if> as a parameter to $0."
   fi

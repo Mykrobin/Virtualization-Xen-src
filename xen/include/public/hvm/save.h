@@ -63,15 +63,12 @@ struct hvm_save_descriptor {
 
 #ifdef __XEN__
 # define DECLARE_HVM_SAVE_TYPE_COMPAT(_x, _code, _type, _ctype, _fix)     \
-    static inline int __HVM_SAVE_FIX_COMPAT_##_x(void *h, uint32_t size)  \
-        { return _fix(h, size); }                                         \
-    struct __HVM_SAVE_TYPE_##_x { _type t; char c[_code]; char cpt[2];};  \
+    static inline int __HVM_SAVE_FIX_COMPAT_##_x(void *h) { return _fix(h); } \
+    struct __HVM_SAVE_TYPE_##_x { _type t; char c[_code]; char cpt[2];}; \
     struct __HVM_SAVE_TYPE_COMPAT_##_x { _ctype t; }                   
 
-# include <xen/lib.h> /* BUG() */
 # define DECLARE_HVM_SAVE_TYPE(_x, _code, _type)                         \
-    static inline int __HVM_SAVE_FIX_COMPAT_##_x(void *h, uint32_t size) \
-        { BUG(); return -1; }                                            \
+    static inline int __HVM_SAVE_FIX_COMPAT_##_x(void *h) { BUG(); return -1; } \
     struct __HVM_SAVE_TYPE_##_x { _type t; char c[_code]; char cpt[1];}; \
     struct __HVM_SAVE_TYPE_COMPAT_##_x { _type t; }                   
 #else
@@ -91,7 +88,7 @@ struct hvm_save_descriptor {
 # define HVM_SAVE_LENGTH_COMPAT(_x) (sizeof (HVM_SAVE_TYPE_COMPAT(_x)))
 
 # define HVM_SAVE_HAS_COMPAT(_x) (sizeof (((struct __HVM_SAVE_TYPE_##_x *)(0))->cpt)-1)
-# define HVM_SAVE_FIX_COMPAT(_x, _dst, _size) __HVM_SAVE_FIX_COMPAT_##_x(_dst, _size)
+# define HVM_SAVE_FIX_COMPAT(_x, _dst) __HVM_SAVE_FIX_COMPAT_##_x(_dst)
 #endif
 
 /* 
@@ -104,8 +101,8 @@ DECLARE_HVM_SAVE_TYPE(END, 0, struct hvm_save_end);
 
 #if defined(__i386__) || defined(__x86_64__)
 #include "../arch-x86/hvm/save.h"
-#elif defined(__arm__) || defined(__aarch64__)
-#include "../arch-arm/hvm/save.h"
+#elif defined(__ia64__)
+#include "../arch-ia64/hvm/save.h"
 #else
 #error "unsupported architecture"
 #endif

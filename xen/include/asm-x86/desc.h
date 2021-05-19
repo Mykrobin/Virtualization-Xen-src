@@ -18,6 +18,8 @@
 
 #define LDT_ENTRY_SIZE 8
 
+#if defined(__x86_64__)
+
 #define FLAT_COMPAT_RING1_CS 0xe019  /* GDT index 259 */
 #define FLAT_COMPAT_RING1_DS 0xe021  /* GDT index 260 */
 #define FLAT_COMPAT_RING1_SS 0xe021  /* GDT index 260 */
@@ -36,9 +38,30 @@
 #define LDT_ENTRY (TSS_ENTRY + 2)
 #define PER_CPU_GDT_ENTRY (LDT_ENTRY + 2)
 
+#elif defined(__i386__)
+
+#define FLAT_COMPAT_KERNEL_CS FLAT_KERNEL_CS
+#define FLAT_COMPAT_KERNEL_DS FLAT_KERNEL_DS
+#define FLAT_COMPAT_KERNEL_SS FLAT_KERNEL_SS
+#define FLAT_COMPAT_USER_CS   FLAT_USER_CS
+#define FLAT_COMPAT_USER_DS   FLAT_USER_DS
+#define FLAT_COMPAT_USER_SS   FLAT_USER_SS
+
+#define DOUBLEFAULT_TSS_ENTRY FIRST_RESERVED_GDT_ENTRY
+
+#define TSS_ENTRY (FIRST_RESERVED_GDT_ENTRY + 8)
+#define LDT_ENTRY (TSS_ENTRY + 1)
+#define PER_CPU_GDT_ENTRY (LDT_ENTRY + 1)
+
+#endif
+
 #ifndef __ASSEMBLY__
 
+#if defined(__x86_64__)
 #define GUEST_KERNEL_RPL(d) (is_pv_32bit_domain(d) ? 1 : 3)
+#elif defined(__i386__)
+#define GUEST_KERNEL_RPL(d) ((void)(d), 1)
+#endif
 
 /* Fix up the RPL of a guest segment selector. */
 #define __fixup_guest_selector(d, sel)                             \
@@ -47,7 +70,17 @@
     (sel) = (((sel) & 3) >= _rpl) ? (sel) : (((sel) & ~3) | _rpl); \
 })
 
+/* Stack selectors don't need fixing up if the kernel runs in ring 0. */
+#ifdef CONFIG_X86_SUPERVISOR_MODE_KERNEL
+#define fixup_guest_stack_selector(d, ss) ((void)0)
+#else
 #define fixup_guest_stack_selector(d, ss) __fixup_guest_selector(d, ss)
+#endif
+
+/*
+ * Code selectors are always fixed up. It allows the Xen exit stub to detect
+ * return to guest context, even when the guest kernel runs in ring 0.
+ */
 #define fixup_guest_code_selector(d, cs)  __fixup_guest_selector(d, cs)
 
 /*
@@ -65,7 +98,7 @@
  */
 #define guest_gate_selector_okay(d, sel)                                \
     ((((sel)>>3) < FIRST_RESERVED_GDT_ENTRY) || /* Guest seg? */        \
-     ((sel) == (!is_pv_32bit_domain(d) ?                                \
+     ((sel) == (!is_pv_32on64_domain(d) ?                               \
                 FLAT_KERNEL_CS :                /* Xen default seg? */  \
                 FLAT_COMPAT_KERNEL_CS)) ||                              \
      ((sel) & 4))                               /* LDT seg? */
@@ -82,67 +115,33 @@
 #define _SEGMENT_S       ( 1<<12) /* System descriptor (yes iff S==0) */
 #define _SEGMENT_DPL     ( 3<<13) /* Descriptor Privilege Level */
 #define _SEGMENT_P       ( 1<<15) /* Segment Present */
+#ifdef __x86_64__
 #define _SEGMENT_L       ( 1<<21) /* 64-bit segment */
+#else
+#define _SEGMENT_L       0
+#endif
 #define _SEGMENT_DB      ( 1<<22) /* 16- or 32-bit segment */
 #define _SEGMENT_G       ( 1<<23) /* Granularity */
 
 #ifndef __ASSEMBLY__
 
-/* System Descriptor types for GDT and IDT entries. */
-#define SYS_DESC_tss16_avail  1
-#define SYS_DESC_ldt          2
-#define SYS_DESC_tss16_busy   3
-#define SYS_DESC_call_gate16  4
-#define SYS_DESC_task_gate    5
-#define SYS_DESC_irq_gate16   6
-#define SYS_DESC_trap_gate16  7
-#define SYS_DESC_tss_avail    9
-#define SYS_DESC_tss_busy     11
-#define SYS_DESC_call_gate    12
-#define SYS_DESC_irq_gate     14
-#define SYS_DESC_trap_gate    15
-
 struct desc_struct {
     u32 a, b;
 };
 
-typedef union {
-    struct {
-        uint64_t a, b;
-    };
-    struct {
-        uint16_t addr0;
-        uint16_t cs;
-        uint8_t  ist; /* :3, 5 bits rsvd, but this yields far better code. */
-        uint8_t  type:4, s:1, dpl:2, p:1;
-        uint16_t addr1;
-        uint32_t addr2;
-        /* 32 bits rsvd. */
-    };
-} idt_entry_t;
+#if defined(__x86_64__)
 
-/* Write the lower 64 bits of an IDT Entry. This relies on the upper 32
- * bits of the address not changing, which is a safe assumption as all
- * functions we are likely to load will live inside the 1GB
- * code/data/bss address range.
- *
- * Ideally, we would use cmpxchg16b, but this is not supported on some
- * old AMD 64bit capable processors, and has no safe equivalent.
- */
-static inline void _write_gate_lower(volatile idt_entry_t *gate,
-                                     const idt_entry_t *new)
-{
-    ASSERT(gate->b == new->b);
-    gate->a = new->a;
-}
+typedef struct {
+    u64 a, b;
+} idt_entry_t;
 
 #define _set_gate(gate_addr,type,dpl,addr)               \
 do {                                                     \
     (gate_addr)->a = 0;                                  \
-    smp_wmb(); /* disable gate /then/ rewrite */         \
+    wmb(); /* disable gate /then/ rewrite */             \
     (gate_addr)->b =                                     \
         ((unsigned long)(addr) >> 32);                   \
-    smp_wmb(); /* rewrite /then/ enable gate */          \
+    wmb(); /* rewrite /then/ enable gate */              \
     (gate_addr)->a =                                     \
         (((unsigned long)(addr) & 0xFFFF0000UL) << 32) | \
         ((unsigned long)(dpl) << 45) |                   \
@@ -152,81 +151,73 @@ do {                                                     \
         (1UL << 47);                                     \
 } while (0)
 
-static inline void _set_gate_lower(idt_entry_t *gate, unsigned long type,
-                                   unsigned long dpl, void *addr)
-{
-    idt_entry_t idte;
-    idte.b = gate->b;
-    idte.a =
-        (((unsigned long)(addr) & 0xFFFF0000UL) << 32) |
-        ((unsigned long)(dpl) << 45) |
-        ((unsigned long)(type) << 40) |
-        ((unsigned long)(addr) & 0xFFFFUL) |
-        ((unsigned long)__HYPERVISOR_CS64 << 16) |
-        (1UL << 47);
-    _write_gate_lower(gate, &idte);
-}
-
-/* Update the lower half handler of an IDT Entry, without changing any
- * other configuration. */
-static inline void _update_gate_addr_lower(idt_entry_t *gate, void *addr)
-{
-    idt_entry_t idte;
-    idte.a = gate->a;
-
-    idte.b = ((unsigned long)(addr) >> 32);
-    idte.a &= 0x0000FFFFFFFF0000ULL;
-    idte.a |= (((unsigned long)(addr) & 0xFFFF0000UL) << 32) |
-        ((unsigned long)(addr) & 0xFFFFUL);
-
-    _write_gate_lower(gate, &idte);
-}
-
 #define _set_tssldt_desc(desc,addr,limit,type)           \
 do {                                                     \
     (desc)[0].b = (desc)[1].b = 0;                       \
-    smp_wmb(); /* disable entry /then/ rewrite */        \
+    wmb(); /* disable entry /then/ rewrite */            \
     (desc)[0].a =                                        \
         ((u32)(addr) << 16) | ((u32)(limit) & 0xFFFF);   \
     (desc)[1].a = (u32)(((unsigned long)(addr)) >> 32);  \
-    smp_wmb(); /* rewrite /then/ enable entry */         \
+    wmb(); /* rewrite /then/ enable entry */             \
     (desc)[0].b =                                        \
         ((u32)(addr) & 0xFF000000U) |                    \
         ((u32)(type) << 8) | 0x8000U |                   \
         (((u32)(addr) & 0x00FF0000U) >> 16);             \
 } while (0)
 
-struct __packed desc_ptr {
+#elif defined(__i386__)
+
+typedef struct desc_struct idt_entry_t;
+
+#define _set_gate(gate_addr,type,dpl,addr)               \
+do {                                                     \
+    (gate_addr)->b = 0;                                  \
+    wmb(); /* disable gate /then/ rewrite */             \
+    (gate_addr)->a =                                     \
+        ((unsigned long)(addr) & 0xFFFFUL) |             \
+        ((unsigned long)__HYPERVISOR_CS << 16);          \
+    wmb(); /* rewrite /then/ enable gate */              \
+    (gate_addr)->b =                                     \
+        ((unsigned long)(addr) & 0xFFFF0000UL) |         \
+        ((unsigned long)(dpl) << 13) |                   \
+        ((unsigned long)(type) << 8) |                   \
+        (1UL << 15);                                     \
+} while (0)
+
+#define _set_tssldt_desc(desc,addr,limit,type)           \
+do {                                                     \
+    (desc)->b = 0;                                       \
+    wmb(); /* disable entry /then/ rewrite */            \
+    (desc)->a =                                          \
+        ((u32)(addr) << 16) | ((u32)(limit) & 0xFFFF);   \
+    wmb(); /* rewrite /then/ enable entry */             \
+    (desc)->b =                                          \
+        ((u32)(addr) & 0xFF000000U) |                    \
+        ((u32)(type) << 8) | 0x8000U |                   \
+        (((u32)(addr) & 0x00FF0000U) >> 16);             \
+} while (0)
+
+DECLARE_PER_CPU(struct tss_struct *, doublefault_tss);
+
+#endif
+
+struct desc_ptr {
 	unsigned short limit;
 	unsigned long base;
-};
+} __attribute__((__packed__)) ;
 
 extern struct desc_struct boot_cpu_gdt_table[];
 DECLARE_PER_CPU(struct desc_struct *, gdt_table);
+#ifdef CONFIG_COMPAT
 extern struct desc_struct boot_cpu_compat_gdt_table[];
 DECLARE_PER_CPU(struct desc_struct *, compat_gdt_table);
+#else
+# define boot_cpu_compat_gdt_table boot_cpu_gdt_table
+# define per_cpu__compat_gdt_table per_cpu__gdt_table
+#endif
 
+extern void set_intr_gate(unsigned int irq, void * addr);
 extern void load_TR(void);
-
-static inline void lgdt(const struct desc_ptr *gdtr)
-{
-    __asm__ __volatile__ ( "lgdt %0" :: "m" (*gdtr) : "memory" );
-}
-
-static inline void lidt(const struct desc_ptr *idtr)
-{
-    __asm__ __volatile__ ( "lidt %0" :: "m" (*idtr) : "memory" );
-}
-
-static inline void lldt(unsigned int sel)
-{
-    __asm__ __volatile__ ( "lldt %w0" :: "rm" (sel) : "memory" );
-}
-
-static inline void ltr(unsigned int sel)
-{
-    __asm__ __volatile__ ( "ltr %w0" :: "rm" (sel) : "memory" );
-}
 
 #endif /* !__ASSEMBLY__ */
 

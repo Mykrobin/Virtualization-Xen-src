@@ -945,6 +945,7 @@ store_edid:
 #endif
         ret
 
+opt_edid:       .byte   0       # EDID parsing option (force/no/default)
 mt_end:         .word   0       # End of video mode table if built
 edit_buf:       .space  6       # Line editor buffer
 card_name:      .word   0       # Pointer to adapter name
@@ -990,14 +991,16 @@ name_bann:      .asciz  "Video adapter: "
 
 force_size:     .word   0       # Use this size instead of the one in BIOS vars
 
-GLOBAL(boot_vid_info)
-        .byte   0, 0    /* orig_x, orig_y */
-        .byte   3       /* text mode 3    */
-        .byte   80, 25  /* 80x25          */
-        .byte   1       /* isVGA          */
-        .word   16      /* 8x16 font      */
-        .fill   0x28,1,0
-GLOBAL(boot_edid_info)
-        .fill   128,1,0x13
-GLOBAL(boot_edid_caps)
-        .word   0x1313
+vesa_size:      .word   0,0,0   # width x depth x height
+
+                .globl  boot_vid_info, boot_edid_info, boot_edid_caps
+/* If we don't run at all, assume basic video mode 3 at 80x25. */
+boot_vid_mode:  .word   VIDEO_80x25
+boot_vid_info:  .byte   0, 0    /* orig_x, orig_y */
+                .byte   3       /* text mode 3    */
+                .byte   80, 25  /* 80x25          */
+                .byte   1       /* isVGA          */
+                .word   16      /* 8x16 font      */
+                .fill   0x28,1,0
+boot_edid_info: .fill   128,1,0x13
+boot_edid_caps: .word   0x1313

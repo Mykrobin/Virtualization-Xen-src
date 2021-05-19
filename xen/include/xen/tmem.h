@@ -9,37 +9,10 @@
 #ifndef __XEN_TMEM_H__
 #define __XEN_TMEM_H__
 
-struct xen_sysctl_tmem_op;
-
-#ifdef CONFIG_TMEM
-extern int tmem_control(struct xen_sysctl_tmem_op *op);
+extern void init_tmem(void);
 extern void tmem_destroy(void *);
 extern void *tmem_relinquish_pages(unsigned int, unsigned int);
 extern unsigned long tmem_freeable_pages(void);
-#else
-static inline int
-tmem_control(struct xen_sysctl_tmem_op *op)
-{
-    return -ENOSYS;
-}
-
-static inline void
-tmem_destroy(void *p)
-{
-    return;
-}
-
-static inline void *
-tmem_relinquish_pages(unsigned int x, unsigned int y)
-{
-    return NULL;
-}
-
-static inline unsigned long
-tmem_freeable_pages(void)
-{
-    return 0;
-}
-#endif /* CONFIG_TMEM */
+extern int  opt_tmem;
 
 #endif /* __XEN_TMEM_H__ */

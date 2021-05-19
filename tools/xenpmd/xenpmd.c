@@ -18,7 +18,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 /* Xen extended power management support provides HVM guest power management
@@ -39,7 +40,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <xenstore.h>
+#include <xs.h>
 
 /* #define RUN_STANDALONE */
 #define RUN_IN_SIMULATE_MODE
@@ -100,7 +101,7 @@ FILE *get_next_battery_file(DIR *battery_dir,
 {
     FILE *file = 0;
     struct dirent *dir_entries;
-    char file_name[284];
+    char file_name[32];
     
     do 
     {
@@ -110,10 +111,10 @@ FILE *get_next_battery_file(DIR *battery_dir,
         if ( strlen(dir_entries->d_name) < 4 )
             continue;
         if ( battery_info_type == BIF ) 
-            snprintf(file_name, sizeof(file_name), BATTERY_INFO_FILE_PATH,
+            snprintf(file_name, 32, BATTERY_INFO_FILE_PATH,
                      dir_entries->d_name);
         else 
-            snprintf(file_name, sizeof(file_name), BATTERY_STATE_FILE_PATH,
+            snprintf(file_name, 32, BATTERY_STATE_FILE_PATH,
                      dir_entries->d_name);
         file = fopen(file_name, "r");
     } while ( !file );
@@ -186,29 +187,25 @@ void set_attribute_battery_info(char *attrib_name,
 
     if ( strstr(attrib_name, "model number") ) 
     {
-        strncpy(info->model_number, attrib_value, 31);
-        info->model_number[31] = '\0';
+        strncpy(info->model_number, attrib_value, 32);
         return;
     }
 
     if ( strstr(attrib_name, "serial number") ) 
     {
-        strncpy(info->serial_number, attrib_value, 31);
-        info->serial_number[31] = '\0';
+        strncpy(info->serial_number, attrib_value, 32);
         return;
     }
 
     if ( strstr(attrib_name, "battery type") ) 
     {
-        strncpy(info->battery_type, attrib_value, 31);
-        info->battery_type[31] = '\0';
+        strncpy(info->battery_type, attrib_value, 32);
         return;
     }
 
     if ( strstr(attrib_name, "OEM info") ) 
     {
-        strncpy(info->oem_info, attrib_value, 31);
-        info->oem_info[31] = '\0';
+        strncpy(info->oem_info, attrib_value, 32);
         return;
     }
 

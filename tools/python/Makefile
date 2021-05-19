@@ -1,34 +1,80 @@
-XEN_ROOT = $(CURDIR)/../..
+XEN_ROOT = ../..
 include $(XEN_ROOT)/tools/Rules.mk
 
 .PHONY: all
 all: build
 
-PY_CFLAGS = $(CFLAGS) $(PY_NOOPT_CFLAGS)
-PY_LDFLAGS = $(LDFLAGS) $(APPEND_LDFLAGS)
-INSTALL_LOG = build/installed_files.txt
+# For each new supported translation, add its name here, eg 'fr_FR'
+# to cause the .po file to be built & installed, eg
+LINGUAS :=
+POPACKAGE := xen-xm
+PODIR := xen/xm/messages
+POTFILE := $(PODIR)/xen-xm.pot
+I18NSRCFILES = $(shell find xen/xm/ -name '*.py')
+CATALOGS = $(patsubst %,xen/xm/messages/%.mo,$(LINGUAS))
+NLSDIR = $(SHAREDIR)/locale
+XENPATH = "xen/util/path.py"
 
-.PHONY: build
-build:
-	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" $(PYTHON) setup.py build
+genpath-target = $(call buildmakevars2file,$(XENPATH))
+$(eval $(genpath-target))
+
+.PHONY: build buildpy
+buildpy: genpath 
+	CC="$(CC)" CFLAGS="$(CFLAGS)" $(PYTHON) setup.py build
+
+build: buildpy refresh-pot refresh-po $(CATALOGS)
+
+# NB we take care to only update the .pot file it strings have
+# actually changed. This is complicated by the embedded date
+# string, hence the sed black magic. This avoids the expensive
+# re-generation of .po files on every single build
+refresh-pot: $(I18NSRCFILES)
+	xgettext --default-domain=$(POPACKAGE) \
+		--keyword=N_ \
+		--keyword=_ \
+		-o $(POTFILE)-tmp \
+		$(I18NSRCFILES)
+	sed -f remove-potcdate.sed < $(POTFILE) > $(POTFILE)-1
+	sed -f remove-potcdate.sed < $(POTFILE)-tmp > $(POTFILE)-2
+	set -e; if cmp -s $(POTFILE)-1 $(POTFILE)-2; then \
+		rm -f $(POTFILE)-tmp $(POTFILE)-1 $(POTFILE)-2; \
+	else \
+		mv $(POTFILE)-tmp $(POTFILE); \
+                rm -f $(POTFILE)-1 $(POTFILE)-2; \
+	fi
+
+refresh-po: $(POTFILE)
+	set -e; for l in $(LINGUAS); do \
+		if $(MSGMERGE) $(PODIR)/$$l.po $(POTFILE) > $(PODIR)/$$l-tmp ; then \
+			mv -f $(PODIR)/$$l-tmp $(PODIR)/$$l.po ; \
+			echo "$(MSGMERGE) of $$l.po succeeded" ; \
+		else \
+			echo "$(MSGMERGE) of $$l.po failed" ; \
+			rm -f $(PODIR)/$$l-tmp ; \
+		fi \
+	done
+
+%.mo: %.po
+	$(MSGFMT) -c -o $@ $<
 
 .PHONY: install
-install:
-	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC_BIN)
+install: install-messages install-dtd
+	CC="$(CC)" CFLAGS="$(CFLAGS)" $(PYTHON) setup.py install \
+		$(PYTHON_PREFIX_ARG) --root="$(DESTDIR)" --force
 
-	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" LDFLAGS="$(PY_LDFLAGS)" $(PYTHON) \
-		setup.py install --record $(INSTALL_LOG) $(PYTHON_PREFIX_ARG) \
-		--root="$(DESTDIR)" --force
+install-dtd: all
+	$(INSTALL_DIR) $(DESTDIR)$(SHAREDIR)/xen
+	$(INSTALL_DATA) xen/xm/create.dtd $(DESTDIR)$(SHAREDIR)/xen
 
-	$(INSTALL_PROG) scripts/convert-legacy-stream $(DESTDIR)$(LIBEXEC_BIN)
-	$(INSTALL_PROG) scripts/verify-stream-v2 $(DESTDIR)$(LIBEXEC_BIN)
-
-.PHONY: uninstall
-uninstall:
-	rm -f $(DESTDIR)$(LIBEXEC_BIN)/verify-stream-v2
-	rm -f $(DESTDIR)$(LIBEXEC_BIN)/convert-legacy-stream
-	if [ -e $(INSTALL_LOG) ]; then \
-		cat $(INSTALL_LOG) | xargs -i rm -f $(DESTDIR)/{}; \
+install-messages: all
+	set -e; if which $(MSGFMT) >/dev/null ; then \
+		$(INSTALL_DIR) $(DESTDIR)$(NLSDIR); \
+		for l in $(LINGUAS); do \
+			$(INSTALL_DIR) $(DESTDIR)$(NLSDIR)/$$l; \
+			$(INSTALL_DIR) $(DESTDIR)$(NLSDIR)/$$l/LC_MESSAGES; \
+			$(INSTALL_DATA) $(PODIR)/$$l.mo \
+				$(DESTDIR)$(NLSDIR)/$$l/LC_MESSAGES/$(POPACKAGE).mo; \
+		done ; \
 	fi
 
 .PHONY: test
@@ -37,11 +83,8 @@ test:
 
 .PHONY: clean
 clean:
-	find . \( -name "*.py[ocd]" -o -name "*~" -o -name "_*.[hc]" \) -delete
-	rm -rf build/
-	rm -f $(DEPS_RM)
+	rm -f $(XENPATH)
+	rm -rf build *.pyc *.pyo *.o *.a *~ $(CATALOGS) xen/util/auxbin.pyc
+	rm -f $(DEPS)
 
-.PHONY: distclean
-distclean: clean
-
--include $(DEPS_INCLUDE)
+-include $(DEPS)

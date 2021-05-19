@@ -13,12 +13,14 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #ifndef __ASM_X86_HVM_VPT_H__
 #define __ASM_X86_HVM_VPT_H__
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/time.h>
@@ -44,7 +46,6 @@ struct periodic_time {
     bool_t warned_timeout_too_short;
 #define PTSRC_isa    1 /* ISA time source */
 #define PTSRC_lapic  2 /* LAPIC time source */
-#define PTSRC_ioapic 3 /* IOAPIC time source */
     u8 source;                  /* PTSRC_ */
     u8 irq;
     struct vcpu *vcpu;          /* vcpu timer interrupt delivers to */
@@ -95,7 +96,7 @@ typedef struct HPETState {
     uint64_t hpet_to_ns_limit; /* max hpet ticks convertable to ns      */
     uint64_t mc_offset;
     struct periodic_time pt[HPET_TIMER_NUM];
-    rwlock_t lock;
+    spinlock_t lock;
 } HPETState;
 
 typedef struct RTCState {
@@ -103,24 +104,17 @@ typedef struct RTCState {
     struct hvm_hw_rtc hw;
     /* RTC's idea of the current time */
     struct tm current_tm;
-    /* update-ended timer */
-    struct timer update_timer;
-    struct timer update_timer2;
-    uint64_t next_update_time;
-    /* alarm timer */
-    struct timer alarm_timer;
-    /* periodic timer */
+    /* second update */
+    int64_t next_second_time;
+    struct timer second_timer;
+    struct timer second_timer2;
     struct periodic_time pt;
-    s_time_t start_time;
-    s_time_t check_ticks_since;
-    int period;
-    uint8_t pt_dead_ticks;
-    uint32_t use_timer;
     spinlock_t lock;
 } RTCState;
 
 #define FREQUENCE_PMTIMER  3579545  /* Timer should run at 3.579545 MHz */
 typedef struct PMTState {
+    struct hvm_hw_pmtimer pm;   /* 32bit timer value */
     struct vcpu *vcpu;          /* Keeps sync with this vcpu's guest-time */
     uint64_t last_gtime;        /* Last (guest) time we updated the timer */
     uint32_t not_accounted;     /* time not accounted at last update */
@@ -130,6 +124,7 @@ typedef struct PMTState {
 } PMTState;
 
 struct pl_time {    /* platform time */
+    struct PITState  vpit;
     struct RTCState  vrtc;
     struct HPETState vhpet;
     struct PMTState  vpmt;
@@ -138,20 +133,17 @@ struct pl_time {    /* platform time */
     /* Ensures monotonicity in appropriate timer modes. */
     uint64_t last_guest_time;
     spinlock_t pl_time_lock;
-    struct domain *domain;
 };
 
 void pt_save_timer(struct vcpu *v);
 void pt_restore_timer(struct vcpu *v);
-int pt_update_irq(struct vcpu *v);
+void pt_update_irq(struct vcpu *v);
 void pt_intr_post(struct vcpu *v, struct hvm_intack intack);
 void pt_migrate(struct vcpu *v);
 
 void pt_adjust_global_vcpu_target(struct vcpu *v);
 #define pt_global_vcpu_target(d) \
-    (is_hvm_domain(d) && (d)->arch.hvm_domain.i8259_target ? \
-     (d)->arch.hvm_domain.i8259_target : \
-     (d)->vcpu ? (d)->vcpu[0] : NULL)
+    ((d)->arch.hvm_domain.i8259_target ? : (d)->vcpu ? (d)->vcpu[0] : NULL)
 
 void pt_may_unmask_irq(struct domain *d, struct periodic_time *vlapic_pt);
 
@@ -175,7 +167,7 @@ void destroy_periodic_time(struct periodic_time *pt);
 int pv_pit_handler(int port, int data, int write);
 void pit_reset(struct domain *d);
 
-void pit_init(struct domain *d, unsigned long cpu_khz);
+void pit_init(struct vcpu *v, unsigned long cpu_khz);
 void pit_stop_channel0_irq(PITState * pit);
 void pit_deinit(struct domain *d);
 void rtc_init(struct domain *d);
@@ -187,9 +179,8 @@ void rtc_update_clock(struct domain *d);
 void pmtimer_init(struct vcpu *v);
 void pmtimer_deinit(struct domain *d);
 void pmtimer_reset(struct domain *d);
-int pmtimer_change_ioport(struct domain *d, unsigned int version);
 
-void hpet_init(struct domain *d);
+void hpet_init(struct vcpu *v);
 void hpet_deinit(struct domain *d);
 void hpet_reset(struct domain *d);
 

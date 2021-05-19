@@ -11,7 +11,7 @@ ENTRY(wakeup_start)
         movw    %cs, %ax
         movw    %ax, %ds
         movw    %ax, %ss        # A stack required for BIOS call
-        movw    $wakesym(wakeup_stack), %sp
+        movw    $wakesym(early_stack), %sp
 
         pushl   $0              # Kill dangerous flag early
         popfl
@@ -42,13 +42,15 @@ ENTRY(wakeup_start)
 
         # boot trampoline is under 1M, and shift its start into
         # %fs to reference symbols in that area
-        mov     wakesym(trampoline_seg), %fs
+        movl    $BOOT_TRAMPOLINE, %eax
+        shrl    $4, %eax
+        movl    %eax, %fs
         lidt    %fs:bootsym(idt_48)
         lgdt    %fs:bootsym(gdt_48)
 
         movw    $1, %ax
         lmsw    %ax             # Turn on CR0.PE 
-        ljmpl   $BOOT_CS32, $bootsym_rel(wakeup_32, 6)
+        ljmpl   $BOOT_CS32, $bootsym_phys(wakeup_32)
 
 /* This code uses an extended set of video mode numbers. These include:
  * Aliases for standard modes
@@ -98,14 +100,9 @@ bogus_real_magic:
 
         .align 4
 real_magic:     .long 0x12345678
-GLOBAL(video_mode)
-        .long 0
-GLOBAL(video_flags)
-        .long 0
-trampoline_seg: .word 0
-        .pushsection .trampoline_seg, "a"
-        .long   trampoline_seg - .
-        .popsection
+         .globl video_mode, video_flags
+video_mode:     .long 0
+video_flags:    .long 0
 
         .code32
 
@@ -117,11 +114,11 @@ wakeup_32:
         mov     $BOOT_DS, %eax
         mov     %eax, %ds
         mov     %eax, %ss
-        mov     $bootsym_rel(wakeup_stack, 4, %esp)
+        mov     $bootsym_phys(early_stack), %esp
 
         # check saved magic again
-        mov     $sym_offs(saved_magic),%eax
-        add     bootsym_rel(trampoline_xen_phys_start, 4, %eax)
+        mov     $sym_phys(saved_magic), %eax
+        add     bootsym_phys(trampoline_xen_phys_start), %eax
         mov     (%eax), %eax
         cmp     $0x9abcdef0, %eax
         jne     bogus_saved_magic
@@ -133,34 +130,21 @@ wakeup_32:
         mov     %ecx, %cr4
 
         /* Load pagetable base register */
-        mov     $sym_offs(idle_pg_table),%eax
-        add     bootsym_rel(trampoline_xen_phys_start,4,%eax)
+        mov     $sym_phys(idle_pg_table),%eax
+        add     bootsym_phys(trampoline_xen_phys_start),%eax
         mov     %eax,%cr3
-
-        /* Reapply IA32_MISC_ENABLE modifications from early_init_intel(). */
-        mov     bootsym_rel(trampoline_misc_enable_off, 4, %esi)
-        mov     bootsym_rel(trampoline_misc_enable_off + 4, 4, %edi)
-        mov     %esi, %eax
-        or      %edi, %eax
-        jz      1f
-        mov     $MSR_IA32_MISC_ENABLE, %ecx
-        rdmsr
-        not     %esi
-        not     %edi
-        and     %esi, %eax
-        and     %edi, %edx
-        wrmsr
-1:
 
         /* Will cpuid feature change after resume? */
         /* Set up EFER (Extended Feature Enable Register). */
-        mov     bootsym_rel(cpuid_ext_features,4,%edi)
+        mov     bootsym_phys(cpuid_ext_features),%edi
         test    $0x20100800,%edi /* SYSCALL/SYSRET, No Execute, Long Mode? */
         jz      .Lskip_eferw
         movl    $MSR_EFER,%ecx
         rdmsr
+#if CONFIG_PAGING_LEVELS == 4
         btsl    $_EFER_LME,%eax /* Long Mode      */
         btsl    $_EFER_SCE,%eax /* SYSCALL/SYSRET */
+#endif
         btl     $20,%edi        /* No Execute?    */
         jnc     1f
         btsl    $_EFER_NX,%eax  /* No Execute     */
@@ -175,18 +159,30 @@ wakeup_32:
         jmp     1f
 1:
 
+#if defined(__x86_64__)
+
         /* Now in compatibility mode. Long-jump to 64-bit mode */
-        ljmp    $BOOT_CS64, $bootsym_rel(wakeup_64,6)
+        ljmp    $BOOT_CS64, $bootsym_phys(wakeup_64)
 
         .code64
 wakeup_64:
         /* Jump to high mappings and the higher-level wakeup code. */
-        movabs  $__ret_point, %rbx
+        movq    ret_point(%rip), %rbx
         jmp     *%rbx
+
+ret_point:
+        .quad   __ret_point
+
+#else /* !defined(__x86_64__) */
+
+        lgdt    gdt_descr
+        mov     $(__HYPERVISOR_DS), %eax
+        mov     %eax, %ds
+
+        ljmp    $(__HYPERVISOR_CS), $__ret_point
+
+#endif
 
 bogus_saved_magic:
         movw    $0x0e00 + 'S', 0xb8014
         jmp     bogus_saved_magic
-
-/* Stack for wakeup: rest of first trampoline page. */
-ENTRY(wakeup_stack_start)

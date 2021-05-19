@@ -9,37 +9,33 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 
-XEN_ROOT=$(CURDIR)/../..
+XEN_ROOT=../..
 include $(XEN_ROOT)/tools/Rules.mk
 
 CFLAGS  += -Werror
 CFLAGS  += $(CFLAGS_libxenstore)
 CPPFLAGS += -DXEN_SCRIPT_DIR="\"$(XEN_SCRIPT_DIR)\""
-LDLIBS  += $(LDLIBS_libxenstore)
+LDFLAGS += $(LDFLAGS_libxenstore)
+
+SBIN = xenbackendd
 
 .PHONY: all
 all: build
 
 .PHONY: build
-build: xenbackendd
+build: $(SBIN)
 
 .PHONY: install
 install: build
-	$(INSTALL_DIR) $(DESTDIR)$(sbindir)
-	$(INSTALL_PROG) xenbackendd $(DESTDIR)$(sbindir)
+	$(INSTALL_DIR) $(DESTDIR)$(SBINDIR)
+	$(INSTALL_PROG) xenbackendd $(DESTDIR)$(SBINDIR)
 
 .PHONY: clean
 clean:
-	$(RM) *.a *.so *.o $(DEPS_RM) xenbackendd _paths.h
+	rm -f $(SBIN) $(DEPS)
 
-.PHONY: distclean
-distclean: clean
 
-xenbackendd.o: _paths.h
-xenbackendd: xenbackendd.o
-	$(CC) $(LDFLAGS) $< -o $@ $(LDLIBS) $(APPEND_LDFLAGS)
+%: %.c Makefile
+	$(CC) $(CFLAGS) $(CPPFLAGS) $< $(LDFLAGS) -o $@
 
-genpath-target = $(call buildmakevars2header,_paths.h)
-$(eval $(genpath-target))
-
--include $(DEPS_INCLUDE)
+-include $(DEPS)

@@ -47,7 +47,6 @@
 #include "tapdisk-server.h"
 #include "tapdisk-driver.h"
 #include "tapdisk-interface.h"
-#include "tapdisk-disktype.h"
 #include "qcow.h"
 
 #if 1
@@ -62,6 +61,7 @@
 #define O_LARGEFILE 0
 #endif
 
+#define TAPDISK 1
 #define BLOCK_PROCESSSZ 4096
 #define QCOW_VBD 0
 #define AIO_VBD 1
@@ -202,7 +202,7 @@ int main(int argc, const char *argv[])
 	uint64_t size;
 	struct timeval timeout;
 	uint64_t i;
-	char *buf = NULL;
+	char *buf;
 	struct stat finfo;
 	td_request_t treq;
 	td_vbd_request_t* vreq;
@@ -217,13 +217,13 @@ int main(int argc, const char *argv[])
 		exit(-1);
 	}
 
-        err = tapdisk_server_initialize();
+        err = tapdisk_server_initialize(NULL, NULL);
         if( err ) {
           DPRINTF("qcow2raw Couldn't initialize server instance.\n");
           return err;
         }
 
-        err=tapdisk_vbd_initialize(QCOW_VBD);
+        err=tapdisk_vbd_initialize(-1,-1, QCOW_VBD);
         if( err ) {
           DPRINTF("qcow2raw Couldn't initialize qcow vbd.\n");
           return err;
@@ -335,7 +335,7 @@ int main(int argc, const char *argv[])
 	}
 
         //Now the output file should be there, reopen it as an aio VBD
-        err=tapdisk_vbd_initialize(AIO_VBD);
+        err=tapdisk_vbd_initialize(-1,-1, AIO_VBD);
         if( err ) {
           DPRINTF("qcow2raw Couldn't initialize aio vbd.\n");
           return err;

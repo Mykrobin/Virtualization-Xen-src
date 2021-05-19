@@ -13,18 +13,9 @@
 #define DEFINE_SPINLOCK(x) spinlock_t x = SPIN_LOCK_UNLOCKED
 #endif
 
-#ifdef _LINUX_INIT_H
-
-#ifndef __init
+#if defined(_LINUX_INIT_H) && !defined(__init)
 #define __init
 #endif
-
-#ifndef __devinit
-#define __devinit
-#define __devinitdata
-#endif
-
-#endif /* _LINUX_INIT_H */
 
 #if defined(__LINUX_CACHE_H) && !defined(__read_mostly)
 #define __read_mostly
@@ -168,16 +159,6 @@ typedef irqreturn_t (*irq_handler_t)(int, void *, struct pt_regs *);
 
 #ifndef atomic_cmpxchg
 #define atomic_cmpxchg(v, old, new) (cmpxchg(&((v)->counter), (old), (new)))
-#endif
-
-#ifdef sync_test_bit
-#define synch_change_bit		sync_change_bit
-#define synch_clear_bit			sync_clear_bit
-#define synch_set_bit			sync_set_bit
-#define synch_test_and_change_bit	sync_test_and_change_bit
-#define synch_test_and_clear_bit	sync_test_and_clear_bit
-#define synch_test_and_set_bit		sync_test_and_set_bit
-#define synch_test_bit			sync_test_bit
 #endif
 
 #endif

@@ -5,11 +5,8 @@
 
 #ifndef __ASSEMBLY__
 
-#include <xen/types.h>
+#include <xen/smp.h>
 #include <xen/percpu.h>
-#include <xen/errno.h>
-#include <asm/asm_defns.h>
-#include <asm/cpufeature.h>
 
 #define rdmsr(msr,val1,val2) \
      __asm__ __volatile__("rdmsr" \
@@ -21,7 +18,7 @@
 			    : "=a" (a__), "=d" (b__) \
 			    : "c" (msr)); \
        val = a__ | ((u64)b__<<32); \
-} while(0)
+} while(0);
 
 #define wrmsr(msr,val1,val2) \
      __asm__ __volatile__("wrmsr" \
@@ -37,75 +34,53 @@ static inline void wrmsrl(unsigned int msr, __u64 val)
 }
 
 /* rdmsr with exception handling */
-#define rdmsr_safe(msr,val) ({\
+#define rdmsr_safe(msr,val1,val2) ({\
     int _rc; \
-    uint32_t lo, hi; \
     __asm__ __volatile__( \
         "1: rdmsr\n2:\n" \
         ".section .fixup,\"ax\"\n" \
-        "3: xorl %0,%0\n; xorl %1,%1\n" \
-        "   movl %5,%2\n; jmp 2b\n" \
+        "3: movl %5,%2\n; jmp 2b\n" \
         ".previous\n" \
-        _ASM_EXTABLE(1b, 3b) \
-        : "=a" (lo), "=d" (hi), "=&r" (_rc) \
+        ".section __ex_table,\"a\"\n" \
+        "   "__FIXUP_ALIGN"\n" \
+        "   "__FIXUP_WORD" 1b,3b\n" \
+        ".previous\n" \
+        : "=a" (val1), "=d" (val2), "=&r" (_rc) \
         : "c" (msr), "2" (0), "i" (-EFAULT)); \
-    val = lo | ((uint64_t)hi << 32); \
     _rc; })
 
 /* wrmsr with exception handling */
-static inline int wrmsr_safe(unsigned int msr, uint64_t val)
-{
-    int _rc;
-    uint32_t lo, hi;
-    lo = (uint32_t)val;
-    hi = (uint32_t)(val >> 32);
+#define wrmsr_safe(msr,val1,val2) ({\
+    int _rc; \
+    __asm__ __volatile__( \
+        "1: wrmsr\n2:\n" \
+        ".section .fixup,\"ax\"\n" \
+        "3: movl %5,%0\n; jmp 2b\n" \
+        ".previous\n" \
+        ".section __ex_table,\"a\"\n" \
+        "   "__FIXUP_ALIGN"\n" \
+        "   "__FIXUP_WORD" 1b,3b\n" \
+        ".previous\n" \
+        : "=&r" (_rc) \
+        : "c" (msr), "a" (val1), "d" (val2), "0" (0), "i" (-EFAULT)); \
+    _rc; })
 
-    __asm__ __volatile__(
-        "1: wrmsr\n2:\n"
-        ".section .fixup,\"ax\"\n"
-        "3: movl %5,%0\n; jmp 2b\n"
-        ".previous\n"
-        _ASM_EXTABLE(1b, 3b)
-        : "=&r" (_rc)
-        : "c" (msr), "a" (lo), "d" (hi), "0" (0), "i" (-EFAULT));
-    return _rc;
-}
+#define rdtsc(low,high) \
+     __asm__ __volatile__("rdtsc" : "=a" (low), "=d" (high))
 
-static inline uint64_t msr_fold(const struct cpu_user_regs *regs)
-{
-    return (regs->rdx << 32) | regs->eax;
-}
+#define rdtscl(low) \
+     __asm__ __volatile__("rdtsc" : "=a" (low) : : "edx")
 
-static inline void msr_split(struct cpu_user_regs *regs, uint64_t val)
-{
-    regs->rdx = val >> 32;
-    regs->rax = (uint32_t)val;
-}
-
-static inline uint64_t rdtsc(void)
-{
-    uint32_t low, high;
-
-    __asm__ __volatile__("rdtsc" : "=a" (low), "=d" (high));
-
-    return ((uint64_t)high << 32) | low;
-}
-
-static inline uint64_t rdtsc_ordered(void)
-{
-	/*
-	 * The RDTSC instruction is not ordered relative to memory access.
-	 * The Intel SDM and the AMD APM are both vague on this point, but
-	 * empirically an RDTSC instruction can be speculatively executed
-	 * before prior loads.  An RDTSC immediately after an appropriate
-	 * barrier appears to be ordered as a normal load, that is, it
-	 * provides the same ordering guarantees as reading from a global
-	 * memory location that some other imaginary CPU is updating
-	 * continuously with a time stamp.
-	 */
-	alternative("lfence", "mfence", X86_FEATURE_MFENCE_RDTSC);
-	return rdtsc();
-}
+#if defined(__i386__)
+#define rdtscll(val) \
+     __asm__ __volatile__("rdtsc" : "=A" (val))
+#elif defined(__x86_64__)
+#define rdtscll(val) do { \
+     unsigned int a,d; \
+     asm volatile("rdtsc" : "=a" (a), "=d" (d)); \
+     (val) = ((unsigned long)a) | (((unsigned long)d)<<32); \
+} while(0)
+#endif
 
 #define __write_tsc(val) wrmsrl(MSR_IA32_TSC, val)
 #define write_tsc(val) ({                                       \
@@ -115,209 +90,39 @@ static inline uint64_t rdtsc_ordered(void)
     __write_tsc(val);                                           \
 })
 
+#define write_rdtscp_aux(val) wrmsr(MSR_TSC_AUX, (val), 0)
+
 #define rdpmc(counter,low,high) \
      __asm__ __volatile__("rdpmc" \
 			  : "=a" (low), "=d" (high) \
 			  : "c" (counter))
 
-/*
- * On hardware supporting FSGSBASE, the value loaded into hardware is the
- * guest kernel's choice for 64bit PV guests (Xen's choice for Idle, HVM and
- * 32bit PV).
- *
- * Therefore, the {RD,WR}{FS,GS}BASE instructions are only safe to use if
- * %cr4.fsgsbase is set.
- */
-static inline unsigned long __rdfsbase(void)
-{
-    unsigned long base;
 
-#ifdef HAVE_AS_FSGSBASE
-    asm volatile ( "rdfsbase %0" : "=r" (base) );
-#else
-    asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xc0" : "=a" (base) );
-#endif
+DECLARE_PER_CPU(u64, efer);
 
-    return base;
-}
-
-static inline unsigned long __rdgsbase(void)
-{
-    unsigned long base;
-
-#ifdef HAVE_AS_FSGSBASE
-    asm volatile ( "rdgsbase %0" : "=r" (base) );
-#else
-    asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xc8" : "=a" (base) );
-#endif
-
-    return base;
-}
-
-static inline unsigned long rdfsbase(void)
-{
-    unsigned long base;
-
-    if ( read_cr4() & X86_CR4_FSGSBASE )
-        return __rdfsbase();
-
-    rdmsrl(MSR_FS_BASE, base);
-
-    return base;
-}
-
-static inline unsigned long rdgsbase(void)
-{
-    unsigned long base;
-
-    if ( read_cr4() & X86_CR4_FSGSBASE )
-        return __rdgsbase();
-
-    rdmsrl(MSR_GS_BASE, base);
-
-    return base;
-}
-
-static inline unsigned long rdgsshadow(void)
-{
-    unsigned long base;
-
-    if ( read_cr4() & X86_CR4_FSGSBASE )
-    {
-        asm volatile ( "swapgs" );
-        base = __rdgsbase();
-        asm volatile ( "swapgs" );
-    }
-    else
-        rdmsrl(MSR_SHADOW_GS_BASE, base);
-
-    return base;
-}
-
-static inline void wrfsbase(unsigned long base)
-{
-    if ( read_cr4() & X86_CR4_FSGSBASE )
-#ifdef HAVE_AS_FSGSBASE
-        asm volatile ( "wrfsbase %0" :: "r" (base) );
-#else
-        asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xd0" :: "a" (base) );
-#endif
-    else
-        wrmsrl(MSR_FS_BASE, base);
-}
-
-static inline void wrgsbase(unsigned long base)
-{
-    if ( read_cr4() & X86_CR4_FSGSBASE )
-#ifdef HAVE_AS_FSGSBASE
-        asm volatile ( "wrgsbase %0" :: "r" (base) );
-#else
-        asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xd8" :: "a" (base) );
-#endif
-    else
-        wrmsrl(MSR_GS_BASE, base);
-}
-
-static inline void wrgsshadow(unsigned long base)
-{
-    if ( read_cr4() & X86_CR4_FSGSBASE )
-    {
-        asm volatile ( "swapgs\n\t"
-#ifdef HAVE_AS_FSGSBASE
-                       "wrgsbase %0\n\t"
-                       "swapgs"
-                       :: "r" (base) );
-#else
-                       ".byte 0xf3, 0x48, 0x0f, 0xae, 0xd8\n\t"
-                       "swapgs"
-                       :: "a" (base) );
-#endif
-    }
-    else
-        wrmsrl(MSR_SHADOW_GS_BASE, base);
-}
-
-DECLARE_PER_CPU(uint64_t, efer);
-static inline uint64_t read_efer(void)
+static inline u64 read_efer(void)
 {
     return this_cpu(efer);
 }
 
-static inline void write_efer(uint64_t val)
+static inline void write_efer(u64 val)
 {
     this_cpu(efer) = val;
     wrmsrl(MSR_EFER, val);
 }
 
-extern unsigned int ler_msr;
+DECLARE_PER_CPU(u32, ler_msr);
 
-DECLARE_PER_CPU(uint32_t, tsc_aux);
-
-/* Lazy update of MSR_TSC_AUX */
-static inline void wrmsr_tsc_aux(uint32_t val)
+static inline void ler_enable(void)
 {
-    uint32_t *this_tsc_aux = &this_cpu(tsc_aux);
+    u64 debugctl;
+    
+    if ( !this_cpu(ler_msr) )
+        return;
 
-    if ( *this_tsc_aux != val )
-    {
-        wrmsr(MSR_TSC_AUX, val, 0);
-        *this_tsc_aux = val;
-    }
+    rdmsrl(MSR_IA32_DEBUGCTLMSR, debugctl);
+    wrmsrl(MSR_IA32_DEBUGCTLMSR, debugctl | 1);
 }
-
-/* MSR policy object for shared per-domain MSRs */
-struct msr_domain_policy
-{
-    /* 0x000000ce  MSR_INTEL_PLATFORM_INFO */
-    struct {
-        bool available; /* This MSR is non-architectural */
-        bool cpuid_faulting;
-    } plaform_info;
-};
-
-/* RAW msr domain policy: contains the actual values from H/W MSRs */
-extern struct msr_domain_policy raw_msr_domain_policy;
-/*
- * HOST msr domain policy: features that Xen actually decided to use,
- * a subset of RAW policy.
- */
-extern struct msr_domain_policy host_msr_domain_policy;
-
-/* MSR policy object for per-vCPU MSRs */
-struct msr_vcpu_policy
-{
-    /* 0x00000048 - MSR_SPEC_CTRL */
-    struct {
-        /*
-         * Only the bottom two bits are defined, so no need to waste space
-         * with uint64_t at the moment, but use uint32_t for the convenience
-         * of the assembly code.
-         */
-        uint32_t raw;
-    } spec_ctrl;
-
-    /* 0x00000140  MSR_INTEL_MISC_FEATURES_ENABLES */
-    struct {
-        bool available; /* This MSR is non-architectural */
-        bool cpuid_faulting;
-    } misc_features_enables;
-};
-
-void init_guest_msr_policy(void);
-int init_domain_msr_policy(struct domain *d);
-int init_vcpu_msr_policy(struct vcpu *v);
-
-/*
- * Below functions can return X86EMUL_UNHANDLEABLE which means that MSR is
- * not (yet) handled by it and must be processed by legacy handlers. Such
- * behaviour is needed for transition period until all rd/wrmsr are handled
- * by the new MSR infrastructure.
- *
- * These functions are also used by the migration logic, so need to cope with
- * being used outside of v's context.
- */
-int guest_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val);
-int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val);
 
 #endif /* !__ASSEMBLY__ */
 

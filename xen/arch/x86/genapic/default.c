@@ -1,6 +1,7 @@
 /* 
  * Default generic APIC driver. This handles upto 8 CPUs.
  */
+#include <xen/config.h>
 #include <xen/cpumask.h>
 #include <asm/current.h>
 #include <asm/mpspec.h>
@@ -11,7 +12,6 @@
 #include <xen/string.h>
 #include <xen/smp.h>
 #include <xen/init.h>
-#include <asm/io_apic.h>
 #include <asm/mach-default/mach_mpparse.h>
 
 /* should be called last. */

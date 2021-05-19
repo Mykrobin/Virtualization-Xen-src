@@ -8,16 +8,15 @@
 # Copyright (C) 2005 by Christian Limpach
 #
 
-XEN_ROOT	= $(CURDIR)/../..
+XEN_ROOT	= ../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-PROGRAMS = readnotes lsevtchn
-
 CFLAGS += -Werror
+CFLAGS += $(CFLAGS_libxenctrl) $(CFLAGS_libxenguest) $(CFLAGS_libxenstore)
 
-# incorrectly uses libxc internals
-CFLAGS_readnotes.o  := $(CFLAGS_libxenevtchn) $(CFLAGS_libxenctrl) $(CFLAGS_libxenguest) -I$(XEN_ROOT)/tools/libxc $(CFLAGS_libxencall)
-CFLAGS_lsevtchn.o   := $(CFLAGS_libxenevtchn) $(CFLAGS_libxenctrl)
+PROGRAMS = xc_restore xc_save readnotes lsevtchn
+
+LDLIBS   = $(LDFLAGS_libxenctrl) $(LDFLAGS_libxenguest) $(LDFLAGS_libxenstore)
 
 .PHONY: all
 all: build
@@ -25,27 +24,18 @@ all: build
 .PHONY: build
 build: $(PROGRAMS)
 
-readnotes: readnotes.o
-	$(CC) $(LDFLAGS) $^ -o $@ $(LDLIBS_libxenctrl) $(LDLIBS_libxenguest) $(APPEND_LDFLAGS)
-
-lsevtchn: lsevtchn.o
-	$(CC) $(LDFLAGS) $^ -o $@ $(LDLIBS_libxenctrl) $(APPEND_LDFLAGS)
+$(PROGRAMS): %: %.o
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 .PHONY: install
 install: build
-	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC_BIN)
-	$(INSTALL_PROG) $(PROGRAMS) $(DESTDIR)$(LIBEXEC_BIN)
+	$(INSTALL_DIR) $(DESTDIR)$(PRIVATE_BINDIR)
+	$(INSTALL_PROG) $(PROGRAMS) $(DESTDIR)$(PRIVATE_BINDIR)
 
-.PHONY: uninstall
-uninstall:
-	rm -f $(addprefix $(DESTDIR)$(LIBEXECDIR)/, $(PROGRAMS))
 
 .PHONY: clean
 clean:
 	$(RM) *.o $(PROGRAMS)
-	$(RM) $(DEPS_RM)
+	$(RM) $(DEPS)
 
-.PHONY: distclean
-distclean: clean
-
--include $(DEPS_INCLUDE)
+-include $(DEPS)

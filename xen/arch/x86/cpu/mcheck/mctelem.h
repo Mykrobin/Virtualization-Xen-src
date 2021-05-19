@@ -23,7 +23,7 @@
  * urgent uses, intended for use from machine check exception handlers,
  * and non-urgent uses intended for use from error pollers.
  * Associated with each logout entry of whatever class is a data area
- * sized per the single argument to mctelem_init.  mctelem_init should be
+ * sized per the single argument to mctelem_init.  mcelem_init should be
  * called from MCA init code before anybody has the chance to change the
  * machine check vector with mcheck_mca_logout or to use mcheck_mca_logout.
  *
@@ -45,7 +45,7 @@
  * which will return a cookie referencing the oldest (first committed)
  * entry of the requested class.  Access the associated data using
  * mctelem_dataptr and when finished use mctelem_consume_oldest_end - in the
- * begin .. end bracket you are guaranteed that the entry can't be freed
+ * begin .. end bracket you are guaranteed that the entry canot be freed
  * even if it is ack'd elsewhere).  Once the ultimate consumer of the
  * telemetry has processed it to stable storage it should acknowledge
  * the telemetry quoting the cookie id, at which point we will free
@@ -59,7 +59,7 @@ typedef enum mctelem_class {
 	MC_NONURGENT
 } mctelem_class_t;
 
-extern void mctelem_init(unsigned int);
+extern void mctelem_init(int);
 extern mctelem_cookie_t mctelem_reserve(mctelem_class_t);
 extern void *mctelem_dataptr(mctelem_cookie_t);
 extern void mctelem_commit(mctelem_cookie_t);
@@ -67,10 +67,9 @@ extern void mctelem_dismiss(mctelem_cookie_t);
 extern mctelem_cookie_t mctelem_consume_oldest_begin(mctelem_class_t);
 extern void mctelem_consume_oldest_end(mctelem_cookie_t);
 extern void mctelem_ack(mctelem_class_t, mctelem_cookie_t);
-extern void mctelem_defer(mctelem_cookie_t, bool lmce);
+extern void mctelem_defer(mctelem_cookie_t);
 extern void mctelem_process_deferred(unsigned int,
-                                     int (*)(mctelem_cookie_t), bool lmce);
-bool mctelem_has_deferred(unsigned int);
-bool mctelem_has_deferred_lmce(unsigned int cpu);
+    int (*)(mctelem_cookie_t));
+int mctelem_has_deferred(unsigned int);
 
 #endif

@@ -25,11 +25,13 @@
  *  General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License along
- *  with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/lib.h>
 #include <xen/types.h>
@@ -37,313 +39,64 @@
 #include <xen/smp.h>
 #include <xen/guest_access.h>
 #include <xen/keyhandler.h>
+#include <xen/cpuidle.h>
 #include <xen/trace.h>
 #include <xen/sched-if.h>
-#include <xen/irq.h>
 #include <asm/cache.h>
 #include <asm/io.h>
-#include <asm/iocap.h>
 #include <asm/hpet.h>
 #include <asm/processor.h>
 #include <xen/pmstat.h>
-#include <xen/softirq.h>
 #include <public/platform.h>
 #include <public/sysctl.h>
 #include <acpi/cpufreq/cpufreq.h>
-#include <asm/apic.h>
-#include <asm/cpuidle.h>
-#include <asm/mwait.h>
-#include <xen/notifier.h>
-#include <xen/cpu.h>
-#include <asm/spec_ctrl.h>
 
 /*#define DEBUG_PM_CX*/
 
-#define GET_HW_RES_IN_NS(msr, val) \
-    do { rdmsrl(msr, val); val = tsc_ticks2ns(val); } while( 0 )
-#define GET_MC6_RES(val)  GET_HW_RES_IN_NS(0x664, val)
-#define GET_PC2_RES(val)  GET_HW_RES_IN_NS(0x60D, val) /* SNB onwards */
-#define GET_PC3_RES(val)  GET_HW_RES_IN_NS(0x3F8, val)
-#define GET_PC6_RES(val)  GET_HW_RES_IN_NS(0x3F9, val)
-#define GET_PC7_RES(val)  GET_HW_RES_IN_NS(0x3FA, val)
-#define GET_PC8_RES(val)  GET_HW_RES_IN_NS(0x630, val) /* some Haswells only */
-#define GET_PC9_RES(val)  GET_HW_RES_IN_NS(0x631, val) /* some Haswells only */
-#define GET_PC10_RES(val) GET_HW_RES_IN_NS(0x632, val) /* some Haswells only */
-#define GET_CC1_RES(val)  GET_HW_RES_IN_NS(0x660, val) /* Silvermont only */
-#define GET_CC3_RES(val)  GET_HW_RES_IN_NS(0x3FC, val)
-#define GET_CC6_RES(val)  GET_HW_RES_IN_NS(0x3FD, val)
-#define GET_CC7_RES(val)  GET_HW_RES_IN_NS(0x3FE, val) /* SNB onwards */
-#define PHI_CC6_RES(val)  GET_HW_RES_IN_NS(0x3FF, val) /* Xeon Phi only */
-
 static void lapic_timer_nop(void) { }
-void (*__read_mostly lapic_timer_off)(void);
-void (*__read_mostly lapic_timer_on)(void);
+static void (*lapic_timer_off)(void);
+static void (*lapic_timer_on)(void);
 
-bool lapic_timer_init(void)
-{
-    if ( boot_cpu_has(X86_FEATURE_ARAT) )
-    {
-        lapic_timer_off = lapic_timer_nop;
-        lapic_timer_on = lapic_timer_nop;
-    }
-    else if ( hpet_broadcast_is_available() )
-    {
-        lapic_timer_off = hpet_broadcast_enter;
-        lapic_timer_on = hpet_broadcast_exit;
-    }
-    else if ( pit_broadcast_is_available() )
-    {
-        lapic_timer_off = pit_broadcast_enter;
-        lapic_timer_on = pit_broadcast_exit;
-    }
-    else
-        return false;
+extern void (*pm_idle) (void);
+extern void (*dead_idle) (void);
+extern void menu_get_trace_data(u32 *expected, u32 *pred);
 
-    return true;
-}
-
-static uint64_t (*__read_mostly tick_to_ns)(uint64_t) = acpi_pm_tick_to_ns;
-
-void (*__read_mostly pm_idle_save)(void);
+static void (*pm_idle_save) (void) __read_mostly;
 unsigned int max_cstate __read_mostly = ACPI_PROCESSOR_MAX_POWER - 1;
 integer_param("max_cstate", max_cstate);
-static bool __read_mostly local_apic_timer_c2_ok;
+static int local_apic_timer_c2_ok __read_mostly = 0;
 boolean_param("lapic_timer_c2_ok", local_apic_timer_c2_ok);
 
-struct acpi_processor_power *__read_mostly processor_powers[NR_CPUS];
-
-struct hw_residencies
-{
-    uint64_t mc0;
-    uint64_t mc6;
-    uint64_t pc2;
-    uint64_t pc3;
-    uint64_t pc4;
-    uint64_t pc6;
-    uint64_t pc7;
-    uint64_t pc8;
-    uint64_t pc9;
-    uint64_t pc10;
-    uint64_t cc1;
-    uint64_t cc3;
-    uint64_t cc6;
-    uint64_t cc7;
-};
-
-static void do_get_hw_residencies(void *arg)
-{
-    struct cpuinfo_x86 *c = &current_cpu_data;
-    struct hw_residencies *hw_res = arg;
-
-    if ( c->x86_vendor != X86_VENDOR_INTEL || c->x86 != 6 )
-        return;
-
-    switch ( c->x86_model )
-    {
-    /* 4th generation Intel Core (Haswell) */
-    case 0x45:
-        GET_PC8_RES(hw_res->pc8);
-        GET_PC9_RES(hw_res->pc9);
-        GET_PC10_RES(hw_res->pc10);
-        /* fall through */
-    /* Sandy bridge */
-    case 0x2A:
-    case 0x2D:
-    /* Ivy bridge */
-    case 0x3A:
-    case 0x3E:
-    /* Haswell */
-    case 0x3C:
-    case 0x3F:
-    case 0x46:
-    /* Broadwell */
-    case 0x3D:
-    case 0x47:
-    case 0x4F:
-    case 0x56:
-    /* Skylake */
-    case 0x4E:
-    case 0x55:
-    case 0x5E:
-    /* Cannon Lake */
-    case 0x66:
-    /* Kaby Lake */
-    case 0x8E:
-    case 0x9E:
-        GET_PC2_RES(hw_res->pc2);
-        GET_CC7_RES(hw_res->cc7);
-        /* fall through */
-    /* Nehalem */
-    case 0x1A:
-    case 0x1E:
-    case 0x1F:
-    case 0x2E:
-    /* Westmere */
-    case 0x25:
-    case 0x2C:
-    case 0x2F:
-        GET_PC3_RES(hw_res->pc3);
-        GET_PC6_RES(hw_res->pc6);
-        GET_PC7_RES(hw_res->pc7);
-        GET_CC3_RES(hw_res->cc3);
-        GET_CC6_RES(hw_res->cc6);
-        break;
-    /* Xeon Phi Knights Landing */
-    case 0x57:
-    /* Xeon Phi Knights Mill */
-    case 0x85:
-        GET_CC3_RES(hw_res->mc0); /* abusing GET_CC3_RES */
-        GET_CC6_RES(hw_res->mc6); /* abusing GET_CC6_RES */
-        GET_PC2_RES(hw_res->pc2);
-        GET_PC3_RES(hw_res->pc3);
-        GET_PC6_RES(hw_res->pc6);
-        GET_PC7_RES(hw_res->pc7);
-        PHI_CC6_RES(hw_res->cc6);
-        break;
-    /* various Atoms */
-    case 0x27:
-        GET_PC3_RES(hw_res->pc2); /* abusing GET_PC3_RES */
-        GET_PC6_RES(hw_res->pc4); /* abusing GET_PC6_RES */
-        GET_PC7_RES(hw_res->pc6); /* abusing GET_PC7_RES */
-        break;
-    /* Silvermont */
-    case 0x37:
-    case 0x4A:
-    case 0x4D:
-    case 0x5A:
-    case 0x5D:
-    /* Airmont */
-    case 0x4C:
-        GET_MC6_RES(hw_res->mc6);
-        GET_PC7_RES(hw_res->pc6); /* abusing GET_PC7_RES */
-        GET_CC1_RES(hw_res->cc1);
-        GET_CC6_RES(hw_res->cc6);
-        break;
-    /* Goldmont */
-    case 0x5C:
-    case 0x5F:
-    /* Goldmont Plus */
-    case 0x7A:
-        GET_PC2_RES(hw_res->pc2);
-        GET_PC3_RES(hw_res->pc3);
-        GET_PC6_RES(hw_res->pc6);
-        GET_PC10_RES(hw_res->pc10);
-        GET_CC1_RES(hw_res->cc1);
-        GET_CC3_RES(hw_res->cc3);
-        GET_CC6_RES(hw_res->cc6);
-        break;
-    }
-}
-
-static void get_hw_residencies(uint32_t cpu, struct hw_residencies *hw_res)
-{
-    memset(hw_res, 0, sizeof(*hw_res));
-
-    if ( smp_processor_id() == cpu )
-        do_get_hw_residencies(hw_res);
-    else
-        on_selected_cpus(cpumask_of(cpu), do_get_hw_residencies, hw_res, 1);
-}
-
-static void print_hw_residencies(uint32_t cpu)
-{
-    struct hw_residencies hw_res;
-
-    get_hw_residencies(cpu, &hw_res);
-
-    if ( hw_res.mc0 | hw_res.mc6 )
-        printk("MC0[%"PRIu64"] MC6[%"PRIu64"]\n",
-               hw_res.mc0, hw_res.mc6);
-    printk("PC2[%"PRIu64"] PC%d[%"PRIu64"] PC6[%"PRIu64"] PC7[%"PRIu64"]\n",
-           hw_res.pc2,
-           hw_res.pc4 ? 4 : 3, hw_res.pc4 ?: hw_res.pc3,
-           hw_res.pc6, hw_res.pc7);
-    if ( hw_res.pc8 | hw_res.pc9 | hw_res.pc10 )
-        printk("PC8[%"PRIu64"] PC9[%"PRIu64"] PC10[%"PRIu64"]\n",
-               hw_res.pc8, hw_res.pc9, hw_res.pc10);
-    printk("CC%d[%"PRIu64"] CC6[%"PRIu64"] CC7[%"PRIu64"]\n",
-           hw_res.cc1 ? 1 : 3, hw_res.cc1 ?: hw_res.cc3,
-           hw_res.cc6, hw_res.cc7);
-}
-
-static char* acpi_cstate_method_name[] =
-{
-    "NONE",
-    "SYSIO",
-    "FFH",
-    "HALT"
-};
-
-static uint64_t get_stime_tick(void) { return (uint64_t)NOW(); }
-static uint64_t stime_ticks_elapsed(uint64_t t1, uint64_t t2) { return t2 - t1; }
-static uint64_t stime_tick_to_ns(uint64_t ticks) { return ticks; }
-
-static uint64_t get_acpi_pm_tick(void) { return (uint64_t)inl(pmtmr_ioport); }
-static uint64_t acpi_pm_ticks_elapsed(uint64_t t1, uint64_t t2)
-{
-    if ( t2 >= t1 )
-        return (t2 - t1);
-    else if ( !(acpi_gbl_FADT.flags & ACPI_FADT_32BIT_TIMER) )
-        return (((0x00FFFFFF - t1) + t2 + 1) & 0x00FFFFFF);
-    else
-        return ((0xFFFFFFFF - t1) + t2 +1);
-}
-
-uint64_t (*__read_mostly cpuidle_get_tick)(void) = get_acpi_pm_tick;
-static uint64_t (*__read_mostly ticks_elapsed)(uint64_t, uint64_t)
-    = acpi_pm_ticks_elapsed;
+static struct acpi_processor_power *__read_mostly processor_powers[NR_CPUS];
 
 static void print_acpi_power(uint32_t cpu, struct acpi_processor_power *power)
 {
-    uint64_t idle_res = 0, idle_usage = 0;
-    uint64_t last_state_update_tick, current_tick, current_stime;
-    uint64_t usage[ACPI_PROCESSOR_MAX_POWER] = { 0 };
-    uint64_t res_tick[ACPI_PROCESSOR_MAX_POWER] = { 0 };
-    unsigned int i;
-    signed int last_state_idx;
+    uint32_t i, idle_usage = 0;
+    uint64_t res, idle_res = 0;
 
     printk("==cpu%d==\n", cpu);
-    last_state_idx = power->last_state ? power->last_state->idx : -1;
-    printk("active state:\t\tC%d\n", last_state_idx);
+    printk("active state:\t\tC%d\n",
+           power->last_state ? power->last_state->idx : -1);
     printk("max_cstate:\t\tC%d\n", max_cstate);
     printk("states:\n");
-
-    spin_lock_irq(&power->stat_lock);
-    current_tick = cpuidle_get_tick();
-    current_stime = NOW();
+    
     for ( i = 1; i < power->count; i++ )
     {
-        res_tick[i] = power->states[i].time;
-        usage[i] = power->states[i].usage;
-    }
-    last_state_update_tick = power->last_state_update_tick;
-    spin_unlock_irq(&power->stat_lock);
+        res = acpi_pm_tick_to_ns(power->states[i].time);
+        idle_usage += power->states[i].usage;
+        idle_res += res;
 
-    if ( last_state_idx >= 0 )
-    {
-        res_tick[last_state_idx] += ticks_elapsed(last_state_update_tick,
-                                                  current_tick);
-        usage[last_state_idx]++;
-    }
-
-    for ( i = 1; i < power->count; i++ )
-    {
-        idle_usage += usage[i];
-        idle_res += tick_to_ns(res_tick[i]);
-
-        printk((last_state_idx == i) ? "   *" : "    ");
+        printk((power->last_state && power->last_state->idx == i) ?
+               "   *" : "    ");
         printk("C%d:\t", i);
         printk("type[C%d] ", power->states[i].type);
         printk("latency[%03d] ", power->states[i].latency);
-        printk("usage[%08"PRIu64"] ", usage[i]);
-        printk("method[%5s] ", acpi_cstate_method_name[power->states[i].entry_method]);
-        printk("duration[%"PRIu64"]\n", tick_to_ns(res_tick[i]));
+        printk("usage[%08d] ", power->states[i].usage);
+        printk("duration[%"PRId64"]\n", res);
     }
-    printk((last_state_idx == 0) ? "   *" : "    ");
-    printk("C0:\tusage[%08"PRIu64"] duration[%"PRIu64"]\n",
-           usage[0] + idle_usage, current_stime - idle_res);
+    printk("    C0:\tusage[%08d] duration[%"PRId64"]\n",
+           idle_usage, NOW() - idle_res);
 
-    print_hw_residencies(cpu);
 }
 
 static void dump_cx(unsigned char key)
@@ -353,84 +106,45 @@ static void dump_cx(unsigned char key)
     printk("'%c' pressed -> printing ACPI Cx structures\n", key);
     for_each_online_cpu ( cpu )
         if (processor_powers[cpu])
-        {
             print_acpi_power(cpu, processor_powers[cpu]);
-            process_pending_softirqs();
-        }
 }
+
+static struct keyhandler dump_cx_keyhandler = {
+    .diagnostic = 1,
+    .u.fn = dump_cx,
+    .desc = "dump ACPI Cx structures"
+};
 
 static int __init cpu_idle_key_init(void)
 {
-    register_keyhandler('c', dump_cx, "dump ACPI Cx structures", 1);
+    register_keyhandler('c', &dump_cx_keyhandler);
     return 0;
 }
 __initcall(cpu_idle_key_init);
 
-/*
- * The bit is set iff cpu use monitor/mwait to enter C state
- * with this flag set, CPU can be waken up from C state
- * by writing to specific memory address, instead of sending an IPI.
- */
-static cpumask_t cpuidle_mwait_flags;
-
-void cpuidle_wakeup_mwait(cpumask_t *mask)
+static inline u32 ticks_elapsed(u32 t1, u32 t2)
 {
-    cpumask_t target;
-    unsigned int cpu;
-
-    cpumask_and(&target, mask, &cpuidle_mwait_flags);
-
-    /* CPU is MWAITing on the cpuidle_mwait_wakeup flag. */
-    for_each_cpu(cpu, &target)
-        mwait_wakeup(cpu) = 0;
-
-    cpumask_andnot(mask, mask, &target);
+    if ( t2 >= t1 )
+        return (t2 - t1);
+    else if ( !(acpi_gbl_FADT.flags & ACPI_FADT_32BIT_TIMER) )
+        return (((0x00FFFFFF - t1) + t2) & 0x00FFFFFF);
+    else
+        return ((0xFFFFFFFF - t1) + t2);
 }
 
-bool arch_skip_send_event_check(unsigned int cpu)
+static void acpi_safe_halt(void)
 {
-    /*
-     * This relies on softirq_pending() and mwait_wakeup() to access data
-     * on the same cache line.
-     */
-    smp_mb();
-    return !!cpumask_test_cpu(cpu, &cpuidle_mwait_flags);
+    smp_mb__after_clear_bit();
+    safe_halt();
 }
 
-void mwait_idle_with_hints(unsigned int eax, unsigned int ecx)
+#define MWAIT_ECX_INTERRUPT_BREAK   (0x1)
+
+static void mwait_idle_with_hints(unsigned long eax, unsigned long ecx)
 {
-    unsigned int cpu = smp_processor_id();
-    s_time_t expires = per_cpu(timer_deadline, cpu);
-
-    if ( boot_cpu_has(X86_FEATURE_CLFLUSH_MONITOR) )
-    {
-        mb();
-        clflush((void *)&mwait_wakeup(cpu));
-        mb();
-    }
-
-    __monitor((void *)&mwait_wakeup(cpu), 0, 0);
+    __monitor((void *)current, 0, 0);
     smp_mb();
-
-    /*
-     * Timer deadline passing is the event on which we will be woken via
-     * cpuidle_mwait_wakeup. So check it now that the location is armed.
-     */
-    if ( (expires > NOW() || expires == 0) && !softirq_pending(cpu) )
-    {
-        struct cpu_info *info = get_cpu_info();
-
-        cpumask_set_cpu(cpu, &cpuidle_mwait_flags);
-
-        spec_ctrl_enter_idle(info);
-        __mwait(eax, ecx);
-        spec_ctrl_exit_idle(info);
-
-        cpumask_clear_cpu(cpu, &cpuidle_mwait_flags);
-    }
-
-    if ( expires <= NOW() && expires > 0 )
-        raise_softirq(TIMER_SOFTIRQ);
+    __mwait(eax, ecx);
 }
 
 static void acpi_processor_ffh_cstate_enter(struct acpi_processor_cx *cx)
@@ -440,7 +154,7 @@ static void acpi_processor_ffh_cstate_enter(struct acpi_processor_cx *cx)
 
 static void acpi_idle_do_entry(struct acpi_processor_cx *cx)
 {
-    struct cpu_info *info = get_cpu_info();
+    int unused;
 
     switch ( cx->entry_method )
     {
@@ -449,19 +163,15 @@ static void acpi_idle_do_entry(struct acpi_processor_cx *cx)
         acpi_processor_ffh_cstate_enter(cx);
         return;
     case ACPI_CSTATE_EM_SYSIO:
-        spec_ctrl_enter_idle(info);
         /* IO port based C-state */
         inb(cx->address);
         /* Dummy wait op - must do something useless after P_LVL2 read
            because chipsets cannot guarantee that STPCLK# signal
            gets asserted in time to freeze execution properly. */
-        inl(pmtmr_ioport);
-        spec_ctrl_exit_idle(info);
+        unused = inl(pmtmr_ioport);
         return;
     case ACPI_CSTATE_EM_HALT:
-        spec_ctrl_enter_idle(info);
-        safe_halt();
-        spec_ctrl_exit_idle(info);
+        acpi_safe_halt();
         local_irq_disable();
         return;
     }
@@ -487,7 +197,7 @@ static struct {
     unsigned int count;
 } c3_cpu_status = { .lock = SPIN_LOCK_UNLOCKED };
 
-void trace_exit_reason(u32 *irq_traced)
+static inline void trace_exit_reason(u32 *irq_traced)
 {
     if ( unlikely(tb_init_done) )
     {
@@ -507,6 +217,15 @@ void trace_exit_reason(u32 *irq_traced)
     }
 }
 
+/* vcpu is urgent if vcpu is polling event channel
+ *
+ * if urgent vcpu exists, CPU should not enter deep C state
+ */
+static int sched_has_urgent_vcpu(void)
+{
+    return atomic_read(&this_cpu(schedule_data).urgent_count);
+}
+
 /*
  * "AAJ72. EOI Transaction May Not be Sent if Software Enters Core C6 During 
  * an Interrupt Service Routine"
@@ -515,9 +234,9 @@ void trace_exit_reason(u32 *irq_traced)
  * may not be sent if software enters core C6 during an interrupt service 
  * routine. So we don't enter deep Cx state if there is an EOI pending.
  */
-static bool errata_c6_eoi_workaround(void)
+bool_t errata_c6_eoi_workaround(void)
 {
-    static int8_t fix_needed = -1;
+    static bool_t fix_needed = -1;
 
     if ( unlikely(fix_needed == -1) )
     {
@@ -532,44 +251,13 @@ static bool errata_c6_eoi_workaround(void)
     return (fix_needed && cpu_has_pending_apic_eoi());
 }
 
-void update_last_cx_stat(struct acpi_processor_power *power,
-                         struct acpi_processor_cx *cx, uint64_t ticks)
-{
-    ASSERT(!local_irq_is_enabled());
-
-    spin_lock(&power->stat_lock);
-    power->last_state = cx;
-    power->last_state_update_tick = ticks;
-    spin_unlock(&power->stat_lock);
-}
-
-void update_idle_stats(struct acpi_processor_power *power,
-                       struct acpi_processor_cx *cx,
-                       uint64_t before, uint64_t after)
-{
-    int64_t sleep_ticks = ticks_elapsed(before, after);
-    /* Interrupts are disabled */
-
-    spin_lock(&power->stat_lock);
-
-    cx->usage++;
-    if ( sleep_ticks > 0 )
-    {
-        power->last_residency = tick_to_ns(sleep_ticks) / 1000UL;
-        cx->time += sleep_ticks;
-    }
-    power->last_state = &power->states[0];
-    power->last_state_update_tick = after;
-
-    spin_unlock(&power->stat_lock);
-}
-
 static void acpi_processor_idle(void)
 {
     struct acpi_processor_power *power = processor_powers[smp_processor_id()];
     struct acpi_processor_cx *cx = NULL;
     int next_state;
-    uint64_t t1, t2 = 0;
+    int sleep_ticks = 0;
+    u32 t1, t2 = 0;
     u32 exp = 0, pred = 0;
     u32 irq_traced[4] = { 0 };
 
@@ -577,8 +265,8 @@ static void acpi_processor_idle(void)
          (next_state = cpuidle_current_governor->select(power)) > 0 )
     {
         cx = &power->states[next_state];
-        if ( cx->type == ACPI_STATE_C3 && power->flags.bm_check &&
-             acpi_idle_bm_check() )
+        if ( power->flags.bm_check && acpi_idle_bm_check()
+             && cx->type == ACPI_STATE_C3 )
             cx = power->safe_state;
         if ( cx->idx > max_cstate )
             cx = &power->states[max_cstate];
@@ -589,13 +277,7 @@ static void acpi_processor_idle(void)
         if ( pm_idle_save )
             pm_idle_save();
         else
-        {
-            struct cpu_info *info = get_cpu_info();
-
-            spec_ctrl_enter_idle(info);
-            safe_halt();
-            spec_ctrl_exit_idle(info);
-        }
+            acpi_safe_halt();
         return;
     }
 
@@ -611,7 +293,8 @@ static void acpi_processor_idle(void)
      */
     local_irq_disable();
 
-    if ( !cpu_is_haltable(smp_processor_id()) )
+    if ( softirq_pending(smp_processor_id()) ||
+         cpu_is_offline(smp_processor_id()) )
     {
         local_irq_enable();
         sched_tick_resume();
@@ -622,6 +305,7 @@ static void acpi_processor_idle(void)
     if ( (cx->type == ACPI_STATE_C3) && errata_c6_eoi_workaround() )
         cx = power->safe_state;
 
+    power->last_state = cx;
 
     /*
      * Sleep:
@@ -635,43 +319,25 @@ static void acpi_processor_idle(void)
         if ( cx->type == ACPI_STATE_C1 || local_apic_timer_c2_ok )
         {
             /* Get start time (ticks) */
-            t1 = cpuidle_get_tick();
+            t1 = inl(pmtmr_ioport);
             /* Trace cpu idle entry */
             TRACE_4D(TRC_PM_IDLE_ENTRY, cx->idx, t1, exp, pred);
-
-            update_last_cx_stat(power, cx, t1);
-
             /* Invoke C2 */
             acpi_idle_do_entry(cx);
             /* Get end time (ticks) */
-            t2 = cpuidle_get_tick();
+            t2 = inl(pmtmr_ioport);
             trace_exit_reason(irq_traced);
             /* Trace cpu idle exit */
             TRACE_6D(TRC_PM_IDLE_EXIT, cx->idx, t2,
                      irq_traced[0], irq_traced[1], irq_traced[2], irq_traced[3]);
-            /* Update statistics */
-            update_idle_stats(power, cx, t1, t2);
             /* Re-enable interrupts */
             local_irq_enable();
+            /* Compute time (ticks) that we were actually asleep */
+            sleep_ticks = ticks_elapsed(t1, t2);
             break;
         }
 
     case ACPI_STATE_C3:
-        /*
-         * Before invoking C3, be aware that TSC/APIC timer may be 
-         * stopped by H/W. Without carefully handling of TSC/APIC stop issues,
-         * deep C state can't work correctly.
-         */
-        /* preparing APIC stop */
-        lapic_timer_off();
-
-        /* Get start time (ticks) */
-        t1 = cpuidle_get_tick();
-        /* Trace cpu idle entry */
-        TRACE_4D(TRC_PM_IDLE_ENTRY, cx->idx, t1, exp, pred);
-
-        update_last_cx_stat(power, cx, t1);
-
         /*
          * disable bus master
          * bm_check implies we need ARB_DIS
@@ -682,9 +348,7 @@ static void acpi_processor_idle(void)
          * not set. In that case we cannot do much, we enter C3
          * without doing anything.
          */
-        if ( cx->type != ACPI_STATE_C3 )
-            /* nothing to be done here */;
-        else if ( power->flags.bm_check && power->flags.bm_control )
+        if ( power->flags.bm_check && power->flags.bm_control )
         {
             spin_lock(&c3_cpu_status.lock);
             if ( ++c3_cpu_status.count == num_online_cpus() )
@@ -703,21 +367,22 @@ static void acpi_processor_idle(void)
             ACPI_FLUSH_CPU_CACHE();
         }
 
+        /*
+         * Before invoking C3, be aware that TSC/APIC timer may be 
+         * stopped by H/W. Without carefully handling of TSC/APIC stop issues,
+         * deep C state can't work correctly.
+         */
+        /* preparing APIC stop */
+        lapic_timer_off();
+
+        /* Get start time (ticks) */
+        t1 = inl(pmtmr_ioport);
+        /* Trace cpu idle entry */
+        TRACE_4D(TRC_PM_IDLE_ENTRY, cx->idx, t1, exp, pred);
         /* Invoke C3 */
         acpi_idle_do_entry(cx);
-
-        if ( (cx->type == ACPI_STATE_C3) &&
-             power->flags.bm_check && power->flags.bm_control )
-        {
-            /* Enable bus master arbitration */
-            spin_lock(&c3_cpu_status.lock);
-            if ( c3_cpu_status.count-- == num_online_cpus() )
-                acpi_set_register(ACPI_BITREG_ARB_DISABLE, 0);
-            spin_unlock(&c3_cpu_status.lock);
-        }
-
         /* Get end time (ticks) */
-        t2 = cpuidle_get_tick();
+        t2 = inl(pmtmr_ioport);
 
         /* recovering TSC */
         cstate_restore_tsc();
@@ -726,26 +391,37 @@ static void acpi_processor_idle(void)
         TRACE_6D(TRC_PM_IDLE_EXIT, cx->idx, t2,
                  irq_traced[0], irq_traced[1], irq_traced[2], irq_traced[3]);
 
-        /* Update statistics */
-        update_idle_stats(power, cx, t1, t2);
+        if ( power->flags.bm_check && power->flags.bm_control )
+        {
+            /* Enable bus master arbitration */
+            spin_lock(&c3_cpu_status.lock);
+            if ( c3_cpu_status.count-- == num_online_cpus() )
+                acpi_set_register(ACPI_BITREG_ARB_DISABLE, 0);
+            spin_unlock(&c3_cpu_status.lock);
+        }
+
         /* Re-enable interrupts */
         local_irq_enable();
         /* recovering APIC */
         lapic_timer_on();
+        /* Compute time (ticks) that we were actually asleep */
+        sleep_ticks = ticks_elapsed(t1, t2);
 
         break;
 
     default:
-        /* Now in C0 */
-        power->last_state = &power->states[0];
         local_irq_enable();
         sched_tick_resume();
         cpufreq_dbs_timer_resume();
         return;
     }
 
-    /* Now in C0 */
-    power->last_state = &power->states[0];
+    cx->usage++;
+    if ( sleep_ticks > 0 )
+    {
+        power->last_residency = acpi_pm_tick_to_ns(sleep_ticks) / 1000UL;
+        cx->time += sleep_ticks;
+    }
 
     sched_tick_resume();
     cpufreq_dbs_timer_resume();
@@ -754,10 +430,11 @@ static void acpi_processor_idle(void)
         cpuidle_current_governor->reflect(power);
 }
 
-void acpi_dead_idle(void)
+static void acpi_dead_idle(void)
 {
     struct acpi_processor_power *power;
     struct acpi_processor_cx *cx;
+    int unused;
 
     if ( (power = processor_powers[smp_processor_id()]) == NULL )
         goto default_halt;
@@ -765,96 +442,60 @@ void acpi_dead_idle(void)
     if ( (cx = &power->states[power->count-1]) == NULL )
         goto default_halt;
 
-    if ( cx->entry_method == ACPI_CSTATE_EM_FFH )
+    for ( ; ; )
     {
-        void *mwait_ptr = &mwait_wakeup(smp_processor_id());
+        if ( !power->flags.bm_check && cx->type == ACPI_STATE_C3 )
+            ACPI_FLUSH_CPU_CACHE();
 
-        /*
-         * Cache must be flushed as the last operation before sleeping.
-         * Otherwise, CPU may still hold dirty data, breaking cache coherency,
-         * leading to strange errors.
-         */
-        spec_ctrl_enter_idle(get_cpu_info());
-        wbinvd();
-
-        while ( 1 )
+        switch ( cx->entry_method )
         {
-            /*
-             * 1. The CLFLUSH is a workaround for erratum AAI65 for
-             * the Xeon 7400 series.  
-             * 2. The WBINVD is insufficient due to the spurious-wakeup
-             * case where we return around the loop.
-             * 3. Unlike wbinvd, clflush is a light weight but not serializing 
-             * instruction, hence memory fence is necessary to make sure all 
-             * load/store visible before flush cache line.
-             */
-            mb();
-            clflush(mwait_ptr);
-            __monitor(mwait_ptr, 0, 0);
-            mb();
-            __mwait(cx->address, 0);
-        }
-    }
-    else if ( current_cpu_data.x86_vendor == X86_VENDOR_AMD &&
-              cx->entry_method == ACPI_CSTATE_EM_SYSIO )
-    {
-        /* Intel prefers not to use SYSIO */
-
-        /* Avoid references to shared data after the cache flush */
-        u32 address = cx->address;
-        u32 pmtmr_ioport_local = pmtmr_ioport;
-
-        spec_ctrl_enter_idle(get_cpu_info());
-        wbinvd();
-
-        while ( 1 )
-        {
-            inb(address);
-            inl(pmtmr_ioport_local);
+            case ACPI_CSTATE_EM_FFH:
+                /* Not treat interrupt as break event */
+                mwait_idle_with_hints(cx->address, 0);
+                break;
+            case ACPI_CSTATE_EM_SYSIO:
+                inb(cx->address);
+                unused = inl(pmtmr_ioport);
+                break;
+            default:
+                goto default_halt;
         }
     }
 
 default_halt:
-    default_dead_idle();
+    for ( ; ; )
+        halt();
 }
 
-int cpuidle_init_cpu(unsigned int cpu)
+static int init_cx_pminfo(struct acpi_processor_power *acpi_power)
 {
-    struct acpi_processor_power *acpi_power;
+    int i;
 
-    acpi_power = processor_powers[cpu];
-    if ( !acpi_power )
-    {
-        unsigned int i;
+    memset(acpi_power, 0, sizeof(*acpi_power));
 
-        if ( cpu == 0 && boot_cpu_has(X86_FEATURE_NONSTOP_TSC) )
-        {
-            cpuidle_get_tick = get_stime_tick;
-            ticks_elapsed = stime_ticks_elapsed;
-            tick_to_ns = stime_tick_to_ns;
-        }
+    for ( i = 0; i < ACPI_PROCESSOR_MAX_POWER; i++ )
+        acpi_power->states[i].idx = i;
 
-        acpi_power = xzalloc(struct acpi_processor_power);
-        if ( !acpi_power )
-            return -ENOMEM;
+    acpi_power->states[ACPI_STATE_C1].type = ACPI_STATE_C1;
+    acpi_power->states[ACPI_STATE_C1].entry_method = ACPI_CSTATE_EM_HALT;
 
-        for ( i = 0; i < ACPI_PROCESSOR_MAX_POWER; i++ )
-            acpi_power->states[i].idx = i;
-
-        acpi_power->cpu = cpu;
-
-        spin_lock_init(&acpi_power->stat_lock);
-
-        processor_powers[cpu] = acpi_power;
-    }
+    acpi_power->states[ACPI_STATE_C0].valid = 1;
+    acpi_power->states[ACPI_STATE_C1].valid = 1;
 
     acpi_power->count = 2;
-    acpi_power->states[1].type = ACPI_STATE_C1;
-    acpi_power->states[1].entry_method = ACPI_CSTATE_EM_HALT;
-    acpi_power->safe_state = &acpi_power->states[1];
+    acpi_power->safe_state = &acpi_power->states[ACPI_STATE_C1];
 
     return 0;
 }
+
+#define CPUID_MWAIT_LEAF (5)
+#define CPUID5_ECX_EXTENSIONS_SUPPORTED (0x1)
+#define CPUID5_ECX_INTERRUPT_BREAK      (0x2)
+
+#define MWAIT_ECX_INTERRUPT_BREAK       (0x1)
+
+#define MWAIT_SUBSTATE_MASK (0xf)
+#define MWAIT_SUBSTATE_SIZE (4)
 
 static int acpi_processor_ffh_cstate_probe(xen_processor_cx_t *cx)
 {
@@ -863,8 +504,6 @@ static int acpi_processor_ffh_cstate_probe(xen_processor_cx_t *cx)
     unsigned int edx_part;
     unsigned int cstate_type; /* C-state type and not ACPI C-state type */
     unsigned int num_cstate_subtype;
-    int ret = 0;
-    static unsigned long printed;
 
     if ( c->cpuid_level < CPUID_MWAIT_LEAF )
     {
@@ -873,9 +512,8 @@ static int acpi_processor_ffh_cstate_probe(xen_processor_cx_t *cx)
     }
 
     cpuid(CPUID_MWAIT_LEAF, &eax, &ebx, &ecx, &edx);
-    if ( opt_cpu_info )
-        printk(XENLOG_DEBUG "cpuid.MWAIT[eax=%x ebx=%x ecx=%x edx=%x]\n",
-               eax, ebx, ecx, edx);
+    printk(XENLOG_DEBUG "cpuid.MWAIT[.eax=%x, .ebx=%x, .ecx=%x, .edx=%x]\n",
+           eax, ebx, ecx, edx);
 
     /* Check whether this particular cx_type (in CST) is supported or not */
     cstate_type = (cx->reg.address >> MWAIT_SUBSTATE_SIZE) + 1;
@@ -883,16 +521,15 @@ static int acpi_processor_ffh_cstate_probe(xen_processor_cx_t *cx)
     num_cstate_subtype = edx_part & MWAIT_SUBSTATE_MASK;
 
     if ( num_cstate_subtype < (cx->reg.address & MWAIT_SUBSTATE_MASK) )
-        ret = -ERANGE;
+        return -EFAULT;
+
     /* mwait ecx extensions INTERRUPT_BREAK should be supported for C2/C3 */
-    else if ( !(ecx & CPUID5_ECX_EXTENSIONS_SUPPORTED) ||
-              !(ecx & CPUID5_ECX_INTERRUPT_BREAK) )
-        ret = -ENODEV;
-    else if ( opt_cpu_info || cx->type >= BITS_PER_LONG ||
-              !test_and_set_bit(cx->type, &printed) )
-        printk(XENLOG_INFO "Monitor-Mwait will be used to enter C%d state\n",
-               cx->type);
-    return ret;
+    if ( !(ecx & CPUID5_ECX_EXTENSIONS_SUPPORTED) ||
+         !(ecx & CPUID5_ECX_INTERRUPT_BREAK) )
+        return -EFAULT;
+
+    printk(XENLOG_INFO "Monitor-Mwait will be used to enter C-%d state\n", cx->type);
+    return 0;
 }
 
 /*
@@ -969,14 +606,33 @@ static int check_cx(struct acpi_processor_power *power, xen_processor_cx_t *cx)
         if ( local_apic_timer_c2_ok )
             break;
     case ACPI_STATE_C3:
-        if ( !lapic_timer_init() )
+        if ( boot_cpu_has(X86_FEATURE_ARAT) )
+        {
+            lapic_timer_off = lapic_timer_nop;
+            lapic_timer_on = lapic_timer_nop;
+        }
+        else if ( hpet_broadcast_is_available() )
+        {
+            lapic_timer_off = hpet_broadcast_enter;
+            lapic_timer_on = hpet_broadcast_exit;
+        }
+        else if ( pit_broadcast_is_available() )
+        {
+            lapic_timer_off = pit_broadcast_enter;
+            lapic_timer_on = pit_broadcast_exit;
+        }
+        else
+        {
             return -EINVAL;
+        }
 
         /* All the logic here assumes flags.bm_check is same across all CPUs */
-        if ( bm_check_flag < 0 )
+        if ( bm_check_flag == -1 )
         {
             /* Determine whether bm_check is needed based on CPU  */
             acpi_processor_power_init_bm_check(&(power->flags));
+            bm_check_flag = power->flags.bm_check;
+            bm_control_flag = power->flags.bm_control;
         }
         else
         {
@@ -1003,13 +659,14 @@ static int check_cx(struct acpi_processor_power *power, xen_processor_cx_t *cx)
                 }
             }
             /*
-             * On older chipsets, BM_RLD needs to be set in order for Bus
-             * Master activity to wake the system from C3, hence
-             * acpi_set_register() is always being called once below.  Newer
-             * chipsets handle DMA during C3 automatically and BM_RLD is a
-             * NOP.  In either case, the proper way to handle BM_RLD is to
-             * set it and leave it set.
+             * On older chipsets, BM_RLD needs to be set
+             * in order for Bus Master activity to wake the
+             * system from C3.  Newer chipsets handle DMA
+             * during C3 automatically and BM_RLD is a NOP.
+             * In either case, the proper way to
+             * handle BM_RLD is to set it and leave it set.
              */
+            acpi_set_register(ACPI_BITREG_BUS_MASTER_RLD, 1);
         }
         else
         {
@@ -1024,13 +681,7 @@ static int check_cx(struct acpi_processor_power *power, xen_processor_cx_t *cx)
                           " for C3 to be enabled on SMP systems\n"));
                 return -EINVAL;
             }
-        }
-
-        if ( bm_check_flag < 0 )
-        {
-            bm_check_flag = power->flags.bm_check;
-            bm_control_flag = power->flags.bm_control;
-            acpi_set_register(ACPI_BITREG_BUS_MASTER_RLD, bm_check_flag);
+            acpi_set_register(ACPI_BITREG_BUS_MASTER_RLD, 0);
         }
 
         break;
@@ -1051,69 +702,54 @@ static void set_cx(
     if ( check_cx(acpi_power, xen_cx) != 0 )
         return;
 
-    switch ( xen_cx->type )
-    {
-    case ACPI_STATE_C1:
+    if ( xen_cx->type == ACPI_STATE_C1 )
         cx = &acpi_power->states[1];
-        break;
-    default:
-        if ( acpi_power->count >= ACPI_PROCESSOR_MAX_POWER )
-        {
-    case ACPI_STATE_C0:
-            printk(XENLOG_WARNING "CPU%u: C%d data ignored\n",
-                   acpi_power->cpu, xen_cx->type);
-            return;
-        }
+    else
         cx = &acpi_power->states[acpi_power->count];
-        cx->type = xen_cx->type;
-        break;
-    }
 
-    cx->address = xen_cx->reg.address;
+    if ( !cx->valid )
+        acpi_power->count++;
+
+    cx->valid    = 1;
+    cx->type     = xen_cx->type;
+    cx->address  = xen_cx->reg.address;
 
     switch ( xen_cx->reg.space_id )
     {
     case ACPI_ADR_SPACE_FIXED_HARDWARE:
         if ( xen_cx->reg.bit_width == VENDOR_INTEL &&
              xen_cx->reg.bit_offset == NATIVE_CSTATE_BEYOND_HALT &&
-             boot_cpu_has(X86_FEATURE_MONITOR) )
+             boot_cpu_has(X86_FEATURE_MWAIT) )
             cx->entry_method = ACPI_CSTATE_EM_FFH;
         else
             cx->entry_method = ACPI_CSTATE_EM_HALT;
         break;
     case ACPI_ADR_SPACE_SYSTEM_IO:
-        if ( ioports_deny_access(hardware_domain, cx->address, cx->address) )
-            printk(XENLOG_WARNING "Could not deny access to port %04x\n",
-                   cx->address);
         cx->entry_method = ACPI_CSTATE_EM_SYSIO;
         break;
     default:
         cx->entry_method = ACPI_CSTATE_EM_NONE;
-        break;
     }
 
-    cx->latency = xen_cx->latency;
+    cx->latency  = xen_cx->latency;
+    cx->power    = xen_cx->power;
+    
+    cx->latency_ticks = ns_to_acpi_pm_tick(cx->latency * 1000UL);
     cx->target_residency = cx->latency * latency_factor;
-
-    smp_wmb();
-    acpi_power->count += (cx->type != ACPI_STATE_C1);
     if ( cx->type == ACPI_STATE_C1 || cx->type == ACPI_STATE_C2 )
         acpi_power->safe_state = cx;
 }
 
-int get_cpu_id(u32 acpi_id)
+int get_cpu_id(u8 acpi_id)
 {
     int i;
-    u32 apic_id;
-
-    if ( acpi_id >= MAX_MADT_ENTRIES )
-        return -1;
+    u8 apic_id;
 
     apic_id = x86_acpiid_to_apicid[acpi_id];
-    if ( apic_id == BAD_APICID )
+    if ( apic_id == 0xff )
         return -1;
 
-    for ( i = 0; i < nr_cpu_ids; i++ )
+    for ( i = 0; i < NR_CPUS; i++ )
     {
         if ( apic_id == x86_cpu_to_apicid[i] )
             return i;
@@ -1146,11 +782,11 @@ static void print_cx_pminfo(uint32_t cpu, struct xen_processor_power *power)
             return;
         
         printk("\tstates[%d]:\n", i);
-        printk("\t\treg.space_id = %#x\n", state.reg.space_id);
-        printk("\t\treg.bit_width = %#x\n", state.reg.bit_width);
-        printk("\t\treg.bit_offset = %#x\n", state.reg.bit_offset);
-        printk("\t\treg.access_size = %#x\n", state.reg.access_size);
-        printk("\t\treg.address = %#"PRIx64"\n", state.reg.address);
+        printk("\t\treg.space_id = 0x%x\n", state.reg.space_id);
+        printk("\t\treg.bit_width = 0x%x\n", state.reg.bit_width);
+        printk("\t\treg.bit_offset = 0x%x\n", state.reg.bit_offset);
+        printk("\t\treg.access_size = 0x%x\n", state.reg.access_size);
+        printk("\t\treg.address = 0x%"PRIx64"\n", state.reg.address);
         printk("\t\ttype    = %d\n", state.type);
         printk("\t\tlatency = %d\n", state.latency);
         printk("\t\tpower   = %d\n", state.power);
@@ -1177,38 +813,40 @@ long set_cx_pminfo(uint32_t cpu, struct xen_processor_power *power)
     XEN_GUEST_HANDLE(xen_processor_cx_t) states;
     xen_processor_cx_t xen_cx;
     struct acpi_processor_power *acpi_power;
-    int cpu_id, i, ret;
+    int cpu_id, i;
 
     if ( unlikely(!guest_handle_okay(power->states, power->count)) )
         return -EFAULT;
 
-    if ( pm_idle_save && pm_idle != acpi_processor_idle )
-        return 0;
-
     print_cx_pminfo(cpu, power);
 
     /* map from acpi_id to cpu_id */
-    cpu_id = get_cpu_id(cpu);
+    cpu_id = get_cpu_id((u8)cpu);
     if ( cpu_id == -1 )
     {
-        static bool warn_once = true;
-
-        if ( warn_once || opt_cpu_info )
-            printk(XENLOG_WARNING "No CPU ID for APIC ID %#x\n", cpu);
-        warn_once = false;
-        return -EINVAL;
+        printk(XENLOG_ERR "no cpu_id for acpi_id %d\n", cpu);
+        return -EFAULT;
     }
 
-    ret = cpuidle_init_cpu(cpu_id);
-    if ( ret < 0 )
-        return ret;
-
     acpi_power = processor_powers[cpu_id];
+    if ( !acpi_power )
+    {
+        acpi_power = xmalloc(struct acpi_processor_power);
+        if ( !acpi_power )
+            return -ENOMEM;
+        memset(acpi_power, 0, sizeof(*acpi_power));
+        processor_powers[cpu_id] = acpi_power;
+    }
+
+    init_cx_pminfo(acpi_power);
+
+    acpi_power->cpu = cpu_id;
     acpi_power->flags.bm_check = power->flags.bm_check;
     acpi_power->flags.bm_control = power->flags.bm_control;
     acpi_power->flags.has_cst = power->flags.has_cst;
 
     states = power->states;
+
     for ( i = 0; i < power->count; i++ )
     {
         if ( unlikely(copy_from_guest_offset(&xen_cx, states, i, 1)) )
@@ -1223,17 +861,19 @@ long set_cx_pminfo(uint32_t cpu, struct xen_processor_power *power)
 
     /* FIXME: C-state dependency is not supported by far */
 
+    /*print_acpi_power(cpu_id, acpi_power);*/
+
+    if ( cpu_id == 0 && pm_idle_save == NULL )
+    {
+        pm_idle_save = pm_idle;
+        pm_idle = acpi_processor_idle;
+    }
+
     if ( cpu_id == 0 )
     {
-        if ( pm_idle_save == NULL )
-        {
-            pm_idle_save = pm_idle;
-            pm_idle = acpi_processor_idle;
-        }
-
         dead_idle = acpi_dead_idle;
     }
- 
+        
     return 0;
 }
 
@@ -1244,110 +884,40 @@ uint32_t pmstat_get_cx_nr(uint32_t cpuid)
 
 int pmstat_get_cx_stat(uint32_t cpuid, struct pm_cx_stat *stat)
 {
-    struct acpi_processor_power *power = processor_powers[cpuid];
-    uint64_t idle_usage = 0, idle_res = 0;
-    uint64_t last_state_update_tick, current_stime, current_tick;
-    uint64_t usage[ACPI_PROCESSOR_MAX_POWER] = { 0 };
-    uint64_t res[ACPI_PROCESSOR_MAX_POWER] = { 0 };
-    unsigned int i, nr, nr_pc = 0, nr_cc = 0;
+    const struct acpi_processor_power *power = processor_powers[cpuid];
+    uint64_t usage, res, idle_usage = 0, idle_res = 0;
+    int i;
 
     if ( power == NULL )
     {
         stat->last = 0;
         stat->nr = 0;
         stat->idle_time = 0;
-        stat->nr_pc = 0;
-        stat->nr_cc = 0;
         return 0;
     }
 
+    stat->last = power->last_state ? power->last_state->idx : 0;
+    stat->nr = power->count;
     stat->idle_time = get_cpu_idle_time(cpuid);
-    nr = min(stat->nr, power->count);
 
-    /* mimic the stat when detail info hasn't been registered by dom0 */
-    if ( pm_idle_save == NULL )
+    for ( i = power->count - 1; i >= 0; i-- )
     {
-        stat->nr = 2;
-        stat->last = power->last_state ? power->last_state->idx : 0;
-
-        usage[1] = idle_usage = 1;
-        res[1] = idle_res = stat->idle_time;
-
-        current_stime = NOW();
-    }
-    else
-    {
-        struct hw_residencies hw_res;
-        signed int last_state_idx;
-
-        stat->nr = power->count;
-
-        spin_lock_irq(&power->stat_lock);
-        current_tick = cpuidle_get_tick();
-        current_stime = NOW();
-        for ( i = 1; i < nr; i++ )
+        if ( i != 0 )
         {
-            usage[i] = power->states[i].usage;
-            res[i] = power->states[i].time;
-        }
-        last_state_update_tick = power->last_state_update_tick;
-        last_state_idx = power->last_state ? power->last_state->idx : -1;
-        spin_unlock_irq(&power->stat_lock);
-
-        if ( last_state_idx >= 0 )
-        {
-            usage[last_state_idx]++;
-            res[last_state_idx] += ticks_elapsed(last_state_update_tick,
-                                                 current_tick);
-            stat->last = last_state_idx;
+            usage = power->states[i].usage;
+            res = acpi_pm_tick_to_ns(power->states[i].time);
+            idle_usage += usage;
+            idle_res += res;
         }
         else
-            stat->last = 0;
-
-        for ( i = 1; i < nr; i++ )
         {
-            res[i] = tick_to_ns(res[i]);
-            idle_usage += usage[i];
-            idle_res += res[i];
+            usage = idle_usage;
+            res = NOW() - idle_res;
         }
-
-        get_hw_residencies(cpuid, &hw_res);
-
-#define PUT_xC(what, n) do { \
-        if ( stat->nr_##what >= n && \
-             copy_to_guest_offset(stat->what, n - 1, &hw_res.what##n, 1) ) \
-            return -EFAULT; \
-        if ( hw_res.what##n ) \
-            nr_##what = n; \
-    } while ( 0 )
-#define PUT_PC(n) PUT_xC(pc, n)
-        PUT_PC(2);
-        PUT_PC(3);
-        PUT_PC(4);
-        PUT_PC(6);
-        PUT_PC(7);
-        PUT_PC(8);
-        PUT_PC(9);
-        PUT_PC(10);
-#undef PUT_PC
-#define PUT_CC(n) PUT_xC(cc, n)
-        PUT_CC(1);
-        PUT_CC(3);
-        PUT_CC(6);
-        PUT_CC(7);
-#undef PUT_CC
-#undef PUT_xC
+        if ( copy_to_guest_offset(stat->triggers, i, &usage, 1) ||
+             copy_to_guest_offset(stat->residencies, i, &res, 1) )
+            return -EFAULT;
     }
-
-    usage[0] += idle_usage;
-    res[0] = current_stime - idle_res;
-
-    if ( copy_to_guest(stat->triggers, usage, nr) ||
-         copy_to_guest(stat->residencies, res, nr) )
-        return -EFAULT;
-
-    stat->nr_pc = nr_pc;
-    stat->nr_cc = nr_cc;
 
     return 0;
 }
@@ -1367,48 +937,12 @@ void cpuidle_disable_deep_cstate(void)
             max_cstate = 1;
     }
 
+    mb();
+
     hpet_disable_legacy_broadcast();
 }
 
-bool cpuidle_using_deep_cstate(void)
+bool_t cpuidle_using_deep_cstate(void)
 {
     return xen_cpuidle && max_cstate > (local_apic_timer_c2_ok ? 2 : 1);
 }
-
-static int cpu_callback(
-    struct notifier_block *nfb, unsigned long action, void *hcpu)
-{
-    unsigned int cpu = (unsigned long)hcpu;
-
-    /* Only hook on CPU_ONLINE because a dead cpu may utilize the info to
-     * to enter deep C-state */
-    switch ( action )
-    {
-    case CPU_ONLINE:
-        (void)cpuidle_init_cpu(cpu);
-        break;
-    default:
-        break;
-    }
-
-    return NOTIFY_DONE;
-}
-
-static struct notifier_block cpu_nfb = {
-    .notifier_call = cpu_callback
-};
-
-static int __init cpuidle_presmp_init(void)
-{
-    void *cpu = (void *)(long)smp_processor_id();
-
-    if ( !xen_cpuidle )
-        return 0;
-
-    mwait_idle_init(&cpu_nfb);
-    cpu_nfb.notifier_call(&cpu_nfb, CPU_ONLINE, cpu);
-    register_cpu_notifier(&cpu_nfb);
-    return 0;
-}
-presmp_initcall(cpuidle_presmp_init);
-

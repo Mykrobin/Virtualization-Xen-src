@@ -41,6 +41,7 @@
 #include <zlib.h>
 #include <inttypes.h>
 #include <libaio.h>
+#include <openssl/md5.h>
 
 #include "bswap.h"
 #include "aes.h"
@@ -48,7 +49,6 @@
 #include "tapdisk-server.h"
 #include "tapdisk-driver.h"
 #include "tapdisk-interface.h"
-#include "tapdisk-disktype.h"
 #include "qcow.h"
 #include "blk.h"
 
@@ -64,6 +64,8 @@
 #define O_LARGEFILE	0
 #endif
 
+
+#define TAPDISK 1
 #define BLOCK_PROCESSSZ 4096
 #define QCOW_VBD 0
 #define PROGRESS_QUANT 2
@@ -166,7 +168,7 @@ int main(int argc, const char *argv[])
         int ret = -1, fd, len, err;
 	struct timeval timeout;
 	uint64_t i;
-	char *buf = NULL;
+	char *buf;
 	td_request_t treq;
         td_disk_info_t info;
         td_vbd_request_t* vreq;
@@ -199,13 +201,13 @@ int main(int argc, const char *argv[])
 			(uint64_t)info.size);
 	
         /* Open Qcow image*/
-        err = tapdisk_server_initialize();
+        err = tapdisk_server_initialize(NULL, NULL);
         if( err ) {
           DPRINTF("qcow2raw Couldn't initialize server instance.\n");
           return err;
         }
 
-        err=tapdisk_vbd_initialize(QCOW_VBD);
+        err=tapdisk_vbd_initialize(-1,-1, QCOW_VBD);
         if( err ) {
           DPRINTF("qcow2raw Couldn't initialize qcow vbd.\n");
           return err;

@@ -1,19 +1,8 @@
 /*
- * Definitions and utilities for save / restore.
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
- */
+** xg_save_restore.h
+**
+** Defintions and utilities for save / restore.
+*/
 
 #include "xc_private.h"
 
@@ -28,6 +17,8 @@
 
 /* When pinning page tables at the end of restore, we also use batching. */
 #define MAX_PIN_BATCH  1024
+
+
 
 /*
 ** Determine various platform information required for save/restore, in
@@ -48,7 +39,7 @@
 **
 ** Returns 1 on success, 0 on failure.
 */
-static inline int get_platform_info(xc_interface *xch, uint32_t dom,
+static inline int get_platform_info(int xc_handle, uint32_t dom,
                                     /* OUT */ unsigned long *max_mfn,
                                     /* OUT */ unsigned long *hvirt_start,
                                     /* OUT */ unsigned int *pt_levels,
@@ -56,20 +47,26 @@ static inline int get_platform_info(xc_interface *xch, uint32_t dom,
 {
     xen_capabilities_info_t xen_caps = "";
     xen_platform_parameters_t xen_params;
+    DECLARE_DOMCTL;
 
-    if (xc_version(xch, XENVER_platform_parameters, &xen_params) != 0)
+    if (xc_version(xc_handle, XENVER_platform_parameters, &xen_params) != 0)
         return 0;
 
-    if (xc_version(xch, XENVER_capabilities, &xen_caps) != 0)
+    if (xc_version(xc_handle, XENVER_capabilities, &xen_caps) != 0)
         return 0;
 
-    if (xc_maximum_ram_page(xch, max_mfn))
-        return 0;
+    *max_mfn = xc_memory_op(xc_handle, XENMEM_maximum_ram_page, NULL);
 
     *hvirt_start = xen_params.virt_start;
 
-    if ( xc_domain_get_guest_width(xch, dom, guest_width) != 0)
+    memset(&domctl, 0, sizeof(domctl));
+    domctl.domain = dom;
+    domctl.cmd = XEN_DOMCTL_get_address_size;
+
+    if ( do_domctl(xc_handle, &domctl) != 0 )
         return 0; 
+
+    *guest_width = domctl.u.address_size.size / 8;
 
     /* 64-bit tools will see the 64-bit hvirt_start, but 32-bit guests 
      * will be using the compat one. */
@@ -83,6 +80,8 @@ static inline int get_platform_info(xc_interface *xch, uint32_t dom,
         *pt_levels = ( (*guest_width == 8) ? 4 : 3 );
     else if (strstr(xen_caps, "xen-3.0-x86_32p"))
         *pt_levels = 3;
+    else if (strstr(xen_caps, "xen-3.0-x86_32"))
+        *pt_levels = 2;
     else
         return 0;
 
@@ -113,10 +112,10 @@ static inline int get_platform_info(xc_interface *xch, uint32_t dom,
 #define is_mapped(pfn_type) (!((pfn_type) & 0x80000000UL))
 
 
-#define GET_FIELD(_p, _f, _w) (((_w) == 8) ? ((_p)->x64._f) : ((_p)->x32._f))
+#define GET_FIELD(_p, _f) ((dinfo->guest_width==8) ? ((_p)->x64._f) : ((_p)->x32._f))
 
-#define SET_FIELD(_p, _f, _v, _w) do {          \
-    if ((_w) == 8)                              \
+#define SET_FIELD(_p, _f, _v) do {              \
+    if (dinfo->guest_width == 8)                \
         (_p)->x64._f = (_v);                    \
     else                                        \
         (_p)->x32._f = (_v);                    \
@@ -132,16 +131,23 @@ static inline int get_platform_info(xc_interface *xch, uint32_t dom,
               ? ((uint64_t)(_c)) << 12                                  \
               : (((uint32_t)(_c) << 12) | ((uint32_t)(_c) >> 20))))
 
-#define MEMCPY_FIELD(_d, _s, _f, _w) do {                          \
-    if ((_w) == 8)                                                 \
+#define MEMCPY_FIELD(_d, _s, _f) do {                              \
+    if (dinfo->guest_width == 8)                                   \
         memcpy(&(_d)->x64._f, &(_s)->x64._f,sizeof((_d)->x64._f)); \
     else                                                           \
         memcpy(&(_d)->x32._f, &(_s)->x32._f,sizeof((_d)->x32._f)); \
 } while (0)
 
-#define MEMSET_ARRAY_FIELD(_p, _f, _v, _w) do {                    \
-    if ((_w) == 8)                                                 \
+#define MEMSET_ARRAY_FIELD(_p, _f, _v) do {                        \
+    if (dinfo->guest_width == 8)                                   \
         memset(&(_p)->x64._f[0], (_v), sizeof((_p)->x64._f));      \
     else                                                           \
         memset(&(_p)->x32._f[0], (_v), sizeof((_p)->x32._f));      \
 } while (0)
+
+#ifndef MAX
+#define MAX(_a, _b) ((_a) >= (_b) ? (_a) : (_b))
+#endif
+#ifndef MIN
+#define MIN(_a, _b) ((_a) <= (_b) ? (_a) : (_b))
+#endif

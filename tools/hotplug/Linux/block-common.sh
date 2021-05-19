@@ -11,7 +11,8 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public
-# License along with this library; If not, see <http://www.gnu.org/licenses/>.
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #
 
 
@@ -67,8 +68,7 @@ write_dev() {
   fi
  
   xenstore_write "$XENBUS_PATH/physical-device" "$mm"
-  xenstore_write "$XENBUS_PATH/physical-device-path" "$1"
-  
+
   success
 }
 
@@ -112,17 +112,14 @@ same_vm()
                   "$FRONTEND_UUID")
   local target=$(xenstore_read_default  "/local/domain/$FRONTEND_ID/target"   \
                  "-1")
-  local targetvm=$(xenstore_read_default "/local/domain/$target/vm" "-1")
   local otarget=$(xenstore_read_default  "/local/domain/$otherdom/target"   \
                  "-1")
   local otvm=$(xenstore_read_default  "/local/domain/$otarget/vm"   \
                  "-1")
   otvm=${otvm%-1}
   othervm=${othervm%-1}
-  targetvm=${targetvm%-1}
   local frontend_uuid=${FRONTEND_UUID%-1}
   
-  [ "$frontend_uuid" = "$othervm" -o "$targetvm" = "$othervm" -o \
-    "$frontend_uuid" = "$otvm" -o "$targetvm" = "$otvm" ]
+  [ "$frontend_uuid" = "$othervm" -o "$target" = "$otherdom" -o "$frontend_uuid" = "$otvm" ]
 }
 

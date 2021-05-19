@@ -13,7 +13,8 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 /*
  * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
@@ -22,13 +23,6 @@
 
 #ifndef	_SYS_FS_ZFS_ACL_H
 #define	_SYS_FS_ZFS_ACL_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
-#ifndef _UID_T
-#define	_UID_T
-typedef	unsigned int uid_t;			/* UID type */
-#endif /* _UID_T */
 
 typedef struct zfs_oldace {
 	uint32_t	z_fuid;		/* "who" */

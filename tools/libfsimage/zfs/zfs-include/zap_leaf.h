@@ -13,7 +13,8 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 /*
  * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
@@ -22,8 +23,6 @@
 
 #ifndef	_SYS_ZAP_LEAF_H
 #define	_SYS_ZAP_LEAF_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #define	ZAP_LEAF_MAGIC 0x2AB1EAF
 

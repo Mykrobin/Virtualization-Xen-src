@@ -7,6 +7,7 @@
  *
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/kernel.h>
@@ -20,8 +21,8 @@
 #include <asm/msr.h>
 
 #include "mce.h"
-#include "vmce.h"
 
+DEFINE_PER_CPU(cpu_banks_t, poll_bankmask);
 static struct timer mce_timer;
 
 #define MCE_PERIOD MILLISECS(8000)
@@ -54,7 +55,7 @@ static void mce_checkregs (void *info)
 
 		if (dom0_vmce_enabled()) {
 			mctelem_commit(mctc);
-			send_global_virq(VIRQ_MCA);
+			send_guest_global_virq(dom0, VIRQ_MCA);
 		} else if (++dumpcount >= 10) {
 			x86_mcinfo_dump((struct mc_info *)mctelem_dataptr(mctc));
 			mctelem_dismiss(mctc);
@@ -90,24 +91,34 @@ static int __init init_nonfatal_mce_checker(void)
 	struct cpuinfo_x86 *c = &boot_cpu_data;
 
 	/* Check for MCE support */
-	if (!opt_mce || !mce_available(c))
+	if (mce_disabled || !mce_available(c))
 		return -ENODEV;
-
-	if (__get_cpu_var(poll_bankmask) == NULL)
-		return -EINVAL;
 
 	/*
 	 * Check for non-fatal errors every MCE_RATE s
 	 */
 	switch (c->x86_vendor) {
 	case X86_VENDOR_AMD:
+		if (c->x86 == 6) { /* K7 */
+			init_timer(&mce_timer, mce_work_fn, NULL, 0);
+			set_timer(&mce_timer, NOW() + MCE_PERIOD);
+			break;
+		}
+
 		/* Assume we are on K8 or newer AMD CPU here */
 		amd_nonfatal_mcheck_init(c);
 		break;
 
 	case X86_VENDOR_INTEL:
-		init_timer(&mce_timer, mce_work_fn, NULL, 0);
-		set_timer(&mce_timer, NOW() + MCE_PERIOD);
+		/*
+		 * The P5 family is different. P4/P6 and latest CPUs share the
+		 * same polling methods.
+		 */
+		if ( c->x86 != 5 )
+		{
+			init_timer(&mce_timer, mce_work_fn, NULL, 0);
+			set_timer(&mce_timer, NOW() + MCE_PERIOD);
+		}
 		break;
 	}
 

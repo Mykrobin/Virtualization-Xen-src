@@ -26,7 +26,8 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <time.h>
@@ -37,8 +38,6 @@
 #include <unistd.h>
 #include <errno.h>
 #include <signal.h>
-#include <xenevtchn.h>
-#define XC_WANT_COMPAT_MAP_FOREIGN_API
 #include <xenctrl.h>
 #include <xen/xen.h>
 #include <string.h>
@@ -243,12 +242,10 @@ static void dump_stats(void)
     }
 
     printf("processed %d total records in %d seconds (%ld per second)\n",
-           rec_count, (int)run_time,
-           run_time ? (long)(rec_count/run_time) : 0L);
+           rec_count, (int)run_time, (long)(rec_count/run_time));
 
-    printf("woke up %d times in %d seconds (%ld per second)\n",
-           wakeups, (int) run_time,
-           run_time ? (long)(wakeups/run_time) : 0L);
+    printf("woke up %d times in %d seconds (%ld per second)\n", wakeups,
+	   (int) run_time, (long)(wakeups/run_time));
 
     check_gotten_sum();
 }
@@ -271,7 +268,7 @@ static void log_event(int event_id)
 }
 
 int virq_port;
-xenevtchn_handle *xce_handle = NULL;
+int xce_handle = -1;
 
 /* Returns the event channel handle. */
 /* Stolen from xenstore code */
@@ -283,16 +280,16 @@ static int eventchn_init(void)
     if (0)
         return -1;
   
-    xce_handle = xenevtchn_open(NULL, 0);
+    xce_handle = xc_evtchn_open();
 
-    if (xce_handle == NULL)
+    if (xce_handle < 0)
         perror("Failed to open evtchn device");
   
-    if ((rc = xenevtchn_bind_virq(xce_handle, VIRQ_TBUF)) == -1)
+    if ((rc = xc_evtchn_bind_virq(xce_handle, VIRQ_TBUF)) == -1)
         perror("Failed to bind to domain exception virq port");
     virq_port = rc;
   
-    return xce_handle == NULL ? -1 : 0;
+    return xce_handle;
 }
 
 static void wait_for_event(void)
@@ -303,12 +300,12 @@ static void wait_for_event(void)
     struct timeval tv;
     int evtchn_fd;
   
-    if (xce_handle == NULL) {
+    if (xce_handle < 0) {
         nanosleep(&opts.poll_sleep, NULL);
         return;
     }
 
-    evtchn_fd = xenevtchn_fd(xce_handle);
+    evtchn_fd = xc_evtchn_fd(xce_handle);
 
     FD_ZERO(&inset);
     FD_SET(evtchn_fd, &inset);
@@ -318,23 +315,23 @@ static void wait_for_event(void)
     ret = select(evtchn_fd+1, &inset, NULL, NULL, &tv);
   
     if ( (ret == 1) && FD_ISSET(evtchn_fd, &inset)) {
-        if ((port = xenevtchn_pending(xce_handle)) == -1)
+        if ((port = xc_evtchn_pending(xce_handle)) == -1)
             perror("Failed to read from event fd");
     
         //    if (port == virq_port)
         //      printf("got the event I was looking for\r\n");
 
-        if (xenevtchn_unmask(xce_handle, port) == -1)
+        if (xc_evtchn_unmask(xce_handle, port) == -1)
             perror("Failed to write to event fd");
     }
 }
 
 static void get_tbufs(unsigned long *mfn, unsigned long *size)
 {
-    xc_interface *xc_handle = xc_interface_open(0,0,0);
+    int xc_handle = xc_interface_open();
     int ret;
 
-    if ( !xc_handle ) 
+    if ( xc_handle < 0 ) 
     {
         exit(EXIT_FAILURE);
     }
@@ -352,7 +349,7 @@ static void get_tbufs(unsigned long *mfn, unsigned long *size)
 
 static void disable_tracing(void)
 {
-    xc_interface *xc_handle = xc_interface_open(0,0,0);
+    int xc_handle = xc_interface_open();
     xc_tbuf_disable(xc_handle);  
     xc_interface_close(xc_handle);
 }
@@ -368,12 +365,12 @@ static void disable_tracing(void)
 static struct t_struct *map_tbufs(unsigned long tbufs_mfn, unsigned int num,
                                   unsigned long tinfo_size)
 {
-    xc_interface *xc_handle;
+    int xc_handle;
     static struct t_struct tbufs = { 0 };
     int i;
 
-    xc_handle = xc_interface_open(0,0,0);
-    if ( !xc_handle ) 
+    xc_handle = xc_interface_open();
+    if ( xc_handle < 0 ) 
     {
         exit(EXIT_FAILURE);
     }
@@ -414,7 +411,7 @@ static struct t_struct *map_tbufs(unsigned long tbufs_mfn, unsigned int num,
         for ( j=0; j<tbufs.t_info->tbuf_size; j++)
             pfn_list[j] = (xen_pfn_t)mfn_list[j];
 
-        tbufs.meta[i] = xc_map_foreign_pages(xc_handle, DOMID_XEN,
+        tbufs.meta[i] = xc_map_foreign_batch(xc_handle, DOMID_XEN,
                                              PROT_READ | PROT_WRITE,
                                              pfn_list,
                                              tbufs.t_info->tbuf_size);
@@ -437,7 +434,7 @@ static struct t_struct *map_tbufs(unsigned long tbufs_mfn, unsigned int num,
 static unsigned int get_num_cpus(void)
 {
     xc_physinfo_t physinfo = { 0 };
-    xc_interface *xc_handle = xc_interface_open(0,0,0);
+    int xc_handle = xc_interface_open();
     int ret;
 
     ret = xc_physinfo(xc_handle, &physinfo);
@@ -665,11 +662,6 @@ static void alloc_qos_data(int ncpu)
     }
     pgsize = getpagesize();
     dummy = malloc(pgsize);
-    if (!dummy) {
-        PERROR("malloc");
-        exit(EXIT_FAILURE);
-    }
-    memset(dummy, 0, pgsize);
 
     for (n=0; n<ncpu; n++) {
 
@@ -682,7 +674,7 @@ static void alloc_qos_data(int ncpu)
         new_qos = (_new_qos_data *) mmap(0, sizeof(_new_qos_data), PROT_READ|PROT_WRITE, 
                                          MAP_SHARED, qos_fd, off);
         off += i;
-        if (new_qos == MAP_FAILED) {
+        if (new_qos == NULL) {
             PERROR("mmap");
             exit(3);
         }
@@ -696,7 +688,6 @@ static void alloc_qos_data(int ncpu)
         cpu_qos_data[n] = new_qos;
     }
     free(dummy);
-    close(qos_fd);
     new_qos = NULL;
 }
 
@@ -782,8 +773,7 @@ static int indexof(int domid)
 {
     int idx;
     xc_dominfo_t dominfo[NDOMAINS];
-    xc_interface *xc_handle;
-    int ndomains;
+    int xc_handle, ndomains;
   
     if (domid < 0) {	// shouldn't happen
         printf("bad domain id: %d\r\n", domid);
@@ -802,7 +792,7 @@ static int indexof(int domid)
         }
 
     // call domaininfo hypercall to try and garbage collect unused entries
-    xc_handle = xc_interface_open(0,0,0);
+    xc_handle = xc_interface_open();
     ndomains = xc_domain_getinfo(xc_handle, 0, NDOMAINS, dominfo);
     xc_interface_close(xc_handle);
 
@@ -1184,13 +1174,3 @@ static int process_record(int cpu, struct t_rec *r)
 
     return 4 + (r->cycles_included ? 8 : 0) + (r->extra_u32 * 4);
 }
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * tab-width: 4
- * indent-tabs-mode: nil
- * End:
- */

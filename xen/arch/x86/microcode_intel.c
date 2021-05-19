@@ -21,6 +21,7 @@
  * 2 of the License, or (at your option) any later version.
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/kernel.h>
 #include <xen/init.h>
@@ -29,42 +30,11 @@
 #include <xen/spinlock.h>
 
 #include <asm/msr.h>
+#include <asm/uaccess.h>
 #include <asm/processor.h>
 #include <asm/microcode.h>
 
 #define pr_debug(x...) ((void)0)
-
-struct microcode_header_intel {
-    unsigned int hdrver;
-    unsigned int rev;
-    unsigned int date;
-    unsigned int sig;
-    unsigned int cksum;
-    unsigned int ldrver;
-    unsigned int pf;
-    unsigned int datasize;
-    unsigned int totalsize;
-    unsigned int reserved[3];
-};
-
-struct microcode_intel {
-    struct microcode_header_intel hdr;
-    unsigned int bits[0];
-};
-
-/* microcode format is extended from prescott processors */
-struct extended_signature {
-    unsigned int sig;
-    unsigned int pf;
-    unsigned int cksum;
-};
-
-struct extended_sigtable {
-    unsigned int count;
-    unsigned int cksum;
-    unsigned int reserved[3];
-    struct extended_signature sigs[0];
-};
 
 #define DEFAULT_UCODE_DATASIZE  (2000)
 #define MC_HEADER_SIZE          (sizeof(struct microcode_header_intel))
@@ -89,16 +59,17 @@ struct extended_sigtable {
 /* serialize access to the physical write to MSR 0x79 */
 static DEFINE_SPINLOCK(microcode_update_lock);
 
-static int collect_cpu_info(unsigned int cpu_num, struct cpu_signature *csig)
+static int collect_cpu_info(int cpu_num, struct cpu_signature *csig)
 {
     struct cpuinfo_x86 *c = &cpu_data[cpu_num];
-    uint64_t msr_content;
+    unsigned int val[2];
 
     BUG_ON(cpu_num != smp_processor_id());
 
     memset(csig, 0, sizeof(*csig));
 
-    if ( (c->x86_vendor != X86_VENDOR_INTEL) || (c->x86 < 6) )
+    if ( (c->x86_vendor != X86_VENDOR_INTEL) || (c->x86 < 6) ||
+         cpu_has(c, X86_FEATURE_IA64) )
     {
         printk(KERN_ERR "microcode: CPU%d not a capable Intel "
                "processor\n", cpu_num);
@@ -110,26 +81,23 @@ static int collect_cpu_info(unsigned int cpu_num, struct cpu_signature *csig)
     if ( (c->x86_model >= 5) || (c->x86 > 6) )
     {
         /* get processor flags from MSR 0x17 */
-        rdmsrl(MSR_IA32_PLATFORM_ID, msr_content);
-        csig->pf = 1 << ((msr_content >> 50) & 7);
+        rdmsr(MSR_IA32_PLATFORM_ID, val[0], val[1]);
+        csig->pf = 1 << ((val[1] >> 18) & 7);
     }
 
-    wrmsrl(MSR_IA32_UCODE_REV, 0x0ULL);
-    /* As documented in the SDM: Do a CPUID 1 here */
-    cpuid_eax(1);
-
+    wrmsr(MSR_IA32_UCODE_REV, 0, 0);
+    /* see notes above for revision 1.07.  Apparent chip bug */
+    sync_core();
     /* get the current revision from MSR 0x8B */
-    rdmsrl(MSR_IA32_UCODE_REV, msr_content);
-    csig->rev = (uint32_t)(msr_content >> 32);
-    pr_debug("microcode: collect_cpu_info : sig=%#x, pf=%#x, rev=%#x\n",
+    rdmsr(MSR_IA32_UCODE_REV, val[0], csig->rev);
+    pr_debug("microcode: collect_cpu_info : sig=0x%x, pf=0x%x, rev=0x%x\n",
              csig->sig, csig->pf, csig->rev);
 
     return 0;
 }
 
 static inline int microcode_update_match(
-    unsigned int cpu_num, const struct microcode_header_intel *mc_header,
-    int sig, int pf)
+    int cpu_num, struct microcode_header_intel *mc_header, int sig, int pf)
 {
     struct ucode_cpu_info *uci = &per_cpu(ucode_cpu_info, cpu_num);
 
@@ -143,8 +111,7 @@ static int microcode_sanity_check(void *mc)
     struct extended_sigtable *ext_header = NULL;
     struct extended_signature *ext_sig;
     unsigned long total_size, data_size, ext_table_size;
-    unsigned int ext_sigcount = 0, i;
-    uint32_t sum, orig_sum;
+    int sum, orig_sum, ext_sigcount = 0, i;
 
     total_size = get_totalsize(mc_header);
     data_size = get_datasize(mc_header);
@@ -184,8 +151,8 @@ static int microcode_sanity_check(void *mc)
     /* check extended table checksum */
     if ( ext_table_size )
     {
-        uint32_t ext_table_sum = 0;
-        uint32_t *ext_tablep = (uint32_t *)ext_header;
+        int ext_table_sum = 0;
+        int *ext_tablep = (int *)ext_header;
 
         i = ext_table_size / DWSIZE;
         while ( i-- )
@@ -202,7 +169,7 @@ static int microcode_sanity_check(void *mc)
     orig_sum = 0;
     i = (MC_HEADER_SIZE + data_size) / DWSIZE;
     while ( i-- )
-        orig_sum += ((uint32_t *)mc)[i];
+        orig_sum += ((int *)mc)[i];
     if ( orig_sum )
     {
         printk(KERN_ERR "microcode: aborting, bad checksum\n");
@@ -232,11 +199,11 @@ static int microcode_sanity_check(void *mc)
  * return 1 - found update
  * return < 0 - error
  */
-static int get_matching_microcode(const void *mc, unsigned int cpu)
+static int get_matching_microcode(void *mc, int cpu)
 {
     struct ucode_cpu_info *uci = &per_cpu(ucode_cpu_info, cpu);
-    const struct microcode_header_intel *mc_header = mc;
-    const struct extended_sigtable *ext_header;
+    struct microcode_header_intel *mc_header = mc;
+    struct extended_sigtable *ext_header;
     unsigned long total_size = get_totalsize(mc_header);
     int ext_sigcount, i;
     struct extended_signature *ext_sig;
@@ -262,7 +229,7 @@ static int get_matching_microcode(const void *mc, unsigned int cpu)
     return 0;
  find:
     pr_debug("microcode: CPU%d found a matching microcode update with"
-             " version %#x (current=%#x)\n",
+             " version 0x%x (current=0x%x)\n",
              cpu, mc_header->rev, uci->cpu_sig.rev);
     new_mc = xmalloc_bytes(total_size);
     if ( new_mc == NULL )
@@ -271,18 +238,19 @@ static int get_matching_microcode(const void *mc, unsigned int cpu)
         return -ENOMEM;
     }
 
-    memcpy(new_mc, mc, total_size);
+    /* free previous update file */
     xfree(uci->mc.mc_intel);
+
+    memcpy(new_mc, mc, total_size);
     uci->mc.mc_intel = new_mc;
     return 1;
 }
 
-static int apply_microcode(unsigned int cpu)
+static int apply_microcode(int cpu)
 {
     unsigned long flags;
-    uint64_t msr_content;
     unsigned int val[2];
-    unsigned int cpu_num = raw_smp_processor_id();
+    int cpu_num = raw_smp_processor_id();
     struct ucode_cpu_info *uci = &per_cpu(ucode_cpu_info, cpu_num);
 
     /* We should bind the task to the CPU */
@@ -295,26 +263,26 @@ static int apply_microcode(unsigned int cpu)
     spin_lock_irqsave(&microcode_update_lock, flags);
 
     /* write microcode via MSR 0x79 */
-    wrmsrl(MSR_IA32_UCODE_WRITE, (unsigned long)uci->mc.mc_intel->bits);
-    wrmsrl(MSR_IA32_UCODE_REV, 0x0ULL);
+    wrmsr(MSR_IA32_UCODE_WRITE,
+          (unsigned long) uci->mc.mc_intel->bits,
+          (unsigned long) uci->mc.mc_intel->bits >> 16 >> 16);
+    wrmsr(MSR_IA32_UCODE_REV, 0, 0);
 
-    /* As documented in the SDM: Do a CPUID 1 here */
-    cpuid_eax(1);
+    /* see notes above for revision 1.07.  Apparent chip bug */
+    sync_core();
 
     /* get the current revision from MSR 0x8B */
-    rdmsrl(MSR_IA32_UCODE_REV, msr_content);
-    val[1] = (uint32_t)(msr_content >> 32);
+    rdmsr(MSR_IA32_UCODE_REV, val[0], val[1]);
 
     spin_unlock_irqrestore(&microcode_update_lock, flags);
     if ( val[1] != uci->mc.mc_intel->hdr.rev )
     {
         printk(KERN_ERR "microcode: CPU%d update from revision "
-               "%#x to %#x failed. Resulting revision is %#x.\n", cpu_num,
-               uci->cpu_sig.rev, uci->mc.mc_intel->hdr.rev, val[1]);
+               "0x%x to 0x%x failed\n", cpu_num, uci->cpu_sig.rev, val[1]);
         return -EIO;
     }
     printk(KERN_INFO "microcode: CPU%d updated from revision "
-           "%#x to %#x, date = %04x-%02x-%02x \n",
+           "0x%x to 0x%x, date = %04x-%02x-%02x \n",
            cpu_num, uci->cpu_sig.rev, val[1],
            uci->mc.mc_intel->hdr.date & 0xffff,
            uci->mc.mc_intel->hdr.date >> 24,
@@ -352,8 +320,7 @@ static long get_next_ucode_from_buffer(void **mc, const u8 *buf,
     return offset + total_size;
 }
 
-static int cpu_request_microcode(unsigned int cpu, const void *buf,
-                                 size_t size)
+static int cpu_request_microcode(int cpu, const void *buf, size_t size)
 {
     long offset = 0;
     int error = 0;
@@ -388,14 +355,17 @@ static int cpu_request_microcode(unsigned int cpu, const void *buf,
         error = offset;
 
     if ( !error && matching_count )
-        error = apply_microcode(cpu);
+        apply_microcode(cpu);
 
     return error;
 }
 
-static int microcode_resume_match(unsigned int cpu, const void *mc)
+static int microcode_resume_match(int cpu, struct cpu_signature *nsig)
 {
-    return get_matching_microcode(mc, cpu);
+    struct ucode_cpu_info *uci = &per_cpu(ucode_cpu_info, cpu);
+
+    return (sigmatch(nsig->sig, uci->cpu_sig.sig, nsig->pf, uci->cpu_sig.pf) &&
+            (uci->cpu_sig.rev > nsig->rev));
 }
 
 static const struct microcode_ops microcode_intel_ops = {
@@ -405,9 +375,10 @@ static const struct microcode_ops microcode_intel_ops = {
     .apply_microcode                  = apply_microcode,
 };
 
-int __init microcode_init_intel(void)
+static __init int microcode_init_intel(void)
 {
     if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL )
         microcode_ops = &microcode_intel_ops;
     return 0;
 }
+__initcall(microcode_init_intel);

@@ -42,8 +42,10 @@
  * POSSIBILITY OF SUCH DAMAGES.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <acpi/acpi.h>
+#include <acpi/acnamesp.h>
 #include <acpi/actables.h>
 
 #define _COMPONENT          ACPI_TABLES
@@ -66,8 +68,7 @@ ACPI_MODULE_NAME("tbxface")
 acpi_status __init acpi_allocate_root_table(u32 initial_table_count)
 {
 
-	acpi_gbl_root_table_list.size = initial_table_count -
-					ACPI_ROOT_TABLE_SIZE_INCREMENT;
+	acpi_gbl_root_table_list.size = initial_table_count;
 	acpi_gbl_root_table_list.flags = ACPI_ROOT_ALLOW_RESIZE;
 
 	return (acpi_tb_resize_root_table_list());
@@ -163,7 +164,7 @@ acpi_initialize_tables(struct acpi_table_desc * initial_table_array,
  * DESCRIPTION: Finds and verifies an ACPI table.
  *
  *****************************************************************************/
-acpi_status __init
+acpi_status
 acpi_get_table(char *signature,
 	       acpi_native_uint instance, struct acpi_table_header **out_table)
 {
@@ -197,7 +198,9 @@ acpi_get_table(char *signature,
 			*out_table = acpi_gbl_root_table_list.tables[i].pointer;
 		}
 
-		acpi_gbl_root_table_list.tables[i].pointer = NULL;
+		/*if (!acpi_gbl_permanent_mmap)*/ {
+			acpi_gbl_root_table_list.tables[i].pointer = NULL;
+		}
 
 		return (status);
 	}
@@ -205,50 +208,4 @@ acpi_get_table(char *signature,
 	return (AE_NOT_FOUND);
 }
 
-/******************************************************************************
- *
- * FUNCTION:    acpi_get_table_phys
- *
- * PARAMETERS:  signature      - ACPI signature of needed table
- *              instance       - Which instance (for SSDTs)
- *              addr           - Where the table's physical address is returned
- *              len            - Where the length of table is returned
- *
- * RETURN:      Status, pointer and length of table
- *
- * DESCRIPTION: Finds physical address and length of ACPI table
- *
- *****************************************************************************/
-acpi_status __init
-acpi_get_table_phys(acpi_string signature, acpi_native_uint instance,
-		     acpi_physical_address *addr, acpi_native_uint *len)
-{
-	acpi_native_uint i, j;
-	acpi_status status;
-
-	if (!signature || !addr || !len)
-		return AE_BAD_PARAMETER;
-
-	for (i = j = 0; i < acpi_gbl_root_table_list.count; i++) {
-		if (!ACPI_COMPARE_NAME(
-				&acpi_gbl_root_table_list.tables[i].signature,
-				signature))
-			continue;
-
-		if (++j < instance)
-			continue;
-
-		status =
-		    acpi_tb_verify_table(&acpi_gbl_root_table_list.tables[i]);
-		if (ACPI_SUCCESS(status)) {
-			*addr = acpi_gbl_root_table_list.tables[i].address;
-			*len = acpi_gbl_root_table_list.tables[i].length;
-		}
-
-		acpi_gbl_root_table_list.tables[i].pointer = NULL;
-
-		return status;
-	}
-
-	return AE_NOT_FOUND;
-}
+ACPI_EXPORT_SYMBOL(acpi_get_table)

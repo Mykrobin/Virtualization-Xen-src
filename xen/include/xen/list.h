@@ -10,15 +10,12 @@
 #include <xen/lib.h>
 #include <asm/system.h>
 
-/*
- * These are non-NULL pointers that will result in faults under normal
- * circumstances, used to verify that nobody uses non-initialized list
- * entries. Architectures can override these.
+/* These are non-NULL pointers that will result in page faults
+ * under normal circumstances, used to verify that nobody uses
+ * non-initialized list entries.
  */
-#ifndef LIST_POISON1
 #define LIST_POISON1  ((void *) 0x00100100)
 #define LIST_POISON2  ((void *) 0x00200200)
-#endif
 
 /*
  * Simple doubly linked list implementation.
@@ -39,21 +36,10 @@ struct list_head {
 #define LIST_HEAD(name) \
     struct list_head name = LIST_HEAD_INIT(name)
 
-#define LIST_HEAD_READ_MOSTLY(name) \
-    struct list_head __read_mostly name = LIST_HEAD_INIT(name)
-
-/* Do not move this ahead of the struct list_head definition! */
-#include <xen/prefetch.h>
-
 static inline void INIT_LIST_HEAD(struct list_head *list)
 {
     list->next = list;
     list->prev = list;
-}
-
-static inline bool list_head_is_null(const struct list_head *list)
-{
-    return !list->next && !list->prev;
 }
 
 /*
@@ -312,15 +298,6 @@ static inline int list_empty(const struct list_head *head)
 }
 
 /**
- * list_is_singular - tests whether a list has exactly one entry
- * @head: the list to test.
- */
-static inline int list_is_singular(const struct list_head *head)
-{
-    return !list_empty(head) && (head->next == head->prev);
-}
-
-/**
  * list_empty_careful - tests whether a list is empty and not being modified
  * @head: the list to test
  *
@@ -388,66 +365,6 @@ static inline void list_splice_init(struct list_head *list,
  */
 #define list_entry(ptr, type, member) \
     container_of(ptr, type, member)
-
-/**
- * list_first_entry - get the first element from a list
- * @ptr:        the list head to take the element from.
- * @type:       the type of the struct this is embedded in.
- * @member:     the name of the list_struct within the struct.
- *
- * Note, that list is expected to be not empty.
- */
-#define list_first_entry(ptr, type, member) \
-        list_entry((ptr)->next, type, member)
-
-/**
- * list_last_entry - get the last element from a list
- * @ptr:        the list head to take the element from.
- * @type:       the type of the struct this is embedded in.
- * @member:     the name of the list_struct within the struct.
- *
- * Note, that list is expected to be not empty.
- */
-#define list_last_entry(ptr, type, member) \
-        list_entry((ptr)->prev, type, member)
-
-/**
- * list_first_entry_or_null - get the first element from a list
- * @ptr:        the list head to take the element from.
- * @type:       the type of the struct this is embedded in.
- * @member:     the name of the list_struct within the struct.
- *
- * Note that if the list is empty, it returns NULL.
- */
-#define list_first_entry_or_null(ptr, type, member) \
-        (!list_empty(ptr) ? list_first_entry(ptr, type, member) : NULL)
-
-/**
- * list_last_entry_or_null - get the last element from a list
- * @ptr:        the list head to take the element from.
- * @type:       the type of the struct this is embedded in.
- * @member:     the name of the list_struct within the struct.
- *
- * Note that if the list is empty, it returns NULL.
- */
-#define list_last_entry_or_null(ptr, type, member) \
-        (!list_empty(ptr) ? list_last_entry(ptr, type, member) : NULL)
-
-/**
-  * list_next_entry - get the next element in list
-  * @pos:        the type * to cursor
-  * @member:     the name of the list_struct within the struct.
-  */
-#define list_next_entry(pos, member) \
-        list_entry((pos)->member.next, typeof(*(pos)), member)
- 
-/**
-  * list_prev_entry - get the prev element in list
-  * @pos:        the type * to cursor
-  * @member:     the name of the list_struct within the struct.
-  */
-#define list_prev_entry(pos, member) \
-        list_entry((pos)->member.prev, typeof(*(pos)), member)
 
 /**
  * list_for_each    -    iterate over a list

@@ -38,36 +38,19 @@
     typedef type * __guest_handle_ ## name
 #endif
 
-/*
- * XEN_GUEST_HANDLE represents a guest pointer, when passed as a field
- * in a struct in memory.
- * XEN_GUEST_HANDLE_PARAM represent a guest pointer, when passed as an
- * hypercall argument.
- * XEN_GUEST_HANDLE_PARAM and XEN_GUEST_HANDLE are the same on X86 but
- * they might not be on other architectures.
- */
 #define __DEFINE_XEN_GUEST_HANDLE(name, type) \
     ___DEFINE_XEN_GUEST_HANDLE(name, type);   \
     ___DEFINE_XEN_GUEST_HANDLE(const_##name, const type)
 #define DEFINE_XEN_GUEST_HANDLE(name)   __DEFINE_XEN_GUEST_HANDLE(name, name)
 #define __XEN_GUEST_HANDLE(name)        __guest_handle_ ## name
 #define XEN_GUEST_HANDLE(name)          __XEN_GUEST_HANDLE(name)
-#define XEN_GUEST_HANDLE_PARAM(name)    XEN_GUEST_HANDLE(name)
-#define set_xen_guest_handle_raw(hnd, val)  do { (hnd).p = val; } while (0)
-#define set_xen_guest_handle(hnd, val) set_xen_guest_handle_raw(hnd, val)
+#define set_xen_guest_handle(hnd, val)  do { (hnd).p = val; } while (0)
+#ifdef __XEN_TOOLS__
+#define get_xen_guest_handle(val, hnd)  do { val = (hnd).p; } while (0)
+#endif
 
 #if defined(__i386__)
-# ifdef __XEN__
-__DeFiNe__ __DECL_REG_LO8(which) uint32_t e ## which ## x
-__DeFiNe__ __DECL_REG_LO16(name) union { uint32_t e ## name; }
-# endif
 #include "xen-x86_32.h"
-# ifdef __XEN__
-__UnDeF__ __DECL_REG_LO8
-__UnDeF__ __DECL_REG_LO16
-__DeFiNe__ __DECL_REG_LO8(which) e ## which ## x
-__DeFiNe__ __DECL_REG_LO16(name) e ## name
-# endif
 #elif defined(__x86_64__)
 #include "xen-x86_64.h"
 #endif
@@ -75,43 +58,20 @@ __DeFiNe__ __DECL_REG_LO16(name) e ## name
 #ifndef __ASSEMBLY__
 typedef unsigned long xen_pfn_t;
 #define PRI_xen_pfn "lx"
-#define PRIu_xen_pfn "lu"
 #endif
 
-#define XEN_HAVE_PV_GUEST_ENTRY 1
-
-#define XEN_HAVE_PV_UPCALL_MASK 1
-
 /*
- * `incontents 200 segdesc Segment Descriptor Tables
- */
-/*
- * ` enum neg_errnoval
- * ` HYPERVISOR_set_gdt(const xen_pfn_t frames[], unsigned int entries);
- * `
+ * SEGMENT DESCRIPTOR TABLES
  */
 /*
  * A number of GDT entries are reserved by Xen. These are not situated at the
  * start of the GDT because some stupid OSes export hard-coded selector values
  * in their ABI. These hard-coded values are always near the start of the GDT,
  * so Xen places itself out of the way, at the far end of the GDT.
- *
- * NB The LDT is set using the MMUEXT_SET_LDT op of HYPERVISOR_mmuext_op
  */
 #define FIRST_RESERVED_GDT_PAGE  14
 #define FIRST_RESERVED_GDT_BYTE  (FIRST_RESERVED_GDT_PAGE * 4096)
 #define FIRST_RESERVED_GDT_ENTRY (FIRST_RESERVED_GDT_BYTE / 8)
-
-
-/*
- * ` enum neg_errnoval
- * ` HYPERVISOR_update_descriptor(u64 pa, u64 desc);
- * `
- * ` @pa   The machine physical address of the descriptor to
- * `       update. Must be either a descriptor page or writable.
- * ` @desc The descriptor value to update, in the same format as a
- * `       native descriptor table entry.
- */
 
 /* Maximum number of virtual CPUs in legacy multi-processor guests. */
 #define XEN_LEGACY_MAX_VCPUS 32
@@ -119,23 +79,9 @@ typedef unsigned long xen_pfn_t;
 #ifndef __ASSEMBLY__
 
 typedef unsigned long xen_ulong_t;
-#define PRI_xen_ulong "lx"
 
-/*
- * ` enum neg_errnoval
- * ` HYPERVISOR_stack_switch(unsigned long ss, unsigned long esp);
- * `
- * Sets the stack segment and pointer for the current vcpu.
- */
-
-/*
- * ` enum neg_errnoval
- * ` HYPERVISOR_set_trap_table(const struct trap_info traps[]);
- * `
- */
 /*
  * Send an array of these to HYPERVISOR_set_trap_table().
- * Terminate the array with a sentinel entry, with traps[].address==0.
  * The privilege level specifies which modes may enter a trap via a software
  * interrupt. On x86/64, since rings 1 and 2 are unavailable, we allocate
  * privilege levels as follows:
@@ -160,15 +106,8 @@ DEFINE_XEN_GUEST_HANDLE(trap_info_t);
 typedef uint64_t tsc_timestamp_t; /* RDTSC timestamp */
 
 /*
- * The following is all CPU context. Note that the fpu_ctxt block is filled
+ * The following is all CPU context. Note that the fpu_ctxt block is filled 
  * in by FXSAVE if the CPU has feature FXSR; otherwise FSAVE is used.
- *
- * Also note that when calling DOMCTL_setvcpucontext for HVM guests, not all
- * information in this structure is updated, the fields read include: fpu_ctxt
- * (if VGCT_I387_VALID is set), flags, user_regs and debugreg[*].
- *
- * Note: VCPUOP_initialise for HVM guests is non-symetric with
- * DOMCTL_setvcpucontext, and uses struct vcpu_hvm_context from hvm/hvm_vcpu.h
  */
 struct vcpu_guest_context {
     /* FPU registers come first so they can be aligned for FXSAVE/FXRSTOR. */
@@ -226,113 +165,15 @@ typedef struct vcpu_guest_context vcpu_guest_context_t;
 DEFINE_XEN_GUEST_HANDLE(vcpu_guest_context_t);
 
 struct arch_shared_info {
-    /*
-     * Number of valid entries in the p2m table(s) anchored at
-     * pfn_to_mfn_frame_list_list and/or p2m_vaddr.
-     */
-    unsigned long max_pfn;
-    /*
-     * Frame containing list of mfns containing list of mfns containing p2m.
-     * A value of 0 indicates it has not yet been set up, ~0 indicates it has
-     * been set to invalid e.g. due to the p2m being too large for the 3-level
-     * p2m tree. In this case the linear mapper p2m list anchored at p2m_vaddr
-     * is to be used.
-     */
+    unsigned long max_pfn;                  /* max pfn that appears in table */
+    /* Frame containing list of mfns containing list of mfns containing p2m. */
     xen_pfn_t     pfn_to_mfn_frame_list_list;
     unsigned long nmi_reason;
-    /*
-     * Following three fields are valid if p2m_cr3 contains a value different
-     * from 0.
-     * p2m_cr3 is the root of the address space where p2m_vaddr is valid.
-     * p2m_cr3 is in the same format as a cr3 value in the vcpu register state
-     * and holds the folded machine frame number (via xen_pfn_to_cr3) of a
-     * L3 or L4 page table.
-     * p2m_vaddr holds the virtual address of the linear p2m list. All entries
-     * in the range [0...max_pfn[ are accessible via this pointer.
-     * p2m_generation will be incremented by the guest before and after each
-     * change of the mappings of the p2m list. p2m_generation starts at 0 and
-     * a value with the least significant bit set indicates that a mapping
-     * update is in progress. This allows guest external software (e.g. in Dom0)
-     * to verify that read mappings are consistent and whether they have changed
-     * since the last check.
-     * Modifying a p2m element in the linear p2m list is allowed via an atomic
-     * write only.
-     */
-    unsigned long p2m_cr3;         /* cr3 value of the p2m address space */
-    unsigned long p2m_vaddr;       /* virtual address of the p2m list */
-    unsigned long p2m_generation;  /* generation count of p2m mapping */
-#ifdef __i386__
-    /* There's no room for this field in the generic structure. */
-    uint32_t wc_sec_hi;
-#endif
+    uint64_t pad[32];
 };
 typedef struct arch_shared_info arch_shared_info_t;
 
-#if defined(__XEN__) || defined(__XEN_TOOLS__)
-/*
- * struct xen_arch_domainconfig's ABI is covered by
- * XEN_DOMCTL_INTERFACE_VERSION.
- */
-struct xen_arch_domainconfig {
-#define _XEN_X86_EMU_LAPIC          0
-#define XEN_X86_EMU_LAPIC           (1U<<_XEN_X86_EMU_LAPIC)
-#define _XEN_X86_EMU_HPET           1
-#define XEN_X86_EMU_HPET            (1U<<_XEN_X86_EMU_HPET)
-#define _XEN_X86_EMU_PM             2
-#define XEN_X86_EMU_PM              (1U<<_XEN_X86_EMU_PM)
-#define _XEN_X86_EMU_RTC            3
-#define XEN_X86_EMU_RTC             (1U<<_XEN_X86_EMU_RTC)
-#define _XEN_X86_EMU_IOAPIC         4
-#define XEN_X86_EMU_IOAPIC          (1U<<_XEN_X86_EMU_IOAPIC)
-#define _XEN_X86_EMU_PIC            5
-#define XEN_X86_EMU_PIC             (1U<<_XEN_X86_EMU_PIC)
-#define _XEN_X86_EMU_VGA            6
-#define XEN_X86_EMU_VGA             (1U<<_XEN_X86_EMU_VGA)
-#define _XEN_X86_EMU_IOMMU          7
-#define XEN_X86_EMU_IOMMU           (1U<<_XEN_X86_EMU_IOMMU)
-#define _XEN_X86_EMU_PIT            8
-#define XEN_X86_EMU_PIT             (1U<<_XEN_X86_EMU_PIT)
-#define _XEN_X86_EMU_USE_PIRQ       9
-#define XEN_X86_EMU_USE_PIRQ        (1U<<_XEN_X86_EMU_USE_PIRQ)
-#define _XEN_X86_EMU_VPCI           10
-#define XEN_X86_EMU_VPCI            (1U<<_XEN_X86_EMU_VPCI)
-
-#define XEN_X86_EMU_ALL             (XEN_X86_EMU_LAPIC | XEN_X86_EMU_HPET |  \
-                                     XEN_X86_EMU_PM | XEN_X86_EMU_RTC |      \
-                                     XEN_X86_EMU_IOAPIC | XEN_X86_EMU_PIC |  \
-                                     XEN_X86_EMU_VGA | XEN_X86_EMU_IOMMU |   \
-                                     XEN_X86_EMU_PIT | XEN_X86_EMU_USE_PIRQ |\
-                                     XEN_X86_EMU_VPCI)
-    uint32_t emulation_flags;
-};
-
-/* Location of online VCPU bitmap. */
-#define XEN_ACPI_CPU_MAP             0xaf00
-#define XEN_ACPI_CPU_MAP_LEN         ((HVM_MAX_VCPUS + 7) / 8)
-
-/* GPE0 bit set during CPU hotplug */
-#define XEN_ACPI_GPE0_CPUHP_BIT      2
-#endif
-
 #endif /* !__ASSEMBLY__ */
-
-/*
- * ` enum neg_errnoval
- * ` HYPERVISOR_fpu_taskswitch(int set);
- * `
- * Sets (if set!=0) or clears (if set==0) CR0.TS.
- */
-
-/*
- * ` enum neg_errnoval
- * ` HYPERVISOR_set_debugreg(int regno, unsigned long value);
- *
- * ` unsigned long
- * ` HYPERVISOR_get_debugreg(int regno);
- * For 0<=reg<=7, returns the debug register value.
- * For other values of reg, returns ((unsigned long)-EINVAL).
- * (Unfortunately, this interface is defective.)
- */
 
 /*
  * Prefix forces emulation of some non-trapping instructions.
@@ -351,7 +192,7 @@ struct xen_arch_domainconfig {
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

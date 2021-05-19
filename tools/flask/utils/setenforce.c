@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <string.h>
 #include <unistd.h>
+#include <libflask.h>
 
 static void usage (int argCnt, const char *args[])
 {
@@ -26,15 +27,15 @@ static void usage (int argCnt, const char *args[])
 int main (int argCnt, const char *args[])
 {
     int ret = 0;
-    xc_interface *xch = 0;
+    int xch = 0;
     long mode = 0;
     char *end;
 
     if (argCnt != 2)
         usage(argCnt, args);
 
-    xch = xc_interface_open(0,0,0);
-    if ( !xch )
+    xch = xc_interface_open();
+    if ( xch < 0 )
     {
         fprintf(stderr, "Unable to create interface to xenctrl: %s\n",
                 strerror(errno));
@@ -44,12 +45,12 @@ int main (int argCnt, const char *args[])
 
     if( strlen(args[1]) == 1 && (args[1][0] == '0' || args[1][0] == '1')){
         mode = strtol(args[1], &end, 10);
-        ret = xc_flask_setenforce(xch, mode);
+        ret = flask_setenforce(xch, mode);
     } else {
         if( strcasecmp(args[1], "enforcing") == 0 ){
-            ret = xc_flask_setenforce(xch, 1);
+            ret = flask_setenforce(xch, 1);
         } else if( strcasecmp(args[1], "permissive") == 0 ){
-            ret = xc_flask_setenforce(xch, 0);
+            ret = flask_setenforce(xch, 0);
         } else {
             usage(argCnt, args);
         }

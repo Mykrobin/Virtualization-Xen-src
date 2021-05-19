@@ -13,10 +13,11 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 /*
- * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -44,13 +45,7 @@ typedef struct zil_header {
 	uint64_t zh_replay_seq;	/* highest replayed sequence number */
 	blkptr_t zh_log;	/* log chain */
 	uint64_t zh_claim_seq;	/* highest claimed sequence number */
-	uint64_t zh_flags;	/* header flags */
-	uint64_t zh_pad[4];
+	uint64_t zh_pad[5];
 } zil_header_t;
-
-/*
- * zh_flags bit settings
- */
-#define	ZIL_REPLAY_NEEDED 0x1	/* replay needed - internal only */
 
 #endif	/* _SYS_ZIL_H */

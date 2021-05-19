@@ -1,6 +1,6 @@
 /*
- * MCA implementation for AMD CPUs
- * Copyright (c) 2007-2012 Advanced Micro Devices, Inc. 
+ * MCA implementation for AMD K7/K8 CPUs
+ * Copyright (c) 2007 Advanced Micro Devices, Inc. 
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -13,7 +13,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #ifndef X86_MCA_H
@@ -29,27 +30,19 @@
 
 
 /* Bitfield of the MSR_IA32_MCG_CAP register */
+#define MCG_SER_P               (1UL<<24)
 #define MCG_CAP_COUNT           0x00000000000000ffULL
-#define MCG_CTL_P               (1ULL<<8)
-#define MCG_EXT_P               (1ULL<<9)  /* Intel specific */
-#define MCG_CMCI_P              (1ULL<<10) /* Intel specific */
-#define MCG_TES_P               (1ULL<<11) /* Intel specific */
-#define MCG_EXT_CNT             16         /* Intel specific */
-#define MCG_SER_P               (1ULL<<24) /* Intel specific */
-#define MCG_LMCE_P              (1ULL<<27) /* Intel specific */
+#define MCG_CTL_P               0x0000000000000100ULL
+#define MCG_EXT_P		(1UL<<9)
+#define MCG_EXT_CNT		(16)
+#define MCG_CMCI_P		(1UL<<10)
 /* Other bits are reserved */
 
 /* Bitfield of the MSR_IA32_MCG_STATUS register */
 #define MCG_STATUS_RIPV         0x0000000000000001ULL
 #define MCG_STATUS_EIPV         0x0000000000000002ULL
 #define MCG_STATUS_MCIP         0x0000000000000004ULL
-#define MCG_STATUS_LMCE         0x0000000000000008ULL  /* Intel specific */
-/* Bits 3-63 are reserved on CPU not supporting LMCE */
-/* Bits 4-63 are reserved on CPU supporting LMCE */
-
-/* Bitfield of MSR_IA32_MCG_EXT_CTL register (Intel Specific) */
-#define MCG_EXT_CTL_LMCE_EN     (1ULL<<0)
-/* Other bits are reserved */
+/* Bits 3-63 are reserved */
 
 /* Bitfield of MSR_K8_MCi_STATUS registers */
 /* MCA error code */
@@ -59,9 +52,9 @@
 /* Other information */
 #define MCi_STATUS_OTHER        0x01ffffff00000000ULL
 /* Action Required flag */
-#define MCi_STATUS_AR           0x0080000000000000ULL  /* Intel specific */
+#define MCi_STATUS_AR           0x0080000000000000ULL
 /* Signaling flag */
-#define MCi_STATUS_S            0x0100000000000000ULL  /* Intel specific */
+#define MCi_STATUS_S            0x0100000000000000ULL
 /* processor context corrupt */
 #define MCi_STATUS_PCC          0x0200000000000000ULL
 /* MSR_K8_MCi_ADDR register valid */
@@ -93,59 +86,44 @@
 #define K8_HWCR_MCi_STATUS_WREN		(1ULL << 18)
 
 /*Intel Specific bitfield*/
-#define MCi_MISC_ADDRMOD_MASK (0x7UL << 6)
-#define MCi_MISC_PHYSMOD    (0x2UL << 6)
+#define CMCI_THRESHOLD			0x2
 
 #include <asm/domain.h>
+typedef DECLARE_BITMAP(cpu_banks_t, MAX_NR_BANKS);
+DECLARE_PER_CPU(cpu_banks_t, mce_banks_owned);
 
-struct mca_banks
+/* Below interfaces are defined for MCA internal processing:
+ * a. pre_handler will be called early in MCA ISR context, mainly for early
+ *    need_reset detection for avoiding log missing. Also, it is used to judge
+ *    impacted DOMAIN if possible.
+ * b. mca_error_handler is actually a (error_action_index,
+ *    recovery_hanlder pointer) pair. The defined recovery_handler
+ *    performs the actual recovery operations such as page_offline, cpu_offline
+ *    in softIRQ context when the per_bank MCA error matching the corresponding
+ *    mca_code index. If pre_handler can't judge the impacted domain,
+ *    recovery_handler must figure it out.
+*/
+
+/* MCA error has been recovered successfully by the recovery action*/
+#define MCA_RECOVERED (0x1 << 0)
+/* MCA error impact the specified DOMAIN in owner field below */
+#define MCA_OWNER (0x1 << 1)
+/* MCA error can't be recovered and need reset */
+#define MCA_NEED_RESET (0x1 << 2)
+/* MCA error did not have any action yet */
+#define MCA_NO_ACTION (0x1 << 3)
+
+struct mca_handle_result
 {
-    int num;
-    unsigned long *bank_map;
+    uint32_t result;
+    /* Used one result & MCA_OWNER */
+    domid_t owner;
+    /* Used by mca_error_handler, result & MCA_RECOVRED */
+    struct recovery_action *action;
 };
 
-static inline void mcabanks_clear(int bit, struct mca_banks *banks)
-{
-    if (!banks || !banks->bank_map || bit >= banks->num)
-        return ;
-    clear_bit(bit, banks->bank_map);
-}
-
-static inline void mcabanks_set(int bit, struct mca_banks* banks)
-{
-    if (!banks || !banks->bank_map || bit >= banks->num)
-        return;
-    set_bit(bit, banks->bank_map);
-}
-
-static inline int mcabanks_test(int bit, struct mca_banks* banks)
-{
-    if (!banks || !banks->bank_map || bit >= banks->num)
-        return 0;
-    return test_bit(bit, banks->bank_map);
-}
-
-struct mca_banks *mcabanks_alloc(void);
-void mcabanks_free(struct mca_banks *banks);
-extern struct mca_banks *mca_allbanks;
-
-/* Keep bank so that we can get status even if mib is NULL */
-struct mca_binfo {
-    int bank;
-    struct mcinfo_global *mig;
-    struct mcinfo_bank *mib;
-    struct mc_info *mi;
-    struct cpu_user_regs *regs;
-};
-
-enum mce_result
-{
-    MCER_NOERROR,
-    MCER_RECOVERED,
-    /* Not recovered, but can continue */
-    MCER_CONTINUE,
-    MCER_RESET,
-};
+extern void (*mca_prehandler)( struct cpu_user_regs *regs,
+                        struct mca_handle_result *result);
 
 struct mca_error_handler
 {
@@ -153,13 +131,16 @@ struct mca_error_handler
      * identified by mca_code. Otherwise, we might need to have
      * a seperate function to decode the corresponding actions
      * for the particular mca error later.
-     */
-    bool (*owned_error)(uint64_t status);
-    void (*recovery_handler)(struct mca_binfo *binfo,
-                    enum mce_result *result, const struct cpu_user_regs *regs);
+    */
+    uint16_t mca_code;
+    void (*recovery_handler)( struct mcinfo_bank *bank,
+                    struct mcinfo_global *global,
+                    struct mcinfo_extended *extension,
+                    struct mca_handle_result *result);
 };
 
 /* Global variables */
-extern bool opt_mce;
+extern int mce_disabled;
+extern unsigned int nr_mce_banks;
 
 #endif /* X86_MCA_H */

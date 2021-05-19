@@ -18,34 +18,55 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  *
  */
 #include <asm/io.h>
+#include <xen/config.h>
 #include <xen/init.h>
-#include <xen/pfn.h>
 #include <xen/types.h>
 #include <xen/errno.h>
 #include <xen/acpi.h>
 #include <xen/numa.h>
+#include <acpi/acpi_bus.h>
 #include <acpi/acmacros.h>
 #include <acpi/acpiosxf.h>
 #include <acpi/platform/aclinux.h>
 #include <xen/spinlock.h>
 #include <xen/domain_page.h>
-#include <xen/efi.h>
-#include <xen/vmap.h>
+#ifdef __ia64__
+#include <linux/efi.h>
+#endif
 
 #define _COMPONENT		ACPI_OS_SERVICES
 ACPI_MODULE_NAME("osl")
+#define PREFIX		"ACPI: "
+struct acpi_os_dpc {
+	acpi_osd_exec_callback function;
+	void *context;
+};
 
 #ifdef CONFIG_ACPI_CUSTOM_DSDT
 #include CONFIG_ACPI_CUSTOM_DSDT_FILE
 #endif
 
-void __init acpi_os_printf(const char *fmt, ...)
+#ifdef ENABLE_DEBUGGER
+#include <linux/kdb.h>
+
+/* stuff for debugger support */
+int acpi_in_debugger;
+EXPORT_SYMBOL(acpi_in_debugger);
+
+extern char line_buf[80];
+#endif				/*ENABLE_DEBUGGER */
+
+int acpi_specific_hotkey_enabled = TRUE;
+EXPORT_SYMBOL(acpi_specific_hotkey_enabled);
+
+void acpi_os_printf(const char *fmt, ...)
 {
 	va_list args;
 	va_start(args, fmt);
@@ -53,7 +74,7 @@ void __init acpi_os_printf(const char *fmt, ...)
 	va_end(args);
 }
 
-void __init acpi_os_vprintf(const char *fmt, va_list args)
+void acpi_os_vprintf(const char *fmt, va_list args)
 {
 	static char buffer[512];
 
@@ -62,14 +83,10 @@ void __init acpi_os_vprintf(const char *fmt, va_list args)
 	printk("%s", buffer);
 }
 
-acpi_physical_address __initdata rsdp_hint;
-
 acpi_physical_address __init acpi_os_get_root_pointer(void)
 {
-	if (rsdp_hint)
-		return rsdp_hint;
-
-	if (efi_enabled(EFI_BOOT)) {
+#ifdef __ia64__
+	if (efi_enabled) {
 		if (efi.acpi20 != EFI_INVALID_TABLE_ADDR)
 			return efi.acpi20;
 		else if (efi.acpi != EFI_INVALID_TABLE_ADDR)
@@ -79,44 +96,27 @@ acpi_physical_address __init acpi_os_get_root_pointer(void)
 			       "System description tables not found\n");
 			return 0;
 		}
-	} else if (IS_ENABLED(CONFIG_ACPI_LEGACY_TABLES_LOOKUP)) {
+	} else
+#endif
+	{
 		acpi_physical_address pa = 0;
 
 		acpi_find_root_pointer(&pa);
 		return pa;
 	}
-
-	return 0;
 }
 
 void __iomem *
 acpi_os_map_memory(acpi_physical_address phys, acpi_size size)
 {
-	if (system_state >= SYS_STATE_boot) {
-		mfn_t mfn = _mfn(PFN_DOWN(phys));
-		unsigned int offs = phys & (PAGE_SIZE - 1);
-
-		/* The low first Mb is always mapped on x86. */
-		if (IS_ENABLED(CONFIG_X86) && !((phys + size - 1) >> 20))
-			return __va(phys);
-		return __vmap(&mfn, PFN_UP(offs + size), 1, 1,
-			      ACPI_MAP_MEM_ATTR, VMAP_DEFAULT) + offs;
-	}
-	return __acpi_map_table(phys, size);
+	return __acpi_map_table((unsigned long)phys, size);
 }
+EXPORT_SYMBOL_GPL(acpi_os_map_memory);
 
 void acpi_os_unmap_memory(void __iomem * virt, acpi_size size)
 {
-	if (IS_ENABLED(CONFIG_X86) &&
-	    (unsigned long)virt >= DIRECTMAP_VIRT_START &&
-	    (unsigned long)virt < DIRECTMAP_VIRT_END) {
-		ASSERT(!((__pa(virt) + size - 1) >> 20));
-		return;
-	}
-
-	if (system_state >= SYS_STATE_boot)
-		vunmap((void *)((unsigned long)virt & PAGE_MASK));
 }
+EXPORT_SYMBOL_GPL(acpi_os_unmap_memory);
 
 acpi_status acpi_os_read_port(acpi_io_address port, u32 * value, u32 width)
 {
@@ -139,6 +139,8 @@ acpi_status acpi_os_read_port(acpi_io_address port, u32 * value, u32 width)
 	return AE_OK;
 }
 
+EXPORT_SYMBOL(acpi_os_read_port);
+
 acpi_status acpi_os_write_port(acpi_io_address port, u32 value, u32 width)
 {
 	if (width <= 8) {
@@ -154,15 +156,15 @@ acpi_status acpi_os_write_port(acpi_io_address port, u32 value, u32 width)
 	return AE_OK;
 }
 
+EXPORT_SYMBOL(acpi_os_write_port);
+
 acpi_status
 acpi_os_read_memory(acpi_physical_address phys_addr, u32 * value, u32 width)
 {
 	u32 dummy;
-	void __iomem *virt_addr = acpi_os_map_memory(phys_addr, width >> 3);
+	void __iomem *virt_addr;
 
-	if (!virt_addr)
-		return AE_ERROR;
-
+	virt_addr = map_domain_page(phys_addr>>PAGE_SHIFT);
 	if (!value)
 		value = &dummy;
 
@@ -180,7 +182,7 @@ acpi_os_read_memory(acpi_physical_address phys_addr, u32 * value, u32 width)
 		BUG();
 	}
 
-	acpi_os_unmap_memory(virt_addr, width >> 3);
+	unmap_domain_page(virt_addr);
 
 	return AE_OK;
 }
@@ -188,10 +190,9 @@ acpi_os_read_memory(acpi_physical_address phys_addr, u32 * value, u32 width)
 acpi_status
 acpi_os_write_memory(acpi_physical_address phys_addr, u32 value, u32 width)
 {
-	void __iomem *virt_addr = acpi_os_map_memory(phys_addr, width >> 3);
+	void __iomem *virt_addr;
 
-	if (!virt_addr)
-		return AE_ERROR;
+	virt_addr = map_domain_page(phys_addr>>PAGE_SHIFT);
 
 	switch (width) {
 	case 8:
@@ -207,42 +208,30 @@ acpi_os_write_memory(acpi_physical_address phys_addr, u32 value, u32 width)
 		BUG();
 	}
 
-	acpi_os_unmap_memory(virt_addr, width >> 3);
+	unmap_domain_page(virt_addr);
 
 	return AE_OK;
 }
 
-#define is_xmalloc_memory(ptr) ((unsigned long)(ptr) & (PAGE_SIZE - 1))
+/*
+ * Acquire a spinlock.
+ *
+ * handle is a pointer to the spinlock_t.
+ */
 
-void *__init acpi_os_alloc_memory(size_t sz)
+acpi_cpu_flags acpi_os_acquire_lock(acpi_spinlock lockp)
 {
-	void *ptr;
-
-	if (system_state == SYS_STATE_early_boot)
-		return mfn_to_virt(mfn_x(alloc_boot_pages(PFN_UP(sz), 1)));
-
-	ptr = xmalloc_bytes(sz);
-	ASSERT(!ptr || is_xmalloc_memory(ptr));
-	return ptr;
+	acpi_cpu_flags flags;
+	spin_lock_irqsave(lockp, flags);
+	return flags;
 }
 
-void *__init acpi_os_zalloc_memory(size_t sz)
-{
-	void *ptr;
+/*
+ * Release a spinlock. See above.
+ */
 
-	if (system_state != SYS_STATE_early_boot) {
-		ptr = xzalloc_bytes(sz);
-		ASSERT(!ptr || is_xmalloc_memory(ptr));
-		return ptr;
-	}
-	ptr = acpi_os_alloc_memory(sz);
-	return ptr ? memset(ptr, 0, sz) : NULL;
+void acpi_os_release_lock(acpi_spinlock lockp, acpi_cpu_flags flags)
+{
+	spin_unlock_irqrestore(lockp, flags);
 }
 
-void __init acpi_os_free_memory(void *ptr)
-{
-	if (is_xmalloc_memory(ptr))
-		xfree(ptr);
-	else if (ptr && system_state == SYS_STATE_early_boot)
-		init_boot_pages(__pa(ptr), __pa(ptr) + PAGE_SIZE);
-}

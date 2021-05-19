@@ -1,11 +1,10 @@
-XEN_ROOT = $(CURDIR)/../../../..
+XEN_ROOT = ../../../..
 include ../Rules.mk
 
 XG_HDRS := xg_public.h 
 XG_OBJS := xg_main.o 
 
-CFLAGS += -D__XEN_TOOLS__
-CFLAGS += $(CFLAGS_xeninclude)
+CFLAGS += $(INCLUDES) -I. -I../../../include 
 
 
 .PHONY: all
@@ -22,6 +21,7 @@ xg_all.a: $(XG_OBJS) Makefile $(XG_HDRS)
 #	$(CC) -m32 -c -o $@ $^
 
 xen-headers:
+	$(MAKE) -C ../../../check 
 	$(MAKE) -C ../../../include
 
 # xg_main.o: xg_main.c Makefile $(XG_HDRS)
@@ -32,7 +32,5 @@ xen-headers:
 
 .PHONY: clean
 clean:
-	rm -rf xen xg_all.a $(XG_OBJS)  .*.d
+	rm -rf xen xg_all.a $(XG_OBJS) 
 
-.PHONY: distclean
-distclean: clean

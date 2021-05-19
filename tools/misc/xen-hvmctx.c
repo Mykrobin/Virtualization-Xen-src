@@ -98,7 +98,7 @@ struct fpu_regs {
     uint32_t mxcsr;
     uint32_t mxcsr_mask;
     struct fpu_mm mm[8];
-    struct fpu_xmm xmm[16];
+    struct fpu_xmm xmm[15];
     uint64_t res1[12];
 } __attribute__((packed));
 
@@ -156,7 +156,7 @@ static void dump_cpu(void)
            "             ss 0x%8.8x (0x%16.16llx + 0x%8.8x / 0x%5.5x)\n"
            "             tr 0x%8.8x (0x%16.16llx + 0x%8.8x / 0x%5.5x)\n"
            "           ldtr 0x%8.8x (0x%16.16llx + 0x%8.8x / 0x%5.5x)\n"
-           "           idtr            (0x%16.16llx + 0x%8.8x)\n"
+           "           itdr            (0x%16.16llx + 0x%8.8x)\n"
            "           gdtr            (0x%16.16llx + 0x%8.8x)\n"
            "    sysenter cs 0x%8.8llx  eip 0x%16.16llx  esp 0x%16.16llx\n"
            "      shadow gs 0x%16.16llx\n"
@@ -366,44 +366,18 @@ static void dump_mtrr(void)
                (unsigned long long) p.msr_mtrr_fixed[i]);
 }
 
-static void dump_viridian_domain(void)
+static void dump_viridian(void)
 {
-    HVM_SAVE_TYPE(VIRIDIAN_DOMAIN) p;
+    HVM_SAVE_TYPE(VIRIDIAN) p;
     READ(p);
-    printf("    VIRIDIAN_DOMAIN: hypercall gpa 0x%llx, guest_os_id 0x%llx\n",
+    printf("    VIRIDIAN: hypercall gpa 0x%llx, guest ID 0x%llx\n",
            (unsigned long long) p.hypercall_gpa,
            (unsigned long long) p.guest_os_id);           
 }
 
-static void dump_viridian_vcpu(void)
-{
-    HVM_SAVE_TYPE(VIRIDIAN_VCPU) p;
-    READ(p);
-    printf("    VIRIDIAN_VCPU: vp_assist_msr 0x%llx, vp_assist_pending %s\n",
-	   (unsigned long long) p.vp_assist_msr,
-	   p.vp_assist_pending ? "true" : "false");
-}
-
-static void dump_vmce_vcpu(void)
-{
-    HVM_SAVE_TYPE(VMCE_VCPU) p;
-    READ(p);
-    printf("    VMCE_VCPU: caps %" PRIx64 "\n", p.caps);
-    printf("    VMCE_VCPU: bank0 mci_ctl2 %" PRIx64 "\n", p.mci_ctl2_bank0);
-    printf("    VMCE_VCPU: bank1 mci_ctl2 %" PRIx64 "\n", p.mci_ctl2_bank1);
-}
-
-static void dump_tsc_adjust(void)
-{
-    HVM_SAVE_TYPE(TSC_ADJUST) p;
-    READ(p);
-    printf("    TSC_ADJUST: tsc_adjust %" PRIx64 "\n", p.tsc_adjust);
-}
-
 int main(int argc, char **argv)
 {
-    int entry, domid;
-    xc_interface *xch;
+    int entry, domid, xch;
 
     struct hvm_save_descriptor desc;
 
@@ -413,8 +387,8 @@ int main(int argc, char **argv)
         exit(1);
     }
 
-    xch = xc_interface_open(0,0,0);
-    if ( !xch )
+    xch = xc_interface_open();
+    if ( xch < 0 )
     {
         fprintf(stderr, "Error: can't open libxc handle\n");
         exit(1);
@@ -464,10 +438,7 @@ int main(int argc, char **argv)
         case HVM_SAVE_CODE(HPET): dump_hpet(); break;
         case HVM_SAVE_CODE(PMTIMER): dump_pmtimer(); break;
         case HVM_SAVE_CODE(MTRR): dump_mtrr(); break;
-        case HVM_SAVE_CODE(VIRIDIAN_DOMAIN): dump_viridian_domain(); break;
-        case HVM_SAVE_CODE(VIRIDIAN_VCPU): dump_viridian_vcpu(); break;
-        case HVM_SAVE_CODE(VMCE_VCPU): dump_vmce_vcpu(); break;
-        case HVM_SAVE_CODE(TSC_ADJUST): dump_tsc_adjust(); break;
+        case HVM_SAVE_CODE(VIRIDIAN): dump_viridian(); break;
         case HVM_SAVE_CODE(END): break;
         default:
             printf(" ** Don't understand type %u: skipping\n",

@@ -17,7 +17,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #include <inttypes.h>
@@ -66,7 +67,7 @@ static uint32_t relocate_32bitbios(char *elfarray, uint32_t elfarraysize)
      */
     reloc_size = reloc_off;
     printf("%d bytes of ROMBIOS high-memory extensions:\n", reloc_size);
-    highbiosarea = mem_alloc(reloc_size, 1024);
+    highbiosarea = mem_alloc(reloc_size, 0);
     BUG_ON(highbiosarea == NULL);
     printf("  Relocating to 0x%x-0x%x ... ",
            (uint32_t)&highbiosarea[0],
@@ -143,17 +144,7 @@ static uint32_t relocate_32bitbios(char *elfarray, uint32_t elfarraysize)
     return (uint32_t)highbiosarea;
 }
 
-uint32_t rombios_highbios_setup(void)
+uint32_t highbios_setup(void)
 {
     return relocate_32bitbios((char *)highbios_array, sizeof(highbios_array));
 }
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * tab-width: 4
- * indent-tabs-mode: nil
- * End:
- */

@@ -1,18 +1,20 @@
 #ifndef _ASM_IO_H
 #define _ASM_IO_H
 
-#include <xen/vmap.h>
+#include <xen/config.h>
 #include <xen/types.h>
 #include <asm/page.h>
 
-#define readb(x) (*(volatile uint8_t  *)(x))
-#define readw(x) (*(volatile uint16_t *)(x))
-#define readl(x) (*(volatile uint32_t *)(x))
-#define readq(x) (*(volatile uint64_t *)(x))
-#define writeb(d,x) (*(volatile uint8_t  *)(x) = (d))
-#define writew(d,x) (*(volatile uint16_t *)(x) = (d))
-#define writel(d,x) (*(volatile uint32_t *)(x) = (d))
-#define writeq(d,x) (*(volatile uint64_t *)(x) = (d))
+/* We don't need real ioremap() on Xen/x86. */
+#define ioremap(x,l) (__va(x))
+#define iounmap(p)   ((void)0)
+
+#define readb(x) (*(volatile char *)(x))
+#define readw(x) (*(volatile short *)(x))
+#define readl(x) (*(volatile int *)(x))
+#define writeb(d,x) (*(volatile char *)(x) = (d))
+#define writew(d,x) (*(volatile short *)(x) = (d))
+#define writel(d,x) (*(volatile int *)(x) = (d))
 
 #define __OUT1(s,x) \
 static inline void out##s(unsigned x value, unsigned short port) {
@@ -49,10 +51,5 @@ __OUT(w,"w",short)
 __OUT(l,,int)
 
 extern void (*pv_post_outb_hook)(unsigned int port, u8 value);
-
-/* Function pointer used to handle platform specific I/O port emulation. */
-#define IOEMUL_QUIRK_STUB_BYTES 10
-extern bool (*ioemul_handle_quirk)(
-    u8 opcode, char *io_emul_stub, struct cpu_user_regs *regs);
 
 #endif

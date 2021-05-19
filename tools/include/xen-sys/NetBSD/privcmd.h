@@ -30,7 +30,7 @@
 #ifndef __NetBSD_PRIVCMD_H__
 #define __NetBSD_PRIVCMD_H__
 
-/* Interface to /dev/xen/privcmd */
+/* Interface to /proc/xen/privcmd */
 
 typedef struct privcmd_hypercall
 {

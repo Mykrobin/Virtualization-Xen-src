@@ -13,20 +13,22 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 /*
- * Copyright 2010 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef	_SYS_FS_ZFS_H
 #define	_SYS_FS_ZFS_H
 
+
 /*
  * On-disk version number.
  */
-#define	SPA_VERSION			24ULL
+#define	SPA_VERSION			16ULL
 
 /*
  * The following are configuration names used in the nvlist describing a pool's
@@ -60,12 +62,6 @@
 #define	ZPOOL_CONFIG_NPARITY		"nparity"
 #define	ZPOOL_CONFIG_PHYS_PATH		"phys_path"
 #define	ZPOOL_CONFIG_L2CACHE		"l2cache"
-#define	ZPOOL_CONFIG_HOLE_ARRAY		"hole_array"
-#define	ZPOOL_CONFIG_VDEV_CHILDREN	"vdev_children"
-#define	ZPOOL_CONFIG_IS_HOLE		"is_hole"
-#define	ZPOOL_CONFIG_DDT_HISTOGRAM	"ddt_histogram"
-#define	ZPOOL_CONFIG_DDT_OBJ_STATS	"ddt_object_stats"
-#define	ZPOOL_CONFIG_DDT_STATS		"ddt_stats"
 /*
  * The persistent vdev state is stored as separate values rather than a single
  * 'vdev_state' entry.  This is because a device can be in multiple states, such
@@ -83,7 +79,6 @@
 #define	VDEV_TYPE_DISK			"disk"
 #define	VDEV_TYPE_FILE			"file"
 #define	VDEV_TYPE_MISSING		"missing"
-#define	VDEV_TYPE_HOLE			"hole"
 #define	VDEV_TYPE_SPARE			"spare"
 #define	VDEV_TYPE_L2CACHE		"l2cache"
 

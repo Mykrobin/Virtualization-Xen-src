@@ -16,6 +16,7 @@
  * it's possible to reconstruct a chronological record of trace events.
  */
 
+#include <xen/config.h>
 #include <asm/types.h>
 #include <asm/io.h>
 #include <xen/lib.h>
@@ -24,12 +25,10 @@
 #include <xen/trace.h>
 #include <xen/errno.h>
 #include <xen/event.h>
-#include <xen/tasklet.h>
+#include <xen/softirq.h>
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/percpu.h>
-#include <xen/pfn.h>
-#include <xen/cpu.h>
 #include <asm/atomic.h>
 #include <public/sysctl.h>
 
@@ -42,19 +41,19 @@ CHECK_t_buf;
 #define compat_t_rec t_rec
 #endif
 
-/* opt_tbuf_size: trace buffer size (in pages) for each cpu */
-static unsigned int opt_tbuf_size;
-static unsigned int opt_tevt_mask;
+/* opt_tbuf_size: trace buffer size (in pages) */
+static unsigned int opt_tbuf_size = 0;
 integer_param("tbuf_size", opt_tbuf_size);
-integer_param("tevt_mask", opt_tevt_mask);
 
 /* Pointers to the meta-data objects for all system trace buffers */
 static struct t_info *t_info;
-static unsigned int t_info_pages;
-
+#define T_INFO_PAGES 2  /* Size fixed at 2 pages for now. */
+#define T_INFO_SIZE ((T_INFO_PAGES)*(PAGE_SIZE))
 static DEFINE_PER_CPU_READ_MOSTLY(struct t_buf *, t_bufs);
+static DEFINE_PER_CPU_READ_MOSTLY(unsigned char *, t_data);
 static DEFINE_PER_CPU_READ_MOSTLY(spinlock_t, t_lock);
-static u32 data_size __read_mostly;
+static u32 data_size;
+static u32 t_info_first_offset __read_mostly;
 
 /* High water mark for trace buffers; */
 /* Send virtual interrupt when buffer level reaches this point */
@@ -69,7 +68,7 @@ static DEFINE_PER_CPU(unsigned long, lost_records_first_tsc);
 int tb_init_done __read_mostly;
 
 /* which CPUs tracing is enabled on */
-static cpumask_t tb_cpu_mask;
+static cpumask_t tb_cpu_mask = CPU_MASK_ALL;
 
 /* which tracing events are enabled */
 static u32 tb_event_mask = TRC_ALL;
@@ -78,85 +77,27 @@ static u32 tb_event_mask = TRC_ALL;
  * i.e., sizeof(_type) * ans >= _x. */
 #define fit_to_type(_type, _x) (((_x)+sizeof(_type)-1) / sizeof(_type))
 
-static int cpu_callback(
-    struct notifier_block *nfb, unsigned long action, void *hcpu)
-{
-    unsigned int cpu = (unsigned long)hcpu;
-
-    if ( action == CPU_UP_PREPARE )
-        spin_lock_init(&per_cpu(t_lock, cpu));
-
-    return NOTIFY_DONE;
-}
-
-static struct notifier_block cpu_nfb = {
-    .notifier_call = cpu_callback
-};
-
-static uint32_t calc_tinfo_first_offset(void)
+static void calc_tinfo_first_offset(void)
 {
     int offset_in_bytes = offsetof(struct t_info, mfn_offset[NR_CPUS]);
-    return fit_to_type(uint32_t, offset_in_bytes);
+    t_info_first_offset = fit_to_type(uint32_t, offset_in_bytes);
 }
 
 /**
- * calculate_tbuf_size - check to make sure that the proposed size will fit
+ * check_tbuf_size - check to make sure that the proposed size will fit
  * in the currently sized struct t_info and allows prod and cons to
  * reach double the value without overflow.
- * The t_info layout is fixed and cant be changed without breaking xentrace.
- * Initialize t_info_pages based on number of trace pages.
  */
-static int calculate_tbuf_size(unsigned int pages, uint16_t t_info_first_offset)
+static int check_tbuf_size(u32 pages)
 {
-    struct t_buf dummy_size;
-    typeof(dummy_size.prod) max_size;
-    struct t_info dummy_pages;
-    typeof(dummy_pages.tbuf_size) max_pages;
-    typeof(dummy_pages.mfn_offset[0]) max_mfn_offset;
-    unsigned int max_cpus = num_online_cpus();
-    unsigned int t_info_words;
-
-    /* force maximum value for an unsigned type */
-    max_size = -1;
-    max_pages = -1;
-    max_mfn_offset = -1;
-
-    /* max size holds up to n pages */
-    max_size /= PAGE_SIZE;
-
-    if ( max_size < max_pages )
-        max_pages = max_size;
-
-    /*
-     * max mfn_offset holds up to n pages per cpu
-     * The array of mfns for the highest cpu can start at the maximum value
-     * mfn_offset can hold. So reduce the number of cpus and also the mfn_offset.
-     */
-    max_mfn_offset -= t_info_first_offset;
-    max_cpus--;
-    if ( max_cpus )
-        max_mfn_offset /= max_cpus;
-    if ( max_mfn_offset < max_pages )
-        max_pages = max_mfn_offset;
-
-    if ( pages > max_pages )
-    {
-        printk(XENLOG_INFO "xentrace: requested number of %u pages "
-               "reduced to %u\n",
-               pages, max_pages);
-        pages = max_pages;
-    }
-
-    /* 
-     * NB this calculation is correct, because t_info_first_offset is
-     * in words, not bytes, not bytes
-     */
-    t_info_words = num_online_cpus() * pages + t_info_first_offset;
-    t_info_pages = PFN_UP(t_info_words * sizeof(uint32_t));
-    printk(XENLOG_INFO "xentrace: requesting %u t_info pages "
-           "for %u trace pages on %u cpus\n",
-           t_info_pages, pages, num_online_cpus());
-    return pages;
+    struct t_buf dummy;
+    typeof(dummy.prod) size;
+    
+    size = ((typeof(dummy.prod))pages)  * PAGE_SIZE;
+    
+    return (size / PAGE_SIZE != pages)
+           || (size + size < size)
+           || (num_online_cpus() * pages + t_info_first_offset > T_INFO_SIZE / sizeof(uint32_t));
 }
 
 /**
@@ -169,141 +110,168 @@ static int calculate_tbuf_size(unsigned int pages, uint16_t t_info_first_offset)
  * This function may also be called later when enabling trace buffers 
  * via the SET_SIZE hypercall.
  */
-static int alloc_trace_bufs(unsigned int pages)
+static int alloc_trace_bufs(void)
 {
-    int i, cpu;
+    int           i, cpu, order;
+    unsigned long nr_pages;
     /* Start after a fixed-size array of NR_CPUS */
     uint32_t *t_info_mfn_list;
-    uint16_t t_info_first_offset;
-    uint16_t offset;
+    int offset;
 
-    if ( t_info )
-        return -EBUSY;
-
-    if ( pages == 0 )
+    if ( opt_tbuf_size == 0 )
         return -EINVAL;
 
-    /* Calculate offset in units of u32 of first mfn */
-    t_info_first_offset = calc_tinfo_first_offset();
+    if ( check_tbuf_size(opt_tbuf_size) )
+    {
+        printk("Xen trace buffers: tb size %d too large. "
+               "Tracing disabled.\n",
+               opt_tbuf_size);
+        return -EINVAL;
+    }
 
-    pages = calculate_tbuf_size(pages, t_info_first_offset);
-
-    t_info = alloc_xenheap_pages(get_order_from_pages(t_info_pages), 0);
+    /* t_info size is fixed for now. Currently this works great, so there
+     * seems to be no need to make it dynamic. */
+    t_info = alloc_xenheap_pages(get_order_from_pages(T_INFO_PAGES), 0);
     if ( t_info == NULL )
-        goto out_fail;
+    {
+        printk("Xen trace buffers: t_info allocation failed! "
+               "Tracing disabled.\n");
+        return -ENOMEM;
+    }
 
-    memset(t_info, 0, t_info_pages*PAGE_SIZE);
+    for ( i = 0; i < T_INFO_PAGES; i++ )
+        share_xen_page_with_privileged_guests(
+            virt_to_page(t_info) + i, XENSHARE_readonly);
 
     t_info_mfn_list = (uint32_t *)t_info;
+    offset = t_info_first_offset;
 
-    t_info->tbuf_size = pages;
+    t_info->tbuf_size = opt_tbuf_size;
+    printk(XENLOG_INFO "tbuf_size %d\n", t_info->tbuf_size);
+
+    nr_pages = opt_tbuf_size;
+    order = get_order_from_pages(nr_pages);
 
     /*
-     * Allocate buffers for all of the cpus.
-     * If any fails, deallocate what you have so far and exit.
+     * First, allocate buffers for all of the cpus.  If any
+     * fails, deallocate what you have so far and exit. 
      */
     for_each_online_cpu(cpu)
     {
-        offset = t_info_first_offset + (cpu * pages);
-        t_info->mfn_offset[cpu] = offset;
+        int flags;
+        char         *rawbuf;
+        struct t_buf *buf;
 
-        for ( i = 0; i < pages; i++ )
+        if ( (rawbuf = alloc_xenheap_pages(
+                order, MEMF_bits(32 + PAGE_SHIFT))) == NULL )
         {
-            void *p = alloc_xenheap_pages(0, MEMF_bits(32 + PAGE_SHIFT));
-            if ( !p )
+            printk("Xen trace buffers: memory allocation failed\n");
+            opt_tbuf_size = 0;
+            goto out_dealloc;
+        }
+
+        spin_lock_irqsave(&per_cpu(t_lock, cpu), flags);
+
+        per_cpu(t_bufs, cpu) = buf = (struct t_buf *)rawbuf;
+        buf->cons = buf->prod = 0;
+        per_cpu(t_data, cpu) = (unsigned char *)(buf + 1);
+
+        spin_unlock_irqrestore(&per_cpu(t_lock, cpu), flags);
+
+    }
+
+    /*
+     * Now share the pages to xentrace can map them, and write them in
+     * the global t_info structure.
+     */
+    for_each_online_cpu(cpu)
+    {
+        /* Share pages so that xentrace can map them. */
+        char         *rawbuf;
+
+        if ( (rawbuf = (char *)per_cpu(t_bufs, cpu)) )
+        {
+            struct page_info *p = virt_to_page(rawbuf);
+            uint32_t mfn = virt_to_mfn(rawbuf);
+
+            for ( i = 0; i < nr_pages; i++ )
             {
-                printk(XENLOG_INFO "xentrace: memory allocation failed "
-                       "on cpu %d after %d pages\n", cpu, i);
-                t_info_mfn_list[offset + i] = 0;
-                goto out_dealloc;
+                share_xen_page_with_privileged_guests(
+                    p + i, XENSHARE_writable);
+            
+                t_info_mfn_list[offset + i]=mfn + i;
             }
-            t_info_mfn_list[offset + i] = virt_to_mfn(p);
+            /* Write list first, then write per-cpu offset. */
+            wmb();
+            t_info->mfn_offset[cpu]=offset;
+            printk(XENLOG_INFO "p%d mfn %"PRIx32" offset %d\n",
+                   cpu, mfn, offset);
+            offset+=i;
         }
     }
 
-    /*
-     * Initialize buffers for all of the cpus.
-     */
-    for_each_online_cpu(cpu)
-    {
-        struct t_buf *buf;
-
-        spin_lock_init(&per_cpu(t_lock, cpu));
-
-        offset = t_info->mfn_offset[cpu];
-
-        /* Initialize the buffer metadata */
-        per_cpu(t_bufs, cpu) = buf = mfn_to_virt(t_info_mfn_list[offset]);
-        buf->cons = buf->prod = 0;
-
-        printk(XENLOG_INFO "xentrace: p%d mfn %x offset %u\n",
-                   cpu, t_info_mfn_list[offset], offset);
-
-        /* Now share the trace pages */
-        for ( i = 0; i < pages; i++ )
-            share_xen_page_with_privileged_guests(
-                mfn_to_page(_mfn(t_info_mfn_list[offset + i])), SHARE_rw);
-    }
-
-    /* Finally, share the t_info page */
-    for(i = 0; i < t_info_pages; i++)
-        share_xen_page_with_privileged_guests(
-            virt_to_page(t_info) + i, SHARE_ro);
-
-    data_size  = (pages * PAGE_SIZE - sizeof(struct t_buf));
+    data_size  = (opt_tbuf_size * PAGE_SIZE - sizeof(struct t_buf));
     t_buf_highwater = data_size >> 1; /* 50% high water */
-    opt_tbuf_size = pages;
-
-    printk("xentrace: initialised\n");
-    smp_wmb(); /* above must be visible before tb_init_done flag set */
-    tb_init_done = 1;
 
     return 0;
-
 out_dealloc:
     for_each_online_cpu(cpu)
     {
-        offset = t_info->mfn_offset[cpu];
-        if ( !offset )
-            continue;
-        for ( i = 0; i < pages; i++ )
+        int flags;
+        char * rawbuf;
+
+        spin_lock_irqsave(&per_cpu(t_lock, cpu), flags);
+        if ( (rawbuf = (char *)per_cpu(t_bufs, cpu)) )
         {
-            uint32_t mfn = t_info_mfn_list[offset + i];
-            if ( !mfn )
-                break;
-            ASSERT(!(mfn_to_page(_mfn(mfn))->count_info & PGC_allocated));
-            free_xenheap_pages(mfn_to_virt(mfn), 0);
+            per_cpu(t_bufs, cpu) = NULL;
+            ASSERT(!(virt_to_page(rawbuf)->count_info & PGC_allocated));
+            free_xenheap_pages(rawbuf, order);
         }
+        spin_unlock_irqrestore(&per_cpu(t_lock, cpu), flags);
     }
-    free_xenheap_pages(t_info, get_order_from_pages(t_info_pages));
-    t_info = NULL;
-out_fail:
-    printk(XENLOG_WARNING "xentrace: allocation failed! Tracing disabled.\n");
+    
     return -ENOMEM;
 }
 
 
 /**
- * tb_set_size - handle the logic involved with dynamically allocating tbufs
+ * tb_set_size - handle the logic involved with dynamically
+ * allocating and deallocating tbufs
  *
  * This function is called when the SET_SIZE hypercall is done.
  */
-static int tb_set_size(unsigned int pages)
+static int tb_set_size(int size)
 {
     /*
      * Setting size is a one-shot operation. It can be done either at
      * boot time or via control tools, but not by both. Once buffers
      * are created they cannot be destroyed.
      */
-    if ( opt_tbuf_size && pages != opt_tbuf_size )
+    int ret = 0;
+
+
+
+    if ( opt_tbuf_size != 0 )
     {
-        printk(XENLOG_INFO "xentrace: tb_set_size from %d to %d "
-               "not implemented\n",
-               opt_tbuf_size, pages);
+        if ( size != opt_tbuf_size )
+            gdprintk(XENLOG_INFO, "tb_set_size from %d to %d not implemented\n",
+                     opt_tbuf_size, size);
         return -EINVAL;
     }
 
-    return alloc_trace_bufs(pages);
+    if ( size <= 0 )
+        return -EINVAL;
+
+    opt_tbuf_size = size;
+
+    if ( (ret = alloc_trace_bufs()) != 0 )
+    {
+        opt_tbuf_size = 0;
+        return ret;
+    }
+
+    printk("Xen trace buffers: initialized\n");
+    return 0;
 }
 
 int trace_will_trace_event(u32 event)
@@ -326,7 +294,7 @@ int trace_will_trace_event(u32 event)
                 & ((event >> TRC_SUBCLS_SHIFT) & 0xf )) == 0 )
         return 0;
 
-    if ( !cpumask_test_cpu(smp_processor_id(), &tb_cpu_mask) )
+    if ( !cpu_isset(smp_processor_id(), tb_cpu_mask) )
         return 0;
 
     return 1;
@@ -341,32 +309,43 @@ int trace_will_trace_event(u32 event)
  */
 void __init init_trace_bufs(void)
 {
-    cpumask_setall(&tb_cpu_mask);
-    register_cpu_notifier(&cpu_nfb);
+    int i;
 
-    if ( opt_tbuf_size )
+    /* Calculate offset in u32 of first mfn */
+    calc_tinfo_first_offset();
+
+    /* Per-cpu t_lock initialisation. */
+    for ( i = 0; i < NR_CPUS; i++ )
+        spin_lock_init(&per_cpu(t_lock, i));
+
+    if ( opt_tbuf_size == 0 )
     {
-        if ( alloc_trace_bufs(opt_tbuf_size) )
-        {
-            printk("xentrace: allocation size %d failed, disabling\n",
-                   opt_tbuf_size);
-            opt_tbuf_size = 0;
-        }
-        else if ( opt_tevt_mask )
-        {
-            printk("xentrace: Starting tracing, enabling mask %x\n",
-                   opt_tevt_mask);
-            tb_event_mask = opt_tevt_mask;
-            tb_init_done=1;
-        }
+        printk("Xen trace buffers: disabled\n");
+        goto fail;
     }
+
+    if ( alloc_trace_bufs() != 0 )
+    {
+        dprintk(XENLOG_INFO, "Xen trace buffers: "
+                "allocation size %d failed, disabling\n",
+                opt_tbuf_size);
+        goto fail;
+    }
+
+    printk("Xen trace buffers: initialised\n");
+    wmb(); /* above must be visible before tb_init_done flag set */
+    tb_init_done = 1;
+    return;
+
+ fail:
+    opt_tbuf_size = 0;
 }
 
 /**
  * tb_control - sysctl operations on trace buffers.
- * @tbc: a pointer to a struct xen_sysctl_tbuf_op to be filled out
+ * @tbc: a pointer to a xen_sysctl_tbuf_op_t to be filled out
  */
-int tb_control(struct xen_sysctl_tbuf_op *tbc)
+int tb_control(xen_sysctl_tbuf_op_t *tbc)
 {
     static DEFINE_SPINLOCK(lock);
     int rc = 0;
@@ -378,19 +357,10 @@ int tb_control(struct xen_sysctl_tbuf_op *tbc)
     case XEN_SYSCTL_TBUFOP_get_info:
         tbc->evt_mask   = tb_event_mask;
         tbc->buffer_mfn = t_info ? virt_to_mfn(t_info) : 0;
-        tbc->size = t_info_pages * PAGE_SIZE;
+        tbc->size = T_INFO_PAGES * PAGE_SIZE;
         break;
     case XEN_SYSCTL_TBUFOP_set_cpu_mask:
-    {
-        cpumask_var_t mask;
-
-        rc = xenctl_bitmap_to_cpumask(&mask, &tbc->cpu_mask);
-        if ( !rc )
-        {
-            cpumask_copy(&tb_cpu_mask, mask);
-            free_cpumask_var(mask);
-        }
-    }
+        rc = xenctl_cpumap_to_cpumask(&tb_cpu_mask, &tbc->cpu_mask);
         break;
     case XEN_SYSCTL_TBUFOP_set_evt_mask:
         tb_event_mask = tbc->evt_mask;
@@ -414,13 +384,13 @@ int tb_control(struct xen_sysctl_tbuf_op *tbc)
         int i;
 
         tb_init_done = 0;
-        smp_wmb();
+        wmb();
         /* Clear any lost-record info so we don't get phantom lost records next time we
          * start tracing.  Grab the lock to make sure we're not racing anyone.  After this
          * hypercall returns, no more records should be placed into the buffers. */
         for_each_online_cpu(i)
         {
-            unsigned long flags;
+            int flags;
             spin_lock_irqsave(&per_cpu(t_lock, i), flags);
             per_cpu(lost_records, i)=0;
             spin_unlock_irqrestore(&per_cpu(t_lock, i), flags);
@@ -503,16 +473,10 @@ static inline u32 calc_bytes_avail(const struct t_buf *buf)
     return data_size - calc_unconsumed_bytes(buf);
 }
 
-static unsigned char *next_record(const struct t_buf *buf, uint32_t *next,
-                                 unsigned char **next_page,
-                                 uint32_t *offset_in_page)
+static inline struct t_rec *next_record(const struct t_buf *buf,
+                                        uint32_t *next)
 {
     u32 x = buf->prod, cons = buf->cons;
-    uint16_t per_cpu_mfn_offset;
-    uint32_t per_cpu_mfn_nr;
-    uint32_t *mfn_list;
-    uint32_t mfn;
-    unsigned char *this_page;
 
     barrier(); /* must read buf->prod and buf->cons only once */
     *next = x;
@@ -524,27 +488,7 @@ static unsigned char *next_record(const struct t_buf *buf, uint32_t *next,
 
     ASSERT(x < data_size);
 
-    /* add leading header to get total offset of next record */
-    x += sizeof(struct t_buf);
-    *offset_in_page = x & ~PAGE_MASK;
-
-    /* offset into array of mfns */
-    per_cpu_mfn_nr = x >> PAGE_SHIFT;
-    per_cpu_mfn_offset = t_info->mfn_offset[smp_processor_id()];
-    mfn_list = (uint32_t *)t_info;
-    mfn = mfn_list[per_cpu_mfn_offset + per_cpu_mfn_nr];
-    this_page = mfn_to_virt(mfn);
-    if (per_cpu_mfn_nr + 1 >= opt_tbuf_size)
-    {
-        /* reached end of buffer? */
-        *next_page = NULL;
-    }
-    else
-    {
-        mfn = mfn_list[per_cpu_mfn_offset + per_cpu_mfn_nr + 1];
-        *next_page = mfn_to_virt(mfn);
-    }
-    return this_page;
+    return (struct t_rec *)&this_cpu(t_data)[x];
 }
 
 static inline void __insert_record(struct t_buf *buf,
@@ -554,60 +498,45 @@ static inline void __insert_record(struct t_buf *buf,
                                    unsigned int rec_size,
                                    const void *extra_data)
 {
-    struct t_rec split_rec, *rec;
-    uint32_t *dst;
-    unsigned char *this_page, *next_page;
+    struct t_rec *rec;
+    unsigned char *dst;
     unsigned int extra_word = extra / sizeof(u32);
     unsigned int local_rec_size = calc_rec_size(cycles, extra);
     uint32_t next;
-    uint32_t offset;
-    uint32_t remaining;
 
     BUG_ON(local_rec_size != rec_size);
     BUG_ON(extra & 3);
 
-    this_page = next_record(buf, &next, &next_page, &offset);
-    if ( !this_page )
+    rec = next_record(buf, &next);
+    if ( !rec )
         return;
-
-    remaining = PAGE_SIZE - offset;
-
-    if ( unlikely(rec_size > remaining) )
+    /* Double-check once more that we have enough space.
+     * Don't bugcheck here, in case the userland tool is doing
+     * something stupid. */
+    if ( (unsigned char *)rec + rec_size > this_cpu(t_data) + data_size )
     {
-        if ( next_page == NULL )
-        {
-            /* access beyond end of buffer */
+        if ( printk_ratelimit() )
             printk(XENLOG_WARNING
-                   "%s: size=%08x prod=%08x cons=%08x rec=%u remaining=%u\n",
-                   __func__, data_size, next, buf->cons, rec_size, remaining);
-            return;
-        }
-        rec = &split_rec;
-    } else {
-        rec = (struct t_rec*)(this_page + offset);
+                   "%s: size=%08x prod=%08x cons=%08x rec=%u\n",
+                   __func__, data_size, next, buf->cons, rec_size);
+        return;
     }
 
     rec->event = event;
     rec->extra_u32 = extra_word;
-    dst = rec->u.nocycles.extra_u32;
+    dst = (unsigned char *)rec->u.nocycles.extra_u32;
     if ( (rec->cycles_included = cycles) != 0 )
     {
         u64 tsc = (u64)get_cycles();
         rec->u.cycles.cycles_lo = (uint32_t)tsc;
         rec->u.cycles.cycles_hi = (uint32_t)(tsc >> 32);
-        dst = rec->u.cycles.extra_u32;
+        dst = (unsigned char *)rec->u.cycles.extra_u32;
     } 
 
     if ( extra_data && extra )
         memcpy(dst, extra_data, extra);
 
-    if ( unlikely(rec_size > remaining) )
-    {
-        memcpy(this_page + offset, rec, remaining);
-        memcpy(next_page, (char *)rec + remaining, rec_size - remaining);
-    }
-
-    smp_wmb();
+    wmb();
 
     next += rec_size;
     if ( next >= 2*data_size )
@@ -641,11 +570,11 @@ static inline void insert_wrap_record(struct t_buf *buf,
 
 static inline void insert_lost_records(struct t_buf *buf)
 {
-    struct __packed {
+    struct {
         u32 lost_records;
-        u16 did, vid;
+        u32 did:16, vid:16;
         u64 first_tsc;
-    } ed;
+    } __attribute__((packed)) ed;
 
     ed.vid = current->vcpu_id;
     ed.did = current->domain->domain_id;
@@ -664,19 +593,18 @@ static inline void insert_lost_records(struct t_buf *buf)
  */
 static void trace_notify_dom0(unsigned long unused)
 {
-    send_global_virq(VIRQ_TBUF);
+    send_guest_global_virq(dom0, VIRQ_TBUF);
 }
-static DECLARE_SOFTIRQ_TASKLET(trace_notify_dom0_tasklet,
-                               trace_notify_dom0, 0);
+static DECLARE_TASKLET(trace_notify_dom0_tasklet, trace_notify_dom0, 0);
 
 /**
- * __trace_var - Enters a trace tuple into the trace buffer for the current CPU.
+ * trace - Enters a trace tuple into the trace buffer for the current CPU.
  * @event: the event type being logged
- * @cycles: include tsc timestamp into trace record
- * @extra: size of additional trace data in bytes
- * @extra_data: pointer to additional trace data
+ * @d1...d5: the data items for the event being logged
  *
- * Logs a trace record into the appropriate buffer.
+ * Logs a trace record into the appropriate buffer.  Returns nonzero on
+ * failure, otherwise 0.  Failure occurs only if the trace buffers are not yet
+ * initialised.
  */
 void __trace_var(u32 event, bool_t cycles, unsigned int extra,
                  const void *extra_data)
@@ -714,11 +642,11 @@ void __trace_var(u32 event, bool_t cycles, unsigned int extra,
                 & ((event >> TRC_SUBCLS_SHIFT) & 0xf )) == 0 )
         return;
 
-    if ( !cpumask_test_cpu(smp_processor_id(), &tb_cpu_mask) )
+    if ( !cpu_isset(smp_processor_id(), tb_cpu_mask) )
         return;
 
     /* Read tb_init_done /before/ t_bufs. */
-    smp_rmb();
+    rmb();
 
     spin_lock_irqsave(&this_cpu(t_lock), flags);
 
@@ -816,68 +744,10 @@ unlock:
         tasklet_schedule(&trace_notify_dom0_tasklet);
 }
 
-void __trace_hypercall(uint32_t event, unsigned long op,
-                       const xen_ulong_t *args)
-{
-    struct {
-        uint32_t op;
-        uint32_t args[6];
-    } d;
-    uint32_t *a = d.args;
-
-    /*
-     * In lieu of using __packed above, which gcc9 legitimately doesn't
-     * like in combination with the address of d.args[] taken.
-     */
-    BUILD_BUG_ON(offsetof(typeof(d), args) != sizeof(d.op));
-
-#define APPEND_ARG32(i)                         \
-    do {                                        \
-        unsigned i_ = (i);                      \
-        *a++ = args[(i_)];                      \
-        d.op |= TRC_PV_HYPERCALL_V2_ARG_32(i_); \
-    } while( 0 )
-
-    /*
-     * This shouldn't happen as @op should be small enough but just in
-     * case, warn if the argument bits in the trace record would
-     * clobber the hypercall op.
-     */
-    WARN_ON(op & TRC_PV_HYPERCALL_V2_ARG_MASK);
-
-    d.op = op;
-
-    switch ( op )
-    {
-    case __HYPERVISOR_mmu_update:
-        APPEND_ARG32(1); /* count */
-        break;
-    case __HYPERVISOR_multicall:
-        APPEND_ARG32(1); /* count */
-        break;
-    case __HYPERVISOR_grant_table_op:
-        APPEND_ARG32(0); /* cmd */
-        APPEND_ARG32(2); /* count */
-        break;
-    case __HYPERVISOR_vcpu_op:
-        APPEND_ARG32(0); /* cmd */
-        APPEND_ARG32(1); /* vcpuid */
-        break;
-    case __HYPERVISOR_mmuext_op:
-        APPEND_ARG32(1); /* count */
-        break;
-    case __HYPERVISOR_sched_op:
-        APPEND_ARG32(0); /* cmd */
-        break;
-    }
-
-    __trace_var(event, 1, sizeof(uint32_t) * (1 + (a - d.args)), &d);
-}
-
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

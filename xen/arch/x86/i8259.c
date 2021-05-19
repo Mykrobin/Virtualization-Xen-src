@@ -5,6 +5,7 @@
  * tables for IO APICS as well as uniprocessor 8259-alikes.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <asm/regs.h>
@@ -15,11 +16,61 @@
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/desc.h>
-#include <xen/bitops.h>
+#include <asm/bitops.h>
 #include <xen/delay.h>
 #include <asm/apic.h>
 #include <asm/asm_defns.h>
 #include <io_ports.h>
+
+/*
+ * Common place to define all x86 IRQ vectors
+ *
+ * This builds up the IRQ handler stubs using some ugly macros in irq.h
+ *
+ * These macros create the low-level assembly IRQ routines that save
+ * register context and call do_IRQ(). do_IRQ() then does all the
+ * operations that are needed to keep the AT (or SMP IOAPIC)
+ * interrupt-controller happy.
+ */
+
+BUILD_COMMON_IRQ()
+
+#define BI(x,y) \
+    BUILD_IRQ(x##y)
+
+#define BUILD_16_IRQS(x) \
+    BI(x,0) BI(x,1) BI(x,2) BI(x,3) \
+    BI(x,4) BI(x,5) BI(x,6) BI(x,7) \
+    BI(x,8) BI(x,9) BI(x,a) BI(x,b) \
+    BI(x,c) BI(x,d) BI(x,e) BI(x,f)
+
+BUILD_16_IRQS(0x0) BUILD_16_IRQS(0x1) BUILD_16_IRQS(0x2) BUILD_16_IRQS(0x3)
+BUILD_16_IRQS(0x4) BUILD_16_IRQS(0x5) BUILD_16_IRQS(0x6) BUILD_16_IRQS(0x7)
+BUILD_16_IRQS(0x8) BUILD_16_IRQS(0x9) BUILD_16_IRQS(0xa) BUILD_16_IRQS(0xb)
+BUILD_16_IRQS(0xc) BUILD_16_IRQS(0xd) BUILD_16_IRQS(0xe) BUILD_16_IRQS(0xf)
+
+#undef BUILD_16_IRQS
+#undef BI
+
+
+#define IRQ(x,y) \
+    IRQ##x##y##_interrupt
+
+#define IRQLIST_16(x) \
+    IRQ(x,0), IRQ(x,1), IRQ(x,2), IRQ(x,3), \
+    IRQ(x,4), IRQ(x,5), IRQ(x,6), IRQ(x,7), \
+    IRQ(x,8), IRQ(x,9), IRQ(x,a), IRQ(x,b), \
+    IRQ(x,c), IRQ(x,d), IRQ(x,e), IRQ(x,f)
+
+    static void (*interrupt[])(void) = {
+        IRQLIST_16(0x0), IRQLIST_16(0x1), IRQLIST_16(0x2), IRQLIST_16(0x3),
+        IRQLIST_16(0x4), IRQLIST_16(0x5), IRQLIST_16(0x6), IRQLIST_16(0x7),
+        IRQLIST_16(0x8), IRQLIST_16(0x9), IRQLIST_16(0xa), IRQLIST_16(0xb),
+        IRQLIST_16(0xc), IRQLIST_16(0xd), IRQLIST_16(0xe), IRQLIST_16(0xf)
+    };
+
+#undef IRQ
+#undef IRQLIST_16
 
 /*
  * This is the 'legacy' 8259A Programmable Interrupt Controller,
@@ -32,28 +83,18 @@
 
 static DEFINE_SPINLOCK(i8259A_lock);
 
-static bool _mask_and_ack_8259A_irq(unsigned int irq);
+static void mask_and_ack_8259A_irq(unsigned int irq);
 
-bool bogus_8259A_irq(unsigned int irq)
+static unsigned int startup_8259A_irq(unsigned int irq)
 {
-    return _mask_and_ack_8259A_irq(irq);
-}
-
-static void mask_and_ack_8259A_irq(struct irq_desc *desc)
-{
-    _mask_and_ack_8259A_irq(desc->irq);
-}
-
-static unsigned int startup_8259A_irq(struct irq_desc *desc)
-{
-    enable_8259A_irq(desc);
+    enable_8259A_irq(irq);
     return 0; /* never anything pending */
 }
 
-static void end_8259A_irq(struct irq_desc *desc, u8 vector)
+static void end_8259A_irq(unsigned int irq, u8 vector)
 {
-    if (!(desc->status & (IRQ_DISABLED|IRQ_INPROGRESS)))
-        enable_8259A_irq(desc);
+    if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
+        enable_8259A_irq(irq);
 }
 
 static struct hw_interrupt_type __read_mostly i8259A_irq_type = {
@@ -69,8 +110,6 @@ static struct hw_interrupt_type __read_mostly i8259A_irq_type = {
 /*
  * 8259A PIC functions to handle ISA devices:
  */
-
-#define aeoi_mode (i8259A_irq_type.ack == disable_8259A_irq)
 
 /*
  * This contains the irq mask for both 8259A irq controllers,
@@ -90,9 +129,9 @@ static unsigned int cached_irq_mask = 0xffff;
  * this 'mixed mode' IRQ handling costs nothing because it's only used
  * at IRQ setup time.
  */
-unsigned int __read_mostly io_apic_irqs;
+unsigned long io_apic_irqs;
 
-static void _disable_8259A_irq(unsigned int irq)
+void disable_8259A_irq(unsigned int irq)
 {
     unsigned int mask = 1 << irq;
     unsigned long flags;
@@ -103,24 +142,17 @@ static void _disable_8259A_irq(unsigned int irq)
         outb(cached_A1,0xA1);
     else
         outb(cached_21,0x21);
-    per_cpu(vector_irq, 0)[LEGACY_VECTOR(irq)] = ~irq;
     spin_unlock_irqrestore(&i8259A_lock, flags);
 }
 
-void disable_8259A_irq(struct irq_desc *desc)
+void enable_8259A_irq(unsigned int irq)
 {
-    _disable_8259A_irq(desc->irq);
-}
-
-void enable_8259A_irq(struct irq_desc *desc)
-{
-    unsigned int mask = ~(1 << desc->irq);
+    unsigned int mask = ~(1 << irq);
     unsigned long flags;
 
     spin_lock_irqsave(&i8259A_lock, flags);
     cached_irq_mask &= mask;
-    per_cpu(vector_irq, 0)[LEGACY_VECTOR(desc->irq)] = desc->irq;
-    if (desc->irq & 8)
+    if (irq & 8)
         outb(cached_A1,0xA1);
     else
         outb(cached_21,0x21);
@@ -190,17 +222,14 @@ static inline int i8259A_irq_real(unsigned int irq)
  * Careful! The 8259A is a fragile beast, it pretty
  * much _has_ to be done exactly like this (mask it
  * first, _then_ send the EOI, and the order of EOI
- * to the two 8259s is important!  Return a boolean
- * indicating whether the irq was genuine or spurious.
+ * to the two 8259s is important!
  */
-static bool _mask_and_ack_8259A_irq(unsigned int irq)
+static void mask_and_ack_8259A_irq(unsigned int irq)
 {
     unsigned int irqmask = 1 << irq;
     unsigned long flags;
-    bool is_real_irq = true; /* Assume real unless spurious */
 
     spin_lock_irqsave(&i8259A_lock, flags);
-
     /*
      * Lightweight spurious IRQ detection. We do not want
      * to overdo spurious IRQ handling - it's usually a sign
@@ -216,40 +245,53 @@ static bool _mask_and_ack_8259A_irq(unsigned int irq)
      * but should be enough to warn the user that there
      * is something bad going on ...
      */
-    if ((cached_irq_mask & irqmask) && !i8259A_irq_real(irq)) {
+    if (cached_irq_mask & irqmask)
+        goto spurious_8259A_irq;
+    cached_irq_mask |= irqmask;
+
+ handle_real_irq:
+    if (irq & 8) {
+        inb(0xA1);              /* DUMMY - (do we need this?) */
+        outb(cached_A1,0xA1);
+        outb(0x60+(irq&7),0xA0);/* 'Specific EOI' to slave */
+        outb(0x62,0x20);        /* 'Specific EOI' to master-IRQ2 */
+    } else {
+        inb(0x21);              /* DUMMY - (do we need this?) */
+        outb(cached_21,0x21);
+        outb(0x60+irq,0x20);    /* 'Specific EOI' to master */
+    }
+    spin_unlock_irqrestore(&i8259A_lock, flags);
+    return;
+
+ spurious_8259A_irq:
+    /*
+     * this is the slow path - should happen rarely.
+     */
+    if (i8259A_irq_real(irq))
+        /*
+         * oops, the IRQ _is_ in service according to the
+         * 8259A - not spurious, go handle it.
+         */
+        goto handle_real_irq;
+
+    {
         static int spurious_irq_mask;
-        is_real_irq = false;
-        /* Report spurious IRQ, once per IRQ line. */
+        /*
+         * At this point we can be sure the IRQ is spurious,
+         * lets ACK and report it. [once per IRQ]
+         */
         if (!(spurious_irq_mask & irqmask)) {
             printk("spurious 8259A interrupt: IRQ%d.\n", irq);
             spurious_irq_mask |= irqmask;
         }
+        atomic_inc(&irq_err_count);
         /*
          * Theoretically we do not have to handle this IRQ,
          * but in Linux this does not cause problems and is
          * simpler for us.
          */
+        goto handle_real_irq;
     }
-
-    cached_irq_mask |= irqmask;
-
-    if (irq & 8) {
-        inb(0xA1);              /* DUMMY - (do we need this?) */
-        outb(cached_A1,0xA1);
-        if (!aeoi_mode) {
-            outb(0x60 + (irq & 7), 0xA0);/* 'Specific EOI' to slave */
-            outb(0x62,0x20);        /* 'Specific EOI' to master-IRQ2 */
-        }
-    } else {
-        inb(0x21);              /* DUMMY - (do we need this?) */
-        outb(cached_21,0x21);
-        if (!aeoi_mode)
-            outb(0x60 + irq, 0x20);/* 'Specific EOI' to master */
-    }
-
-    spin_unlock_irqrestore(&i8259A_lock, flags);
-
-    return is_real_irq;
 }
 
 static char irq_trigger[2];
@@ -271,7 +313,7 @@ static void save_ELCR(char *trigger)
 
 int i8259A_resume(void)
 {
-    init_8259A(aeoi_mode);
+    init_8259A(0);
     restore_ELCR(irq_trigger);
     return 0;
 }
@@ -282,7 +324,7 @@ int i8259A_suspend(void)
     return 0;
 }
 
-void init_8259A(int auto_eoi)
+void __devinit init_8259A(int auto_eoi)
 {
     unsigned long flags;
 
@@ -335,7 +377,7 @@ static struct irqaction __read_mostly cascade = { no_action, "cascade", NULL};
 
 void __init init_IRQ(void)
 {
-    int irq, cpu = smp_processor_id();
+    int vector, irq, cpu = smp_processor_id();
 
     init_bsp_APIC();
 
@@ -343,21 +385,34 @@ void __init init_IRQ(void)
 
     BUG_ON(init_irq_data() < 0);
 
+    for ( vector = FIRST_DYNAMIC_VECTOR; vector < NR_VECTORS; vector++ )
+    {
+        if (vector == HYPERCALL_VECTOR || vector == LEGACY_SYSCALL_VECTOR)
+            continue;
+        set_intr_gate(vector, interrupt[vector]);
+    }
+
     for (irq = 0; platform_legacy_irq(irq); irq++) {
         struct irq_desc *desc = irq_to_desc(irq);
+        struct irq_cfg *cfg = desc->chip_data;
         
-        if ( irq == 2 ) /* IRQ2 doesn't exist */
-            continue;
         desc->handler = &i8259A_irq_type;
         per_cpu(vector_irq, cpu)[FIRST_LEGACY_VECTOR + irq] = irq;
-        cpumask_copy(desc->arch.cpu_mask, cpumask_of(cpu));
-        desc->arch.vector = FIRST_LEGACY_VECTOR + irq;
+        cfg->domain = cpumask_of_cpu(cpu);
+        cfg->vector = FIRST_LEGACY_VECTOR + irq;
     }
     
-    per_cpu(vector_irq, cpu)[IRQ0_VECTOR] = 0;
+    per_cpu(vector_irq, cpu)[FIRST_HIPRIORITY_VECTOR] = 0;
 
     apic_intr_init();
 
-    setup_irq(2, 0, &cascade);
+    /* Set the clock to HZ Hz */
+#define CLOCK_TICK_RATE 1193182 /* crystal freq (Hz) */
+#define LATCH (((CLOCK_TICK_RATE)+(HZ/2))/HZ)
+    outb_p(0x34, PIT_MODE);        /* binary, mode 2, LSB/MSB, ch 0 */
+    outb_p(LATCH & 0xff, PIT_CH0); /* LSB */
+    outb(LATCH >> 8, PIT_CH0);     /* MSB */
+
+    setup_irq(2, &cascade);
 }
 

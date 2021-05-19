@@ -13,10 +13,11 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 /*
- * Copyright 2010 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -26,9 +27,8 @@
 #define	MASTER_NODE_OBJ	1
 #define	ZFS_ROOT_OBJ		"ROOT"
 #define	ZPL_VERSION_STR		"VERSION"
-#define	ZFS_SA_ATTRS		"SA_ATTRS"
 
-#define	ZPL_VERSION		5ULL
+#define	ZPL_VERSION		4ULL
 
 #define	ZFS_DIRENT_OBJ(de) BF64_GET(de, 0, 48)
 

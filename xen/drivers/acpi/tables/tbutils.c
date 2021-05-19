@@ -41,6 +41,7 @@
  * POSSIBILITY OF SUCH DAMAGES.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <acpi/acpi.h>
 #include <acpi/actables.h>
@@ -48,6 +49,10 @@
 #define _COMPONENT          ACPI_TABLES
 ACPI_MODULE_NAME("tbutils")
 
+/* Local prototypes */
+static acpi_physical_address
+acpi_tb_get_root_table_entry(u8 * table_entry,
+			     acpi_native_uint table_entry_size);
 /*******************************************************************************
  *
  * FUNCTION:    acpi_tb_check_xsdt
@@ -63,7 +68,7 @@ ACPI_MODULE_NAME("tbutils")
  * DESCRIPTION: validate XSDT
 ******************************************************************************/
 
-static acpi_status __init
+static acpi_status
 acpi_tb_check_xsdt(acpi_physical_address address)
 {
 	struct acpi_table_header *table;
@@ -106,6 +111,29 @@ acpi_tb_check_xsdt(acpi_physical_address address)
 		return AE_NULL_ENTRY;
 	else
 		return AE_OK;
+}
+
+/*******************************************************************************
+ *
+ * FUNCTION:    acpi_tb_tables_loaded
+ *
+ * PARAMETERS:  None
+ *
+ * RETURN:      TRUE if required ACPI tables are loaded
+ *
+ * DESCRIPTION: Determine if the minimum required ACPI tables are present
+ *              (FADT, FACS, DSDT)
+ *
+ ******************************************************************************/
+
+u8 acpi_tb_tables_loaded(void)
+{
+
+	if (acpi_gbl_root_table_list.count >= 3) {
+		return (TRUE);
+	}
+
+	return (FALSE);
 }
 
 /*******************************************************************************
@@ -174,8 +202,7 @@ acpi_tb_print_table_header(acpi_physical_address address,
  *
  ******************************************************************************/
 
-acpi_status __init
-acpi_tb_verify_checksum(struct acpi_table_header *table, u32 length)
+acpi_status acpi_tb_verify_checksum(struct acpi_table_header *table, u32 length)
 {
 	u8 checksum;
 
@@ -282,6 +309,13 @@ acpi_tb_install_table(acpi_physical_address address,
 
 	acpi_tb_print_table_header(address, table);
 
+	if (table_index == ACPI_TABLE_INDEX_DSDT) {
+
+		/* Global integer width is based upon revision of the DSDT */
+
+		acpi_ut_set_integer_width(table->revision);
+	}
+
       unmap_and_exit:
 	acpi_os_unmap_memory(table, sizeof(struct acpi_table_header));
 }
@@ -303,7 +337,7 @@ acpi_tb_install_table(acpi_physical_address address,
  *
  ******************************************************************************/
 
-static acpi_physical_address __init
+static acpi_physical_address
 acpi_tb_get_root_table_entry(u8 * table_entry,
 			     acpi_native_uint table_entry_size)
 {
@@ -368,7 +402,7 @@ acpi_tb_parse_root_table(acpi_physical_address rsdp_address, u8 flags)
 	u32 table_count;
 	struct acpi_table_header *table;
 	acpi_physical_address address;
-	acpi_physical_address rsdt_address = 0;
+	acpi_physical_address uninitialized_var(rsdt_address);
 	u32 length;
 	u8 *table_entry;
 	acpi_status status;

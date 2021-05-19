@@ -57,7 +57,7 @@ typedef struct fsig_plugin_ops {
 #define	disk_read_func (*fsig_disk_read_junk())
 #define	disk_read_hook (*fsig_disk_read_junk())
 #define	print_possibilities 0
-#define	noisy_printf(fmt...)
+#define	noisy_printf
 
 #define	grub_memset memset
 #define	grub_memmove memmove
@@ -78,7 +78,6 @@ unsigned long fsig_log2(unsigned long);
 #define	ERR_DEV_VALUES 1
 #define	ERR_WONT_FIT 1
 #define	ERR_READ 1
-#define	ERR_NEWER_VERSION 1
 
 fsi_plugin_ops_t *fsig_init(fsi_plugin_t *, fsig_plugin_ops_t *);
 

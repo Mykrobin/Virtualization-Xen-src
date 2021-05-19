@@ -1,18 +1,3 @@
-/*
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
- */
-
 #include "xc_private.h"
 #include "xg_private.h"
 #include "xg_save_restore.h"
@@ -23,7 +8,20 @@
 #include <xen/foreign/x86_64.h>
 #include <xen/hvm/params.h>
 
-static int modify_returncode(xc_interface *xch, uint32_t domid)
+static int pv_guest_width(int xc_handle, uint32_t domid)
+{
+    DECLARE_DOMCTL;
+    domctl.domain = domid;
+    domctl.cmd = XEN_DOMCTL_get_address_size;
+    if ( xc_domctl(xc_handle, &domctl) != 0 )
+    {
+        PERROR("Could not get guest address size");
+        return -1;
+    }
+    return domctl.u.address_size.size / 8;
+}
+
+static int modify_returncode(int xc_handle, uint32_t domid)
 {
     vcpu_guest_context_any_t ctxt;
     xc_dominfo_t info;
@@ -32,33 +30,24 @@ static int modify_returncode(xc_interface *xch, uint32_t domid)
     struct domain_info_context *dinfo = &_dinfo;
     int rc;
 
-    if ( xc_domain_getinfo(xch, domid, 1, &info) != 1 ||
-         info.domid != domid )
+    if ( xc_domain_getinfo(xc_handle, domid, 1, &info) != 1 )
     {
         PERROR("Could not get domain info");
-        return -1;
-    }
-
-    if ( !info.shutdown || (info.shutdown_reason != SHUTDOWN_suspend) )
-    {
-        ERROR("Dom %d not suspended: (shutdown %d, reason %d)", domid,
-              info.shutdown, info.shutdown_reason);
-        errno = EINVAL;
         return -1;
     }
 
     if ( info.hvm )
     {
         /* HVM guests without PV drivers have no return code to modify. */
-        uint64_t irq = 0;
-        xc_hvm_param_get(xch, domid, HVM_PARAM_CALLBACK_IRQ, &irq);
+        unsigned long irq = 0;
+        xc_get_hvm_param(xc_handle, domid, HVM_PARAM_CALLBACK_IRQ, &irq);
         if ( !irq )
             return 0;
 
         /* HVM guests have host address width. */
-        if ( xc_version(xch, XENVER_capabilities, &caps) != 0 )
+        if ( xc_version(xc_handle, XENVER_capabilities, &caps) != 0 )
         {
-            PERROR("Could not get Xen capabilities");
+            PERROR("Could not get Xen capabilities\n");
             return -1;
         }
         dinfo->guest_width = strstr(caps, "x86_64") ? 8 : 4;
@@ -66,16 +55,17 @@ static int modify_returncode(xc_interface *xch, uint32_t domid)
     else
     {
         /* Probe PV guest address width. */
-        if ( xc_domain_get_guest_width(xch, domid, &dinfo->guest_width) )
+        dinfo->guest_width = pv_guest_width(xc_handle, domid);
+        if ( dinfo->guest_width < 0 )
             return -1;
     }
 
-    if ( (rc = xc_vcpu_getcontext(xch, domid, 0, &ctxt)) != 0 )
+    if ( (rc = xc_vcpu_getcontext(xc_handle, domid, 0, &ctxt)) != 0 )
         return rc;
 
-    SET_FIELD(&ctxt, user_regs.eax, 1, dinfo->guest_width);
+    SET_FIELD(&ctxt, user_regs.eax, 1);
 
-    if ( (rc = xc_vcpu_setcontext(xch, domid, 0, &ctxt)) != 0 )
+    if ( (rc = xc_vcpu_setcontext(xc_handle, domid, 0, &ctxt)) != 0 )
         return rc;
 
     return 0;
@@ -83,7 +73,7 @@ static int modify_returncode(xc_interface *xch, uint32_t domid)
 
 #else
 
-static int modify_returncode(xc_interface *xch, uint32_t domid)
+static int modify_returncode(int xc_handle, uint32_t domid)
 {
     return 0;
 
@@ -91,7 +81,7 @@ static int modify_returncode(xc_interface *xch, uint32_t domid)
 
 #endif
 
-static int xc_domain_resume_cooperative(xc_interface *xch, uint32_t domid)
+static int xc_domain_resume_cooperative(int xc_handle, uint32_t domid)
 {
     DECLARE_DOMCTL;
     int rc;
@@ -100,44 +90,21 @@ static int xc_domain_resume_cooperative(xc_interface *xch, uint32_t domid)
      * Set hypercall return code to indicate that suspend is cancelled
      * (rather than resuming in a new domain context).
      */
-    if ( (rc = modify_returncode(xch, domid)) != 0 )
+    if ( (rc = modify_returncode(xc_handle, domid)) != 0 )
         return rc;
 
     domctl.cmd = XEN_DOMCTL_resumedomain;
     domctl.domain = domid;
-    return do_domctl(xch, &domctl);
+    return do_domctl(xc_handle, &domctl);
 }
 
-#if defined(__i386__) || defined(__x86_64__)
-static int xc_domain_resume_hvm(xc_interface *xch, uint32_t domid)
-{
-    DECLARE_DOMCTL;
-
-    /*
-     * The domctl XEN_DOMCTL_resumedomain unpause each vcpu. After
-     * the domctl, the guest will run.
-     *
-     * If it is PVHVM, the guest called the hypercall
-     *    SCHEDOP_shutdown:SHUTDOWN_suspend
-     * to suspend itself. We don't modify the return code, so the PV driver
-     * will disconnect and reconnect.
-     *
-     * If it is a HVM, the guest will continue running.
-     */
-    domctl.cmd = XEN_DOMCTL_resumedomain;
-    domctl.domain = domid;
-    return do_domctl(xch, &domctl);
-}
-#endif
-
-static int xc_domain_resume_any(xc_interface *xch, uint32_t domid)
+static int xc_domain_resume_any(int xc_handle, uint32_t domid)
 {
     DECLARE_DOMCTL;
     xc_dominfo_t info;
     int i, rc = -1;
 #if defined(__i386__) || defined(__x86_64__)
-    struct domain_info_context _dinfo = { .guest_width = 0,
-                                          .p2m_size = 0 };
+    struct domain_info_context _dinfo = { .p2m_size = 0 };
     struct domain_info_context *dinfo = &_dinfo;
     unsigned long mfn;
     vcpu_guest_context_any_t ctxt;
@@ -148,7 +115,7 @@ static int xc_domain_resume_any(xc_interface *xch, uint32_t domid)
     xen_pfn_t *p2m = NULL;
 #endif
 
-    if ( xc_domain_getinfo(xch, domid, 1, &info) != 1 )
+    if ( xc_domain_getinfo(xc_handle, domid, 1, &info) != 1 )
     {
         PERROR("Could not get domain info");
         return rc;
@@ -159,13 +126,12 @@ static int xc_domain_resume_any(xc_interface *xch, uint32_t domid)
      */
 #if defined(__i386__) || defined(__x86_64__)
     if ( info.hvm )
-        return xc_domain_resume_hvm(xch, domid);
-
-    if ( xc_domain_get_guest_width(xch, domid, &dinfo->guest_width) != 0 )
     {
-        PERROR("Could not get domain width");
+        ERROR("Cannot resume uncooperative HVM guests");
         return rc;
     }
+
+    dinfo->guest_width = pv_guest_width(xc_handle, domid);
     if ( dinfo->guest_width != sizeof(long) )
     {
         ERROR("Cannot resume uncooperative cross-address-size guests");
@@ -173,7 +139,7 @@ static int xc_domain_resume_any(xc_interface *xch, uint32_t domid)
     }
 
     /* Map the shared info frame */
-    shinfo = xc_map_foreign_range(xch, domid, PAGE_SIZE,
+    shinfo = xc_map_foreign_range(xc_handle, domid, PAGE_SIZE,
                                   PROT_READ, info.shared_info_frame);
     if ( shinfo == NULL )
     {
@@ -184,7 +150,7 @@ static int xc_domain_resume_any(xc_interface *xch, uint32_t domid)
     dinfo->p2m_size = shinfo->arch.max_pfn;
 
     p2m_frame_list_list =
-        xc_map_foreign_range(xch, domid, PAGE_SIZE, PROT_READ,
+        xc_map_foreign_range(xc_handle, domid, PAGE_SIZE, PROT_READ,
                              shinfo->arch.pfn_to_mfn_frame_list_list);
     if ( p2m_frame_list_list == NULL )
     {
@@ -192,7 +158,7 @@ static int xc_domain_resume_any(xc_interface *xch, uint32_t domid)
         goto out;
     }
 
-    p2m_frame_list = xc_map_foreign_pages(xch, domid, PROT_READ,
+    p2m_frame_list = xc_map_foreign_pages(xc_handle, domid, PROT_READ,
                                           p2m_frame_list_list,
                                           P2M_FLL_ENTRIES);
     if ( p2m_frame_list == NULL )
@@ -205,7 +171,7 @@ static int xc_domain_resume_any(xc_interface *xch, uint32_t domid)
        the guest must not change which frames are used for this purpose.
        (its not clear why it would want to change them, and we'll be OK
        from a safety POV anyhow. */
-    p2m = xc_map_foreign_pages(xch, domid, PROT_READ,
+    p2m = xc_map_foreign_pages(xc_handle, domid, PROT_READ,
                                p2m_frame_list,
                                P2M_FL_ENTRIES);
     if ( p2m == NULL )
@@ -214,15 +180,21 @@ static int xc_domain_resume_any(xc_interface *xch, uint32_t domid)
         goto out;
     }
 
-    if ( xc_vcpu_getcontext(xch, domid, 0, &ctxt) )
+    if ( lock_pages(&ctxt, sizeof(ctxt)) )
+    {
+        ERROR("Unable to lock ctxt");
+        goto out;
+    }
+
+    if ( xc_vcpu_getcontext(xc_handle, domid, 0, &ctxt) )
     {
         ERROR("Could not get vcpu context");
         goto out;
     }
 
-    mfn = GET_FIELD(&ctxt, user_regs.edx, dinfo->guest_width);
+    mfn = GET_FIELD(&ctxt, user_regs.edx);
 
-    start_info = xc_map_foreign_range(xch, domid, PAGE_SIZE,
+    start_info = xc_map_foreign_range(xc_handle, domid, PAGE_SIZE,
                                       PROT_READ | PROT_WRITE, mfn);
     if ( start_info == NULL )
     {
@@ -238,19 +210,16 @@ static int xc_domain_resume_any(xc_interface *xch, uint32_t domid)
 
     /* Reset all secondary CPU states. */
     for ( i = 1; i <= info.max_vcpu_id; i++ )
-        if ( xc_vcpu_setcontext(xch, domid, i, NULL) != 0 )
-        {
-            ERROR("Couldn't reset vcpu state");
-            goto out;
-        }
+        xc_vcpu_setcontext(xc_handle, domid, i, NULL);
 
     /* Ready to resume domain execution now. */
     domctl.cmd = XEN_DOMCTL_resumedomain;
     domctl.domain = domid;
-    rc = do_domctl(xch, &domctl);
+    rc = do_domctl(xc_handle, &domctl);
 
-out:
 #if defined(__i386__) || defined(__x86_64__)
+ out:
+    unlock_pages((void *)&ctxt, sizeof ctxt);
     if (p2m)
         munmap(p2m, P2M_FL_ENTRIES*PAGE_SIZE);
     if (p2m_frame_list)
@@ -267,24 +236,15 @@ out:
 /*
  * Resume execution of a domain after suspend shutdown.
  * This can happen in one of two ways:
- *  1. (fast=1) Resume the guest without resetting the domain environment.
- *     The guests's call to SCHEDOP_shutdown(SHUTDOWN_suspend) will return 1.
- *
- *  2. (fast=0) Reset guest environment so it believes it is resumed in a new
- *     domain context. The guests's call to SCHEDOP_shutdown(SHUTDOWN_suspend)
- *     will return 0.
- *
- * (1) should only by used for guests which can handle the special return
- * code. Also note that the insertion of the return code is quite interesting
- * and that the guest MUST be paused - otherwise we would be corrupting
- * the guest vCPU state.
- *
+ *  1. Resume with special return code.
+ *  2. Reset guest environment so it believes it is resumed in a new
+ *     domain context.
  * (2) should be used only for guests which cannot handle the special
- * new return code - and it is always safe (but slower).
+ * new return code. (1) is always safe (but slower).
  */
-int xc_domain_resume(xc_interface *xch, uint32_t domid, int fast)
+int xc_domain_resume(int xc_handle, uint32_t domid, int fast)
 {
     return (fast
-            ? xc_domain_resume_cooperative(xch, domid)
-            : xc_domain_resume_any(xch, domid));
+            ? xc_domain_resume_cooperative(xc_handle, domid)
+            : xc_domain_resume_any(xc_handle, domid));
 }

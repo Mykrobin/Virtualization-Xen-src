@@ -13,14 +13,15 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  */
 #ifndef __ASM_X86_HVM_SVM_VMCB_H__
 #define __ASM_X86_HVM_SVM_VMCB_H__
 
-#include <xen/types.h>
-#include <asm/hvm/emulate.h>
+#include <asm/config.h>
+#include <asm/hvm/hvm.h>
 
 
 /* general 1 intercepts */
@@ -31,7 +32,7 @@ enum GenericIntercept1bits
     GENERAL1_INTERCEPT_SMI           = 1 << 2,
     GENERAL1_INTERCEPT_INIT          = 1 << 3,
     GENERAL1_INTERCEPT_VINTR         = 1 << 4,
-    GENERAL1_INTERCEPT_CR0_SEL_WRITE = 1 << 5,
+    GENERAL1_INTERCEPT_CR0_SEL_WRITE = 1 << 5, 
     GENERAL1_INTERCEPT_IDTR_READ     = 1 << 6,
     GENERAL1_INTERCEPT_GDTR_READ     = 1 << 7,
     GENERAL1_INTERCEPT_LDTR_READ     = 1 << 8,
@@ -75,8 +76,7 @@ enum GenericIntercept2bits
     GENERAL2_INTERCEPT_WBINVD  = 1 << 9,
     GENERAL2_INTERCEPT_MONITOR = 1 << 10,
     GENERAL2_INTERCEPT_MWAIT   = 1 << 11,
-    GENERAL2_INTERCEPT_MWAIT_CONDITIONAL = 1 << 12,
-    GENERAL2_INTERCEPT_XSETBV  = 1 << 13
+    GENERAL2_INTERCEPT_MWAIT_CONDITIONAL = 1 << 12
 };
 
 
@@ -158,156 +158,158 @@ enum DRInterceptBits
 enum VMEXIT_EXITCODE
 {
     /* control register read exitcodes */
-    VMEXIT_CR0_READ    =   0, /* 0x0 */
-    VMEXIT_CR1_READ    =   1, /* 0x1 */
-    VMEXIT_CR2_READ    =   2, /* 0x2 */
-    VMEXIT_CR3_READ    =   3, /* 0x3 */
-    VMEXIT_CR4_READ    =   4, /* 0x4 */
-    VMEXIT_CR5_READ    =   5, /* 0x5 */
-    VMEXIT_CR6_READ    =   6, /* 0x6 */
-    VMEXIT_CR7_READ    =   7, /* 0x7 */
-    VMEXIT_CR8_READ    =   8, /* 0x8 */
-    VMEXIT_CR9_READ    =   9, /* 0x9 */
-    VMEXIT_CR10_READ   =  10, /* 0xa */
-    VMEXIT_CR11_READ   =  11, /* 0xb */
-    VMEXIT_CR12_READ   =  12, /* 0xc */
-    VMEXIT_CR13_READ   =  13, /* 0xd */
-    VMEXIT_CR14_READ   =  14, /* 0xe */
-    VMEXIT_CR15_READ   =  15, /* 0xf */
+    VMEXIT_CR0_READ    =   0,
+    VMEXIT_CR1_READ    =   1,
+    VMEXIT_CR2_READ    =   2,
+    VMEXIT_CR3_READ    =   3,
+    VMEXIT_CR4_READ    =   4,
+    VMEXIT_CR5_READ    =   5,
+    VMEXIT_CR6_READ    =   6,
+    VMEXIT_CR7_READ    =   7,
+    VMEXIT_CR8_READ    =   8,
+    VMEXIT_CR9_READ    =   9,
+    VMEXIT_CR10_READ   =  10,
+    VMEXIT_CR11_READ   =  11,
+    VMEXIT_CR12_READ   =  12,
+    VMEXIT_CR13_READ   =  13,
+    VMEXIT_CR14_READ   =  14,
+    VMEXIT_CR15_READ   =  15,
 
     /* control register write exitcodes */
-    VMEXIT_CR0_WRITE   =  16, /* 0x10 */
-    VMEXIT_CR1_WRITE   =  17, /* 0x11 */
-    VMEXIT_CR2_WRITE   =  18, /* 0x12 */
-    VMEXIT_CR3_WRITE   =  19, /* 0x13 */
-    VMEXIT_CR4_WRITE   =  20, /* 0x14 */
-    VMEXIT_CR5_WRITE   =  21, /* 0x15 */
-    VMEXIT_CR6_WRITE   =  22, /* 0x16 */
-    VMEXIT_CR7_WRITE   =  23, /* 0x17 */
-    VMEXIT_CR8_WRITE   =  24, /* 0x18 */
-    VMEXIT_CR9_WRITE   =  25, /* 0x19 */
-    VMEXIT_CR10_WRITE  =  26, /* 0x1a */
-    VMEXIT_CR11_WRITE  =  27, /* 0x1b */
-    VMEXIT_CR12_WRITE  =  28, /* 0x1c */
-    VMEXIT_CR13_WRITE  =  29, /* 0x1d */
-    VMEXIT_CR14_WRITE  =  30, /* 0x1e */
-    VMEXIT_CR15_WRITE  =  31, /* 0x1f */
+    VMEXIT_CR0_WRITE   =  16,
+    VMEXIT_CR1_WRITE   =  17,
+    VMEXIT_CR2_WRITE   =  18,
+    VMEXIT_CR3_WRITE   =  19,
+    VMEXIT_CR4_WRITE   =  20,
+    VMEXIT_CR5_WRITE   =  21,
+    VMEXIT_CR6_WRITE   =  22,
+    VMEXIT_CR7_WRITE   =  23,
+    VMEXIT_CR8_WRITE   =  24,
+    VMEXIT_CR9_WRITE   =  25,
+    VMEXIT_CR10_WRITE  =  26,
+    VMEXIT_CR11_WRITE  =  27,
+    VMEXIT_CR12_WRITE  =  28,
+    VMEXIT_CR13_WRITE  =  29,
+    VMEXIT_CR14_WRITE  =  30,
+    VMEXIT_CR15_WRITE  =  31,
 
     /* debug register read exitcodes */
-    VMEXIT_DR0_READ    =  32, /* 0x20 */
-    VMEXIT_DR1_READ    =  33, /* 0x21 */
-    VMEXIT_DR2_READ    =  34, /* 0x22 */
-    VMEXIT_DR3_READ    =  35, /* 0x23 */
-    VMEXIT_DR4_READ    =  36, /* 0x24 */
-    VMEXIT_DR5_READ    =  37, /* 0x25 */
-    VMEXIT_DR6_READ    =  38, /* 0x26 */
-    VMEXIT_DR7_READ    =  39, /* 0x27 */
-    VMEXIT_DR8_READ    =  40, /* 0x28 */
-    VMEXIT_DR9_READ    =  41, /* 0x29 */
-    VMEXIT_DR10_READ   =  42, /* 0x2a */
-    VMEXIT_DR11_READ   =  43, /* 0x2b */
-    VMEXIT_DR12_READ   =  44, /* 0x2c */
-    VMEXIT_DR13_READ   =  45, /* 0x2d */
-    VMEXIT_DR14_READ   =  46, /* 0x2e */
-    VMEXIT_DR15_READ   =  47, /* 0x2f */
+    VMEXIT_DR0_READ    =  32,
+    VMEXIT_DR1_READ    =  33,
+    VMEXIT_DR2_READ    =  34,
+    VMEXIT_DR3_READ    =  35,
+    VMEXIT_DR4_READ    =  36,
+    VMEXIT_DR5_READ    =  37,
+    VMEXIT_DR6_READ    =  38,
+    VMEXIT_DR7_READ    =  39,
+    VMEXIT_DR8_READ    =  40,
+    VMEXIT_DR9_READ    =  41,
+    VMEXIT_DR10_READ   =  42,
+    VMEXIT_DR11_READ   =  43,
+    VMEXIT_DR12_READ   =  44,
+    VMEXIT_DR13_READ   =  45,
+    VMEXIT_DR14_READ   =  46,
+    VMEXIT_DR15_READ   =  47,
 
     /* debug register write exitcodes */
-    VMEXIT_DR0_WRITE   =  48, /* 0x30 */
-    VMEXIT_DR1_WRITE   =  49, /* 0x31 */
-    VMEXIT_DR2_WRITE   =  50, /* 0x32 */
-    VMEXIT_DR3_WRITE   =  51, /* 0x33 */
-    VMEXIT_DR4_WRITE   =  52, /* 0x34 */
-    VMEXIT_DR5_WRITE   =  53, /* 0x35 */
-    VMEXIT_DR6_WRITE   =  54, /* 0x36 */
-    VMEXIT_DR7_WRITE   =  55, /* 0x37 */
-    VMEXIT_DR8_WRITE   =  56, /* 0x38 */
-    VMEXIT_DR9_WRITE   =  57, /* 0x39 */
-    VMEXIT_DR10_WRITE  =  58, /* 0x3a */
-    VMEXIT_DR11_WRITE  =  59, /* 0x3b */
-    VMEXIT_DR12_WRITE  =  60, /* 0x3c */
-    VMEXIT_DR13_WRITE  =  61, /* 0x3d */
-    VMEXIT_DR14_WRITE  =  62, /* 0x3e */
-    VMEXIT_DR15_WRITE  =  63, /* 0x3f */
+    VMEXIT_DR0_WRITE   =  48,
+    VMEXIT_DR1_WRITE   =  49,
+    VMEXIT_DR2_WRITE   =  50,
+    VMEXIT_DR3_WRITE   =  51,
+    VMEXIT_DR4_WRITE   =  52,
+    VMEXIT_DR5_WRITE   =  53,
+    VMEXIT_DR6_WRITE   =  54,
+    VMEXIT_DR7_WRITE   =  55,
+    VMEXIT_DR8_WRITE   =  56,
+    VMEXIT_DR9_WRITE   =  57,
+    VMEXIT_DR10_WRITE  =  58,
+    VMEXIT_DR11_WRITE  =  59,
+    VMEXIT_DR12_WRITE  =  60,
+    VMEXIT_DR13_WRITE  =  61,
+    VMEXIT_DR14_WRITE  =  62,
+    VMEXIT_DR15_WRITE  =  63,
 
     /* processor exception exitcodes (VMEXIT_EXCP[0-31]) */
-    VMEXIT_EXCEPTION_DE  =  64, /* 0x40, divide-by-zero-error */
-    VMEXIT_EXCEPTION_DB  =  65, /* 0x41, debug */
-    VMEXIT_EXCEPTION_NMI =  66, /* 0x42, non-maskable-interrupt */
-    VMEXIT_EXCEPTION_BP  =  67, /* 0x43, breakpoint */
-    VMEXIT_EXCEPTION_OF  =  68, /* 0x44, overflow */
-    VMEXIT_EXCEPTION_BR  =  69, /* 0x45, bound-range */
-    VMEXIT_EXCEPTION_UD  =  70, /* 0x46, invalid-opcode*/
-    VMEXIT_EXCEPTION_NM  =  71, /* 0x47, device-not-available */
-    VMEXIT_EXCEPTION_DF  =  72, /* 0x48, double-fault */
-    VMEXIT_EXCEPTION_09  =  73, /* 0x49, unsupported (reserved) */
-    VMEXIT_EXCEPTION_TS  =  74, /* 0x4a, invalid-tss */
-    VMEXIT_EXCEPTION_NP  =  75, /* 0x4b, segment-not-present */
-    VMEXIT_EXCEPTION_SS  =  76, /* 0x4c, stack */
-    VMEXIT_EXCEPTION_GP  =  77, /* 0x4d, general-protection */
-    VMEXIT_EXCEPTION_PF  =  78, /* 0x4e, page-fault */
-    VMEXIT_EXCEPTION_15  =  79, /* 0x4f, reserved */
-    VMEXIT_EXCEPTION_MF  =  80, /* 0x50, x87 floating-point exception-pending */
-    VMEXIT_EXCEPTION_AC  =  81, /* 0x51, alignment-check */
-    VMEXIT_EXCEPTION_MC  =  82, /* 0x52, machine-check */
-    VMEXIT_EXCEPTION_XF  =  83, /* 0x53, simd floating-point */
+    VMEXIT_EXCEPTION_DE  =  64, /* divide-by-zero-error */
+    VMEXIT_EXCEPTION_DB  =  65, /* debug */
+    VMEXIT_EXCEPTION_NMI =  66, /* non-maskable-interrupt */
+    VMEXIT_EXCEPTION_BP  =  67, /* breakpoint */
+    VMEXIT_EXCEPTION_OF  =  68, /* overflow */
+    VMEXIT_EXCEPTION_BR  =  69, /* bound-range */
+    VMEXIT_EXCEPTION_UD  =  70, /* invalid-opcode*/
+    VMEXIT_EXCEPTION_NM  =  71, /* device-not-available */
+    VMEXIT_EXCEPTION_DF  =  72, /* double-fault */
+    VMEXIT_EXCEPTION_09  =  73, /* unsupported (reserved) */
+    VMEXIT_EXCEPTION_TS  =  74, /* invalid-tss */
+    VMEXIT_EXCEPTION_NP  =  75, /* segment-not-present */
+    VMEXIT_EXCEPTION_SS  =  76, /* stack */
+    VMEXIT_EXCEPTION_GP  =  77, /* general-protection */
+    VMEXIT_EXCEPTION_PF  =  78, /* page-fault */
+    VMEXIT_EXCEPTION_15  =  79, /* reserved */
+    VMEXIT_EXCEPTION_MF  =  80, /* x87 floating-point exception-pending */
+    VMEXIT_EXCEPTION_AC  =  81, /* alignment-check */
+    VMEXIT_EXCEPTION_MC  =  82, /* machine-check */
+    VMEXIT_EXCEPTION_XF  =  83, /* simd floating-point */
 
     /* exceptions 20-31 (exitcodes 84-95) are reserved */
 
     /* ...and the rest of the #VMEXITs */
-    VMEXIT_INTR             =  96, /* 0x60 */
-    VMEXIT_NMI              =  97, /* 0x61 */
-    VMEXIT_SMI              =  98, /* 0x62 */
-    VMEXIT_INIT             =  99, /* 0x63 */
-    VMEXIT_VINTR            = 100, /* 0x64 */
-    VMEXIT_CR0_SEL_WRITE    = 101, /* 0x65 */
-    VMEXIT_IDTR_READ        = 102, /* 0x66 */
-    VMEXIT_GDTR_READ        = 103, /* 0x67 */
-    VMEXIT_LDTR_READ        = 104, /* 0x68 */
-    VMEXIT_TR_READ          = 105, /* 0x69 */
-    VMEXIT_IDTR_WRITE       = 106, /* 0x6a */
-    VMEXIT_GDTR_WRITE       = 107, /* 0x6b */
-    VMEXIT_LDTR_WRITE       = 108, /* 0x6c */
-    VMEXIT_TR_WRITE         = 109, /* 0x6d */
-    VMEXIT_RDTSC            = 110, /* 0x6e */
-    VMEXIT_RDPMC            = 111, /* 0x6f */
-    VMEXIT_PUSHF            = 112, /* 0x70 */
-    VMEXIT_POPF             = 113, /* 0x71 */
-    VMEXIT_CPUID            = 114, /* 0x72 */
-    VMEXIT_RSM              = 115, /* 0x73 */
-    VMEXIT_IRET             = 116, /* 0x74 */
-    VMEXIT_SWINT            = 117, /* 0x75 */
-    VMEXIT_INVD             = 118, /* 0x76 */
-    VMEXIT_PAUSE            = 119, /* 0x77 */
-    VMEXIT_HLT              = 120, /* 0x78 */
-    VMEXIT_INVLPG           = 121, /* 0x79 */
-    VMEXIT_INVLPGA          = 122, /* 0x7a */
-    VMEXIT_IOIO             = 123, /* 0x7b */
-    VMEXIT_MSR              = 124, /* 0x7c */
-    VMEXIT_TASK_SWITCH      = 125, /* 0x7d */
-    VMEXIT_FERR_FREEZE      = 126, /* 0x7e */
-    VMEXIT_SHUTDOWN         = 127, /* 0x7f */
-    VMEXIT_VMRUN            = 128, /* 0x80 */
-    VMEXIT_VMMCALL          = 129, /* 0x81 */
-    VMEXIT_VMLOAD           = 130, /* 0x82 */
-    VMEXIT_VMSAVE           = 131, /* 0x83 */
-    VMEXIT_STGI             = 132, /* 0x84 */
-    VMEXIT_CLGI             = 133, /* 0x85 */
-    VMEXIT_SKINIT           = 134, /* 0x86 */
-    VMEXIT_RDTSCP           = 135, /* 0x87 */
-    VMEXIT_ICEBP            = 136, /* 0x88 */
-    VMEXIT_WBINVD           = 137, /* 0x89 */
-    VMEXIT_MONITOR          = 138, /* 0x8a */
-    VMEXIT_MWAIT            = 139, /* 0x8b */
-    VMEXIT_MWAIT_CONDITIONAL= 140, /* 0x8c */
-    VMEXIT_XSETBV           = 141, /* 0x8d */
-    VMEXIT_NPF              = 1024, /* 0x400, nested paging fault */
+    VMEXIT_INTR             =  96,
+    VMEXIT_NMI              =  97,
+    VMEXIT_SMI              =  98,
+    VMEXIT_INIT             =  99,
+    VMEXIT_VINTR            = 100,
+    VMEXIT_CR0_SEL_WRITE    = 101,
+    VMEXIT_IDTR_READ        = 102,
+    VMEXIT_GDTR_READ        = 103,
+    VMEXIT_LDTR_READ        = 104,
+    VMEXIT_TR_READ          = 105,
+    VMEXIT_IDTR_WRITE       = 106,
+    VMEXIT_GDTR_WRITE       = 107,
+    VMEXIT_LDTR_WRITE       = 108,
+    VMEXIT_TR_WRITE         = 109,
+    VMEXIT_RDTSC            = 110,
+    VMEXIT_RDPMC            = 111,
+    VMEXIT_PUSHF            = 112,
+    VMEXIT_POPF             = 113,
+    VMEXIT_CPUID            = 114,
+    VMEXIT_RSM              = 115,
+    VMEXIT_IRET             = 116,
+    VMEXIT_SWINT            = 117,
+    VMEXIT_INVD             = 118,
+    VMEXIT_PAUSE            = 119,
+    VMEXIT_HLT              = 120,
+    VMEXIT_INVLPG           = 121,
+    VMEXIT_INVLPGA          = 122,
+    VMEXIT_IOIO             = 123,
+    VMEXIT_MSR              = 124,
+    VMEXIT_TASK_SWITCH      = 125,
+    VMEXIT_FERR_FREEZE      = 126,
+    VMEXIT_SHUTDOWN         = 127,
+    VMEXIT_VMRUN            = 128,
+    VMEXIT_VMMCALL          = 129,
+    VMEXIT_VMLOAD           = 130,
+    VMEXIT_VMSAVE           = 131,
+    VMEXIT_STGI             = 132,
+    VMEXIT_CLGI             = 133,
+    VMEXIT_SKINIT           = 134,
+    VMEXIT_RDTSCP           = 135,
+    VMEXIT_ICEBP            = 136,
+    VMEXIT_WBINVD           = 137,
+    VMEXIT_MONITOR          = 138,
+    VMEXIT_MWAIT            = 139,
+    VMEXIT_MWAIT_CONDITIONAL= 140,
+    VMEXIT_NPF              = 1024, /* nested paging fault */
     VMEXIT_INVALID          =  -1
 };
 
-typedef union
+/* Definition of segment state is borrowed by the generic HVM code. */
+typedef struct segment_register svm_segment_register_t;
+
+typedef union 
 {
     u64 bytes;
-    struct
+    struct 
     {
         u64 vector:    8;
         u64 type:      3;
@@ -316,32 +318,30 @@ typedef union
         u64 v:         1;
         u64 errorcode:32;
     } fields;
-} eventinj_t;
+} __attribute__ ((packed)) eventinj_t;
 
-typedef union
+typedef union 
 {
     u64 bytes;
-    struct
+    struct 
     {
         u64 tpr:          8;
         u64 irq:          1;
-        u64 vgif:         1;
-        u64 rsvd0:        6;
+        u64 rsvd0:        7;
         u64 prio:         4;
         u64 ign_tpr:      1;
         u64 rsvd1:        3;
         u64 intr_masking: 1;
-        u64 vgif_enable:  1;
-        u64 rsvd2:        6;
+        u64 rsvd2:        7;
         u64 vector:       8;
         u64 rsvd3:       24;
     } fields;
-} vintr_t;
+} __attribute__ ((packed)) vintr_t;
 
 typedef union
 {
     u64 bytes;
-    struct
+    struct 
     {
         u64 type: 1;
         u64 rsv0: 1;
@@ -353,117 +353,73 @@ typedef union
         u64 rsv1: 9;
         u64 port: 16;
     } fields;
-} ioio_info_t;
+} __attribute__ ((packed)) ioio_info_t;
 
 typedef union
 {
     u64 bytes;
     struct
     {
-        u64 lbr_enable:1;
-        u64 vloadsave_enable:1;
+        u64 enable:1;
     } fields;
-} virt_ext_t;
-
-typedef union
-{
-    uint32_t bytes;
-    struct
-    {
-        /* cr_intercepts, dr_intercepts, exception_intercepts,
-         * general{1,2}_intercepts, pause_filter_count, tsc_offset */
-        uint32_t intercepts: 1;
-        /* iopm_base_pa, msrpm_base_pa */
-        uint32_t iopm: 1;
-        /* guest_asid */
-        uint32_t asid: 1;
-        /* vintr */
-        uint32_t tpr: 1;
-        /* np_enable, h_cr3, g_pat */
-        uint32_t np: 1;
-        /* cr0, cr3, cr4, efer */
-        uint32_t cr: 1;
-        /* dr6, dr7 */
-        uint32_t dr: 1;
-        /* gdtr, idtr */
-        uint32_t dt: 1;
-        /* cs, ds, es, ss, cpl */
-        uint32_t seg: 1;
-        /* cr2 */
-        uint32_t cr2: 1;
-        /* debugctlmsr, last{branch,int}{to,from}ip */
-        uint32_t lbr: 1;
-        uint32_t resv: 21;
-    } fields;
-} vmcbcleanbits_t;
-
-#define IOPM_SIZE   (12 * 1024)
-#define MSRPM_SIZE  (8  * 1024)
+} __attribute__ ((packed)) lbrctrl_t;
 
 struct vmcb_struct {
-    u32 _cr_intercepts;         /* offset 0x00 - cleanbit 0 */
-    u32 _dr_intercepts;         /* offset 0x04 - cleanbit 0 */
-    u32 _exception_intercepts;  /* offset 0x08 - cleanbit 0 */
-    u32 _general1_intercepts;   /* offset 0x0C - cleanbit 0 */
-    u32 _general2_intercepts;   /* offset 0x10 - cleanbit 0 */
+    u32 cr_intercepts;          /* offset 0x00 */
+    u32 dr_intercepts;          /* offset 0x04 */
+    u32 exception_intercepts;   /* offset 0x08 */
+    u32 general1_intercepts;    /* offset 0x0C */
+    u32 general2_intercepts;    /* offset 0x10 */
     u32 res01;                  /* offset 0x14 */
     u64 res02;                  /* offset 0x18 */
     u64 res03;                  /* offset 0x20 */
     u64 res04;                  /* offset 0x28 */
     u64 res05;                  /* offset 0x30 */
     u32 res06;                  /* offset 0x38 */
-    u16 _pause_filter_thresh;   /* offset 0x3C - cleanbit 0 */
-    u16 _pause_filter_count;    /* offset 0x3E - cleanbit 0 */
-    u64 _iopm_base_pa;          /* offset 0x40 - cleanbit 1 */
-    u64 _msrpm_base_pa;         /* offset 0x48 - cleanbit 1 */
-    u64 _tsc_offset;            /* offset 0x50 - cleanbit 0 */
-    u32 _guest_asid;            /* offset 0x58 - cleanbit 2 */
+    u16 res06a;                 /* offset 0x3C */
+    u16 pause_filter_count;     /* offset 0x3E */
+    u64 iopm_base_pa;           /* offset 0x40 */
+    u64 msrpm_base_pa;          /* offset 0x48 */
+    u64 tsc_offset;             /* offset 0x50 */
+    u32 guest_asid;             /* offset 0x58 */
     u8  tlb_control;            /* offset 0x5C */
     u8  res07[3];
-    vintr_t _vintr;             /* offset 0x60 - cleanbit 3 */
+    vintr_t vintr;              /* offset 0x60 */
     u64 interrupt_shadow;       /* offset 0x68 */
     u64 exitcode;               /* offset 0x70 */
     u64 exitinfo1;              /* offset 0x78 */
     u64 exitinfo2;              /* offset 0x80 */
     eventinj_t  exitintinfo;    /* offset 0x88 */
-    u64 _np_enable;             /* offset 0x90 - cleanbit 4 */
+    u64 np_enable;              /* offset 0x90 */
     u64 res08[2];
     eventinj_t  eventinj;       /* offset 0xA8 */
-    u64 _h_cr3;                 /* offset 0xB0 - cleanbit 4 */
-    virt_ext_t virt_ext;        /* offset 0xB8 */
-    vmcbcleanbits_t cleanbits;  /* offset 0xC0 */
-    u32 res09;                  /* offset 0xC4 */
+    u64 h_cr3;                  /* offset 0xB0 */
+    lbrctrl_t lbr_control;      /* offset 0xB8 */
+    u64 res09;                  /* offset 0xC0 */
     u64 nextrip;                /* offset 0xC8 */
-    u8  guest_ins_len;          /* offset 0xD0 */
-    u8  guest_ins[15];          /* offset 0xD1 */
-    u64 res10a[100];            /* offset 0xE0 pad to save area */
+    u64 res10a[102];            /* offset 0xD0 pad to save area */
 
-    union {
-        struct segment_register sreg[6];
-        struct {
-            struct segment_register es;  /* offset 0x400 - cleanbit 8 */
-            struct segment_register cs;  /* cleanbit 8 */
-            struct segment_register ss;  /* cleanbit 8 */
-            struct segment_register ds;  /* cleanbit 8 */
-            struct segment_register fs;
-            struct segment_register gs;
-        };
-    };
-    struct segment_register gdtr; /* cleanbit 7 */
-    struct segment_register ldtr;
-    struct segment_register idtr; /* cleanbit 7 */
-    struct segment_register tr;
+    svm_segment_register_t es;      /* offset 1024 */
+    svm_segment_register_t cs;
+    svm_segment_register_t ss;
+    svm_segment_register_t ds;
+    svm_segment_register_t fs;
+    svm_segment_register_t gs;
+    svm_segment_register_t gdtr;
+    svm_segment_register_t ldtr;
+    svm_segment_register_t idtr;
+    svm_segment_register_t tr;
     u64 res10[5];
     u8 res11[3];
-    u8 _cpl;                    /* cleanbit 8 */
+    u8 cpl;
     u32 res12;
-    u64 _efer;                  /* offset 0x400 + 0xD0 - cleanbit 5 */
+    u64 efer;                   /* offset 1024 + 0xD0 */
     u64 res13[14];
-    u64 _cr4;                   /* offset 0x400 + 0x148 - cleanbit 5 */
-    u64 _cr3;                   /* cleanbit 5 */
-    u64 _cr0;                   /* cleanbit 5 */
-    u64 _dr7;                   /* cleanbit 6 */
-    u64 _dr6;                   /* cleanbit 6 */
+    u64 cr4;                    /* loffset 1024 + 0x148 */
+    u64 cr3;
+    u64 cr0;
+    u64 dr7;
+    u64 dr6;
     u64 rflags;
     u64 rip;
     u64 res14[11];
@@ -478,36 +434,24 @@ struct vmcb_struct {
     u64 sysenter_cs;
     u64 sysenter_esp;
     u64 sysenter_eip;
-    u64 _cr2;                   /* cleanbit 9 */
+    u64 cr2;
     u64 pdpe0;
     u64 pdpe1;
     u64 pdpe2;
     u64 pdpe3;
-    u64 _g_pat;                 /* cleanbit 4 */
-    u64 _debugctlmsr;           /* cleanbit 10 */
-    u64 _lastbranchfromip;      /* cleanbit 10 */
-    u64 _lastbranchtoip;        /* cleanbit 10 */
-    u64 _lastintfromip;         /* cleanbit 10 */
-    u64 _lastinttoip;           /* cleanbit 10 */
+    u64 g_pat;
+    u64 debugctlmsr;
+    u64 lastbranchfromip;
+    u64 lastbranchtoip;
+    u64 lastintfromip;
+    u64 lastinttoip;
     u64 res16[301];
-};
+} __attribute__ ((packed));
 
 struct svm_domain {
-};
-
-/*
- * VMRUN doesn't switch fs/gs/tr/ldtr and SHADOWGS/SYSCALL/SYSENTER state.
- * Therefore, guest state is in the hardware registers when servicing a
- * VMExit.
- *
- * Immediately after a VMExit, the vmcb is stale, and needs to be brought
- * into sync by VMSAVE.  If state in the vmcb is modified, a VMLOAD is
- * needed before the following VMRUN.
- */
-enum vmcb_sync_state {
-    vmcb_in_sync,
-    vmcb_needs_vmsave,    /* VMCB out of sync (VMSAVE needed)? */
-    vmcb_needs_vmload     /* VMCB dirty (VMLOAD needed)? */
+#if CONFIG_PAGING_LEVELS == 3
+    bool_t npt_4gb_warning;
+#endif
 };
 
 struct arch_svm_struct {
@@ -515,11 +459,7 @@ struct arch_svm_struct {
     u64    vmcb_pa;
     unsigned long *msrpm;
     int    launch_core;
-
-    uint8_t vmcb_sync_state; /* enum vmcb_sync_state */
-
-    /* VMCB has a cached instruction from #PF/#NPF Decode Assist? */
-    uint8_t cached_insn_len; /* Zero if no cached instruction. */
+    bool_t vmcb_in_sync;    /* VMCB sync'ed with VMSAVE? */
 
     /* Upper four bytes are undefined in the VMCB, therefore we can't
      * use the fields in the VMCB. Write a 64bit value and then read a 64bit
@@ -529,22 +469,10 @@ struct arch_svm_struct {
     uint64_t guest_sysenter_cs;
     uint64_t guest_sysenter_esp;
     uint64_t guest_sysenter_eip;
-
-    /* AMD lightweight profiling MSR */
-    uint64_t guest_lwp_cfg;      /* guest version */
-    uint64_t cpu_lwp_cfg;        /* CPU version */
-
-    /* data breakpoint extension MSRs */
-    uint32_t dr_mask[4];
-
-    /* OSVW MSRs */
-    struct {
-        u64 length;
-        u64 status;
-    } osvw;
 };
 
 struct vmcb_struct *alloc_vmcb(void);
+struct host_save_area *alloc_host_save_area(void);
 void free_vmcb(struct vmcb_struct *vmcb);
 
 int  svm_create_vmcb(struct vcpu *v);
@@ -552,69 +480,16 @@ void svm_destroy_vmcb(struct vcpu *v);
 
 void setup_vmcb_dump(void);
 
-#define MSR_INTERCEPT_NONE    0
-#define MSR_INTERCEPT_READ    1
-#define MSR_INTERCEPT_WRITE   2
-#define MSR_INTERCEPT_RW      (MSR_INTERCEPT_WRITE | MSR_INTERCEPT_READ)
 void svm_intercept_msr(struct vcpu *v, uint32_t msr, int enable);
-#define svm_disable_intercept_for_msr(v, msr) svm_intercept_msr((v), (msr), MSR_INTERCEPT_NONE)
-#define svm_enable_intercept_for_msr(v, msr) svm_intercept_msr((v), (msr), MSR_INTERCEPT_RW)
-
-/*
- * VMCB accessor functions.
- */
-
-#define VMCB_ACCESSORS(name, cleanbit)            \
-static inline void                                \
-vmcb_set_ ## name(struct vmcb_struct *vmcb,       \
-                  typeof(vmcb->_ ## name) value)  \
-{                                                 \
-    vmcb->_ ## name = value;                      \
-    vmcb->cleanbits.fields.cleanbit = 0;          \
-}                                                 \
-static inline typeof(alloc_vmcb()->_ ## name)     \
-vmcb_get_ ## name(const struct vmcb_struct *vmcb) \
-{                                                 \
-    return vmcb->_ ## name;                       \
-}
-
-VMCB_ACCESSORS(cr_intercepts, intercepts)
-VMCB_ACCESSORS(dr_intercepts, intercepts)
-VMCB_ACCESSORS(exception_intercepts, intercepts)
-VMCB_ACCESSORS(general1_intercepts, intercepts)
-VMCB_ACCESSORS(general2_intercepts, intercepts)
-VMCB_ACCESSORS(pause_filter_count, intercepts)
-VMCB_ACCESSORS(pause_filter_thresh, intercepts)
-VMCB_ACCESSORS(tsc_offset, intercepts)
-VMCB_ACCESSORS(iopm_base_pa, iopm)
-VMCB_ACCESSORS(msrpm_base_pa, iopm)
-VMCB_ACCESSORS(guest_asid, asid)
-VMCB_ACCESSORS(vintr, tpr)
-VMCB_ACCESSORS(np_enable, np)
-VMCB_ACCESSORS(h_cr3, np)
-VMCB_ACCESSORS(g_pat, np)
-VMCB_ACCESSORS(cr0, cr)
-VMCB_ACCESSORS(cr3, cr)
-VMCB_ACCESSORS(cr4, cr)
-VMCB_ACCESSORS(efer, cr)
-VMCB_ACCESSORS(dr6, dr)
-VMCB_ACCESSORS(dr7, dr)
-VMCB_ACCESSORS(cpl, seg)
-VMCB_ACCESSORS(cr2, cr2)
-VMCB_ACCESSORS(debugctlmsr, lbr)
-VMCB_ACCESSORS(lastbranchfromip, lbr)
-VMCB_ACCESSORS(lastbranchtoip, lbr)
-VMCB_ACCESSORS(lastintfromip, lbr)
-VMCB_ACCESSORS(lastinttoip, lbr)
-
-#undef VMCB_ACCESSORS
+#define svm_disable_intercept_for_msr(v, msr) svm_intercept_msr((v), (msr), 0)
+#define svm_enable_intercept_for_msr(v, msr) svm_intercept_msr((v), (msr), 1)
 
 #endif /* ASM_X86_HVM_SVM_VMCS_H__ */
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

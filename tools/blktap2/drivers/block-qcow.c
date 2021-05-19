@@ -33,15 +33,14 @@
 #include <zlib.h>
 #include <inttypes.h>
 #include <libaio.h>
+#include <openssl/md5.h>
 #include <limits.h>
 #include "bswap.h"
 #include "aes.h"
-#include "md5.h"
 
 #include "tapdisk.h"
 #include "tapdisk-driver.h"
 #include "tapdisk-interface.h"
-#include "tapdisk-disktype.h"
 #include "qcow.h"
 #include "blk.h"
 #include "atomicio.h"
@@ -81,16 +80,46 @@ struct qcow_request {
 
 static int decompress_cluster(struct tdqcow_state *s, uint64_t cluster_offset);
 
+#ifdef USE_GCRYPT
+
+#include <gcrypt.h>
+
 uint32_t gen_cksum(char *ptr, int len)
 {
   int i;
   uint32_t md[4];
 
   /* Generate checksum */
-  md5_sum((const uint8_t*)ptr, len, (uint8_t*)md);
+  gcry_md_hash_buffer(GCRY_MD_MD5, md, ptr, len);
 
   return md[0];
 }
+
+#else /* use libcrypto */
+
+#include <openssl/md5.h>
+
+uint32_t gen_cksum(char *ptr, int len)
+{
+  int i;
+  unsigned char *md;
+  uint32_t ret;
+
+  md = malloc(MD5_DIGEST_LENGTH);
+  if(!md) return 0;
+
+  /* Generate checksum */
+  if (MD5((unsigned char *)ptr, len, md) != md)
+    ret = 0;
+  else
+    memcpy(&ret, md, sizeof(uint32_t));
+
+  free(md);
+  return ret;
+}
+
+#endif
+
 
 static void free_aio_state(struct tdqcow_state* s)
 {
@@ -427,7 +456,6 @@ static uint64_t get_cluster_offset(struct tdqcow_state *s,
 
 		if (posix_memalign((void **)&tmp_ptr, 4096, 4096) != 0) {
 			DPRINTF("ERROR allocating memory for L1 table\n");
-                        return 0;
 		}
 		memcpy(tmp_ptr, l1_ptr, 4096);
 
@@ -601,7 +629,6 @@ found:
 		
 		if (posix_memalign((void **)&tmp_ptr2, 4096, 4096) != 0) {
 			DPRINTF("ERROR allocating memory for L1 table\n");
-                        return 0;
 		}
 		memcpy(tmp_ptr2, l2_ptr, 4096);
 		lseek(s->fd, l2_offset + (l2_sector << 12), SEEK_SET);
@@ -1214,8 +1241,7 @@ int qcow_create(const char *filename, uint64_t total_size,
 			if (p && (p - backing_file) >= 2) {
 				/* URL like but exclude "c:" like filenames */
 				strncpy(backing_filename, backing_file,
-					sizeof(backing_filename) - 1);
-				backing_filename[sizeof(backing_filename) - 1] = '\0';
+					sizeof(backing_filename));
 			} else {
 				if (realpath(backing_file, backing_filename) == NULL ||
 				    stat(backing_filename, &st) != 0) {

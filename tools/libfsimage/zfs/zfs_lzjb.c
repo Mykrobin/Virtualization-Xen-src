@@ -13,14 +13,13 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 /*
  * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include "fsys_zfs.h"
 
@@ -33,10 +32,11 @@
 int
 lzjb_decompress(void *s_start, void *d_start, size_t s_len, size_t d_len)
 {
-	uint8_t *src = s_start;
-	uint8_t *dst = d_start;
-	uint8_t *d_end = (uint8_t *)d_start + d_len;
-	uint8_t *cpy, copymap = '\0';
+	unsigned char *src = s_start;
+	unsigned char *dst = d_start;
+	unsigned char *d_end = (unsigned char *)d_start + d_len;
+	unsigned char *cpy;
+	unsigned char copymap = '\0';
 	int copymask = 1 << (NBBY - 1);
 
 	while (dst < d_end) {
@@ -44,11 +44,11 @@ lzjb_decompress(void *s_start, void *d_start, size_t s_len, size_t d_len)
 			copymask = 1;
 			copymap = *src++;
 		}
-		if (copymap & copymask) {
+		if (copymap & (unsigned char)copymask) {
 			int mlen = (src[0] >> (NBBY - MATCH_BITS)) + MATCH_MIN;
 			int offset = ((src[0] << NBBY) | src[1]) & OFFSET_MASK;
 			src += 2;
-			if ((cpy = dst - offset) < (uint8_t *)d_start)
+			if ((cpy = dst - offset) < (unsigned char *)d_start)
 				return (-1);
 			while (--mlen >= 0 && dst < d_end)
 				*dst++ = *cpy++;

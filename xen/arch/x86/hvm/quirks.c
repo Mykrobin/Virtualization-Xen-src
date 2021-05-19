@@ -11,9 +11,11 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/init.h>
 #include <xen/lib.h>
@@ -21,7 +23,7 @@
 #include <xen/bitmap.h>
 #include <asm/hvm/support.h>
 
-s8 __read_mostly hvm_port80_allowed = -1;
+int __read_mostly hvm_port80_allowed = -1;
 boolean_param("hvm_port80", hvm_port80_allowed);
 
 static int __init dmi_hvm_deny_port80(/*const*/ struct dmi_system_id *id)

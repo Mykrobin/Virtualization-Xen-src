@@ -9,9 +9,6 @@
 #ifndef __XEN_SERIAL_H__
 #define __XEN_SERIAL_H__
 
-#include <xen/init.h>
-#include <xen/spinlock.h>
-
 struct cpu_user_regs;
 
 /* Register a character-receive hook on the specified COM port. */
@@ -26,25 +23,12 @@ extern unsigned int serial_txbufsz;
 
 struct uart_driver;
 
-enum serial_port_state {
-    serial_unused,
-    serial_parsed,
-    serial_initialized
-};
-
-struct vuart_info {
-    paddr_t base_addr;          /* Base address of the UART */
-    unsigned long size;         /* Size of the memory region */
-    unsigned long data_off;     /* Data register offset */
-    unsigned long status_off;   /* Status register offset */
-    unsigned long status;       /* Ready status value */
-};
-
 struct serial_port {
     /* Uart-driver parameters. */
     struct uart_driver *driver;
     void               *uart;
-    enum serial_port_state state;
+    /* Number of characters the port can hold for transmit. */
+    int                 tx_fifo_size;
     /* Transmit data buffer (interrupt-driven uart). */
     char               *txbuf;
     unsigned int        txbufp, txbufc;
@@ -67,37 +51,21 @@ struct uart_driver {
     void (*init_postirq)(struct serial_port *);
     /* Hook to clean up after Xen bootstrap (before domain 0 runs). */
     void (*endboot)(struct serial_port *);
-    /* Driver suspend/resume. */
-    void (*suspend)(struct serial_port *);
-    void (*resume)(struct serial_port *);
-    /* Return number of characters the port can hold for transmit,
-     * or -EIO if port is inaccesible */
-    int (*tx_ready)(struct serial_port *);
+    /* Transmit FIFO ready to receive up to @tx_fifo_size characters? */
+    int  (*tx_empty)(struct serial_port *);
     /* Put a character onto the serial line. */
     void (*putc)(struct serial_port *, char);
-    /* Flush accumulated characters. */
-    void (*flush)(struct serial_port *);
     /* Get a character from the serial line: returns 0 if none available. */
     int  (*getc)(struct serial_port *, char *);
     /* Get IRQ number for this port's serial line: returns -1 if none. */
     int  (*irq)(struct serial_port *);
-    /* Unmask TX interrupt */
-    void  (*start_tx)(struct serial_port *);
-    /* Mask TX interrupt */
-    void  (*stop_tx)(struct serial_port *);
-    /* Get serial information */
-    const struct vuart_info *(*vuart_info)(struct serial_port *);
 };
 
 /* 'Serial handles' are composed from the following fields. */
-#define SERHND_IDX      (3<<0) /* COM1, COM2, DBGP, DTUART?               */
-# define SERHND_COM1    (0<<0)
-# define SERHND_COM2    (1<<0)
-# define SERHND_DBGP    (2<<0)
-# define SERHND_DTUART  (0<<0) /* Steal SERHND_COM1 value */
-#define SERHND_HI       (1<<2) /* Mux/demux each transferred char by MSB. */
-#define SERHND_LO       (1<<3) /* Ditto, except that the MSB is cleared.  */
-#define SERHND_COOKED   (1<<4) /* Newline/carriage-return translation?    */
+#define SERHND_IDX      (1<<0) /* COM1 or COM2?                           */
+#define SERHND_HI       (1<<1) /* Mux/demux each transferred char by MSB. */
+#define SERHND_LO       (1<<2) /* Ditto, except that the MSB is cleared.  */
+#define SERHND_COOKED   (1<<3) /* Newline/carriage-return translation?    */
 
 /* Two-stage initialisation (before/after IRQ-subsystem initialisation). */
 void serial_init_preirq(void);
@@ -134,11 +102,11 @@ void serial_end_sync(int handle);
 void serial_start_log_everything(int handle);
 void serial_end_log_everything(int handle);
 
+/* Return number of bytes headroom in transmit buffer. */
+int serial_tx_space(int handle);
+
 /* Return irq number for specified serial port (identified by index). */
 int serial_irq(int idx);
-
-/* Retrieve basic UART information to emulate it (base address, size...) */
-const struct vuart_info* serial_vuart_info(int idx);
 
 /* Serial suspend/resume. */
 void serial_suspend(void);
@@ -168,12 +136,6 @@ struct ns16550_defaults {
     unsigned long io_base; /* default io_base address */
 };
 void ns16550_init(int index, struct ns16550_defaults *defaults);
-void ehci_dbgp_init(void);
-
-void arm_uart_init(void);
-
-struct physdev_dbgp_op;
-int dbgp_op(const struct physdev_dbgp_op *);
 
 /* Baud rate was pre-configured before invoking the UART driver. */
 #define BAUD_AUTO (-1)
@@ -183,7 +145,7 @@ int dbgp_op(const struct physdev_dbgp_op *);
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

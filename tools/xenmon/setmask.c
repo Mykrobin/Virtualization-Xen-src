@@ -20,7 +20,8 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <stdlib.h>
@@ -42,7 +43,7 @@ int main(int argc, char * argv[])
     struct xen_sysctl sysctl;
     int ret;
 
-    xc_interface *xc_handle = xc_interface_open(0,0,0);
+    int xc_handle = xc_interface_open();
     sysctl.cmd = XEN_SYSCTL_tbuf_op;
     sysctl.interface_version = XEN_SYSCTL_INTERFACE_VERSION;
     sysctl.u.tbuf_op.cmd  = XEN_SYSCTL_TBUFOP_get_info;

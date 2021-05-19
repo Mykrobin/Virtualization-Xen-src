@@ -1,12 +1,11 @@
-XEN_ROOT = $(CURDIR)/../..
+XEN_ROOT = ../..
 
 include $(XEN_ROOT)/Config.mk
 vpath %.c ../grub-upstream
 
 BOOT=$(OBJ_DIR)/boot-$(XEN_TARGET_ARCH).o
 
-DEF_CPPFLAGS += -I$(XEN_ROOT)/tools/libs/toollog/include
-DEF_CPPFLAGS += -I$(XEN_ROOT)/tools/libxc/include -I$(XEN_ROOT)/tools/include -I.
+DEF_CPPFLAGS += -I$(XEN_ROOT)/tools/libxc -I$(XEN_ROOT)/tools/include -I.
 DEF_CPPFLAGS += -I../grub-upstream/stage1
 DEF_CPPFLAGS += -I../grub-upstream/stage2
 DEF_CPPFLAGS += -I../grub-upstream/netboot
@@ -61,7 +60,6 @@ NETBOOT_SOURCES:=$(addprefix netboot/,$(NETBOOT_SOURCES))
 $(BOOT): DEF_CPPFLAGS+=-D__ASSEMBLY__
 
 PV_GRUB_SOURCES = kexec.c mini-os.c
-PV_GRUB_SOURCES += ../polarssl-$(XEN_TARGET_ARCH)/library/sha1.o
 
 SOURCES = $(NETBOOT_SOURCES) $(STAGE2_SOURCES) $(PV_GRUB_SOURCES)
 

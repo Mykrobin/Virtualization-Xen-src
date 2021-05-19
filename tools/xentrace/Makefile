@@ -1,65 +1,58 @@
-XEN_ROOT=$(CURDIR)/../..
+XEN_ROOT=../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-CFLAGS += -Werror
+CFLAGS  += -Werror
 
-CFLAGS += $(CFLAGS_libxenevtchn)
-CFLAGS += $(CFLAGS_libxenctrl)
-LDLIBS += $(LDLIBS_libxenevtchn)
-LDLIBS += $(LDLIBS_libxenctrl)
-LDLIBS += $(ARGP_LDFLAGS)
+CFLAGS  += $(CFLAGS_libxenctrl)
+LDFLAGS += $(LDFLAGS_libxenctrl)
 
-BIN-$(CONFIG_X86) = xenalyze
-BIN      = $(BIN-y)
-SBIN     = xentrace xentrace_setsize
-LIBBIN   = xenctx
+HDRS     = $(wildcard *.h)
+OBJS     = $(patsubst %.c,%.o,$(wildcard *.c))
+
+BIN      = xentrace xentrace_setsize
+LIBBIN   = 
 SCRIPTS  = xentrace_format
+MAN1     = $(wildcard *.1)
+MAN8     = $(wildcard *.8)
+
+ifeq ($(XEN_TARGET_ARCH),x86_32)
+LIBBIN  += xenctx
+endif
+
+ifeq ($(XEN_TARGET_ARCH),x86_64)
+LIBBIN  += xenctx
+endif
+
+ifeq ($(XEN_TARGET_ARCH),ia64)
+LIBBIN  += xenctx
+endif
 
 .PHONY: all
 all: build
 
 .PHONY: build
-build: $(BIN) $(SBIN) $(LIBBIN)
+build: $(BIN) $(LIBBIN)
 
 .PHONY: install
 install: build
-	$(INSTALL_DIR) $(DESTDIR)$(bindir)
-	$(INSTALL_DIR) $(DESTDIR)$(sbindir)
-	[ -z "$(LIBBIN)" ] || $(INSTALL_DIR) $(DESTDIR)$(LIBEXEC_BIN)
-ifneq ($(BIN),)
-	$(INSTALL_PROG) $(BIN) $(DESTDIR)$(bindir)
-endif
-	$(INSTALL_PROG) $(SBIN) $(DESTDIR)$(sbindir)
-	$(INSTALL_PYTHON_PROG) $(SCRIPTS) $(DESTDIR)$(bindir)
-	[ -z "$(LIBBIN)" ] || $(INSTALL_PROG) $(LIBBIN) $(DESTDIR)$(LIBEXEC_BIN)
-
-.PHONY: uninstall
-uninstall:
-	rm -f $(addprefix $(DESTDIR)$(LIBEXEC_BIN)/, $(LIBBIN))
-	rm -f $(addprefix $(DESTDIR)$(bindir)/, $(SCRIPTS))
-	rm -f $(addprefix $(DESTDIR)$(sbindir)/, $(SBIN))
-ifneq ($(BIN),)
-	rm -f $(addprefix $(DESTDIR)$(bindir)/, $(BIN))
-endif
+	$(INSTALL_DIR) $(DESTDIR)$(BINDIR)
+	[ -z "$(LIBBIN)" ] || $(INSTALL_DIR) $(DESTDIR)$(PRIVATE_BINDIR)
+	$(INSTALL_DIR) $(DESTDIR)$(MAN1DIR)
+	$(INSTALL_DIR) $(DESTDIR)$(MAN8DIR)
+	$(INSTALL_PROG) $(BIN) $(DESTDIR)$(BINDIR)
+	$(INSTALL_PYTHON_PROG) $(SCRIPTS) $(DESTDIR)$(BINDIR)
+	[ -z "$(LIBBIN)" ] || $(INSTALL_PROG) $(LIBBIN) $(DESTDIR)$(PRIVATE_BINDIR)
+	$(INSTALL_DATA) $(MAN1) $(DESTDIR)$(MAN1DIR)
+	$(INSTALL_DATA) $(MAN8) $(DESTDIR)$(MAN8DIR)
 
 .PHONY: clean
 clean:
-	$(RM) *.a *.so *.o *.rpm $(BIN) $(SBIN) $(LIBBIN) $(DEPS_RM)
+	$(RM) *.a *.so *.o *.rpm $(BIN) $(LIBBIN) $(DEPS)
 
-.PHONY: distclean
-distclean: clean
+%: %.c $(HDRS) Makefile
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+xentrace_%: %.c $(HDRS) Makefile
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-xentrace: xentrace.o
-	$(CC) $(LDFLAGS) -o $@ $< $(LDLIBS) $(APPEND_LDFLAGS)
-
-xenctx: xenctx.o
-	$(CC) $(LDFLAGS) -o $@ $< $(LDLIBS) $(APPEND_LDFLAGS)
-
-xentrace_setsize: setsize.o
-	$(CC) $(LDFLAGS) -o $@ $< $(LDLIBS) $(APPEND_LDFLAGS)
-
-xenalyze: xenalyze.o mread.o
-	$(CC) $(LDFLAGS) -o $@ $^ $(ARGP_LDFLAGS) $(APPEND_LDFLAGS)
-
--include $(DEPS_INCLUDE)
+-include $(DEPS)
 

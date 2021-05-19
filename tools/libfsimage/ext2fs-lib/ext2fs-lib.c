@@ -22,7 +22,7 @@
  */
 
 #include <fsimage_plugin.h>
-#include INCLUDE_EXTFS_H
+#include <ext2fs/ext2fs.h>
 #include <errno.h>
 #include <inttypes.h>
 

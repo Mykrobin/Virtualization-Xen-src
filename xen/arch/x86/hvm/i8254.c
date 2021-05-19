@@ -24,13 +24,13 @@
  * IN THE SOFTWARE.
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/mm.h>
 #include <xen/xmalloc.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/sched.h>
-#include <xen/trace.h>
 #include <asm/time.h>
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/io.h>
@@ -38,9 +38,10 @@
 #include <asm/hvm/vpt.h>
 #include <asm/current.h>
 
-#define domain_vpit(x) (&(x)->arch.vpit)
+#define domain_vpit(x) (&(x)->arch.hvm_domain.pl_time.vpit)
 #define vcpu_vpit(x)   (domain_vpit((x)->domain))
-#define vpit_domain(x) (container_of((x), struct domain, arch.vpit))
+#define vpit_domain(x) (container_of((x), struct domain, \
+                                     arch.hvm_domain.pl_time.vpit))
 #define vpit_vcpu(x)   (pt_global_vcpu_target(vpit_domain(x)))
 
 #define RW_STATE_LSB 1
@@ -49,9 +50,9 @@
 #define RW_STATE_WORD1 4
 
 static int handle_pit_io(
-    int dir, unsigned int port, unsigned int bytes, uint32_t *val);
+    int dir, uint32_t port, uint32_t bytes, uint32_t *val);
 static int handle_speaker_io(
-    int dir, unsigned int port, unsigned int bytes, uint32_t *val);
+    int dir, uint32_t port, uint32_t bytes, uint32_t *val);
 
 #define get_guest_time(v) \
    (is_hvm_vcpu(v) ? hvm_get_guest_time(v) : (u64)get_s_time())
@@ -159,7 +160,6 @@ static int pit_get_gate(PITState *pit, int channel)
 static void pit_time_fired(struct vcpu *v, void *priv)
 {
     uint64_t *count_load_time = priv;
-    TRACE_0D(TRC_HVM_EMUL_PIT_TIMER_CB);
     *count_load_time = get_guest_time(v);
 }
 
@@ -189,19 +189,16 @@ static void pit_load_count(PITState *pit, int channel, int val)
     case 2:
     case 3:
         /* Periodic timer. */
-        TRACE_2D(TRC_HVM_EMUL_PIT_START_TIMER, period, period);
         create_periodic_time(v, &pit->pt0, period, period, 0, pit_time_fired, 
                              &pit->count_load_time[channel]);
         break;
     case 1:
     case 4:
         /* One-shot timer. */
-        TRACE_2D(TRC_HVM_EMUL_PIT_START_TIMER, period, 0);
         create_periodic_time(v, &pit->pt0, period, 0, 0, pit_time_fired,
                              &pit->count_load_time[channel]);
         break;
     default:
-        TRACE_0D(TRC_HVM_EMUL_PIT_STOP_TIMER);
         destroy_periodic_time(&pit->pt0);
         break;
     }
@@ -381,10 +378,6 @@ static uint32_t pit_ioport_read(struct PITState *pit, uint32_t addr)
 
 void pit_stop_channel0_irq(PITState *pit)
 {
-    if ( !has_vpit(current->domain) )
-        return;
-
-    TRACE_0D(TRC_HVM_EMUL_PIT_STOP_TIMER);
     spin_lock(&pit->lock);
     destroy_periodic_time(&pit->pt0);
     spin_unlock(&pit->lock);
@@ -394,9 +387,6 @@ static int pit_save(struct domain *d, hvm_domain_context_t *h)
 {
     PITState *pit = domain_vpit(d);
     int rc;
-
-    if ( !has_vpit(d) )
-        return 0;
 
     spin_lock(&pit->lock);
     
@@ -411,9 +401,6 @@ static int pit_load(struct domain *d, hvm_domain_context_t *h)
 {
     PITState *pit = domain_vpit(d);
     int i;
-
-    if ( !has_vpit(d) )
-        return -ENODEV;
 
     spin_lock(&pit->lock);
 
@@ -445,10 +432,6 @@ void pit_reset(struct domain *d)
     struct hvm_hw_pit_channel *s;
     int i;
 
-    if ( !has_vpit(d) )
-        return;
-
-    TRACE_0D(TRC_HVM_EMUL_PIT_STOP_TIMER);
     destroy_periodic_time(&pit->pt0);
     pit->pt0.source = PTSRC_isa;
 
@@ -465,45 +448,33 @@ void pit_reset(struct domain *d)
     spin_unlock(&pit->lock);
 }
 
-void pit_init(struct domain *d, unsigned long cpu_khz)
+void pit_init(struct vcpu *v, unsigned long cpu_khz)
 {
-    PITState *pit = domain_vpit(d);
-
-    if ( !has_vpit(d) )
-        return;
+    PITState *pit = vcpu_vpit(v);
 
     spin_lock_init(&pit->lock);
 
-    if ( is_hvm_domain(d) )
-    {
-        register_portio_handler(d, PIT_BASE, 4, handle_pit_io);
-        register_portio_handler(d, 0x61, 1, handle_speaker_io);
-    }
+    register_portio_handler(v->domain, PIT_BASE, 4, handle_pit_io);
+    register_portio_handler(v->domain, 0x61, 1, handle_speaker_io);
 
-    pit_reset(d);
+    pit_reset(v->domain);
 }
 
 void pit_deinit(struct domain *d)
 {
     PITState *pit = domain_vpit(d);
-
-    if ( !has_vpit(d) )
-        return;
-
-    TRACE_0D(TRC_HVM_EMUL_PIT_STOP_TIMER);
     destroy_periodic_time(&pit->pt0);
 }
 
 /* the intercept action for PIT DM retval:0--not handled; 1--handled */  
 static int handle_pit_io(
-    int dir, unsigned int port, unsigned int bytes, uint32_t *val)
+    int dir, uint32_t port, uint32_t bytes, uint32_t *val)
 {
     struct PITState *vpit = vcpu_vpit(current);
 
     if ( bytes != 1 )
     {
         gdprintk(XENLOG_WARNING, "PIT bad access\n");
-        *val = ~0;
         return X86EMUL_OKAY;
     }
 
@@ -539,7 +510,7 @@ static uint32_t speaker_ioport_read(
 }
 
 static int handle_speaker_io(
-    int dir, unsigned int port, uint32_t bytes, uint32_t *val)
+    int dir, uint32_t port, uint32_t bytes, uint32_t *val)
 {
     struct PITState *vpit = vcpu_vpit(current);
 
@@ -567,10 +538,7 @@ int pv_pit_handler(int port, int data, int write)
         .data = data
     };
 
-    if ( !has_vpit(current->domain) )
-        return ~0;
-
-    if ( is_hardware_domain(current->domain) && hwdom_pit_access(&ioreq) )
+    if ( (current->domain->domain_id == 0) && dom0_pit_access(&ioreq) )
     {
         /* nothing to do */;
     }
@@ -586,12 +554,3 @@ int pv_pit_handler(int port, int data, int write)
 
     return !write ? ioreq.data : 0;
 }
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * indent-tabs-mode: nil
- * End:
- */

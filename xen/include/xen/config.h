@@ -7,14 +7,13 @@
 #ifndef __XEN_CONFIG_H__
 #define __XEN_CONFIG_H__
 
-#include <xen/kconfig.h>
-
 #ifndef __ASSEMBLY__
 #include <xen/compiler.h>
 #endif
 #include <asm/config.h>
 
 #define EXPORT_SYMBOL(var)
+#define EXPORT_SYMBOL_GPL(var)
 
 /*
  * The following log levels are as follows:
@@ -70,20 +69,31 @@
 #define __force
 #define __bitwise
 
-#define KB(_kb)     (_AC(_kb, ULL) << 10)
-#define MB(_mb)     (_AC(_mb, ULL) << 20)
-#define GB(_gb)     (_AC(_gb, ULL) << 30)
+#ifndef __ASSEMBLY__
 
-#define IS_ALIGNED(val, align) (((val) & ((align) - 1)) == 0)
+int current_domain_id(void);
+#define dprintk(_l, _f, _a...)                              \
+    printk(_l "%s:%d: " _f, __FILE__ , __LINE__ , ## _a )
+#define gdprintk(_l, _f, _a...)                             \
+    printk(XENLOG_GUEST _l "%s:%d:d%d " _f, __FILE__,       \
+           __LINE__, current_domain_id() , ## _a )
+
+#endif /* !__ASSEMBLY__ */
 
 #define __STR(...) #__VA_ARGS__
 #define STR(...) __STR(__VA_ARGS__)
 
-/* allow existing code to work with Kconfig variable */
-#define NR_CPUS CONFIG_NR_CPUS
+#ifndef __ASSEMBLY__
+/* Turn a plain number into a C unsigned long constant. */
+#define __mk_unsigned_long(x) x ## UL
+#define mk_unsigned_long(x) __mk_unsigned_long(x)
+#else /* __ASSEMBLY__ */
+/* In assembly code we cannot use C numeric constant suffixes. */
+#define mk_unsigned_long(x) x
+#endif /* !__ASSEMBLY__ */
 
-#ifndef CONFIG_DEBUG
-#define NDEBUG
-#endif
+#define fastcall
+#define __cpuinitdata
+#define __cpuinit
 
 #endif /* __XEN_CONFIG_H__ */

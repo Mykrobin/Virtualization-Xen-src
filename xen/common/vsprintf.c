@@ -16,11 +16,9 @@
  * - scnprintf and vscnprintf
  */
 
+#include <xen/stdarg.h>
 #include <xen/ctype.h>
-#include <xen/symbols.h>
 #include <xen/lib.h>
-#include <xen/sched.h>
-#include <xen/livepatch.h>
 #include <asm/div64.h>
 #include <asm/page.h>
 
@@ -153,11 +151,11 @@ static char *number(
     static const char large_digits[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     int i;
 
-    ASSERT(base >= 2 && base <= 36);
-
     digits = (type & LARGE) ? large_digits : small_digits;
     if (type & LEFT)
         type &= ~ZEROPAD;
+    if (base < 2 || base > 36)
+        return NULL;
     c = (type & ZEROPAD) ? '0' : ' ';
     sign = 0;
     if (type & SIGN) {
@@ -174,14 +172,10 @@ static char *number(
         }
     }
     if (type & SPECIAL) {
-        if (num == 0)
-            type &= ~SPECIAL;
-        else if (base == 16)
+        if (base == 16)
             size -= 2;
         else if (base == 8)
             size--;
-        else
-            type &= ~SPECIAL;
     }
     i = 0;
     if (num == 0)
@@ -193,209 +187,53 @@ static char *number(
     size -= precision;
     if (!(type&(ZEROPAD+LEFT))) {
         while(size-->0) {
-            if (buf < end)
+            if (buf <= end)
                 *buf = ' ';
             ++buf;
         }
     }
     if (sign) {
-        if (buf < end)
+        if (buf <= end)
             *buf = sign;
         ++buf;
     }
     if (type & SPECIAL) {
-        if (buf < end)
-            *buf = '0';
-        ++buf;
-        if (base == 16) {
-            if (buf < end)
+        if (base==8) {
+            if (buf <= end)
+                *buf = '0';
+            ++buf;
+        } else if (base==16) {
+            if (buf <= end)
+                *buf = '0';
+            ++buf;
+            if (buf <= end)
                 *buf = digits[33];
             ++buf;
         }
     }
     if (!(type & LEFT)) {
         while (size-- > 0) {
-            if (buf < end)
+            if (buf <= end)
                 *buf = c;
             ++buf;
         }
     }
     while (i < precision--) {
-        if (buf < end)
+        if (buf <= end)
             *buf = '0';
         ++buf;
     }
     while (i-- > 0) {
-        if (buf < end)
+        if (buf <= end)
             *buf = tmp[i];
         ++buf;
     }
     while (size-- > 0) {
-        if (buf < end)
+        if (buf <= end)
             *buf = ' ';
         ++buf;
     }
     return buf;
-}
-
-static char *string(char *str, char *end, const char *s,
-                    int field_width, int precision, int flags)
-{
-    int i, len = (precision < 0) ? strlen(s) : strnlen(s, precision);
-
-    if (!(flags & LEFT)) {
-        while (len < field_width--) {
-            if (str < end)
-                *str = ' ';
-            ++str;
-        }
-    }
-    for (i = 0; i < len; ++i) {
-        if (str < end)
-            *str = *s;
-        ++str; ++s;
-    }
-    while (len < field_width--) {
-        if (str < end)
-            *str = ' ';
-        ++str;
-    }
-
-    return str;
-}
-
-static char *pointer(char *str, char *end, const char **fmt_ptr,
-                     const void *arg, int field_width, int precision,
-                     int flags)
-{
-    const char *fmt = *fmt_ptr, *s;
-
-    /* Custom %p suffixes. See XEN_ROOT/docs/misc/printk-formats.txt */
-    switch ( fmt[1] )
-    {
-    case 'h': /* Raw buffer as hex string. */
-    {
-        const uint8_t *hex_buffer = arg;
-        char sep = ' '; /* Separator character. */
-        unsigned int i;
-
-        /* Consumed 'h' from the format string. */
-        ++*fmt_ptr;
-
-        /* Bound user count from %* to between 0 and 64 bytes. */
-        if ( field_width <= 0 )
-            return str;
-        if ( field_width > 64 )
-            field_width = 64;
-
-        /*
-         * Peek ahead in the format string to see if a recognised separator
-         * modifier is present.
-         */
-        switch ( fmt[2] )
-        {
-        case 'C': /* Colons. */
-            ++*fmt_ptr;
-            sep = ':';
-            break;
-
-        case 'D': /* Dashes. */
-            ++*fmt_ptr;
-            sep = '-';
-            break;
-
-        case 'N': /* No separator. */
-            ++*fmt_ptr;
-            sep = 0;
-            break;
-        }
-
-        for ( i = 0; ; )
-        {
-            /* Each byte: 2 chars, 0-padded, base 16, no hex prefix. */
-            str = number(str, end, hex_buffer[i], 16, 2, -1, ZEROPAD);
-
-            if ( ++i == field_width )
-                return str;
-
-            if ( sep )
-            {
-                if ( str < end )
-                    *str = sep;
-                ++str;
-            }
-        }
-    }
-
-    case 's': /* Symbol name with offset and size (iff offset != 0) */
-    case 'S': /* Symbol name unconditionally with offset and size */
-    {
-        unsigned long sym_size, sym_offset;
-        char namebuf[KSYM_NAME_LEN+1];
-
-        /* Advance parents fmt string, as we have consumed 's' or 'S' */
-        ++*fmt_ptr;
-
-        s = symbols_lookup((unsigned long)arg, &sym_size, &sym_offset, namebuf);
-
-        /* If the symbol is not found, fall back to printing the address */
-        if ( !s )
-            break;
-
-        /* Print symbol name */
-        str = string(str, end, s, -1, -1, 0);
-
-        if ( fmt[1] == 'S' || sym_offset != 0 )
-        {
-            /* Print '+<offset>/<len>' */
-            str = number(str, end, sym_offset, 16, -1, -1, SPECIAL|SIGN|PLUS);
-            if ( str < end )
-                *str = '/';
-            ++str;
-            str = number(str, end, sym_size, 16, -1, -1, SPECIAL);
-        }
-
-        /*
-         * namebuf contents and s for core hypervisor are same but for Live Patch
-         * payloads they differ (namebuf contains the name of the payload).
-         */
-        if ( namebuf != s )
-        {
-            str = string(str, end, " [", -1, -1, 0);
-            str = string(str, end, namebuf, -1, -1, 0);
-            str = string(str, end, "]", -1, -1, 0);
-        }
-
-        return str;
-    }
-
-    case 'v': /* d<domain-id>v<vcpu-id> from a struct vcpu */
-    {
-        const struct vcpu *v = arg;
-
-        ++*fmt_ptr;
-        if ( unlikely(v->domain->domain_id == DOMID_IDLE) )
-            str = string(str, end, "IDLE", -1, -1, 0);
-        else
-        {
-            if ( str < end )
-                *str = 'd';
-            str = number(str + 1, end, v->domain->domain_id, 10, -1, -1, 0);
-        }
-        if ( str < end )
-            *str = 'v';
-        return number(str + 1, end, v->vcpu_id, 10, -1, -1, 0);
-    }
-    }
-
-    if ( field_width == -1 )
-    {
-        field_width = 2 * sizeof(void *);
-        flags |= ZEROPAD;
-    }
-
-    return number(str, end, (unsigned long)arg,
-                  16, field_width, precision, flags);
 }
 
 /**
@@ -418,8 +256,9 @@ static char *pointer(char *str, char *end, const char **fmt_ptr,
  */
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
 {
+    int len;
     unsigned long long num;
-    int base;
+    int i, base;
     char *str, *end, c;
     const char *s;
 
@@ -436,16 +275,16 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
     BUG_ON(((int)size < 0) || ((unsigned int)size != size));
 
     str = buf;
-    end = buf + size;
+    end = buf + size - 1;
 
-    if (end < buf) {
+    if (end < buf - 1) {
         end = ((void *) -1);
-        size = end - buf;
+        size = end - buf + 1;
     }
 
     for (; *fmt ; ++fmt) {
         if (*fmt != '%') {
-            if (str < end)
+            if (str <= end)
                 *str = *fmt;
             ++str;
             continue;
@@ -511,17 +350,17 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
         case 'c':
             if (!(flags & LEFT)) {
                 while (--field_width > 0) {
-                    if (str < end)
+                    if (str <= end)
                         *str = ' ';
                     ++str;
                 }
             }
             c = (unsigned char) va_arg(args, int);
-            if (str < end)
+            if (str <= end)
                 *str = c;
             ++str;
             while (--field_width > 0) {
-                if (str < end)
+                if (str <= end)
                     *str = ' ';
                 ++str;
             }
@@ -532,13 +371,35 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
             if ((unsigned long)s < PAGE_SIZE)
                 s = "<NULL>";
 
-            str = string(str, end, s, field_width, precision, flags);
+            len = strnlen(s, precision);
+
+            if (!(flags & LEFT)) {
+                while (len < field_width--) {
+                    if (str <= end)
+                        *str = ' ';
+                    ++str;
+                }
+            }
+            for (i = 0; i < len; ++i) {
+                if (str <= end)
+                    *str = *s;
+                ++str; ++s;
+            }
+            while (len < field_width--) {
+                if (str <= end)
+                    *str = ' ';
+                ++str;
+            }
             continue;
 
         case 'p':
-            /* pointer() might advance fmt (%pS for example) */
-            str = pointer(str, end, &fmt, va_arg(args, const void *),
-                          field_width, precision, flags);
+            if (field_width == -1) {
+                field_width = 2*sizeof(void *);
+                flags |= ZEROPAD;
+            }
+            str = number(str, end,
+                         (unsigned long) va_arg(args, void *),
+                         16, field_width, precision, flags);
             continue;
 
 
@@ -556,7 +417,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
             continue;
 
         case '%':
-            if (str < end)
+            if (str <= end)
                 *str = '%';
             ++str;
             continue;
@@ -579,11 +440,11 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
             break;
 
         default:
-            if (str < end)
+            if (str <= end)
                 *str = '%';
             ++str;
             if (*fmt) {
-                if (str < end)
+                if (str <= end)
                     *str = *fmt;
                 ++str;
             } else {
@@ -612,14 +473,11 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
         str = number(str, end, num, base,
                      field_width, precision, flags);
     }
-
-    /* don't write out a null byte if the buf size is zero */
-    if (size > 0) {
-        if (str < end)
-            *str = '\0';
-        else
-            end[-1] = '\0';
-    }
+    if (str <= end)
+        *str = '\0';
+    else if (size > 0)
+        /* don't write out a null byte if the buf size is zero */
+        *end = '\0';
     /* the trailing null byte doesn't count towards the total
      * ++str;
      */
@@ -653,6 +511,223 @@ int vscnprintf(char *buf, size_t size, const char *fmt, va_list args)
 }
 
 EXPORT_SYMBOL(vscnprintf);
+
+/**
+ * vsscanf - Unformat a buffer into a list of arguments
+ * @buf:    input buffer
+ * @fmt:    format of buffer
+ * @args:   arguments
+ */
+int vsscanf(const char * buf, const char * fmt, va_list args)
+{
+    const char *str = buf;
+    const char *next;
+    char digit;
+    int num = 0;
+    int qualifier;
+    int base;
+    int field_width;
+    int is_sign = 0;
+
+    while (*fmt && *str) {
+        /* skip any white space in format */
+        /* white space in format matchs any amount of
+         * white space, including none, in the input.
+         */
+        if (isspace(*fmt)) {
+            while (isspace(*fmt))
+                ++fmt;
+            while (isspace(*str))
+                ++str;
+        }
+
+        /* anything that is not a conversion must match exactly */
+        if (*fmt != '%' && *fmt) {
+            if (*fmt++ != *str++)
+                break;
+            continue;
+        }
+
+        if (!*fmt)
+            break;
+        ++fmt;
+
+        /* skip this conversion.
+         * advance both strings to next white space
+         */
+        if (*fmt == '*') {
+            while (!isspace(*fmt) && *fmt)
+                fmt++;
+            while (!isspace(*str) && *str)
+                str++;
+            continue;
+        }
+
+        /* get field width */
+        field_width = -1;
+        if (isdigit(*fmt))
+            field_width = skip_atoi(&fmt);
+
+        /* get conversion qualifier */
+        qualifier = -1;
+        if (*fmt == 'h' || *fmt == 'l' || *fmt == 'L' || *fmt == 'Z'
+            || *fmt == 'z') {
+            qualifier = *fmt++;
+            if (unlikely(qualifier == *fmt)) {
+                if (qualifier == 'h') {
+                    qualifier = 'H';
+                    fmt++;
+                } else if (qualifier == 'l') {
+                    qualifier = 'L';
+                    fmt++;
+                }
+            }
+        }
+        base = 10;
+        is_sign = 0;
+
+        if (!*fmt || !*str)
+            break;
+
+        switch(*fmt++) {
+            case 'c': {
+                char *s = (char *) va_arg(args,char*);
+                if (field_width == -1)
+                    field_width = 1;
+                do {
+                    *s++ = *str++;
+                } while (--field_width > 0 && *str);
+                num++;
+            }
+            continue;
+            case 's': {
+                char *s = (char *) va_arg(args, char *);
+                if(field_width == -1)
+                    field_width = INT_MAX;
+                /* first, skip leading white space in buffer */
+                while (isspace(*str))
+                    str++;
+
+                /* now copy until next white space */
+                while (*str && !isspace(*str) && field_width--)
+                    *s++ = *str++;
+                *s = '\0';
+                num++;
+            }
+            continue;
+            case 'n': {
+            /* return number of characters read so far */
+                int *i = (int *)va_arg(args,int*);
+                *i = str - buf;
+            }
+            continue;
+            case 'o':
+                base = 8;
+            break;
+            case 'x':
+            case 'X':
+                base = 16;
+            break;
+            case 'i':
+                base = 0;
+            case 'd':
+                is_sign = 1;
+            case 'u':
+            break;
+            case '%':
+                /* looking for '%' in str */
+                if (*str++ != '%') 
+                    return num;
+            continue;
+            default:
+                /* invalid format; stop here */
+                return num;
+        }
+
+        /* have some sort of integer conversion.
+         * first, skip white space in buffer.
+         */
+        while (isspace(*str))
+            str++;
+
+        digit = *str;
+        if (is_sign && digit == '-')
+            digit = *(str + 1);
+
+        if (!digit || (base == 16 && !isxdigit(digit))
+                || (base == 10 && !isdigit(digit))
+                || (base == 8 && (!isdigit(digit) || digit > '7'))
+                || (base == 0 && !isdigit(digit)))
+            break;
+
+        switch(qualifier) {
+            case 'H': /* that's 'hh' in format */
+                if (is_sign) {
+                    signed char *s = (signed char *) va_arg(args,signed char *);
+                    *s = (signed char) simple_strtol(str,&next,base);
+                } else {
+                    unsigned char *s = (unsigned char *) 
+                                                va_arg(args, unsigned char *);
+                    *s = (unsigned char) simple_strtoul(str, &next, base);
+                }
+            break;
+            case 'h':
+                if (is_sign) {
+                    short *s = (short *) va_arg(args,short *);
+                    *s = (short) simple_strtol(str,&next,base);
+                } else {
+                    unsigned short *s = (unsigned short *) 
+                                                va_arg(args, unsigned short *);
+                    *s = (unsigned short) simple_strtoul(str, &next, base);
+                }
+            break;
+            case 'l':
+                if (is_sign) {
+                    long *l = (long *) va_arg(args,long *);
+                    *l = simple_strtol(str,&next,base);
+                } else {
+                    unsigned long *l = (unsigned long*) 
+                                                    va_arg(args,unsigned long*);
+                    *l = simple_strtoul(str,&next,base);
+                }
+            break;
+            case 'L':
+                if (is_sign) {
+                    long long *l = (long long*) va_arg(args,long long *);
+                    *l = simple_strtoll(str,&next,base);
+                } else {
+                    unsigned long long *l = (unsigned long long*) 
+                                            va_arg(args,unsigned long long*);
+                    *l = simple_strtoull(str,&next,base);
+                }
+            break;
+            case 'Z':
+            case 'z': {
+                size_t *s = (size_t*) va_arg(args,size_t*);
+                *s = (size_t) simple_strtoul(str,&next,base);
+            }
+            break;
+            default:
+                if (is_sign) {
+                    int *i = (int *) va_arg(args, int*);
+                    *i = (int) simple_strtol(str,&next,base);
+                } else {
+                    unsigned int *i = (unsigned int*) 
+                                                    va_arg(args, unsigned int*);
+                    *i = (unsigned int) simple_strtoul(str,&next,base);
+                }
+            break;
+        }
+        num++;
+
+        if (!next)
+            break;
+        str = next;
+    }
+    return num;
+}
+
+EXPORT_SYMBOL(vsscanf);
 
 /**
  * snprintf - Format a string and place it in a buffer
@@ -706,63 +781,28 @@ int scnprintf(char * buf, size_t size, const char *fmt, ...)
 EXPORT_SYMBOL(scnprintf);
 
 /**
- * vasprintf - Format a string and allocate a buffer to place it in
- *
- * @bufp: Pointer to a pointer to receive the allocated buffer
- * @fmt: The format string to use
- * @args: Arguments for the format string
- *
- * -ENOMEM is returned on failure and @bufp is not touched.
- * On success, 0 is returned. The buffer passed back is
- * guaranteed to be null terminated. The memory is allocated
- * from xenheap, so the buffer should be freed with xfree().
+ * sscanf - Unformat a buffer into a list of arguments
+ * @buf:    input buffer
+ * @fmt:    formatting of buffer
+ * @...:    resulting arguments
  */
-int vasprintf(char **bufp, const char *fmt, va_list args)
-{
-    va_list args_copy;
-    size_t size;
-    char *buf;
-
-    va_copy(args_copy, args);
-    size = vsnprintf(NULL, 0, fmt, args_copy);
-    va_end(args_copy);
-
-    buf = xmalloc_array(char, ++size);
-    if ( !buf )
-        return -ENOMEM;
-
-    (void) vsnprintf(buf, size, fmt, args);
-
-    *bufp = buf;
-    return 0;
-}
-
-/**
- * asprintf - Format a string and place it in a buffer
- * @bufp: Pointer to a pointer to receive the allocated buffer
- * @fmt: The format string to use
- * @...: Arguments for the format string
- *
- * -ENOMEM is returned on failure and @bufp is not touched.
- * On success, 0 is returned. The buffer passed back is
- * guaranteed to be null terminated. The memory is allocated
- * from xenheap, so the buffer should be freed with xfree().
- */
-int asprintf(char **bufp, const char *fmt, ...)
+int sscanf(const char * buf, const char * fmt, ...)
 {
     va_list args;
     int i;
 
-    va_start(args, fmt);
-    i=vasprintf(bufp,fmt,args);
+    va_start(args,fmt);
+    i = vsscanf(buf,fmt,args);
     va_end(args);
     return i;
 }
 
+EXPORT_SYMBOL(sscanf);
+
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

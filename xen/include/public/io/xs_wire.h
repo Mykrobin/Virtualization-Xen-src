@@ -28,8 +28,7 @@
 
 enum xsd_sockmsg_type
 {
-    XS_CONTROL,
-#define XS_DEBUG XS_CONTROL
+    XS_DEBUG,
     XS_DIRECTORY,
     XS_READ,
     XS_GET_PERMS,
@@ -48,14 +47,7 @@ enum xsd_sockmsg_type
     XS_ERROR,
     XS_IS_DOMAIN_INTRODUCED,
     XS_RESUME,
-    XS_SET_TARGET,
-    /* XS_RESTRICT has been removed */
-    XS_RESET_WATCHES = XS_SET_TARGET + 2,
-    XS_DIRECTORY_PART,
-
-    XS_TYPE_COUNT,      /* Number of valid types. */
-
-    XS_INVALID = 0xffff /* Guaranteed to remain an invalid type */
+    XS_SET_TARGET
 };
 
 #define XS_WRITE_NONE "NONE"
@@ -89,8 +81,7 @@ __attribute__((unused))
     XSD_ERROR(EROFS),
     XSD_ERROR(EBUSY),
     XSD_ERROR(EAGAIN),
-    XSD_ERROR(EISCONN),
-    XSD_ERROR(E2BIG)
+    XSD_ERROR(EISCONN)
 };
 #endif
 
@@ -110,10 +101,7 @@ enum xs_watch_type
     XS_WATCH_TOKEN
 };
 
-/*
- * `incontents 150 xenstore_struct XenStore wire protocol.
- *
- * Inter-domain shared memory communications. */
+/* Inter-domain shared memory communications. */
 #define XENSTORE_RING_SIZE 1024
 typedef uint32_t XENSTORE_RING_IDX;
 #define MASK_XENSTORE_IDX(idx) ((idx) & (XENSTORE_RING_SIZE-1))
@@ -122,8 +110,6 @@ struct xenstore_domain_interface {
     char rsp[XENSTORE_RING_SIZE]; /* Replies and async watch events. */
     XENSTORE_RING_IDX req_cons, req_prod;
     XENSTORE_RING_IDX rsp_cons, rsp_prod;
-    uint32_t server_features; /* Bitmap of features supported by the server */
-    uint32_t connection;
 };
 
 /* Violating this is very bad.  See docs/misc/xenstore.txt. */
@@ -133,19 +119,12 @@ struct xenstore_domain_interface {
 #define XENSTORE_ABS_PATH_MAX 3072
 #define XENSTORE_REL_PATH_MAX 2048
 
-/* The ability to reconnect a ring */
-#define XENSTORE_SERVER_FEATURE_RECONNECTION 1
-
-/* Valid values for the connection field */
-#define XENSTORE_CONNECTED 0 /* the steady-state */
-#define XENSTORE_RECONNECT 1 /* guest has initiated a reconnect */
-
 #endif /* _XS_WIRE_H */
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

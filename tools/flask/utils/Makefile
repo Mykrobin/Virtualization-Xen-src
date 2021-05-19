@@ -1,46 +1,39 @@
-XEN_ROOT=$(CURDIR)/../../..
+XEN_ROOT=../../..
 include $(XEN_ROOT)/tools/Rules.mk
+XEN_LIBXC          = $(XEN_ROOT)/tools/libxc
 
-CFLAGS += -Werror
-CFLAGS += $(CFLAGS_libxenctrl)
+LIBXC_ROOT = $(XEN_ROOT)/tools/libxc
+LIBFLASK_ROOT = $(XEN_ROOT)/tools/flask/libflask
 
+PROFILE=#-pg
+BASECFLAGS=-Wall -g -Werror
+BASECFLAGS+= $(PROFILE)
+#BASECFLAGS+= -I$(XEN_ROOT)/tools
+BASECFLAGS+= $(CFLAGS_libxenctrl)
+BASECFLAGS+= -I$(LIBFLASK_ROOT)/include
+BASECFLAGS+= -I.
+
+CFLAGS  += $(BASECFLAGS)
+LDFLAGS += $(PROFILE) -L$(XEN_LIBXC) -L$(LIBFLASK_ROOT)
 TESTDIR  = testsuite/tmp
 TESTFLAGS= -DTESTING
 TESTENV  = XENSTORED_ROOTDIR=$(TESTDIR) XENSTORED_RUNDIR=$(TESTDIR)
 
-CLIENTS := flask-loadpolicy flask-setenforce flask-getenforce flask-label-pci flask-get-bool flask-set-bool
+CLIENTS := flask-loadpolicy flask-setenforce flask-getenforce
 CLIENTS_SRCS := $(patsubst flask-%,%.c,$(CLIENTS))
 CLIENTS_OBJS := $(patsubst flask-%,%.o,$(CLIENTS))
 
 .PHONY: all
 all: $(CLIENTS)
 
-flask-loadpolicy: loadpolicy.o
-	$(CC) $(LDFLAGS) $< $(LDLIBS) $(LDLIBS_libxenctrl) -o $@
-
-flask-setenforce: setenforce.o
-	$(CC) $(LDFLAGS) $< $(LDLIBS) $(LDLIBS_libxenctrl) -o $@
-
-flask-getenforce: getenforce.o
-	$(CC) $(LDFLAGS) $< $(LDLIBS) $(LDLIBS_libxenctrl) -o $@
-
-flask-label-pci: label-pci.o
-	$(CC) $(LDFLAGS) $< $(LDLIBS) $(LDLIBS_libxenctrl) -o $@
-
-flask-get-bool: get-bool.o
-	$(CC) $(LDFLAGS) $< $(LDLIBS) $(LDLIBS_libxenctrl) -o $@
-
-flask-set-bool: set-bool.o
-	$(CC) $(LDFLAGS) $< $(LDLIBS) $(LDLIBS_libxenctrl) -o $@
+$(CLIENTS): flask-%: %.o
+	$(CC) $(CFLAGS) $(LDFLAGS) $< $(LOADLIBES) $(LDLIBS) -L. -lflask $(LDFLAGS_libxenctrl) -o $@
 
 .PHONY: clean
 clean: 
 	rm -f *.o *.opic *.so
 	rm -f $(CLIENTS)
-	$(RM) $(DEPS_RM)
-
-.PHONY: distclean
-distclean: clean
+	$(RM) $(DEPS)
 
 .PHONY: print-dir
 print-dir:
@@ -52,11 +45,10 @@ print-end:
 
 .PHONY: install
 install: all
-	$(INSTALL_DIR) $(DESTDIR)$(sbindir)
-	$(INSTALL_PROG) $(CLIENTS) $(DESTDIR)$(sbindir)
+	$(INSTALL_DIR) $(DESTDIR)$(SBINDIR)
+	$(INSTALL_PROG) $(CLIENTS) $(DESTDIR)$(SBINDIR)
 
-.PHONY: uninstall
-uninstall:
-	rm -f $(addprefix $(DESTDIR)$(sbindir)/, $(CLIENTS))
+-include $(DEPS)
 
--include $(DEPS_INCLUDE)
+# never delete any intermediate files.
+.SECONDARY:

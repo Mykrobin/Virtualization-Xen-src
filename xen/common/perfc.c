@@ -57,7 +57,7 @@ void perfc_printall(unsigned char key)
                 for_each_online_cpu ( cpu )
                 {
                     if ( k > 0 && (k % 4) == 0 )
-                        printk("\n%53s", "");
+                        printk("\n%46s", "");
                     printk("  CPU%02u[%10"PRIperfc"u]", cpu, per_cpu(perfcounters, cpu)[j]);
                     ++k;
                 }
@@ -78,7 +78,7 @@ void perfc_printall(unsigned char key)
             printk("TOTAL[%12Lu]", sum);
             if (sum)
             {
-#ifdef CONFIG_PERF_ARRAYS
+#ifdef PERF_ARRAYS
                 for ( k = 0; k < perfc_info[i].nr_elements; k++ )
                 {
                     sum = 0;
@@ -103,7 +103,7 @@ void perfc_printall(unsigned char key)
                     if ( perfc_info[i].type == TYPE_S_ARRAY ) 
                         sum = (perfc_t) sum;
                     if ( k > 0 && (k % 4) == 0 )
-                        printk("\n%53s", "");
+                        printk("\n%46s", "");
                     printk("  CPU%02u[%10Lu]", cpu, sum);
                     ++k;
                 }
@@ -114,6 +114,8 @@ void perfc_printall(unsigned char key)
         }
         printk("\n");
     }
+
+    arch_perfc_printall();
 }
 
 void perfc_reset(unsigned char key)
@@ -134,13 +136,13 @@ void perfc_reset(unsigned char key)
         switch ( perfc_info[i].type )
         {
         case TYPE_SINGLE:
-            for_each_online_cpu ( cpu )
+            for_each_possible_cpu ( cpu )
                 per_cpu(perfcounters, cpu)[j] = 0;
         case TYPE_S_SINGLE:
             ++j;
             break;
         case TYPE_ARRAY:
-            for_each_online_cpu ( cpu )
+            for_each_possible_cpu ( cpu )
                 memset(per_cpu(perfcounters, cpu) + j, 0,
                        perfc_info[i].nr_elements * sizeof(perfc_t));
         case TYPE_S_ARRAY:
@@ -152,25 +154,18 @@ void perfc_reset(unsigned char key)
     arch_perfc_reset();
 }
 
-static struct xen_sysctl_perfc_desc perfc_d[NR_PERFCTRS];
+static xen_sysctl_perfc_desc_t perfc_d[NR_PERFCTRS];
 static xen_sysctl_perfc_val_t *perfc_vals;
 static unsigned int      perfc_nbr_vals;
-static cpumask_t         perfc_cpumap;
-
+static int               perfc_init = 0;
 static int perfc_copy_info(XEN_GUEST_HANDLE_64(xen_sysctl_perfc_desc_t) desc,
                            XEN_GUEST_HANDLE_64(xen_sysctl_perfc_val_t) val)
 {
     unsigned int i, j, v;
 
     /* We only copy the name and array-size information once. */
-    if ( !cpumask_equal(&cpu_online_map, &perfc_cpumap) )
+    if ( !perfc_init ) 
     {
-        unsigned int nr_cpus;
-        perfc_cpumap = cpu_online_map;
-        nr_cpus = cpumask_weight(&perfc_cpumap);
-
-        perfc_nbr_vals = 0;
-
         for ( i = 0; i < NR_PERFCTRS; i++ )
         {
             safe_strcpy(perfc_d[i].name, perfc_info[i].name);
@@ -179,7 +174,7 @@ static int perfc_copy_info(XEN_GUEST_HANDLE_64(xen_sysctl_perfc_desc_t) desc,
             {
             case TYPE_SINGLE:
             case TYPE_S_SINGLE:
-                perfc_d[i].nr_vals = nr_cpus;
+                perfc_d[i].nr_vals = num_possible_cpus();
                 break;
             case TYPE_ARRAY:
             case TYPE_S_ARRAY:
@@ -188,9 +183,8 @@ static int perfc_copy_info(XEN_GUEST_HANDLE_64(xen_sysctl_perfc_desc_t) desc,
             }
             perfc_nbr_vals += perfc_d[i].nr_vals;
         }
-
-        xfree(perfc_vals);
         perfc_vals = xmalloc_array(xen_sysctl_perfc_val_t, perfc_nbr_vals);
+        perfc_init = 1;
     }
 
     if ( guest_handle_is_null(desc) )
@@ -211,14 +205,14 @@ static int perfc_copy_info(XEN_GUEST_HANDLE_64(xen_sysctl_perfc_desc_t) desc,
         {
         case TYPE_SINGLE:
         case TYPE_S_SINGLE:
-            for_each_cpu ( cpu, &perfc_cpumap )
+            for_each_possible_cpu ( cpu )
                 perfc_vals[v++] = per_cpu(perfcounters, cpu)[j];
             ++j;
             break;
         case TYPE_ARRAY:
         case TYPE_S_ARRAY:
             memset(perfc_vals + v, 0, perfc_d[i].nr_vals * sizeof(*perfc_vals));
-            for_each_cpu ( cpu, &perfc_cpumap )
+            for_each_possible_cpu ( cpu )
             {
                 perfc_t *counters = per_cpu(perfcounters, cpu) + j;
                 unsigned int k;
@@ -241,7 +235,7 @@ static int perfc_copy_info(XEN_GUEST_HANDLE_64(xen_sysctl_perfc_desc_t) desc,
 }
 
 /* Dom0 control of perf counters */
-int perfc_control(struct xen_sysctl_perfc_op *pc)
+int perfc_control(xen_sysctl_perfc_op_t *pc)
 {
     static DEFINE_SPINLOCK(lock);
     int rc;
@@ -275,7 +269,7 @@ int perfc_control(struct xen_sysctl_perfc_op *pc)
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

@@ -1,3 +1,4 @@
+#include <xen/config.h>
 #include <xen/pci.h>
 #include <xen/acpi.h>
 #include <acpi/acpi.h>
@@ -23,7 +24,7 @@ void acpi_reboot(void)
 	case ACPI_ADR_SPACE_PCI_CONFIG:
 		printk("Resetting with ACPI PCI RESET_REG.\n");
 		/* Write the value that resets us. */
-		pci_conf_write8(0, 0,
+		pci_conf_write8(0,
 				(rr->address >> 32) & 31,
 				(rr->address >> 16) & 7,
 				(rr->address & 255),

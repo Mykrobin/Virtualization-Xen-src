@@ -16,20 +16,19 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#ifndef __ASM_X86_MEM_PAGING_H__
-#define __ASM_X86_MEM_PAGING_H__
 
-int mem_paging_memop(XEN_GUEST_HANDLE_PARAM(xen_mem_paging_op_t) arg);
+int mem_paging_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
+                      XEN_GUEST_HANDLE(void) u_domctl);
 
-#endif /*__ASM_X86_MEM_PAGING_H__ */
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * indent-tabs-mode: nil
  * End:

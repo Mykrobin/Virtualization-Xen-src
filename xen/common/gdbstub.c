@@ -18,7 +18,8 @@
  * GNU General Public License for more details.
  * 
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 /*
@@ -37,7 +38,6 @@
 #include <xen/spinlock.h>
 #include <xen/serial.h>
 #include <xen/irq.h>
-#include <xen/watchdog.h>
 #include <asm/debugger.h>
 #include <xen/init.h>
 #include <xen/smp.h>
@@ -262,7 +262,7 @@ gdb_write_to_packet_hex(unsigned long x, int int_size, struct gdb_context *ctx)
     case sizeof(u64):
         break;
     default:
-        dbg_printk("WARNING: %s x: %#lx int_size: %d\n",
+        dbg_printk("WARNING: %s x: 0x%lx int_size: %d\n",
                    __func__, x, int_size);
         break;
     }
@@ -639,25 +639,23 @@ __trap_to_gdb(struct cpu_user_regs *regs, unsigned long cookie)
     return rc;
 }
 
-static int __init initialise_gdb(void)
+void __init
+initialise_gdb(void)
 {
     if ( *opt_gdb == '\0' )
-        return 0;
+        return;
 
     gdb_ctx->serhnd = serial_parse_handle(opt_gdb);
     if ( gdb_ctx->serhnd == -1 )
     {
         printk("Bad gdb= option '%s'\n", opt_gdb);
-        return 0;
+        return;
     }
 
     serial_start_sync(gdb_ctx->serhnd);
 
     printk("GDB stub initialised.\n");
-
-    return 0;
 }
-presmp_initcall(initialise_gdb);
 
 static void gdb_pause_this_cpu(void *unused)
 {
@@ -740,7 +738,7 @@ static void gdb_smp_resume(void)
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * End:

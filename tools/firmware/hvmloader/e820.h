@@ -1,6 +1,8 @@
 #ifndef __HVMLOADER_E820_H__
 #define __HVMLOADER_E820_H__
 
+#include <xen/hvm/e820.h>
+
 /*
  * PC BIOS standard E820 types and structure.
  */
@@ -15,21 +17,7 @@ struct e820entry {
     uint32_t type;
 } __attribute__((packed));
 
-#define E820MAX	128
-
-struct e820map {
-    unsigned int nr_map;
-    struct e820entry map[E820MAX];
-};
+#define E820_NR ((uint16_t *)(E820_PHYSICAL_ADDRESS + E820_NR_OFFSET))
+#define E820    ((struct e820entry *)(E820_PHYSICAL_ADDRESS + E820_OFFSET))
 
 #endif /* __HVMLOADER_E820_H__ */
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * tab-width: 4
- * indent-tabs-mode: nil
- * End:
- */

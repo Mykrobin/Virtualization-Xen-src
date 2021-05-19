@@ -5,6 +5,7 @@
  * This source code is licensed under the GNU General Public License,
  * Version 2.  See the file COPYING for more details.
  */
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/errno.h>
 #include <xen/bitmap.h>
@@ -36,21 +37,6 @@
  * include/asm-ppc64/bitops.h and include/asm-s390/bitops.h
  * for the best explanations of this ordering.
  */
-
-/*
- * If a bitmap has a number of bits which is not a multiple of 8 then
- * the last few bits of the last byte of the bitmap can be
- * unexpectedly set which can confuse consumers (e.g. in the tools)
- * who also round up their loops to 8 bits. Ensure we clear those left
- * over bits so as to prevent surprises.
- */
-static void clamp_last_byte(uint8_t *bp, unsigned int nbits)
-{
-	unsigned int remainder = nbits % 8;
-
-	if (remainder)
-		bp[nbits/8] &= (1U << remainder) - 1;
-}
 
 int __bitmap_empty(const unsigned long *bitmap, int bits)
 {
@@ -143,9 +129,7 @@ void __bitmap_shift_right(unsigned long *dst,
 		lower = src[off + k];
 		if (left && off + k == lim - 1)
 			lower &= mask;
-		dst[k] = rem
-		         ? (upper << (BITS_PER_LONG - rem)) | (lower >> rem)
-		         : lower;
+		dst[k] = upper << (BITS_PER_LONG - rem) | lower >> rem;
 		if (left && k == lim - 1)
 			dst[k] &= mask;
 	}
@@ -186,9 +170,7 @@ void __bitmap_shift_left(unsigned long *dst,
 		upper = src[k];
 		if (left && k == lim - 1)
 			upper &= (1UL << left) - 1;
-		dst[k + off] = rem ? (lower >> (BITS_PER_LONG - rem))
-		                      | (upper << rem)
-		                   : upper;
+		dst[k + off] = lower  >> (BITS_PER_LONG - rem) | upper << rem;
 		if (left && k + off == lim - 1)
 			dst[k + off] &= (1UL << left) - 1;
 	}
@@ -503,7 +485,6 @@ void bitmap_long_to_byte(uint8_t *bp, const unsigned long *lp, int nbits)
 			nbits -= 8;
 		}
 	}
-	clamp_last_byte(bp, nbits);
 }
 
 void bitmap_byte_to_long(unsigned long *lp, const uint8_t *bp, int nbits)
@@ -526,7 +507,6 @@ void bitmap_byte_to_long(unsigned long *lp, const uint8_t *bp, int nbits)
 void bitmap_long_to_byte(uint8_t *bp, const unsigned long *lp, int nbits)
 {
 	memcpy(bp, lp, (nbits+7)/8);
-	clamp_last_byte(bp, nbits);
 }
 
 void bitmap_byte_to_long(unsigned long *lp, const uint8_t *bp, int nbits)

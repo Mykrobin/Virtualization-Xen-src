@@ -1,17 +1,13 @@
-XEN_ROOT=$(CURDIR)/../..
+
+XEN_ROOT=../..
 include $(XEN_ROOT)/tools/Rules.mk
 
 CFLAGS  += -Werror
 
 CFLAGS  += $(CFLAGS_libxenctrl)
 CFLAGS  += $(CFLAGS_libxenstore)
-LDLIBS += $(LDLIBS_libxenctrl)
-LDLIBS += $(LDLIBS_libxenstore)
-LDLIBS += $(SOCKET_LIBS)
-
-LDLIBS_xenconsoled += $(UTIL_LIBS)
-LDLIBS_xenconsoled += -lrt
-CONSOLE_CFLAGS-$(CONFIG_ARM) = -DCONFIG_ARM
+LDFLAGS += $(LDFLAGS_libxenctrl)
+LDFLAGS += $(LDFLAGS_libxenstore)
 
 BIN      = xenconsoled xenconsole
 
@@ -20,39 +16,22 @@ all: $(BIN)
 
 .PHONY: clean
 clean:
-	$(RM) *.a *.so *.o *.rpm $(BIN) $(DEPS_RM)
+	$(RM) *.a *.so *.o *.rpm $(BIN) $(DEPS)
 	$(RM) client/*.o daemon/*.o
-	$(RM) client/_paths.h
-	$(RM) daemon/_paths.h
 
-.PHONY: distclean
-distclean: clean
-
-daemon/main.o: daemon/_paths.h
-daemon/io.o: CFLAGS += $(CFLAGS_libxenevtchn) $(CFLAGS_libxengnttab) $(CONSOLE_CFLAGS-y)
 xenconsoled: $(patsubst %.c,%.o,$(wildcard daemon/*.c))
-	$(CC) $(LDFLAGS) $^ -o $@ $(LDLIBS) $(LDLIBS_libxenevtchn) $(LDLIBS_libxengnttab) $(LDLIBS_xenconsoled) $(APPEND_LDFLAGS)
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) \
+              $(UTIL_LIBS) $(SOCKET_LIBS) -lrt
 
-client/main.o: client/_paths.h
 xenconsole: $(patsubst %.c,%.o,$(wildcard client/*.c))
-	$(CC) $(LDFLAGS) $^ -o $@ $(LDLIBS) $(LDLIBS_xenconsole) $(APPEND_LDFLAGS)
-
-genpath-target = $(call buildmakevars2header,client/_paths.h)
-$(eval $(genpath-target))
-
-genpath-target = $(call buildmakevars2header,daemon/_paths.h)
-$(eval $(genpath-target))
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS) \
+	      $(UTIL_LIBS) $(SOCKET_LIBS)
 
 .PHONY: install
 install: $(BIN)
-	$(INSTALL_DIR) $(DESTDIR)/$(sbindir)
-	$(INSTALL_PROG) xenconsoled $(DESTDIR)/$(sbindir)
-	$(INSTALL_DIR) $(DESTDIR)$(LIBEXEC_BIN)
-	$(INSTALL_PROG) xenconsole $(DESTDIR)$(LIBEXEC_BIN)
+	$(INSTALL_DIR) $(DESTDIR)/$(SBINDIR)
+	$(INSTALL_PROG) xenconsoled $(DESTDIR)/$(SBINDIR)
+	$(INSTALL_DIR) $(DESTDIR)$(PRIVATE_BINDIR)
+	$(INSTALL_PROG) xenconsole $(DESTDIR)$(PRIVATE_BINDIR)
 
-.PHONY: uninstall
-uninstall:
-	rm -f $(DESTDIR)$(LIBEXEC_BIN)/xenconsole
-	rm -f $(DESTDIR)$(sbindir)/xenconsoled
-
--include $(DEPS_INCLUDE)
+-include $(DEPS)

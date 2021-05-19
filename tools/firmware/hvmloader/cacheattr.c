@@ -16,7 +16,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #include "util.h"
@@ -39,10 +40,17 @@
 #define MSR_PAT              0x0277
 #define MSR_MTRRdefType      0x02ff
 
-unsigned int cpu_phys_addr(void)
+void cacheattr_init(void)
 {
     uint32_t eax, ebx, ecx, edx;
-    unsigned int phys_bits = 36;
+    uint64_t mtrr_cap, mtrr_def, content, addr_mask;
+    unsigned int i, nr_var_ranges, phys_bits = 36;
+
+    /* Does the CPU support architectural MTRRs? */
+    cpuid(0x00000001, &eax, &ebx, &ecx, &edx);
+    if ( !(edx & (1u << 12)) )
+         return;
+
     /* Find the physical address size for this CPU. */
     cpuid(0x80000000, &eax, &ebx, &ecx, &edx);
     if ( eax >= 0x80000008 )
@@ -50,22 +58,6 @@ unsigned int cpu_phys_addr(void)
         cpuid(0x80000008, &eax, &ebx, &ecx, &edx);
         phys_bits = (uint8_t)eax;
     }
-
-    return phys_bits;
-}
-
-void cacheattr_init(void)
-{
-    uint32_t eax, ebx, ecx, edx;
-    uint64_t mtrr_cap, mtrr_def, content, addr_mask;
-    unsigned int i, nr_var_ranges, phys_bits;
-
-    /* Does the CPU support architectural MTRRs? */
-    cpuid(0x00000001, &eax, &ebx, &ecx, &edx);
-    if ( !(edx & (1u << 12)) )
-         return;
-
-    phys_bits = cpu_phys_addr();
 
     printf("%u-bit phys ... ", phys_bits);
 
@@ -96,33 +88,20 @@ void cacheattr_init(void)
     nr_var_ranges = (uint8_t)mtrr_cap;
     if ( nr_var_ranges != 0 )
     {
-        uint64_t base = pci_mem_start, size;
+        unsigned long base = pci_mem_start, size;
+        int i;
 
-        for ( i = 0; !(base >> 32) && (i < nr_var_ranges); i++ )
+        for ( i = 0; (base != pci_mem_end) && (i < nr_var_ranges); i++ )
         {
             size = PAGE_SIZE;
             while ( !(base & size) )
                 size <<= 1;
-            while ( ((base + size) < base) || ((base + size - 1) >> 32) )
+            while ( ((base + size) < base) || ((base + size) > pci_mem_end) )
                 size >>= 1;
 
             wrmsr(MSR_MTRRphysBase(i), base);
-            wrmsr(MSR_MTRRphysMask(i), (~(size - 1) & addr_mask) | (1u << 11));
-
-            base += size;
-        }
-
-        for ( base = pci_hi_mem_start;
-              (base != pci_hi_mem_end) && (i < nr_var_ranges); i++ )
-        {
-            size = PAGE_SIZE;
-            while ( !(base & size) )
-                size <<= 1;
-            while ( (base + size < base) || (base + size > pci_hi_mem_end) )
-                size >>= 1;
-
-            wrmsr(MSR_MTRRphysBase(i), base);
-            wrmsr(MSR_MTRRphysMask(i), (~(size - 1) & addr_mask) | (1u << 11));
+            wrmsr(MSR_MTRRphysMask(i),
+                  (~(uint64_t)(size-1) & addr_mask) | (1u << 11));
 
             base += size;
         }
@@ -132,13 +111,3 @@ void cacheattr_init(void)
 
     wrmsr(MSR_MTRRdefType, mtrr_def);
 }
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * tab-width: 4
- * indent-tabs-mode: nil
- * End:
- */

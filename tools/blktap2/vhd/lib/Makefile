@@ -1,4 +1,4 @@
-XEN_ROOT=$(CURDIR)/../../../..
+XEN_ROOT=../../../..
 BLKTAP_ROOT := ../..
 include $(XEN_ROOT)/tools/Rules.mk
 
@@ -10,21 +10,22 @@ LVM-UTIL-OBJ    := $(BLKTAP_ROOT)/lvm/lvm-util.o
 
 LIBVHD-BUILD    := libvhd.a
 
-INST-DIR         = $(libdir)
+INST-DIR         = $(LIBDIR)
 
 CFLAGS          += -Werror
 CFLAGS          += -Wno-unused
 CFLAGS          += -I../../include
 CFLAGS          += -D_GNU_SOURCE
 CFLAGS          += -fPIC
+CFLAGS          += -g
 
 ifeq ($(CONFIG_Linux),y)
 LIBS            := -luuid
 endif
 
-ifeq ($(CONFIG_LIBICONV),y)
-LIBS            += -liconv
-endif
+# Get gcc to generate the dependencies for us.
+CFLAGS          += -Wp,-MD,.$(@F).d
+DEPS             = .*.d
 
 LIB-SRCS        := libvhd.c
 LIB-SRCS        += libvhd-journal.c
@@ -41,48 +42,34 @@ LIB-SRCS        += vhd-util-set-field.c
 LIB-SRCS        += vhd-util-snapshot.c
 LIB-SRCS        += vhd-util-scan.c
 LIB-SRCS        += vhd-util-check.c
-LIB-SRCS        += vhd-util-uuid.c
 LIB-SRCS        += relative-path.c
 LIB-SRCS        += atomicio.c
 
 LIB-OBJS         = $(patsubst %.c,%.o,$(LIB-SRCS))
 LIB-OBJS        += $(LVM-UTIL-OBJ)
 
-LIB-PICOBJS      = $(patsubst %.o,%.opic,$(LIB-OBJS))
-
 LIBVHD           = libvhd.a libvhd.so.$(LIBVHD-MAJOR).$(LIBVHD-MINOR)
 
 all: build
 
-build: libvhd.a libvhd.so.$(LIBVHD-MAJOR).$(LIBVHD-MINOR)
+build: $(LIBVHD-BUILD)
 
 libvhd.a: $(LIB-OBJS)
-	$(AR) rc $@ $^
-
-libvhd.so.$(LIBVHD-MAJOR).$(LIBVHD-MINOR): $(LIB-PICOBJS)
-	$(CC) -Wl,$(SONAME_LDFLAG),$(LIBVHD-SONAME) $(SHLIB_LDFLAGS) \
-		$(LDFLAGS) -o libvhd.so.$(LIBVHD-MAJOR).$(LIBVHD-MINOR) $^ $(LIBS)
+	$(CC) $(CFLAGS) -Wl,$(SONAME_LDFLAG),$(LIBVHD-SONAME) $(SHLIB_CFLAGS) \
+		$(LDFLAGS) -o libvhd.so.$(LIBVHD-MAJOR).$(LIBVHD-MINOR) $(LIBS) $^
 	ln -sf libvhd.so.$(LIBVHD-MAJOR).$(LIBVHD-MINOR) libvhd.so.$(LIBVHD-MAJOR)
 	ln -sf libvhd.so.$(LIBVHD-MAJOR) libvhd.so
+	$(AR) rc $@ $^
 
 install: all
 	$(INSTALL_DIR) -p $(DESTDIR)$(INST-DIR)
-	$(INSTALL_DATA) libvhd.a $(DESTDIR)$(INST-DIR)
-	$(INSTALL_PROG) libvhd.so.$(LIBVHD-MAJOR).$(LIBVHD-MINOR) $(DESTDIR)$(INST-DIR)
+	$(INSTALL_DATA) $(LIBVHD) $(DESTDIR)$(INST-DIR)
 	ln -sf libvhd.so.$(LIBVHD-MAJOR).$(LIBVHD-MINOR) $(DESTDIR)$(INST-DIR)/libvhd.so.$(LIBVHD-MAJOR)
 	ln -sf libvhd.so.$(LIBVHD-MAJOR) $(DESTDIR)$(INST-DIR)/libvhd.so
 
-uninstall:
-	rm -f $(DESTDIR)$(INST-DIR)/libvhd.so
-	rm -f $(DESTDIR)$(INST-DIR)/libvhd.so.$(LIBVHD-MAJOR)
-	rm -f $(DESTDIR)$(INST-DIR)/libvhd.so.$(LIBVHD-MAJOR).$(LIBVHD-MINOR)
-	rm -f $(DESTDIR)$(INST-DIR)/libvhd.a
-
 clean:
-	rm -rf *.a *.so* *.o *.opic *~ $(DEPS_RM) $(LIBVHD)
+	rm -rf *.a *.so* *.o *~ $(DEPS) $(LIBVHD)
 
-distclean: clean
+.PHONY: all build clean install libvhd
 
-.PHONY: all build clean distclean install libvhd uninstall
-
--include $(DEPS_INCLUDE)
+-include $(DEPS)

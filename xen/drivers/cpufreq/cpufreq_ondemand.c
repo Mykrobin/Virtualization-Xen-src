@@ -18,6 +18,7 @@
 #include <xen/types.h>
 #include <xen/sched.h>
 #include <xen/timer.h>
+#include <asm/config.h>
 #include <acpi/cpufreq/cpufreq.h>
 
 #define DEF_FREQUENCY_UP_THRESHOLD              (80)
@@ -55,7 +56,10 @@ static struct dbs_tuners {
     .powersave_bias = 0,
 };
 
-static DEFINE_PER_CPU(struct timer, dbs_timer);
+static struct timer dbs_timer[NR_CPUS];
+
+/* Turbo Mode */
+static int turbo_detected = 0;
 
 int write_ondemand_sampling_rate(unsigned int sampling_rate)
 {
@@ -107,6 +111,10 @@ static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
 
     policy = this_dbs_info->cur_policy;
     max = policy->max;
+    if (turbo_detected && !this_dbs_info->turbo_enabled) {
+        if (max > policy->cpuinfo.second_max_freq)
+            max = policy->cpuinfo.second_max_freq;
+    }
 
     if (unlikely(policy->resume)) {
         __cpufreq_driver_target(policy, max,CPUFREQ_RELATION_H);
@@ -121,7 +129,7 @@ static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
         return;
 
     /* Get Idle Time */
-    for_each_cpu(j, policy->cpus) {
+    for_each_cpu_mask(j, policy->cpus) {
         uint64_t idle_ns, total_idle_ns;
         uint64_t load, load_freq, freq_avg;
         struct cpu_dbs_info_s *j_dbs_info;
@@ -144,7 +152,7 @@ static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
     }
 
     /* Check for frequency increase */
-    if (max_load_freq > (uint64_t) dbs_tuners_ins.up_threshold * policy->cur) {
+    if (max_load_freq > dbs_tuners_ins.up_threshold * policy->cur) {
         /* if we are already at full speed then break out early */
         if (policy->cur == max)
             return;
@@ -162,8 +170,7 @@ static void dbs_check_cpu(struct cpu_dbs_info_s *this_dbs_info)
      * can support the current CPU usage without triggering the up
      * policy. To be safe, we focus 10 points under the threshold.
      */
-    if (max_load_freq
-        < (uint64_t) (dbs_tuners_ins.up_threshold - 10) * policy->cur) {
+    if (max_load_freq < (dbs_tuners_ins.up_threshold - 10) * policy->cur) {
         uint64_t freq_next;
 
         freq_next = max_load_freq / (dbs_tuners_ins.up_threshold - 10);
@@ -181,7 +188,7 @@ static void do_dbs_timer(void *dbs)
 
     dbs_check_cpu(dbs_info);
 
-    set_timer(&per_cpu(dbs_timer, dbs_info->cpu),
+    set_timer(&dbs_timer[dbs_info->cpu],
             align_timer(NOW() , dbs_tuners_ins.sampling_rate));
 }
 
@@ -189,10 +196,10 @@ static void dbs_timer_init(struct cpu_dbs_info_s *dbs_info)
 {
     dbs_info->enable = 1;
 
-    init_timer(&per_cpu(dbs_timer, dbs_info->cpu), do_dbs_timer,
+    init_timer(&dbs_timer[dbs_info->cpu], do_dbs_timer, 
         (void *)dbs_info, dbs_info->cpu);
 
-    set_timer(&per_cpu(dbs_timer, dbs_info->cpu), NOW()+dbs_tuners_ins.sampling_rate);
+    set_timer(&dbs_timer[dbs_info->cpu], NOW()+dbs_tuners_ins.sampling_rate);
 
     if ( processor_pminfo[dbs_info->cpu]->perf.shared_type
             == CPUFREQ_SHARED_TYPE_HW )
@@ -204,15 +211,8 @@ static void dbs_timer_init(struct cpu_dbs_info_s *dbs_info)
 static void dbs_timer_exit(struct cpu_dbs_info_s *dbs_info)
 {
     dbs_info->enable = 0;
-
-    /*
-     * The timer function may be running (from cpufreq_dbs_timer_resume) -
-     * wait for it to complete.
-     */
-    while ( cmpxchg(&dbs_info->stoppable, 1, 0) < 0 )
-        cpu_relax();
-
-    kill_timer(&per_cpu(dbs_timer, dbs_info->cpu));
+    dbs_info->stoppable = 0;
+    kill_timer(&dbs_timer[dbs_info->cpu]);
 }
 
 int cpufreq_governor_dbs(struct cpufreq_policy *policy, unsigned int event)
@@ -240,7 +240,7 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy, unsigned int event)
 
         dbs_enable++;
 
-        for_each_cpu(j, policy->cpus) {
+        for_each_cpu_mask(j, policy->cpus) {
             struct cpu_dbs_info_s *j_dbs_info;
             j_dbs_info = &per_cpu(cpu_dbs_info, j);
             j_dbs_info->cur_policy = policy;
@@ -254,7 +254,7 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy, unsigned int event)
          * is used for first time
          */
         if ((dbs_enable == 1) && !dbs_tuners_ins.sampling_rate) {
-            def_sampling_rate = (uint64_t) policy->cpuinfo.transition_latency *
+            def_sampling_rate = policy->cpuinfo.transition_latency *
                 DEF_SAMPLING_RATE_LATENCY_MULTIPLIER;
 
             if (def_sampling_rate < MIN_STAT_SAMPLING_RATE)
@@ -275,15 +275,12 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy, unsigned int event)
             } else
                 dbs_tuners_ins.sampling_rate = usr_sampling_rate;
         }
+        this_dbs_info->turbo_enabled = 1;
         dbs_timer_init(this_dbs_info);
 
         break;
 
     case CPUFREQ_GOV_STOP:
-        if ( !this_dbs_info->enable )
-            /* Already not enabled */
-            break;
-
         dbs_timer_exit(this_dbs_info);
         dbs_enable--;
 
@@ -307,7 +304,7 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy, unsigned int event)
     return 0;
 }
 
-static bool_t __init cpufreq_dbs_handle_option(const char *name, const char *val)
+static void __init cpufreq_dbs_handle_option(const char *name, const char *val)
 {
     if ( !strcmp(name, "rate") && val )
     {
@@ -345,9 +342,6 @@ static bool_t __init cpufreq_dbs_handle_option(const char *name, const char *val
         }
         dbs_tuners_ins.powersave_bias = tmp;
     }
-    else
-        return 0;
-    return 1;
 }
 
 struct cpufreq_governor cpufreq_gov_dbs = {
@@ -358,9 +352,22 @@ struct cpufreq_governor cpufreq_gov_dbs = {
 
 static int __init cpufreq_gov_dbs_init(void)
 {
+#ifdef CONFIG_X86
+    unsigned int eax = cpuid_eax(6);
+    if ( eax & 0x2 ) {
+        turbo_detected = 1;
+        printk(XENLOG_INFO "Turbo Mode detected!\n");
+    }
+#endif
     return cpufreq_register_governor(&cpufreq_gov_dbs);
 }
 __initcall(cpufreq_gov_dbs_init);
+
+static void __exit cpufreq_gov_dbs_exit(void)
+{
+    cpufreq_unregister_governor(&cpufreq_gov_dbs);
+}
+__exitcall(cpufreq_gov_dbs_exit);
 
 void cpufreq_dbs_timer_suspend(void)
 {
@@ -370,28 +377,45 @@ void cpufreq_dbs_timer_suspend(void)
 
     if ( per_cpu(cpu_dbs_info,cpu).stoppable )
     {
-        stop_timer( &per_cpu(dbs_timer, cpu) );
+        stop_timer( &dbs_timer[cpu] );
     }
 }
 
 void cpufreq_dbs_timer_resume(void)
 {
-    unsigned int cpu = smp_processor_id();
-    int8_t *stoppable = &per_cpu(cpu_dbs_info, cpu).stoppable;
+    int cpu;
+    struct timer* t;
+    s_time_t now;
 
-    if ( *stoppable )
+    cpu = smp_processor_id();
+
+    if ( per_cpu(cpu_dbs_info,cpu).stoppable )
     {
-        s_time_t now = NOW();
-        struct timer *t = &per_cpu(dbs_timer, cpu);
-
-        if ( t->expires <= now )
+        now = NOW();
+        t = &dbs_timer[cpu];
+        if (t->expires <= now)
         {
-            if ( !cmpxchg(stoppable, 1, -1) )
-                return;
             t->function(t->data);
-            (void)cmpxchg(stoppable, -1, 1);
         }
         else
-            set_timer(t, align_timer(now, dbs_tuners_ins.sampling_rate));
+        {
+            set_timer(t, align_timer(now , dbs_tuners_ins.sampling_rate));
+        }
     }
 }
+
+void cpufreq_dbs_enable_turbo(int cpuid)
+{
+    per_cpu(cpu_dbs_info, cpuid).turbo_enabled = 1;
+}
+
+void cpufreq_dbs_disable_turbo(int cpuid)
+{
+    per_cpu(cpu_dbs_info, cpuid).turbo_enabled = 0;
+}
+
+unsigned int cpufreq_dbs_get_turbo_status(int cpuid)
+{
+    return turbo_detected && per_cpu(cpu_dbs_info, cpuid).turbo_enabled;
+}
+

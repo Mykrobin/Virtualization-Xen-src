@@ -12,51 +12,50 @@
  * GNU Lesser General Public License for more details.
  */
 
-#include "libxl_osdeps.h" /* must come before any other headers */
-#include "libxl_internal.h"
+#include "_libxl_paths.h"
 
-const char *libxl__private_bindir_path(void)
+const char *libxl_sbindir_path(void)
 {
-    return LIBEXEC_BIN;
+    return SBINDIR;
 }
 
-const char *libxl__xenfirmwaredir_path(void)
+const char *libxl_bindir_path(void)
+{
+    return BINDIR;
+}
+
+const char *libxl_libexec_path(void)
+{
+    return LIBEXEC;
+}
+
+const char *libxl_libdir_path(void)
+{
+    return LIBDIR;
+}
+
+const char *libxl_sharedir_path(void)
+{
+    return SHAREDIR;
+}
+
+const char *libxl_private_bindir_path(void)
+{
+    return PRIVATE_BINDIR;
+}
+
+const char *libxl_xenfirmwaredir_path(void)
 {
     return XENFIRMWAREDIR;
 }
 
-const char *libxl__xen_script_dir_path(void)
+const char *libxl_xen_config_dir_path(void)
+{
+    return XEN_CONFIG_DIR;
+}
+
+const char *libxl_xen_script_dir_path(void)
 {
     return XEN_SCRIPT_DIR;
 }
 
-const char *libxl__run_dir_path(void)
-{
-    return XEN_RUN_DIR;
-}
-
-const char *libxl__seabios_path(void)
-{
-#ifdef SEABIOS_PATH
-    return SEABIOS_PATH;
-#else
-    return NULL;
-#endif
-}
-
-const char *libxl__ovmf_path(void)
-{
-#ifdef OVMF_PATH
-    return OVMF_PATH;
-#else
-    return NULL;
-#endif
-}
-
-/*
- * Local variables:
- * mode: C
- * c-basic-offset: 4
- * indent-tabs-mode: nil
- * End:
- */

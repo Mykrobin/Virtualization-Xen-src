@@ -1,4 +1,4 @@
-XEN_ROOT = $(CURDIR)/../../..
+XEN_ROOT = ../../..
 
 LIB_SRCS-y = fsys_iso9660.c
 
@@ -9,9 +9,6 @@ all: fs-all
 
 .PHONY: install
 install: fs-install
-
-.PHONY: uninstall
-uninstall: fs-uninstall
 
 fsys_iso9660.c: iso9660.h
 

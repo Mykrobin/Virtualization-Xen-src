@@ -3,7 +3,6 @@ override XEN_TARGET_ARCH = x86_32
 
 # User-supplied CFLAGS are not useful here.
 CFLAGS =
-EXTRA_CFLAGS_XEN_TOOLS =
 
 include $(XEN_ROOT)/tools/Rules.mk
 

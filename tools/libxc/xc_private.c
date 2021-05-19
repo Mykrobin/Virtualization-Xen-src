@@ -2,120 +2,75 @@
  * xc_private.c
  *
  * Helper functions for the rest of the library.
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <inttypes.h>
 #include "xc_private.h"
 #include "xg_private.h"
-#include "xc_dom.h"
 #include <stdarg.h>
 #include <stdlib.h>
+#include <malloc.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <assert.h>
 
-struct xc_interface_core *xc_interface_open(xentoollog_logger *logger,
-                                            xentoollog_logger *dombuild_logger,
-                                            unsigned open_flags)
-{
-    struct xc_interface_core xch_buf = { 0 }, *xch = &xch_buf;
-
-    xch->flags = open_flags;
-    xch->dombuild_logger_file = 0;
-    xc_clear_last_error(xch);
-
-    xch->error_handler   = logger;           xch->error_handler_tofree   = 0;
-    xch->dombuild_logger = dombuild_logger;  xch->dombuild_logger_tofree = 0;
-
-    if (!xch->error_handler) {
-        xch->error_handler = xch->error_handler_tofree =
-            (xentoollog_logger*)
-            xtl_createlogger_stdiostream(stderr, XTL_PROGRESS, 0);
-        if (!xch->error_handler)
-            goto err;
-    }
-
-    xch = malloc(sizeof(*xch));
-    if (!xch) {
-        xch = &xch_buf;
-        PERROR("Could not allocate new xc_interface struct");
-        goto err;
-    }
-    *xch = xch_buf;
-
-    if (open_flags & XC_OPENFLAG_DUMMY)
-        return xch; /* We are done */
-
-    xch->xcall = xencall_open(xch->error_handler,
-        open_flags & XC_OPENFLAG_NON_REENTRANT ? XENCALL_OPENFLAG_NON_REENTRANT : 0U);
-    if ( xch->xcall == NULL )
-        goto err;
-
-    xch->fmem = xenforeignmemory_open(xch->error_handler, 0);
-    if ( xch->fmem == NULL )
-        goto err;
-
-    xch->dmod = xendevicemodel_open(xch->error_handler, 0);
-    if ( xch->dmod == NULL )
-        goto err;
-
-    return xch;
-
- err:
-    xenforeignmemory_close(xch->fmem);
-    xencall_close(xch->xcall);
-    xtl_logger_destroy(xch->error_handler_tofree);
-    if (xch != &xch_buf) free(xch);
-    return NULL;
-}
-
-int xc_interface_close(xc_interface *xch)
-{
-    int rc = 0;
-
-    if (!xch)
-        return 0;
-
-    rc = xencall_close(xch->xcall);
-    if (rc) PERROR("Could not close xencall interface");
-
-    rc = xenforeignmemory_close(xch->fmem);
-    if (rc) PERROR("Could not close foreign memory interface");
-
-    rc = xendevicemodel_close(xch->dmod);
-    if (rc) PERROR("Could not close device model interface");
-
-    xtl_logger_destroy(xch->dombuild_logger_tofree);
-    xtl_logger_destroy(xch->error_handler_tofree);
-
-    free(xch);
-    return rc;
-}
+static pthread_key_t last_error_pkey;
+static pthread_once_t last_error_pkey_once = PTHREAD_ONCE_INIT;
 
 static pthread_key_t errbuf_pkey;
 static pthread_once_t errbuf_pkey_once = PTHREAD_ONCE_INIT;
 
-const xc_error *xc_get_last_error(xc_interface *xch)
+#if DEBUG
+static xc_error_handler error_handler = xc_default_error_handler;
+#else
+static xc_error_handler error_handler = NULL;
+#endif
+
+void xc_default_error_handler(const xc_error *err)
 {
-    return &xch->last_error;
+    const char *desc = xc_error_code_to_desc(err->code);
+    fprintf(stderr, "ERROR %s: %s\n", desc, err->message);
 }
 
-void xc_clear_last_error(xc_interface *xch)
+static void
+_xc_clean_last_error(void *m)
 {
-    xch->last_error.code = XC_ERROR_NONE;
-    xch->last_error.message[0] = '\0';
+    free(m);
+    pthread_setspecific(last_error_pkey, NULL);
+}
+
+static void
+_xc_init_last_error(void)
+{
+    pthread_key_create(&last_error_pkey, _xc_clean_last_error);
+}
+
+static xc_error *
+_xc_get_last_error(void)
+{
+    xc_error *last_error;
+
+    pthread_once(&last_error_pkey_once, _xc_init_last_error);
+
+    last_error = pthread_getspecific(last_error_pkey);
+    if (last_error == NULL) {
+        last_error = malloc(sizeof(xc_error));
+        pthread_setspecific(last_error_pkey, last_error);
+        xc_clear_last_error();
+    }
+
+    return last_error;
+}
+
+const xc_error *xc_get_last_error(void)
+{
+    return _xc_get_last_error();
+}
+
+void xc_clear_last_error(void)
+{
+    xc_error *last_error = _xc_get_last_error();
+    last_error->code = XC_ERROR_NONE;
+    last_error->message[0] = '\0';
 }
 
 const char *xc_error_code_to_desc(int code)
@@ -138,141 +93,219 @@ const char *xc_error_code_to_desc(int code)
     return "Unknown error code";
 }
 
-void xc_reportv(xc_interface *xch, xentoollog_logger *lg,
-                xentoollog_level level, int code,
-                const char *fmt, va_list args) {
-    int saved_errno = errno;
-    char msgbuf[XC_MAX_ERROR_MSG_LEN];
-    char *msg;
-
-    /* Strip newlines from messages.
-     * XXX really the messages themselves should have the newlines removed.
-     */
-    char fmt_nonewline[512];
-    int fmt_l;
-
-    fmt_l = strlen(fmt);
-    if (fmt_l && fmt[fmt_l-1]=='\n' && fmt_l < sizeof(fmt_nonewline)) {
-        memcpy(fmt_nonewline, fmt, fmt_l-1);
-        fmt_nonewline[fmt_l-1] = 0;
-        fmt = fmt_nonewline;
-    }
-
-    if ( level >= XTL_ERROR ) {
-        msg = xch->last_error.message;
-        xch->last_error.code = code;
-    } else {
-        msg = msgbuf;
-    }
-    vsnprintf(msg, XC_MAX_ERROR_MSG_LEN-1, fmt, args);
-    msg[XC_MAX_ERROR_MSG_LEN-1] = '\0';
-
-    xtl_log(lg, level, -1, "xc",
-            "%s" "%s%s", msg,
-            code?": ":"", code ? xc_error_code_to_desc(code) : "");
-
-    errno = saved_errno;
-}
-
-void xc_report(xc_interface *xch, xentoollog_logger *lg,
-               xentoollog_level level, int code, const char *fmt, ...) {
-    va_list args;
-    va_start(args,fmt);
-    xc_reportv(xch,lg,level,code,fmt,args);
-    va_end(args);
-}
-
-void xc_report_error(xc_interface *xch, int code, const char *fmt, ...)
+xc_error_handler xc_set_error_handler(xc_error_handler handler)
 {
-    va_list args;
-    va_start(args, fmt);
-    xc_reportv(xch, xch->error_handler, XTL_ERROR, code, fmt, args);
-    va_end(args);
-}
-
-const char *xc_set_progress_prefix(xc_interface *xch, const char *doing)
-{
-    const char *old = xch->currently_progress_reporting;
-
-    xch->currently_progress_reporting = doing;
+    xc_error_handler old = error_handler;
+    error_handler = handler;
     return old;
 }
 
-void xc_report_progress_single(xc_interface *xch, const char *doing)
+static void _xc_set_error(int code, const char *msg)
 {
-    assert(doing);
-    xtl_progress(xch->error_handler, "xc", doing, 0, 0);
+    xc_error *last_error = _xc_get_last_error();
+    last_error->code = code;
+    strncpy(last_error->message, msg, XC_MAX_ERROR_MSG_LEN - 1);
+    last_error->message[XC_MAX_ERROR_MSG_LEN-1] = '\0';
 }
 
-void xc_report_progress_step(xc_interface *xch,
-                             unsigned long done, unsigned long total)
+void xc_set_error(int code, const char *fmt, ...)
 {
-    assert(xch->currently_progress_reporting);
-    xtl_progress(xch->error_handler, "xc",
-                 xch->currently_progress_reporting, done, total);
+    int saved_errno = errno;
+    char msg[XC_MAX_ERROR_MSG_LEN];
+    va_list args;
+
+    va_start(args, fmt);
+    vsnprintf(msg, XC_MAX_ERROR_MSG_LEN-1, fmt, args);
+    msg[XC_MAX_ERROR_MSG_LEN-1] = '\0';
+    va_end(args);
+
+    _xc_set_error(code, msg);
+
+    errno = saved_errno;
+
+    if ( error_handler != NULL ) {
+        xc_error *last_error = _xc_get_last_error();
+        error_handler(last_error);
+    }
 }
 
-int xc_get_pfn_type_batch(xc_interface *xch, uint32_t dom,
+#ifdef __sun__
+
+int lock_pages(void *addr, size_t len) { return 0; }
+void unlock_pages(void *addr, size_t len) { }
+
+int hcall_buf_prep(void **addr, size_t len) { return 0; }
+void hcall_buf_release(void **addr, size_t len) { }
+
+#else /* !__sun__ */
+
+int lock_pages(void *addr, size_t len)
+{
+      int e;
+      void *laddr = (void *)((unsigned long)addr & PAGE_MASK);
+      size_t llen = (len + ((unsigned long)addr - (unsigned long)laddr) +
+                     PAGE_SIZE - 1) & PAGE_MASK;
+      e = mlock(laddr, llen);
+      return e;
+}
+
+void unlock_pages(void *addr, size_t len)
+{
+    void *laddr = (void *)((unsigned long)addr & PAGE_MASK);
+    size_t llen = (len + ((unsigned long)addr - (unsigned long)laddr) +
+                   PAGE_SIZE - 1) & PAGE_MASK;
+    safe_munlock(laddr, llen);
+}
+
+static pthread_key_t hcall_buf_pkey;
+static pthread_once_t hcall_buf_pkey_once = PTHREAD_ONCE_INIT;
+struct hcall_buf {
+    void *buf;
+    void *oldbuf;
+};
+
+static void _xc_clean_hcall_buf(void *m)
+{
+    struct hcall_buf *hcall_buf = m;
+
+    if ( hcall_buf )
+    {
+        if ( hcall_buf->buf )
+        {
+            unlock_pages(hcall_buf->buf, PAGE_SIZE);
+            free(hcall_buf->buf);
+        }
+
+        free(hcall_buf);
+    }
+
+    pthread_setspecific(hcall_buf_pkey, NULL);
+}
+
+static void _xc_init_hcall_buf(void)
+{
+    pthread_key_create(&hcall_buf_pkey, _xc_clean_hcall_buf);
+}
+
+int hcall_buf_prep(void **addr, size_t len)
+{
+    struct hcall_buf *hcall_buf;
+
+    pthread_once(&hcall_buf_pkey_once, _xc_init_hcall_buf);
+
+    hcall_buf = pthread_getspecific(hcall_buf_pkey);
+    if ( !hcall_buf )
+    {
+        hcall_buf = calloc(1, sizeof(*hcall_buf));
+        if ( !hcall_buf )
+            goto out;
+        pthread_setspecific(hcall_buf_pkey, hcall_buf);
+    }
+
+    if ( !hcall_buf->buf )
+    {
+        hcall_buf->buf = xc_memalign(PAGE_SIZE, PAGE_SIZE);
+        if ( !hcall_buf->buf || lock_pages(hcall_buf->buf, PAGE_SIZE) )
+        {
+            free(hcall_buf->buf);
+            hcall_buf->buf = NULL;
+            goto out;
+        }
+    }
+
+    if ( (len < PAGE_SIZE) && !hcall_buf->oldbuf )
+    {
+        memcpy(hcall_buf->buf, *addr, len);
+        hcall_buf->oldbuf = *addr;
+        *addr = hcall_buf->buf;
+        return 0;
+    }
+
+ out:
+    return lock_pages(*addr, len);
+}
+
+void hcall_buf_release(void **addr, size_t len)
+{
+    struct hcall_buf *hcall_buf = pthread_getspecific(hcall_buf_pkey);
+
+    if ( hcall_buf && (hcall_buf->buf == *addr) )
+    {
+        memcpy(hcall_buf->oldbuf, *addr, len);
+        *addr = hcall_buf->oldbuf;
+        hcall_buf->oldbuf = NULL;
+    }
+    else
+    {
+        unlock_pages(*addr, len);
+    }
+}
+
+#endif
+
+/* NB: arr must be locked */
+int xc_get_pfn_type_batch(int xc_handle, uint32_t dom,
                           unsigned int num, xen_pfn_t *arr)
 {
-    int rc;
     DECLARE_DOMCTL;
-    DECLARE_HYPERCALL_BOUNCE(arr, sizeof(*arr) * num, XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
-    if ( xc_hypercall_bounce_pre(xch, arr) )
-        return -1;
     domctl.cmd = XEN_DOMCTL_getpageframeinfo3;
-    domctl.domain = dom;
+    domctl.domain = (domid_t)dom;
     domctl.u.getpageframeinfo3.num = num;
     set_xen_guest_handle(domctl.u.getpageframeinfo3.array, arr);
-    rc = do_domctl_retry_efault(xch, &domctl);
-    xc_hypercall_bounce_post(xch, arr);
-    return rc;
+    return do_domctl(xc_handle, &domctl);
 }
 
 int xc_mmuext_op(
-    xc_interface *xch,
+    int xc_handle,
     struct mmuext_op *op,
     unsigned int nr_ops,
-    uint32_t dom)
+    domid_t dom)
 {
-    DECLARE_HYPERCALL_BOUNCE(op, nr_ops*sizeof(*op), XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
-    long ret = -1;
+    DECLARE_HYPERCALL;
+    long ret = -EINVAL;
 
-    if ( xc_hypercall_bounce_pre(xch, op) )
+    if ( hcall_buf_prep((void **)&op, nr_ops*sizeof(*op)) != 0 )
     {
-        PERROR("Could not bounce memory for mmuext op hypercall");
+        PERROR("Could not lock memory for Xen hypercall");
         goto out1;
     }
 
-    ret = xencall4(xch->xcall, __HYPERVISOR_mmuext_op,
-                   HYPERCALL_BUFFER_AS_ARG(op),
-                   nr_ops, 0, dom);
+    hypercall.op     = __HYPERVISOR_mmuext_op;
+    hypercall.arg[0] = (unsigned long)op;
+    hypercall.arg[1] = (unsigned long)nr_ops;
+    hypercall.arg[2] = (unsigned long)0;
+    hypercall.arg[3] = (unsigned long)dom;
 
-    xc_hypercall_bounce_post(xch, op);
+    ret = do_xen_hypercall(xc_handle, &hypercall);
+
+    hcall_buf_release((void **)&op, nr_ops*sizeof(*op));
 
  out1:
     return ret;
 }
 
-static int flush_mmu_updates(xc_interface *xch, struct xc_mmu *mmu)
+static int flush_mmu_updates(int xc_handle, struct xc_mmu *mmu)
 {
-    int rc, err = 0;
-    DECLARE_NAMED_HYPERCALL_BOUNCE(updates, mmu->updates, mmu->idx*sizeof(*mmu->updates), XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
+    int err = 0;
+    DECLARE_HYPERCALL;
 
     if ( mmu->idx == 0 )
         return 0;
 
-    if ( xc_hypercall_bounce_pre(xch, updates) )
+    hypercall.op     = __HYPERVISOR_mmu_update;
+    hypercall.arg[0] = (unsigned long)mmu->updates;
+    hypercall.arg[1] = (unsigned long)mmu->idx;
+    hypercall.arg[2] = 0;
+    hypercall.arg[3] = mmu->subject;
+
+    if ( lock_pages(mmu->updates, sizeof(mmu->updates)) != 0 )
     {
-        PERROR("flush_mmu_updates: bounce buffer failed");
+        PERROR("flush_mmu_updates: mmu updates lock_pages failed");
         err = 1;
         goto out;
     }
 
-    rc = xencall4(xch->xcall, __HYPERVISOR_mmu_update,
-                  HYPERCALL_BUFFER_AS_ARG(updates),
-                  mmu->idx, 0, mmu->subject);
-    if ( rc < 0 )
+    if ( do_xen_hypercall(xc_handle, &hypercall) < 0 )
     {
         ERROR("Failure when submitting mmu updates");
         err = 1;
@@ -280,78 +313,160 @@ static int flush_mmu_updates(xc_interface *xch, struct xc_mmu *mmu)
 
     mmu->idx = 0;
 
-    xc_hypercall_bounce_post(xch, updates);
+    unlock_pages(mmu->updates, sizeof(mmu->updates));
 
  out:
     return err;
 }
 
-struct xc_mmu *xc_alloc_mmu_updates(xc_interface *xch, unsigned int subject)
+struct xc_mmu *xc_alloc_mmu_updates(int xc_handle, domid_t dom)
 {
     struct xc_mmu *mmu = malloc(sizeof(*mmu));
     if ( mmu == NULL )
         return mmu;
     mmu->idx     = 0;
-    mmu->subject = subject;
+    mmu->subject = dom;
     return mmu;
 }
 
-int xc_add_mmu_update(xc_interface *xch, struct xc_mmu *mmu,
+int xc_add_mmu_update(int xc_handle, struct xc_mmu *mmu,
                       unsigned long long ptr, unsigned long long val)
 {
     mmu->updates[mmu->idx].ptr = ptr;
     mmu->updates[mmu->idx].val = val;
 
     if ( ++mmu->idx == MAX_MMU_UPDATES )
-        return flush_mmu_updates(xch, mmu);
+        return flush_mmu_updates(xc_handle, mmu);
 
     return 0;
 }
 
-int xc_flush_mmu_updates(xc_interface *xch, struct xc_mmu *mmu)
+int xc_flush_mmu_updates(int xc_handle, struct xc_mmu *mmu)
 {
-    return flush_mmu_updates(xch, mmu);
+    return flush_mmu_updates(xc_handle, mmu);
 }
 
-long do_memory_op(xc_interface *xch, int cmd, void *arg, size_t len)
+int xc_memory_op(int xc_handle,
+                 int cmd,
+                 void *arg)
 {
-    DECLARE_HYPERCALL_BOUNCE(arg, len, XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
-    long ret = -1;
+    DECLARE_HYPERCALL;
+    struct xen_memory_reservation *reservation = arg;
+    struct xen_machphys_mfn_list *xmml = arg;
+    xen_pfn_t *extent_start;
+    long ret = -EINVAL;
 
-    if ( xc_hypercall_bounce_pre(xch, arg) )
+    hypercall.op     = __HYPERVISOR_memory_op;
+    hypercall.arg[0] = (unsigned long)cmd;
+    hypercall.arg[1] = (unsigned long)arg;
+
+    switch ( cmd )
     {
-        PERROR("Could not bounce memory for XENMEM hypercall");
-        goto out1;
+    case XENMEM_increase_reservation:
+    case XENMEM_decrease_reservation:
+    case XENMEM_populate_physmap:
+        if ( lock_pages(reservation, sizeof(*reservation)) != 0 )
+        {
+            PERROR("Could not lock");
+            goto out1;
+        }
+        get_xen_guest_handle(extent_start, reservation->extent_start);
+        if ( (extent_start != NULL) &&
+             (lock_pages(extent_start,
+                    reservation->nr_extents * sizeof(xen_pfn_t)) != 0) )
+        {
+            PERROR("Could not lock");
+            unlock_pages(reservation, sizeof(*reservation));
+            goto out1;
+        }
+        break;
+    case XENMEM_machphys_mfn_list:
+        if ( lock_pages(xmml, sizeof(*xmml)) != 0 )
+        {
+            PERROR("Could not lock");
+            goto out1;
+        }
+        get_xen_guest_handle(extent_start, xmml->extent_start);
+        if ( lock_pages(extent_start,
+                   xmml->max_extents * sizeof(xen_pfn_t)) != 0 )
+        {
+            PERROR("Could not lock");
+            unlock_pages(xmml, sizeof(*xmml));
+            goto out1;
+        }
+        break;
+    case XENMEM_add_to_physmap:
+        if ( lock_pages(arg, sizeof(struct xen_add_to_physmap)) )
+        {
+            PERROR("Could not lock");
+            goto out1;
+        }
+        break;
+    case XENMEM_current_reservation:
+    case XENMEM_maximum_reservation:
+    case XENMEM_maximum_gpfn:
+        if ( lock_pages(arg, sizeof(domid_t)) )
+        {
+            PERROR("Could not lock");
+            goto out1;
+        }
+        break;
+    case XENMEM_set_pod_target:
+    case XENMEM_get_pod_target:
+        if ( lock_pages(arg, sizeof(struct xen_pod_target)) )
+        {
+            PERROR("Could not lock");
+            goto out1;
+        }
+        break;
     }
 
-    ret = xencall2(xch->xcall, __HYPERVISOR_memory_op,
-                   cmd, HYPERCALL_BUFFER_AS_ARG(arg));
+    ret = do_xen_hypercall(xc_handle, &hypercall);
 
-    xc_hypercall_bounce_post(xch, arg);
+    switch ( cmd )
+    {
+    case XENMEM_increase_reservation:
+    case XENMEM_decrease_reservation:
+    case XENMEM_populate_physmap:
+        unlock_pages(reservation, sizeof(*reservation));
+        get_xen_guest_handle(extent_start, reservation->extent_start);
+        if ( extent_start != NULL )
+            unlock_pages(extent_start,
+                         reservation->nr_extents * sizeof(xen_pfn_t));
+        break;
+    case XENMEM_machphys_mfn_list:
+        unlock_pages(xmml, sizeof(*xmml));
+        get_xen_guest_handle(extent_start, xmml->extent_start);
+        unlock_pages(extent_start,
+                     xmml->max_extents * sizeof(xen_pfn_t));
+        break;
+    case XENMEM_add_to_physmap:
+        unlock_pages(arg, sizeof(struct xen_add_to_physmap));
+        break;
+    case XENMEM_current_reservation:
+    case XENMEM_maximum_reservation:
+    case XENMEM_maximum_gpfn:
+        unlock_pages(arg, sizeof(domid_t));
+        break;
+    case XENMEM_set_pod_target:
+    case XENMEM_get_pod_target:
+        unlock_pages(arg, sizeof(struct xen_pod_target));
+        break;
+    }
+
  out1:
     return ret;
 }
 
-int xc_maximum_ram_page(xc_interface *xch, unsigned long *max_mfn)
-{
-    long rc = do_memory_op(xch, XENMEM_maximum_ram_page, NULL, 0);
 
-    if ( rc >= 0 )
-    {
-        *max_mfn = rc;
-        rc = 0;
-    }
-    return rc;
-}
-
-long long xc_domain_get_cpu_usage(xc_interface *xch, uint32_t domid, int vcpu)
+long long xc_domain_get_cpu_usage( int xc_handle, domid_t domid, int vcpu )
 {
     DECLARE_DOMCTL;
 
     domctl.cmd = XEN_DOMCTL_getvcpuinfo;
-    domctl.domain = domid;
+    domctl.domain = (domid_t)domid;
     domctl.u.getvcpuinfo.vcpu   = (uint16_t)vcpu;
-    if ( (do_domctl(xch, &domctl) < 0) )
+    if ( (do_domctl(xc_handle, &domctl) < 0) )
     {
         PERROR("Could not get info on domain");
         return -1;
@@ -359,165 +474,141 @@ long long xc_domain_get_cpu_usage(xc_interface *xch, uint32_t domid, int vcpu)
     return domctl.u.getvcpuinfo.cpu_time;
 }
 
-int xc_machphys_mfn_list(xc_interface *xch,
-			 unsigned long max_extents,
-			 xen_pfn_t *extent_start)
-{
-    int rc;
-    DECLARE_HYPERCALL_BOUNCE(extent_start, max_extents * sizeof(xen_pfn_t), XC_HYPERCALL_BUFFER_BOUNCE_OUT);
-    struct xen_machphys_mfn_list xmml = {
-        .max_extents = max_extents,
-    };
 
-    if ( xc_hypercall_bounce_pre(xch, extent_start) )
+#ifndef __ia64__
+int xc_get_pfn_list(int xc_handle,
+                    uint32_t domid,
+                    uint64_t *pfn_buf,
+                    unsigned long max_pfns)
+{
+    DECLARE_DOMCTL;
+    int ret;
+    domctl.cmd = XEN_DOMCTL_getmemlist;
+    domctl.domain   = (domid_t)domid;
+    domctl.u.getmemlist.max_pfns = max_pfns;
+    set_xen_guest_handle(domctl.u.getmemlist.buffer, pfn_buf);
+
+#ifdef VALGRIND
+    memset(pfn_buf, 0, max_pfns * sizeof(*pfn_buf));
+#endif
+
+    if ( lock_pages(pfn_buf, max_pfns * sizeof(*pfn_buf)) != 0 )
     {
-        PERROR("Could not bounce memory for XENMEM_machphys_mfn_list hypercall");
+        PERROR("xc_get_pfn_list: pfn_buf lock failed");
         return -1;
     }
 
-    set_xen_guest_handle(xmml.extent_start, extent_start);
-    rc = do_memory_op(xch, XENMEM_machphys_mfn_list, &xmml, sizeof(xmml));
-    if (rc || xmml.nr_extents != max_extents)
-        rc = -1;
-    else
-        rc = 0;
+    ret = do_domctl(xc_handle, &domctl);
 
-    xc_hypercall_bounce_post(xch, extent_start);
+    unlock_pages(pfn_buf, max_pfns * sizeof(*pfn_buf));
 
-    return rc;
+    return (ret < 0) ? -1 : domctl.u.getmemlist.num_pfns;
 }
+#endif
 
-long xc_get_tot_pages(xc_interface *xch, uint32_t domid)
+long xc_get_tot_pages(int xc_handle, uint32_t domid)
 {
-    xc_dominfo_t info;
-    if ( (xc_domain_getinfo(xch, domid, 1, &info) != 1) ||
-         (info.domid != domid) )
-        return -1;
-    return info.nr_pages;
+    DECLARE_DOMCTL;
+    domctl.cmd = XEN_DOMCTL_getdomaininfo;
+    domctl.domain = (domid_t)domid;
+    return (do_domctl(xc_handle, &domctl) < 0) ?
+        -1 : domctl.u.getdomaininfo.tot_pages;
 }
 
-int xc_copy_to_domain_page(xc_interface *xch,
+int xc_copy_to_domain_page(int xc_handle,
                            uint32_t domid,
                            unsigned long dst_pfn,
                            const char *src_page)
 {
     void *vaddr = xc_map_foreign_range(
-        xch, domid, PAGE_SIZE, PROT_WRITE, dst_pfn);
+        xc_handle, domid, PAGE_SIZE, PROT_WRITE, dst_pfn);
     if ( vaddr == NULL )
         return -1;
     memcpy(vaddr, src_page, PAGE_SIZE);
     munmap(vaddr, PAGE_SIZE);
-    xc_domain_cacheflush(xch, domid, dst_pfn, 1);
     return 0;
 }
 
-int xc_clear_domain_pages(xc_interface *xch,
-                          uint32_t domid,
-                          unsigned long dst_pfn,
-                          int num)
+int xc_clear_domain_page(int xc_handle,
+                         uint32_t domid,
+                         unsigned long dst_pfn)
 {
-    size_t size = num * PAGE_SIZE;
     void *vaddr = xc_map_foreign_range(
-        xch, domid, size, PROT_WRITE, dst_pfn);
+        xc_handle, domid, PAGE_SIZE, PROT_WRITE, dst_pfn);
     if ( vaddr == NULL )
         return -1;
-    memset(vaddr, 0, size);
-    munmap(vaddr, size);
-    xc_domain_cacheflush(xch, domid, dst_pfn, num);
+    memset(vaddr, 0, PAGE_SIZE);
+    munmap(vaddr, PAGE_SIZE);
     return 0;
 }
 
-int xc_domctl(xc_interface *xch, struct xen_domctl *domctl)
+int xc_domctl(int xc_handle, struct xen_domctl *domctl)
 {
-    return do_domctl(xch, domctl);
+    return do_domctl(xc_handle, domctl);
 }
 
-int xc_sysctl(xc_interface *xch, struct xen_sysctl *sysctl)
+int xc_sysctl(int xc_handle, struct xen_sysctl *sysctl)
 {
-    return do_sysctl(xch, sysctl);
+    return do_sysctl(xc_handle, sysctl);
 }
 
-int xc_version(xc_interface *xch, int cmd, void *arg)
+int xc_version(int xc_handle, int cmd, void *arg)
 {
-    DECLARE_HYPERCALL_BOUNCE(arg, 0, XC_HYPERCALL_BUFFER_BOUNCE_OUT); /* Size unknown until cmd decoded */
-    size_t sz;
-    int rc;
+    int rc, argsize = 0;
 
     switch ( cmd )
     {
-    case XENVER_version:
-        sz = 0;
-        break;
     case XENVER_extraversion:
-        sz = sizeof(xen_extraversion_t);
+        argsize = sizeof(xen_extraversion_t);
         break;
     case XENVER_compile_info:
-        sz = sizeof(xen_compile_info_t);
+        argsize = sizeof(xen_compile_info_t);
         break;
     case XENVER_capabilities:
-        sz = sizeof(xen_capabilities_info_t);
+        argsize = sizeof(xen_capabilities_info_t);
         break;
     case XENVER_changeset:
-        sz = sizeof(xen_changeset_info_t);
+        argsize = sizeof(xen_changeset_info_t);
         break;
     case XENVER_platform_parameters:
-        sz = sizeof(xen_platform_parameters_t);
+        argsize = sizeof(xen_platform_parameters_t);
         break;
-    case XENVER_get_features:
-        sz = sizeof(xen_feature_info_t);
-        break;
-    case XENVER_pagesize:
-        sz = 0;
-        break;
-    case XENVER_guest_handle:
-        sz = sizeof(xen_domain_handle_t);
-        break;
-    case XENVER_commandline:
-        sz = sizeof(xen_commandline_t);
-        break;
-    case XENVER_build_id:
-        {
-            xen_build_id_t *build_id = (xen_build_id_t *)arg;
-            sz = sizeof(*build_id) + build_id->len;
-            HYPERCALL_BOUNCE_SET_DIR(arg, XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
-            break;
-        }
-    default:
-        ERROR("xc_version: unknown command %d\n", cmd);
-        return -EINVAL;
     }
 
-    HYPERCALL_BOUNCE_SET_SIZE(arg, sz);
-
-    if ( (sz != 0) && xc_hypercall_bounce_pre(xch, arg) )
+    if ( (argsize != 0) && (lock_pages(arg, argsize) != 0) )
     {
-        PERROR("Could not bounce buffer for version hypercall");
+        PERROR("Could not lock memory for version hypercall");
         return -ENOMEM;
     }
 
-    rc = do_xen_version(xch, cmd, HYPERCALL_BUFFER(arg));
+#ifdef VALGRIND
+    if (argsize != 0)
+        memset(arg, 0, argsize);
+#endif
 
-    if ( sz != 0 )
-        xc_hypercall_bounce_post(xch, arg);
+    rc = do_xen_version(xc_handle, cmd, arg);
+
+    if ( argsize != 0 )
+        unlock_pages(arg, argsize);
 
     return rc;
 }
 
 unsigned long xc_make_page_below_4G(
-    xc_interface *xch, uint32_t domid, unsigned long mfn)
+    int xc_handle, uint32_t domid, unsigned long mfn)
 {
     xen_pfn_t old_mfn = mfn;
     xen_pfn_t new_mfn;
 
-    if ( xc_domain_decrease_reservation_exact(
-        xch, domid, 1, 0, &old_mfn) != 0 )
+    if ( xc_domain_memory_decrease_reservation(
+        xc_handle, domid, 1, 0, &old_mfn) != 0 )
     {
         DPRINTF("xc_make_page_below_4G decrease failed. mfn=%lx\n",mfn);
         return 0;
     }
 
-    if ( xc_domain_increase_reservation_exact(
-        xch, domid, 1, 0, XENMEMF_address_bits(32), &new_mfn) != 0 )
+    if ( xc_domain_memory_increase_reservation(
+        xc_handle, domid, 1, 0, XENMEMF_address_bits(32), &new_mfn) != 0 )
     {
         DPRINTF("xc_make_page_below_4G increase failed. mfn=%lx\n",mfn);
         return 0;
@@ -539,41 +630,32 @@ _xc_init_errbuf(void)
     pthread_key_create(&errbuf_pkey, _xc_clean_errbuf);
 }
 
-const char *xc_strerror(xc_interface *xch, int errcode)
+char *safe_strerror(int errcode)
 {
-    if ( xch->flags & XC_OPENFLAG_NON_REENTRANT )
-    {
-        return strerror(errcode);
-    }
-    else
-    {
 #define XS_BUFSIZE 32
-        char *errbuf;
-        static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-        char *strerror_str;
+    char *errbuf;
+    static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    char *strerror_str;
 
-        pthread_once(&errbuf_pkey_once, _xc_init_errbuf);
+    pthread_once(&errbuf_pkey_once, _xc_init_errbuf);
 
-        errbuf = pthread_getspecific(errbuf_pkey);
-        if (errbuf == NULL) {
-            errbuf = malloc(XS_BUFSIZE);
-            if ( errbuf == NULL )
-                return "(failed to allocate errbuf)";
-            pthread_setspecific(errbuf_pkey, errbuf);
-        }
-
-        /*
-         * Thread-unsafe strerror() is protected by a local mutex. We copy the
-         * string to a thread-private buffer before releasing the mutex.
-         */
-        pthread_mutex_lock(&mutex);
-        strerror_str = strerror(errcode);
-        strncpy(errbuf, strerror_str, XS_BUFSIZE);
-        errbuf[XS_BUFSIZE-1] = '\0';
-        pthread_mutex_unlock(&mutex);
-
-        return errbuf;
+    errbuf = pthread_getspecific(errbuf_pkey);
+    if (errbuf == NULL) {
+        errbuf = malloc(XS_BUFSIZE);
+        pthread_setspecific(errbuf_pkey, errbuf);
     }
+
+    /*
+     * Thread-unsafe strerror() is protected by a local mutex. We copy
+     * the string to a thread-private buffer before releasing the mutex.
+     */
+    pthread_mutex_lock(&mutex);
+    strerror_str = strerror(errcode);
+    strncpy(errbuf, strerror_str, XS_BUFSIZE);
+    errbuf[XS_BUFSIZE-1] = '\0';
+    pthread_mutex_unlock(&mutex);
+
+    return errbuf;
 }
 
 void bitmap_64_to_byte(uint8_t *bp, const uint64_t *lp, int nbits)
@@ -616,8 +698,6 @@ int read_exact(int fd, void *data, size_t size)
         len = read(fd, (char *)data + offset, size - offset);
         if ( (len == -1) && (errno == EINTR) )
             continue;
-        if ( len == 0 )
-            errno = 0;
         if ( len <= 0 )
             return -1;
         offset += len;
@@ -643,91 +723,6 @@ int write_exact(int fd, const void *data, size_t size)
 
     return 0;
 }
-
-#if defined(__MINIOS__)
-/*
- * MiniOS's libc doesn't know about writev(). Implement it as multiple write()s.
- */
-int writev_exact(int fd, const struct iovec *iov, int iovcnt)
-{
-    int rc, i;
-
-    for ( i = 0; i < iovcnt; ++i )
-    {
-        rc = write_exact(fd, iov[i].iov_base, iov[i].iov_len);
-        if ( rc )
-            return rc;
-    }
-
-    return 0;
-}
-#else
-int writev_exact(int fd, const struct iovec *iov, int iovcnt)
-{
-    struct iovec *local_iov = NULL;
-    int rc = 0, iov_idx = 0, saved_errno = 0;
-    ssize_t len;
-
-    while ( iov_idx < iovcnt )
-    {
-        /*
-         * Skip over iov[] entries with 0 length.
-         *
-         * This is needed to cover the case where we took a partial write and
-         * all remaining vectors are of 0 length.  In such a case, the results
-         * from writev() are indistinguishable from EOF.
-         */
-        while ( iov[iov_idx].iov_len == 0 )
-            if ( ++iov_idx == iovcnt )
-                goto out;
-
-        len = writev(fd, &iov[iov_idx], min(iovcnt - iov_idx, IOV_MAX));
-        saved_errno = errno;
-
-        if ( (len == -1) && (errno == EINTR) )
-            continue;
-        if ( len <= 0 )
-        {
-            rc = -1;
-            goto out;
-        }
-
-        /* Check iov[] to see whether we had a partial or complete write. */
-        while ( (len > 0) && (iov_idx < iovcnt) )
-        {
-            if ( len >= iov[iov_idx].iov_len )
-                len -= iov[iov_idx++].iov_len;
-            else
-            {
-                /* Partial write of iov[iov_idx]. Copy iov so we can adjust
-                 * element iov_idx and resubmit the rest. */
-                if ( !local_iov )
-                {
-                    local_iov = malloc(iovcnt * sizeof(*iov));
-                    if ( !local_iov )
-                    {
-                        saved_errno = ENOMEM;
-                        goto out;
-                    }
-
-                    iov = memcpy(local_iov, iov, iovcnt * sizeof(*iov));
-                }
-
-                local_iov[iov_idx].iov_base += len;
-                local_iov[iov_idx].iov_len  -= len;
-                break;
-            }
-        }
-    }
-
-    saved_errno = 0;
-
- out:
-    free(local_iov);
-    errno = saved_errno;
-    return rc;
-}
-#endif
 
 int xc_ffs8(uint8_t x)
 {
@@ -756,10 +751,26 @@ int xc_ffs64(uint64_t x)
     return l ? xc_ffs32(l) : h ? xc_ffs32(h) + 32 : 0;
 }
 
+void *xc_memalign(size_t alignment, size_t size)
+{
+#if defined(_POSIX_C_SOURCE) && !defined(__sun__)
+    int ret;
+    void *ptr;
+    ret = posix_memalign(&ptr, alignment, size);
+    if (ret != 0)
+        return NULL;
+    return ptr;
+#elif defined(__NetBSD__) || defined(__OpenBSD__)
+    return valloc(size);
+#else
+    return memalign(alignment, size);
+#endif
+}
+
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

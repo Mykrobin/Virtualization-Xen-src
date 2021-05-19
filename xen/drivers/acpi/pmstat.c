@@ -14,13 +14,15 @@
 # more details.
 #
 # You should have received a copy of the GNU General Public License along with
-# this program; If not, see <http://www.gnu.org/licenses/>.
+# this program; if not, write to the Free Software Foundation, Inc., 59 
+# Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #
 # The full GNU General Public License is included in this distribution in the
 # file called LICENSE.
 #
 *****************************************************************************/
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/sched.h>
@@ -41,7 +43,9 @@
 #include <acpi/cpufreq/cpufreq.h>
 #include <xen/pmstat.h>
 
-DEFINE_PER_CPU_READ_MOSTLY(struct pm_px *, cpufreq_statistic_data);
+struct pm_px *__read_mostly cpufreq_statistic_data[NR_CPUS];
+
+extern struct list_head cpufreq_governor_list;
 
 /*
  * Get PM statistic info
@@ -51,7 +55,7 @@ int do_get_pm_info(struct xen_sysctl_get_pmstat *op)
     int ret = 0;
     const struct processor_pminfo *pmpt;
 
-    if ( !op || (op->cpuid >= nr_cpu_ids) || !cpu_online(op->cpuid) )
+    if ( !op || (op->cpuid >= NR_CPUS) || !cpu_online(op->cpuid) )
         return -EINVAL;
     pmpt = processor_pminfo[op->cpuid];
 
@@ -90,7 +94,7 @@ int do_get_pm_info(struct xen_sysctl_get_pmstat *op)
 
         spin_lock(cpufreq_statistic_lock);
 
-        pxpt = per_cpu(cpufreq_statistic_data, op->cpuid);
+        pxpt = cpufreq_statistic_data[op->cpuid];
         if ( !pxpt || !pxpt->u.pt || !pxpt->u.trans_pt )
         {
             spin_unlock(cpufreq_statistic_lock);
@@ -132,6 +136,7 @@ int do_get_pm_info(struct xen_sysctl_get_pmstat *op)
         break;
     }
 
+#ifdef CONFIG_X86
     case PMSTAT_get_max_cx:
     {
         op->u.getcx.nr = pmstat_get_cx_nr(op->cpuid);
@@ -150,6 +155,7 @@ int do_get_pm_info(struct xen_sysctl_get_pmstat *op)
         ret = pmstat_reset_cx_stat(op->cpuid);
         break;
     }
+#endif
 
     default:
         printk("not defined sub-hypercall @ do_get_pm_info\n");
@@ -197,8 +203,10 @@ static int get_cpufreq_para(struct xen_sysctl_pm_op *op)
     struct list_head *pos;
     uint32_t cpu, i, j = 0;
 
+    if ( !op || !cpu_online(op->cpuid) )
+        return -EINVAL;
     pmpt = processor_pminfo[op->cpuid];
-    policy = per_cpu(cpufreq_cpu_policy, op->cpuid);
+    policy = cpufreq_cpu_policy[op->cpuid];
 
     if ( !pmpt || !pmpt->perf.states ||
          !policy || !policy->governor )
@@ -207,19 +215,20 @@ static int get_cpufreq_para(struct xen_sysctl_pm_op *op)
     list_for_each(pos, &cpufreq_governor_list)
         gov_num++;
 
-    if ( (op->u.get_para.cpu_num  != cpumask_weight(policy->cpus)) ||
+    if ( (op->u.get_para.cpu_num  != cpus_weight(policy->cpus)) ||
          (op->u.get_para.freq_num != pmpt->perf.state_count)    ||
          (op->u.get_para.gov_num  != gov_num) )
     {
-        op->u.get_para.cpu_num =  cpumask_weight(policy->cpus);
+        op->u.get_para.cpu_num =  cpus_weight(policy->cpus);
         op->u.get_para.freq_num = pmpt->perf.state_count;
         op->u.get_para.gov_num  = gov_num;
         return -EAGAIN;
     }
 
-    if ( !(affected_cpus = xzalloc_array(uint32_t, op->u.get_para.cpu_num)) )
+    if ( !(affected_cpus = xmalloc_array(uint32_t, op->u.get_para.cpu_num)) )
         return -ENOMEM;
-    for_each_cpu(cpu, policy->cpus)
+    memset(affected_cpus, 0, op->u.get_para.cpu_num * sizeof(uint32_t));
+    for_each_cpu_mask(cpu, policy->cpus)
         affected_cpus[j++] = cpu;
     ret = copy_to_guest(op->u.get_para.affected_cpus,
                        affected_cpus, op->u.get_para.cpu_num);
@@ -228,8 +237,10 @@ static int get_cpufreq_para(struct xen_sysctl_pm_op *op)
         return ret;
 
     if ( !(scaling_available_frequencies =
-           xzalloc_array(uint32_t, op->u.get_para.freq_num)) )
+        xmalloc_array(uint32_t, op->u.get_para.freq_num)) )
         return -ENOMEM;
+    memset(scaling_available_frequencies, 0,
+           op->u.get_para.freq_num * sizeof(uint32_t));
     for ( i = 0; i < op->u.get_para.freq_num; i++ )
         scaling_available_frequencies[i] =
                         pmpt->perf.states[i].core_frequency * 1000;
@@ -240,8 +251,10 @@ static int get_cpufreq_para(struct xen_sysctl_pm_op *op)
         return ret;
 
     if ( !(scaling_available_governors =
-           xzalloc_array(char, gov_num * CPUFREQ_NAME_LEN)) )
+        xmalloc_array(char, gov_num * CPUFREQ_NAME_LEN)) )
         return -ENOMEM;
+    memset(scaling_available_governors, 0,
+                gov_num * CPUFREQ_NAME_LEN * sizeof(char));
     if ( (ret = read_scaling_available_governors(scaling_available_governors,
                 gov_num * CPUFREQ_NAME_LEN * sizeof(char))) )
     {
@@ -262,13 +275,13 @@ static int get_cpufreq_para(struct xen_sysctl_pm_op *op)
     op->u.get_para.scaling_max_freq = policy->max;
     op->u.get_para.scaling_min_freq = policy->min;
 
-    if ( cpufreq_driver->name[0] )
+    if ( cpufreq_driver->name )
         strlcpy(op->u.get_para.scaling_driver, 
             cpufreq_driver->name, CPUFREQ_NAME_LEN);
     else
         strlcpy(op->u.get_para.scaling_driver, "Unknown", CPUFREQ_NAME_LEN);
 
-    if ( policy->governor->name[0] )
+    if ( policy->governor->name )
         strlcpy(op->u.get_para.scaling_governor, 
             policy->governor->name, CPUFREQ_NAME_LEN);
     else
@@ -289,8 +302,9 @@ static int get_cpufreq_para(struct xen_sysctl_pm_op *op)
             &op->u.get_para.u.ondemand.sampling_rate_min,
             &op->u.get_para.u.ondemand.sampling_rate,
             &op->u.get_para.u.ondemand.up_threshold);
+        op->u.get_para.u.ondemand.turbo_enabled =
+            cpufreq_dbs_get_turbo_status(op->cpuid);
     }
-    op->u.get_para.turbo_enabled = cpufreq_get_turbo_status(op->cpuid);
 
     return ret;
 }
@@ -299,7 +313,10 @@ static int set_cpufreq_gov(struct xen_sysctl_pm_op *op)
 {
     struct cpufreq_policy new_policy, *old_policy;
 
-    old_policy = per_cpu(cpufreq_cpu_policy, op->cpuid);
+    if ( !op || !cpu_online(op->cpuid) )
+        return -EINVAL;
+
+    old_policy = cpufreq_cpu_policy[op->cpuid];
     if ( !old_policy )
         return -EINVAL;
 
@@ -317,7 +334,9 @@ static int set_cpufreq_para(struct xen_sysctl_pm_op *op)
     int ret = 0;
     struct cpufreq_policy *policy;
 
-    policy = per_cpu(cpufreq_cpu_policy, op->cpuid);
+    if ( !op || !cpu_online(op->cpuid) )
+        return -EINVAL;
+    policy = cpufreq_cpu_policy[op->cpuid];
 
     if ( !policy || !policy->governor )
         return -EINVAL;
@@ -393,12 +412,68 @@ static int set_cpufreq_para(struct xen_sysctl_pm_op *op)
     return ret;
 }
 
+static int get_cpufreq_avgfreq(struct xen_sysctl_pm_op *op)
+{
+    if ( !op || !cpu_online(op->cpuid) )
+        return -EINVAL;
+
+    op->u.get_avgfreq = cpufreq_driver_getavg(op->cpuid, USR_GETAVG);
+
+    return 0;
+}
+
+static int get_cputopo (struct xen_sysctl_pm_op *op)
+{
+    uint32_t i, nr_cpus;
+    XEN_GUEST_HANDLE_64(uint32) cpu_to_core_arr;
+    XEN_GUEST_HANDLE_64(uint32) cpu_to_socket_arr;
+    int arr_size, ret=0;
+
+    cpu_to_core_arr = op->u.get_topo.cpu_to_core;
+    cpu_to_socket_arr = op->u.get_topo.cpu_to_socket;
+    arr_size= min_t(uint32_t, op->u.get_topo.max_cpus, NR_CPUS);
+
+    if ( guest_handle_is_null( cpu_to_core_arr ) ||
+            guest_handle_is_null(  cpu_to_socket_arr) )
+    {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    nr_cpus = 0;
+    for ( i = 0; i < arr_size; i++ )
+    {
+        uint32_t core, socket;
+        if ( cpu_online(i) )
+        {
+            core = cpu_to_core(i);
+            socket = cpu_to_socket(i);
+            nr_cpus = i;
+        }
+        else
+        {
+            core = socket = INVALID_TOPOLOGY_ID;
+        }
+
+        if ( copy_to_guest_offset(cpu_to_core_arr, i, &core, 1) ||
+                copy_to_guest_offset(cpu_to_socket_arr, i, &socket, 1))
+        {
+            ret = -EFAULT;
+            goto out;
+        }
+    }
+
+    op->u.get_topo.nr_cpus = nr_cpus + 1;
+out:
+    return ret;
+}
+
 int do_pm_op(struct xen_sysctl_pm_op *op)
 {
     int ret = 0;
     const struct processor_pminfo *pmpt;
 
-    if ( !op || op->cpuid >= nr_cpu_ids || !cpu_online(op->cpuid) )
+    if ( !op || !cpu_online(op->cpuid) )
         return -EINVAL;
     pmpt = processor_pminfo[op->cpuid];
 
@@ -434,7 +509,13 @@ int do_pm_op(struct xen_sysctl_pm_op *op)
 
     case GET_CPUFREQ_AVGFREQ:
     {
-        op->u.get_avgfreq = cpufreq_driver_getavg(op->cpuid, USR_GETAVG);
+        ret = get_cpufreq_avgfreq(op);
+        break;
+    }
+
+    case XEN_SYSCTL_pm_op_get_cputopo:
+    {
+        ret = get_cputopo(op);
         break;
     }
 
@@ -446,6 +527,18 @@ int do_pm_op(struct xen_sysctl_pm_op *op)
         sched_smt_power_savings = !!op->u.set_sched_opt_smt;
         op->u.set_sched_opt_smt = saved_value;
 
+        break;
+    }
+
+    case XEN_SYSCTL_pm_op_set_vcpu_migration_delay:
+    {
+        set_vcpu_migration_delay(op->u.set_vcpu_migration_delay);
+        break;
+    }
+
+    case XEN_SYSCTL_pm_op_get_vcpu_migration_delay:
+    {
+        op->u.get_vcpu_migration_delay = get_vcpu_migration_delay();
         break;
     }
 
@@ -463,13 +556,13 @@ int do_pm_op(struct xen_sysctl_pm_op *op)
 
     case XEN_SYSCTL_pm_op_enable_turbo:
     {
-        ret = cpufreq_update_turbo(op->cpuid, CPUFREQ_TURBO_ENABLED);
+        cpufreq_dbs_enable_turbo(op->cpuid);
         break;
     }
 
     case XEN_SYSCTL_pm_op_disable_turbo:
     {
-        ret = cpufreq_update_turbo(op->cpuid, CPUFREQ_TURBO_DISABLED);
+        cpufreq_dbs_disable_turbo(op->cpuid);
         break;
     }
 
@@ -478,37 +571,6 @@ int do_pm_op(struct xen_sysctl_pm_op *op)
         ret = -ENOSYS;
         break;
     }
-
-    return ret;
-}
-
-int acpi_set_pdc_bits(u32 acpi_id, XEN_GUEST_HANDLE_PARAM(uint32) pdc)
-{
-    u32 bits[3];
-    int ret;
-
-    if ( copy_from_guest(bits, pdc, 2) )
-        ret = -EFAULT;
-    else if ( bits[0] != ACPI_PDC_REVISION_ID || !bits[1] )
-        ret = -EINVAL;
-    else if ( copy_from_guest_offset(bits + 2, pdc, 2, 1) )
-        ret = -EFAULT;
-    else
-    {
-        u32 mask = 0;
-
-        if ( xen_processor_pmbits & XEN_PROCESSOR_PM_CX )
-            mask |= ACPI_PDC_C_MASK | ACPI_PDC_SMP_C1PT;
-        if ( xen_processor_pmbits & XEN_PROCESSOR_PM_PX )
-            mask |= ACPI_PDC_P_MASK | ACPI_PDC_SMP_C1PT;
-        if ( xen_processor_pmbits & XEN_PROCESSOR_PM_TX )
-            mask |= ACPI_PDC_T_MASK | ACPI_PDC_SMP_C1PT;
-        bits[2] &= (ACPI_PDC_C_MASK | ACPI_PDC_P_MASK | ACPI_PDC_T_MASK |
-                    ACPI_PDC_SMP_C1PT) & ~mask;
-        ret = arch_acpi_set_pdc_bits(acpi_id, bits, mask);
-    }
-    if ( !ret && __copy_to_guest_offset(pdc, 2, bits + 2, 1) )
-        ret = -EFAULT;
 
     return ret;
 }

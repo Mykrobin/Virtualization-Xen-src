@@ -11,7 +11,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  * Copyright (C) Allen Kay <allen.m.kay@intel.com>
  */
@@ -26,7 +27,13 @@
 #include "dmar.h"
 #include "vtd.h"
 #include "extern.h"
-#include <asm/io_apic.h>
+
+int is_usb_device(u8 bus, u8 devfn)
+{
+    u16 class = pci_conf_read16(bus, PCI_SLOT(devfn), PCI_FUNC(devfn),
+                                PCI_CLASS_DEVICE);
+    return (class == 0xc03);
+}
 
 /* Disable vt-d protected memory registers. */
 void disable_pmr(struct iommu *iommu)
@@ -95,9 +102,8 @@ void print_vtd_entries(struct iommu *iommu, int bus, int devfn, u64 gmfn)
     u64 *l, val;
     u32 l_index, level;
 
-    printk("print_vtd_entries: iommu #%u dev %04x:%02x:%02x.%u gmfn %"PRI_gfn"\n",
-           iommu->index, iommu->intel->drhd->segment, bus,
-           PCI_SLOT(devfn), PCI_FUNC(devfn), gmfn);
+    printk("print_vtd_entries: iommu = %p bdf = %x:%x.%x gmfn = %"PRIx64"\n",
+           iommu, bus, PCI_SLOT(devfn), PCI_FUNC(devfn), gmfn);
 
     if ( iommu->root_maddr == 0 )
     {
@@ -112,11 +118,12 @@ void print_vtd_entries(struct iommu *iommu, int bus, int devfn, u64 gmfn)
         return;
     }
 
-    printk("    root_entry[%02x] = %"PRIx64"\n", bus, root_entry[bus].val);
+    printk("    root_entry = %p\n", root_entry);
+    printk("    root_entry[%x] = %"PRIx64"\n", bus, root_entry[bus].val);
     if ( !root_present(root_entry[bus]) )
     {
         unmap_vtd_domain_page(root_entry);
-        printk("    root_entry[%02x] not present\n", bus);
+        printk("    root_entry[%x] not present\n", bus);
         return;
     }
 
@@ -129,13 +136,14 @@ void print_vtd_entries(struct iommu *iommu, int bus, int devfn, u64 gmfn)
         return;
     }
 
+    printk("    context = %p\n", ctxt_entry);
     val = ctxt_entry[devfn].lo;
-    printk("    context[%02x] = %"PRIx64"_%"PRIx64"\n",
+    printk("    context[%x] = %"PRIx64"_%"PRIx64"\n",
            devfn, ctxt_entry[devfn].hi, val);
     if ( !context_present(ctxt_entry[devfn]) )
     {
         unmap_vtd_domain_page(ctxt_entry);
-        printk("    ctxt_entry[%02x] not present\n", devfn);
+        printk("    ctxt_entry[%x] not present\n", devfn);
         return;
     }
 
@@ -151,29 +159,31 @@ void print_vtd_entries(struct iommu *iommu, int bus, int devfn, u64 gmfn)
     do
     {
         l = map_vtd_domain_page(val);
+        printk("    l%d = %p\n", level, l);
         if ( l == NULL )
         {
-            printk("    l%u == NULL\n", level);
+            printk("    l%d == NULL\n", level);
             break;
         }
         l_index = get_level_index(gmfn, level);
-        pte.val = l[l_index];
-        unmap_vtd_domain_page(l);
-        printk("    l%u[%03x] = %"PRIx64"\n", level, l_index, pte.val);
+        printk("    l%d_index = %x\n", level, l_index);
 
+        pte.val = val = l[l_index];
+        unmap_vtd_domain_page(l);
+        printk("    l%d[%x] = %"PRIx64"\n", level, l_index, val);
+
+        pte.val = val;
         if ( !dma_pte_present(pte) )
         {
-            printk("    l%u[%03x] not present\n", level, l_index);
+            printk("    l%d[%x] not present\n", level, l_index);
             break;
         }
-        if ( dma_pte_superpage(pte) )
-            break;
-        val = dma_pte_addr(pte);
     } while ( --level );
 }
 
-void vtd_dump_iommu_info(unsigned char key)
+static void dump_iommu_info(unsigned char key)
 {
+#if defined(__i386__) || defined(__x86_64__)
     struct acpi_drhd_unit *drhd;
     struct iommu *iommu;
     int i;
@@ -198,23 +208,18 @@ void vtd_dump_iommu_info(unsigned char key)
             ecap_intr_remap(iommu->ecap) ? "" : "not ",
             (status & DMA_GSTS_IRES) ? " and enabled" : "" );
 
-        printk("  Interrupt Posting: %ssupported.\n",
-               cap_intr_post(iommu->cap) ? "" : "not ");
-
         if ( status & DMA_GSTS_IRES )
         {
             /* Dump interrupt remapping table. */
-            uint64_t irta = dmar_readq(iommu->reg, DMAR_IRTA_REG);
-            uint64_t iremap_maddr = irta & PAGE_MASK;
-            unsigned int nr_entry = 1 << ((irta & 0xF) + 1);
+            u64 iremap_maddr = dmar_readq(iommu->reg, DMAR_IRTA_REG);
+            int nr_entry = 1 << ((iremap_maddr & 0xF) + 1);
             struct iremap_entry *iremap_entries = NULL;
             int print_cnt = 0;
 
-            printk("  Interrupt remapping table (nr_entry=%#x. "
+            printk("  Interrupt remapping table (nr_entry=0x%x. "
                 "Only dump P=1 entries here):\n", nr_entry);
-            printk("R means remapped format, P means posted format.\n");
-            printk("R:       SVT  SQ   SID  V  AVL FPD      DST DLM TM RH DM P\n");
-            printk("P:       SVT  SQ   SID  V  AVL FPD              PDA  URG P\n");
+            printk("       SVT  SQ   SID      DST  V  AVL DLM TM RH DM "
+                   "FPD P\n");
             for ( i = 0; i < nr_entry; i++ )
             {
                 struct iremap_entry *p;
@@ -230,23 +235,14 @@ void vtd_dump_iommu_info(unsigned char key)
                 else
                     p = &iremap_entries[i % (1 << IREMAP_ENTRY_ORDER)];
 
-                if ( !p->remap.p )
+                if ( !p->lo.p )
                     continue;
-                if ( !p->remap.im )
-                    printk("R:  %04x:  %x   %x  %04x %02x    %x   %x %08x   %x  %x  %x  %x %x\n",
-                           i,
-                           p->remap.svt, p->remap.sq, p->remap.sid,
-                           p->remap.vector, p->remap.avail, p->remap.fpd,
-                           p->remap.dst, p->remap.dlm, p->remap.tm, p->remap.rh,
-                           p->remap.dm, p->remap.p);
-                else
-                    printk("P:  %04x:  %x   %x  %04x %02x    %x   %x %16lx    %x %x\n",
-                           i,
-                           p->post.svt, p->post.sq, p->post.sid, p->post.vector,
-                           p->post.avail, p->post.fpd,
-                           ((u64)p->post.pda_h << 32) | (p->post.pda_l << 6),
-                           p->post.urg, p->post.p);
-
+                printk("  %04x:  %x   %x  %04x %08x %02x    %x   %x  %x  %x  %x"
+                    "   %x %x\n", i,
+                    (u32)p->hi.svt, (u32)p->hi.sq, (u32)p->hi.sid,
+                    (u32)p->lo.dst, (u32)p->lo.vector, (u32)p->lo.avail,
+                    (u32)p->lo.dlm, (u32)p->lo.tm, (u32)p->lo.rh,
+                    (u32)p->lo.dm, (u32)p->lo.fpd, (u32)p->lo.p);
                 print_cnt++;
             }
             if ( iremap_entries )
@@ -261,8 +257,9 @@ void vtd_dump_iommu_info(unsigned char key)
     /* Dump the I/O xAPIC redirection table(s). */
     if ( iommu_enabled )
     {
-        int apic;
+        int apic, reg;
         union IO_APIC_reg_01 reg_01;
+        struct IO_APIC_route_entry rte = { 0 };
         struct IO_APIC_route_remap_entry *remap;
         struct ir_ctrl *ir_ctrl;
 
@@ -270,19 +267,25 @@ void vtd_dump_iommu_info(unsigned char key)
         {
             iommu = ioapic_to_iommu(mp_ioapics[apic].mpc_apicid);
             ir_ctrl = iommu_ir_ctrl(iommu);
-            if ( !ir_ctrl || !ir_ctrl->iremap_maddr || !ir_ctrl->iremap_num )
+            if ( !iommu || !ir_ctrl || ir_ctrl->iremap_maddr == 0 ||
+                ir_ctrl->iremap_num == 0 )
                 continue;
 
             printk( "\nRedirection table of IOAPIC %x:\n", apic);
 
-            /* IO xAPIC Version Register. */
-            reg_01.raw = __io_apic_read(apic, 1);
+            reg = 1; /* IO xAPIC Version Register. */
+            *IO_APIC_BASE(apic) = reg;
+            reg_01.raw = *(IO_APIC_BASE(apic)+4);
 
             printk("  #entry IDX FMT MASK TRIG IRR POL STAT DELI  VECTOR\n");
             for ( i = 0; i <= reg_01.bits.entries; i++ )
             {
-                struct IO_APIC_route_entry rte =
-                    __ioapic_read_entry(apic, i, TRUE);
+                reg = 0x10 + i*2;
+                *IO_APIC_BASE(apic) = reg;
+                *(((u32 *)&rte) + 0) = *(IO_APIC_BASE(apic)+4);
+
+                *IO_APIC_BASE(apic) = reg + 1;
+                *(((u32 *)&rte) + 1) = *(IO_APIC_BASE(apic)+4);
 
                 remap = (struct IO_APIC_route_remap_entry *) &rte;
                 if ( !remap->format )
@@ -290,19 +293,30 @@ void vtd_dump_iommu_info(unsigned char key)
 
                 printk("   %02x:  %04x   %x    %x   %x   %x   %x    %x"
                     "    %x     %02x\n", i,
-                    remap->index_0_14 | (remap->index_15 << 15),
-                    remap->format, remap->mask, remap->trigger, remap->irr,
-                    remap->polarity, remap->delivery_status, remap->delivery_mode,
-                    remap->vector);
+                    (u32)remap->index_0_14 | ((u32)remap->index_15 << 15),
+                    (u32)remap->format, (u32)remap->mask, (u32)remap->trigger,
+                    (u32)remap->irr, (u32)remap->polarity,
+                    (u32)remap->delivery_status, (u32)remap->delivery_mode,
+                    (u32)remap->vector);
             }
         }
     }
+#else
+    printk("%s: not implemnted on IA64 for now.\n", __func__);
+    /* ia64: TODO */
+#endif
 }
+
+struct keyhandler dump_iommu_info_keyhandler = {
+    .diagnostic = 1,
+    .u.fn = dump_iommu_info,
+    .desc = "dump iommu info"
+};
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * indent-tabs-mode: nil
  * End:

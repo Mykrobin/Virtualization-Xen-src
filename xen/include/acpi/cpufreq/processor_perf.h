@@ -3,13 +3,13 @@
 
 #include <public/platform.h>
 #include <public/sysctl.h>
-#include <xen/acpi.h>
 
 #define XEN_PX_INIT 0x80000000
 
+int get_cpu_id(u8);
 int powernow_cpufreq_init(void);
 unsigned int powernow_register_driver(void);
-unsigned int get_measured_perf(unsigned int cpu, unsigned int flag);
+
 void cpufreq_residency_update(unsigned int, uint8_t);
 void cpufreq_statistic_update(unsigned int, uint8_t, uint8_t);
 int  cpufreq_statistic_init(unsigned int);
@@ -29,6 +29,7 @@ struct processor_performance {
     uint32_t state_count;
     struct xen_processor_px *states;
     struct xen_psd_package domain_info;
+    cpumask_t shared_cpu_map;
     uint32_t shared_type;
 
     uint32_t init;
@@ -57,7 +58,7 @@ struct pm_px {
     uint64_t prev_idle_wall;
 };
 
-DECLARE_PER_CPU(struct pm_px *, cpufreq_statistic_data);
+extern struct pm_px *cpufreq_statistic_data[NR_CPUS];
 
 int cpufreq_cpu_init(unsigned int cpuid);
 #endif /* __XEN_PROCESSOR_PM_H__ */

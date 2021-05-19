@@ -1,8 +1,6 @@
-XEN_ROOT = $(CURDIR)/../..
+XEN_ROOT = ../..
 
-ifeq (,$(findstring clean,$(MAKECMDGOALS)))
 include $(XEN_ROOT)/Config.mk
-endif
 
 CAMLLIB = $(shell $(OCAMLC_CROSS_PREFIX)ocamlc -where)
 DEF_CPPFLAGS += -I$(CAMLLIB)

@@ -14,7 +14,8 @@
     Library General Public License for more details.
 
     You should have received a copy of the GNU Library General Public
-    License along with this library; If not, see <http://www.gnu.org/licenses/>.
+    License along with this library; if not, write to the Free
+    Software Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
     Richard Gooch may be reached by email at  rgooch@atnf.csiro.au
     The postal address is:
@@ -30,11 +31,11 @@
     System Programming Guide; Section 9.11. (1997 edition - PPro).
 */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/smp.h>
 #include <xen/spinlock.h>
-#include <asm/atomic.h>
 #include <asm/mtrr.h>
 #include <asm/uaccess.h>
 #include <asm/processor.h>
@@ -49,20 +50,27 @@
 #define	get_cpu()	smp_processor_id()
 #define put_cpu()	do {} while(0)
 
-u32 __read_mostly num_var_ranges = 0;
+u32 num_var_ranges = 0;
 
-unsigned int *__read_mostly usage_table;
+unsigned int *usage_table;
 static DEFINE_MUTEX(mtrr_mutex);
 
-u64 __read_mostly size_or_mask;
-u64 __read_mostly size_and_mask;
+u64 size_or_mask, size_and_mask;
 
-const struct mtrr_ops *__read_mostly mtrr_if = NULL;
+static struct mtrr_ops * mtrr_ops[X86_VENDOR_NUM] = {};
+
+struct mtrr_ops * mtrr_if = NULL;
 
 static void set_mtrr(unsigned int reg, unsigned long base,
 		     unsigned long size, mtrr_type type);
 
-static const char *const mtrr_strings[MTRR_NUM_TYPES] =
+#ifndef CONFIG_X86_64
+extern int arr3_protected;
+#else
+#define arr3_protected 0
+#endif
+
+static const char *mtrr_strings[MTRR_NUM_TYPES] =
 {
     "uncachable",               /* 0 */
     "write-combining",          /* 1 */
@@ -73,9 +81,15 @@ static const char *const mtrr_strings[MTRR_NUM_TYPES] =
     "write-back",               /* 6 */
 };
 
-static const char *mtrr_attrib_to_str(int x)
+const char *mtrr_attrib_to_str(int x)
 {
 	return (x <= 6) ? mtrr_strings[x] : "?";
+}
+
+void set_mtrr_ops(struct mtrr_ops * ops)
+{
+	if (ops->vendor && ops->vendor < X86_VENDOR_NUM)
+		mtrr_ops[ops->vendor] = ops;
 }
 
 /*  Returns non-zero if we have the write-combining memory type  */
@@ -87,13 +101,13 @@ static int have_wrcomb(void)
 /*  This function returns the number of variable MTRRs  */
 static void __init set_num_var_ranges(void)
 {
-	unsigned long config = 0;
+	unsigned long config = 0, dummy;
 
 	if (use_intel()) {
-		rdmsrl(MSR_MTRRcap, config);
+		rdmsr(MTRRcap_MSR, config, dummy);
 	} else if (is_cpu(AMD))
 		config = 2;
-	else if (is_cpu(CENTAUR))
+	else if (is_cpu(CYRIX) || is_cpu(CENTAUR))
 		config = 8;
 	num_var_ranges = config & 0xff;
 }
@@ -131,6 +145,8 @@ struct set_mtrr_data {
  */
 int hold_mtrr_updates_on_aps;
 
+#ifdef CONFIG_SMP
+
 static void ipi_handler(void *info)
 /*  [SUMMARY] Synchronisation handler. Executed by "other" CPUs.
     [RETURNS] Nothing.
@@ -161,6 +177,8 @@ static void ipi_handler(void *info)
 	atomic_dec(&data->count);
 	local_irq_restore(flags);
 }
+
+#endif
 
 static inline int types_compatible(mtrr_type type1, mtrr_type type2) {
 	return type1 == MTRR_TYPE_UNCACHABLE ||
@@ -216,9 +234,9 @@ static void set_mtrr(unsigned int reg, unsigned long base,
 	struct set_mtrr_data data;
 	unsigned long flags;
 
-	cpumask_andnot(&allbutself, &cpu_online_map,
-                      cpumask_of(smp_processor_id()));
-	nr_cpus = cpumask_weight(&allbutself);
+	allbutself = cpu_online_map;
+	cpu_clear(smp_processor_id(), allbutself);
+	nr_cpus = cpus_weight(allbutself);
 
 	data.smp_reg = reg;
 	data.smp_base = base;
@@ -331,7 +349,7 @@ int mtrr_add_page(unsigned long base, unsigned long size,
 	if ((type == MTRR_TYPE_WRCOMB) && !have_wrcomb()) {
 		printk(KERN_WARNING
 		       "mtrr: your processor doesn't support write-combining\n");
-		return -EOPNOTSUPP;
+		return -ENOSYS;
 	}
 
 	if (!size) {
@@ -339,7 +357,7 @@ int mtrr_add_page(unsigned long base, unsigned long size,
 		return -EINVAL;
 	}
 
-	if ((base | (base + size - 1)) >> (paddr_bits - PAGE_SHIFT)) {
+	if (base & size_or_mask || size & size_or_mask) {
 		printk(KERN_WARNING "mtrr: base or size exceeds the MTRR width\n");
 		return -EINVAL;
 	}
@@ -347,6 +365,8 @@ int mtrr_add_page(unsigned long base, unsigned long size,
 	error = -EINVAL;
 	replace = -1;
 
+	/* No CPU hotplug when we change MTRR entries */
+	lock_cpu_hotplug();
 	/*  Search for existing MTRR  */
 	mutex_lock(&mtrr_mutex);
 	for (i = 0; i < num_var_ranges; ++i) {
@@ -365,8 +385,8 @@ int mtrr_add_page(unsigned long base, unsigned long size,
 					continue;
 			}
 			printk(KERN_WARNING
-			       "mtrr: %#lx000,%#lx000 overlaps existing"
-			       " %#lx000,%#lx000\n", base, size, lbase,
+			       "mtrr: 0x%lx000,0x%lx000 overlaps existing"
+			       " 0x%lx000,0x%lx000\n", base, size, lbase,
 			       lsize);
 			goto out;
 		}
@@ -402,6 +422,7 @@ int mtrr_add_page(unsigned long base, unsigned long size,
 	error = i;
  out:
 	mutex_unlock(&mtrr_mutex);
+	unlock_cpu_hotplug();
 	return error;
 }
 
@@ -411,7 +432,7 @@ static int mtrr_check(unsigned long base, unsigned long size)
 		printk(KERN_WARNING
 			"mtrr: size and base must be multiples of 4 kiB\n");
 		printk(KERN_DEBUG
-			"mtrr: size: %#lx  base: %#lx\n", size, base);
+			"mtrr: size: 0x%lx  base: 0x%lx\n", size, base);
 		dump_stack();
 		return -1;
 	}
@@ -454,7 +475,7 @@ static int mtrr_check(unsigned long base, unsigned long size)
  *	failures and do not wish system log messages to be sent.
  */
 
-int __init
+int
 mtrr_add(unsigned long base, unsigned long size, unsigned int type,
 	 char increment)
 {
@@ -490,6 +511,8 @@ int mtrr_del_page(int reg, unsigned long base, unsigned long size)
 		return -ENXIO;
 
 	max = num_var_ranges;
+	/* No CPU hotplug when we change MTRR entries */
+	lock_cpu_hotplug();
 	mutex_lock(&mtrr_mutex);
 	if (reg < 0) {
 		/*  Search for existing MTRR  */
@@ -510,6 +533,12 @@ int mtrr_del_page(int reg, unsigned long base, unsigned long size)
 		printk(KERN_WARNING "mtrr: register: %d too big\n", reg);
 		goto out;
 	}
+	if (is_cpu(CYRIX) && !use_intel()) {
+		if ((reg == 3) && arr3_protected) {
+			printk(KERN_WARNING "mtrr: ARR3 cannot be changed\n");
+			goto out;
+		}
+	}
 	mtrr_if->get(reg, &lbase, &lsize, &ltype);
 	if (lsize < 1) {
 		printk(KERN_WARNING "mtrr: MTRR %d not used\n", reg);
@@ -524,6 +553,7 @@ int mtrr_del_page(int reg, unsigned long base, unsigned long size)
 	error = reg;
  out:
 	mutex_unlock(&mtrr_mutex);
+	unlock_cpu_hotplug();
 	return error;
 }
 /**
@@ -541,12 +571,30 @@ int mtrr_del_page(int reg, unsigned long base, unsigned long size)
  *	code.
  */
 
-int __init
+int
 mtrr_del(int reg, unsigned long base, unsigned long size)
 {
 	if (mtrr_check(base, size))
 		return -EINVAL;
 	return mtrr_del_page(reg, base >> PAGE_SHIFT, size >> PAGE_SHIFT);
+}
+
+EXPORT_SYMBOL(mtrr_add);
+EXPORT_SYMBOL(mtrr_del);
+
+/* HACK ALERT!
+ * These should be called implicitly, but we can't yet until all the initcall
+ * stuff is done...
+ */
+extern void amd_init_mtrr(void);
+extern void cyrix_init_mtrr(void);
+
+static void __init init_ifs(void)
+{
+#ifndef CONFIG_X86_64
+	amd_init_mtrr();
+	cyrix_init_mtrr();
+#endif
 }
 
 /* The suspend/resume methods are only for CPU without MTRR. CPU using generic
@@ -567,10 +615,58 @@ struct mtrr_value {
  */
 void __init mtrr_bp_init(void)
 {
+	init_ifs();
+
 	if (cpu_has_mtrr) {
 		mtrr_if = &generic_mtrr_ops;
-		size_or_mask = ~((1ULL << (paddr_bits - PAGE_SHIFT)) - 1);
-		size_and_mask = ~size_or_mask & 0xfffff00000ULL;
+		size_or_mask = 0xff000000;	/* 36 bits */
+		size_and_mask = 0x00f00000;
+
+		/* This is an AMD specific MSR, but we assume(hope?) that
+		   Intel will implement it to when they extend the address
+		   bus of the Xeon. */
+		if (cpuid_eax(0x80000000) >= 0x80000008) {
+			u32 phys_addr;
+			phys_addr = cpuid_eax(0x80000008) & 0xff;
+			/* CPUID workaround for Intel 0F33/0F34 CPU */
+			if (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL &&
+			    boot_cpu_data.x86 == 0xF &&
+			    boot_cpu_data.x86_model == 0x3 &&
+			    (boot_cpu_data.x86_mask == 0x3 ||
+			     boot_cpu_data.x86_mask == 0x4))
+				phys_addr = 36;
+
+			size_or_mask = ~((1ULL << (phys_addr - PAGE_SHIFT)) - 1);
+			size_and_mask = ~size_or_mask & 0xfffff00000ULL;
+		} else if (boot_cpu_data.x86_vendor == X86_VENDOR_CENTAUR &&
+			   boot_cpu_data.x86 == 6) {
+			/* VIA C* family have Intel style MTRRs, but
+			   don't support PAE */
+			size_or_mask = 0xfff00000;	/* 32 bits */
+			size_and_mask = 0;
+		}
+	} else {
+#ifndef CONFIG_X86_64
+		switch (boot_cpu_data.x86_vendor) {
+		case X86_VENDOR_AMD:
+			if (cpu_has_k6_mtrr) {
+				/* Pre-Athlon (K6) AMD CPU MTRRs */
+				mtrr_if = mtrr_ops[X86_VENDOR_AMD];
+				size_or_mask = 0xfff00000;	/* 32 bits */
+				size_and_mask = 0;
+			}
+			break;
+		case X86_VENDOR_CYRIX:
+			if (cpu_has_cyrix_arr) {
+				mtrr_if = mtrr_ops[X86_VENDOR_CYRIX];
+				size_or_mask = 0xfff00000;	/* 32 bits */
+				size_and_mask = 0;
+			}
+			break;
+		default:
+			break;
+		}
+#endif
 	}
 
 	if (mtrr_if) {

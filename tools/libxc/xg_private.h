@@ -1,18 +1,3 @@
-/*
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation;
- * version 2.1 of the License.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; If not, see <http://www.gnu.org/licenses/>.
- */
-
 #ifndef XG_PRIVATE_H
 #define XG_PRIVATE_H
 
@@ -26,8 +11,9 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 
-#include "xc_private.h"
+#include "xenctrl.h"
 #include "xenguest.h"
+#include "xc_private.h"
 
 #include <xen/memory.h>
 #include <xen/elfnote.h>
@@ -41,10 +27,8 @@
 #endif
 #endif
 
-char *xc_read_image(xc_interface *xch,
-                    const char *filename, unsigned long *size);
-char *xc_inflate_buffer(xc_interface *xch,
-                        const char *in_buf,
+char *xc_read_image(const char *filename, unsigned long *size);
+char *xc_inflate_buffer(const char *in_buf,
                         unsigned long in_size,
                         unsigned long *out_size);
 
@@ -61,13 +45,10 @@ unsigned long csum_page (void * page);
 #define _PAGE_PSE       0x080
 #define _PAGE_GLOBAL    0x100
 
-#define VIRT_BITS_I386     32
-#define VIRT_BITS_X86_64   48
-
-#define PGTBL_LEVELS_I386       3
-#define PGTBL_LEVELS_X86_64     4
-
-#define PGTBL_LEVEL_SHIFT_X86   9
+#define L1_PAGETABLE_SHIFT_I386       12
+#define L2_PAGETABLE_SHIFT_I386       22
+#define L1_PAGETABLE_ENTRIES_I386   1024
+#define L2_PAGETABLE_ENTRIES_I386   1024
 
 #define L1_PAGETABLE_SHIFT_PAE        12
 #define L2_PAGETABLE_SHIFT_PAE        21
@@ -85,18 +66,79 @@ unsigned long csum_page (void * page);
 #define L3_PAGETABLE_ENTRIES_X86_64  512
 #define L4_PAGETABLE_ENTRIES_X86_64  512
 
-typedef uint64_t x86_pgentry_t;
+#if defined(__i386__)
+#define L1_PAGETABLE_SHIFT     L1_PAGETABLE_SHIFT_I386
+#define L2_PAGETABLE_SHIFT     L2_PAGETABLE_SHIFT_I386
+#define L1_PAGETABLE_ENTRIES   L1_PAGETABLE_ENTRIES_I386
+#define L2_PAGETABLE_ENTRIES   L2_PAGETABLE_ENTRIES_I386
+#elif defined(__x86_64__)
+#define L1_PAGETABLE_SHIFT     L1_PAGETABLE_SHIFT_X86_64
+#define L2_PAGETABLE_SHIFT     L2_PAGETABLE_SHIFT_X86_64
+#define L3_PAGETABLE_SHIFT     L3_PAGETABLE_SHIFT_X86_64
+#define L4_PAGETABLE_SHIFT     L4_PAGETABLE_SHIFT_X86_64
+#define L1_PAGETABLE_ENTRIES   L1_PAGETABLE_ENTRIES_X86_64
+#define L2_PAGETABLE_ENTRIES   L2_PAGETABLE_ENTRIES_X86_64
+#define L3_PAGETABLE_ENTRIES   L3_PAGETABLE_ENTRIES_X86_64
+#define L4_PAGETABLE_ENTRIES   L4_PAGETABLE_ENTRIES_X86_64
+#endif
 
-#define PAGE_SHIFT_ARM          12
-#define PAGE_SIZE_ARM           (1UL << PAGE_SHIFT_ARM)
-#define PAGE_MASK_ARM           (~(PAGE_SIZE_ARM-1))
+typedef uint32_t l1_pgentry_32_t;
+typedef uint32_t l2_pgentry_32_t;
+typedef uint64_t l1_pgentry_64_t;
+typedef uint64_t l2_pgentry_64_t;
+typedef uint64_t l3_pgentry_64_t;
+typedef uint64_t l4_pgentry_64_t;
+
+#if defined(__i386__)
+typedef l1_pgentry_32_t l1_pgentry_t;
+typedef l2_pgentry_32_t l2_pgentry_t;
+#elif defined(__x86_64__)
+typedef l1_pgentry_64_t l1_pgentry_t;
+typedef l2_pgentry_64_t l2_pgentry_t;
+typedef l3_pgentry_64_t l3_pgentry_t;
+typedef l4_pgentry_64_t l4_pgentry_t;
+#endif
+
+#define l1_table_offset_i386(_a) \
+  (((_a) >> L1_PAGETABLE_SHIFT_I386) & (L1_PAGETABLE_ENTRIES_I386 - 1))
+#define l2_table_offset_i386(_a) \
+  (((_a) >> L2_PAGETABLE_SHIFT_I386) & (L2_PAGETABLE_ENTRIES_I386 - 1))
+
+#define l1_table_offset_pae(_a) \
+  (((_a) >> L1_PAGETABLE_SHIFT_PAE) & (L1_PAGETABLE_ENTRIES_PAE - 1))
+#define l2_table_offset_pae(_a) \
+  (((_a) >> L2_PAGETABLE_SHIFT_PAE) & (L2_PAGETABLE_ENTRIES_PAE - 1))
+#define l3_table_offset_pae(_a) \
+  (((_a) >> L3_PAGETABLE_SHIFT_PAE) & (L3_PAGETABLE_ENTRIES_PAE - 1))
+
+#define l1_table_offset_x86_64(_a) \
+  (((_a) >> L1_PAGETABLE_SHIFT_X86_64) & (L1_PAGETABLE_ENTRIES_X86_64 - 1))
+#define l2_table_offset_x86_64(_a) \
+  (((_a) >> L2_PAGETABLE_SHIFT_X86_64) & (L2_PAGETABLE_ENTRIES_X86_64 - 1))
+#define l3_table_offset_x86_64(_a) \
+  (((_a) >> L3_PAGETABLE_SHIFT_X86_64) & (L3_PAGETABLE_ENTRIES_X86_64 - 1))
+#define l4_table_offset_x86_64(_a) \
+  (((_a) >> L4_PAGETABLE_SHIFT_X86_64) & (L4_PAGETABLE_ENTRIES_X86_64 - 1))
+
+#if defined(__i386__)
+#define l1_table_offset(_a) l1_table_offset_i386(_a)
+#define l2_table_offset(_a) l2_table_offset_i386(_a)
+#elif defined(__x86_64__)
+#define l1_table_offset(_a) l1_table_offset_x86_64(_a)
+#define l2_table_offset(_a) l2_table_offset_x86_64(_a)
+#define l3_table_offset(_a) l3_table_offset_x86_64(_a)
+#define l4_table_offset(_a) l4_table_offset_x86_64(_a)
+#endif
 
 #define PAGE_SHIFT_X86          12
 #define PAGE_SIZE_X86           (1UL << PAGE_SHIFT_X86)
 #define PAGE_MASK_X86           (~(PAGE_SIZE_X86-1))
 
+#define PAGE_SHIFT_IA64         14
+#define PAGE_SIZE_IA64          (1UL << PAGE_SHIFT_IA64)
+#define PAGE_MASK_IA64          (~(PAGE_SIZE_IA64-1))
+
 #define ROUNDUP(_x,_w) (((unsigned long)(_x)+(1UL<<(_w))-1) & ~((1UL<<(_w))-1))
-#define NRPAGES(x) (ROUNDUP(x, PAGE_SHIFT) >> PAGE_SHIFT)
 
 
 /* XXX SMH: following skanky macros rely on variable p2m_size being set */
@@ -106,21 +148,6 @@ struct domain_info_context {
     unsigned int guest_width;
     unsigned long p2m_size;
 };
-
-static inline xen_pfn_t xc_pfn_to_mfn(xen_pfn_t pfn, xen_pfn_t *p2m,
-                                      unsigned gwidth)
-{
-    if ( gwidth == sizeof(uint64_t) )
-        /* 64 bit guest.  Need to truncate their pfns for 32 bit toolstacks. */
-        return ((uint64_t *)p2m)[pfn];
-    else
-    {
-        /* 32 bit guest.  Need to expand INVALID_MFN for 64 bit toolstacks. */
-        uint32_t mfn = ((uint32_t *)p2m)[pfn];
-
-        return mfn == ~0U ? INVALID_MFN : mfn;
-    }
-}
 
 /* Number of xen_pfn_t in a page */
 #define FPP             (PAGE_SIZE/(dinfo->guest_width))
@@ -134,14 +161,20 @@ static inline xen_pfn_t xc_pfn_to_mfn(xen_pfn_t pfn, xen_pfn_t *p2m,
 /* Size in bytes of the pfn_to_mfn_frame_list     */
 #define P2M_GUEST_FL_SIZE ((P2M_FL_ENTRIES) * (dinfo->guest_width))
 #define P2M_TOOLS_FL_SIZE ((P2M_FL_ENTRIES) *                           \
-                           max_t(size_t, sizeof(xen_pfn_t), dinfo->guest_width))
+                           MAX((sizeof (xen_pfn_t)), dinfo->guest_width))
 
 /* Masks for PTE<->PFN conversions */
 #define MADDR_BITS_X86  ((dinfo->guest_width == 8) ? 52 : 44)
 #define MFN_MASK_X86    ((1ULL << (MADDR_BITS_X86 - PAGE_SHIFT_X86)) - 1)
 #define MADDR_MASK_X86  (MFN_MASK_X86 << PAGE_SHIFT_X86)
 
-int pin_table(xc_interface *xch, unsigned int type, unsigned long mfn,
-              uint32_t dom);
+
+#define PAEKERN_no           0
+#define PAEKERN_yes          1
+#define PAEKERN_extended_cr3 2
+#define PAEKERN_bimodal      3
+
+int pin_table(int xc_handle, unsigned int type, unsigned long mfn,
+              domid_t dom);
 
 #endif /* XG_PRIVATE_H */

@@ -13,7 +13,8 @@
 #  GNU General Public License for more details.
 #
 #  You should have received a copy of the GNU General Public License
-#  along with this program; If not, see <http://www.gnu.org/licenses/>.
+#  along with this program; if not, write to the Free Software
+#  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #
 
 # 
@@ -21,10 +22,9 @@
 #  Use is subject to license terms.
 #
 
-XEN_ROOT = $(CURDIR)/../../..
+XEN_ROOT = ../../..
 
-CFLAGS += -DFSYS_ZFS -DFSIMAGE -I$(XEN_ROOT)/tools/libfsimage/zfs
-LIB_SRCS-y = zfs_lzjb.c zfs_sha256.c zfs_fletcher.c fsi_zfs.c fsys_zfs.c
+LIB_SRCS-y = fsys_zfs.c zfs_lzjb.c zfs_sha256.c zfs_fletcher.c
 
 FS = zfs
 
@@ -33,8 +33,5 @@ all: fs-all
 
 .PHONY: install
 install: fs-install
-
-.PHONY: uninstall
-uninstall: fs-uninstall
 
 include $(XEN_ROOT)/tools/libfsimage/Rules.mk

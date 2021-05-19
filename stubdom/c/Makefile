@@ -1,8 +1,6 @@
-XEN_ROOT = $(CURDIR)/../..
+XEN_ROOT = ../..
 
-ifeq (,$(findstring clean,$(MAKECMDGOALS)))
 include $(XEN_ROOT)/Config.mk
-endif
 
 all: main.a
 

@@ -1,14 +1,48 @@
 #include <xen/event.h>
-#include <xen/mem_access.h>
 #include <xen/multicall.h>
 #include <compat/memory.h>
 #include <compat/xen.h>
-#include <asm/mem_paging.h>
-#include <asm/mem_sharing.h>
 
-#include <asm/pv/mm.h>
+int compat_set_gdt(XEN_GUEST_HANDLE(uint) frame_list, unsigned int entries)
+{
+    unsigned int i, nr_pages = (entries + 511) / 512;
+    unsigned long frames[16];
+    long ret;
 
-int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
+    /* Rechecked in set_gdt, but ensures a sane limit for copy_from_user(). */
+    if ( entries > FIRST_RESERVED_GDT_ENTRY )
+        return -EINVAL;
+
+    if ( !guest_handle_okay(frame_list, nr_pages) )
+        return -EFAULT;
+
+    for ( i = 0; i < nr_pages; ++i )
+    {
+        unsigned int frame;
+
+        if ( __copy_from_guest(&frame, frame_list, 1) )
+            return -EFAULT;
+        frames[i] = frame;
+        guest_handle_add_offset(frame_list, 1);
+    }
+
+    domain_lock(current->domain);
+
+    if ( (ret = set_gdt(current, frames, entries)) == 0 )
+        flush_tlb_local();
+
+    domain_unlock(current->domain);
+
+    return ret;
+}
+
+int compat_update_descriptor(u32 pa_lo, u32 pa_hi, u32 desc_lo, u32 desc_hi)
+{
+    return do_update_descriptor(pa_lo | ((u64)pa_hi << 32),
+                                desc_lo | ((u64)desc_hi << 32));
+}
+
+int compat_arch_memory_op(int op, XEN_GUEST_HANDLE(void) arg)
 {
     struct compat_machphys_mfn_list xmml;
     l2_pgentry_t l2e;
@@ -17,8 +51,22 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     unsigned int i;
     int rc = 0;
 
-    switch ( cmd )
+    switch ( op )
     {
+    case XENMEM_add_to_physmap:
+    {
+        struct compat_add_to_physmap cmp;
+        struct xen_add_to_physmap *nat = COMPAT_ARG_XLAT_VIRT_BASE;
+
+        if ( copy_from_guest(&cmp, arg, 1) )
+            return -EFAULT;
+
+        XLAT_add_to_physmap(nat, &cmp);
+        rc = arch_memory_op(op, guest_handle_from_ptr(nat, void));
+
+        break;
+    }
+
     case XENMEM_set_memory_map:
     {
         struct compat_foreign_memory_map cmp;
@@ -32,7 +80,7 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         XLAT_foreign_memory_map(nat, &cmp);
 #undef XLAT_memory_map_HNDL_buffer
 
-        rc = arch_memory_op(cmd, guest_handle_from_ptr(nat, void));
+        rc = arch_memory_op(op, guest_handle_from_ptr(nat, void));
 
         break;
     }
@@ -51,14 +99,14 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         XLAT_memory_map(nat, &cmp);
 #undef XLAT_memory_map_HNDL_buffer
 
-        rc = arch_memory_op(cmd, guest_handle_from_ptr(nat, void));
+        rc = arch_memory_op(op, guest_handle_from_ptr(nat, void));
         if ( rc < 0 )
             break;
 
 #define XLAT_memory_map_HNDL_buffer(_d_, _s_) ((void)0)
         XLAT_memory_map(&cmp, nat);
 #undef XLAT_memory_map_HNDL_buffer
-        if ( __copy_to_guest(arg, &cmp, 1) )
+        if ( copy_to_guest(arg, &cmp, 1) )
             rc = -EFAULT;
 
         break;
@@ -75,21 +123,14 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 
         XLAT_pod_target(nat, &cmp);
 
-        rc = arch_memory_op(cmd, guest_handle_from_ptr(nat, void));
+        rc = arch_memory_op(op, guest_handle_from_ptr(nat, void));
         if ( rc < 0 )
             break;
 
-        if ( rc == __HYPERVISOR_memory_op )
-            hypercall_xlat_continuation(NULL, 2, 0x2, nat, arg);
-
         XLAT_pod_target(&cmp, nat);
 
-        if ( __copy_to_guest(arg, &cmp, 1) )
-        {
-            if ( rc == __HYPERVISOR_memory_op )
-                hypercall_cancel_continuation(current);
+        if ( copy_to_guest(arg, &cmp, 1) )
             rc = -EFAULT;
-        }
 
         break;
     }
@@ -110,7 +151,6 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     }
 
     case XENMEM_machphys_mfn_list:
-    case XENMEM_machphys_compat_mfn_list:
     {
         unsigned long limit;
         compat_pfn_t last_mfn;
@@ -118,7 +158,9 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         if ( copy_from_guest(&xmml, arg, 1) )
             return -EFAULT;
 
-        limit = (unsigned long)(compat_machine_to_phys_mapping + max_page);
+        limit = (unsigned long)(compat_machine_to_phys_mapping +
+            min_t(unsigned long, max_page,
+                  MACH2PHYS_COMPAT_NR_ENTRIES(current->domain)));
         if ( limit > RDWR_COMPAT_MPT_VIRT_END )
             limit = RDWR_COMPAT_MPT_VIRT_END;
         for ( i = 0, v = RDWR_COMPAT_MPT_VIRT_START, last_mfn = 0;
@@ -137,23 +179,11 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         }
 
         xmml.nr_extents = i;
-        if ( __copy_to_guest(arg, &xmml, 1) )
+        if ( copy_to_guest(arg, &xmml, 1) )
             rc = -EFAULT;
 
         break;
     }
-
-    case XENMEM_get_sharing_freed_pages:
-        return mem_sharing_get_nr_saved_mfns();
-
-    case XENMEM_get_sharing_shared_pages:
-        return mem_sharing_get_nr_shared_mfns();
-
-    case XENMEM_paging_op:
-        return mem_paging_memop(guest_handle_cast(arg, xen_mem_paging_op_t));
-
-    case XENMEM_sharing_op:
-        return mem_sharing_memop(guest_handle_cast(arg, xen_mem_sharing_op_t));
 
     default:
         rc = -ENOSYS;
@@ -163,25 +193,29 @@ int compat_arch_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
     return rc;
 }
 
+int compat_update_va_mapping(unsigned int va, u32 lo, u32 hi,
+                             unsigned int flags)
+{
+    return do_update_va_mapping(va, lo | ((u64)hi << 32), flags);
+}
+
+int compat_update_va_mapping_otherdomain(unsigned long va, u32 lo, u32 hi,
+                                         unsigned long flags,
+                                         domid_t domid)
+{
+    return do_update_va_mapping_otherdomain(va, lo | ((u64)hi << 32), flags, domid);
+}
+
 DEFINE_XEN_GUEST_HANDLE(mmuext_op_compat_t);
 
-int compat_mmuext_op(XEN_GUEST_HANDLE_PARAM(void) arg,
+int compat_mmuext_op(XEN_GUEST_HANDLE(mmuext_op_compat_t) cmp_uops,
                      unsigned int count,
-                     XEN_GUEST_HANDLE_PARAM(uint) pdone,
+                     XEN_GUEST_HANDLE(uint) pdone,
                      unsigned int foreigndom)
 {
     unsigned int i, preempt_mask;
     int rc = 0;
-    XEN_GUEST_HANDLE_PARAM(mmuext_op_compat_t) cmp_uops =
-        guest_handle_cast(arg, mmuext_op_compat_t);
-    XEN_GUEST_HANDLE_PARAM(mmuext_op_t) nat_ops;
-
-    if ( unlikely(count == MMU_UPDATE_PREEMPTED) &&
-         likely(guest_handle_is_null(cmp_uops)) )
-    {
-        set_xen_guest_handle(nat_ops, NULL);
-        return do_mmuext_op(nat_ops, count, pdone, foreigndom);
-    }
+    XEN_GUEST_HANDLE(mmuext_op_t) nat_ops;
 
     preempt_mask = count & MMU_UPDATE_PREEMPTED;
     count ^= preempt_mask;
@@ -226,7 +260,6 @@ int compat_mmuext_op(XEN_GUEST_HANDLE_PARAM(void) arg,
                 break;
             case MMUEXT_NEW_USER_BASEPTR:
                 rc = -EINVAL;
-                /* fallthrough */
             case MMUEXT_TLB_FLUSH_LOCAL:
             case MMUEXT_TLB_FLUSH_MULTI:
             case MMUEXT_TLB_FLUSH_ALL:
@@ -275,29 +308,23 @@ int compat_mmuext_op(XEN_GUEST_HANDLE_PARAM(void) arg,
             if ( err == __HYPERVISOR_mmuext_op )
             {
                 struct cpu_user_regs *regs = guest_cpu_user_regs();
-                struct mc_state *mcs = &current->mc_state;
-                unsigned int arg1 = !(mcs->flags & MCSF_in_multicall)
+                struct mc_state *mcs = &this_cpu(mc_state);
+                unsigned int arg1 = !test_bit(_MCSF_in_multicall, &mcs->flags)
                                     ? regs->ecx
                                     : mcs->call.args[1];
                 unsigned int left = arg1 & ~MMU_UPDATE_PREEMPTED;
 
-                BUG_ON(left == arg1 && left != i);
+                BUG_ON(left == arg1);
                 BUG_ON(left > count);
                 guest_handle_add_offset(nat_ops, i - left);
                 guest_handle_subtract_offset(cmp_uops, left);
                 left = 1;
-                if ( arg1 != MMU_UPDATE_PREEMPTED )
-                {
-                    BUG_ON(!hypercall_xlat_continuation(&left, 4, 0x01, nat_ops,
-                                                        cmp_uops));
-                    if ( !(mcs->flags & MCSF_in_multicall) )
-                        regs->ecx += count - i;
-                    else
-                        mcs->compat_call.args[1] += count - i;
-                }
-                else
-                    BUG_ON(hypercall_xlat_continuation(&left, 4, 0));
+                BUG_ON(!hypercall_xlat_continuation(&left, 0x01, nat_ops, cmp_uops));
                 BUG_ON(left != arg1);
+                if (!test_bit(_MCSF_in_multicall, &mcs->flags))
+                    regs->_ecx += count - i;
+                else
+                    mcs->compat_call.args[1] += count - i;
             }
             else
                 BUG_ON(err > 0);
@@ -317,7 +344,7 @@ int compat_mmuext_op(XEN_GUEST_HANDLE_PARAM(void) arg,
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

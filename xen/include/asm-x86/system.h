@@ -2,12 +2,11 @@
 #define __ASM_SYSTEM_H
 
 #include <xen/lib.h>
-#include <xen/bitops.h>
-#include <asm/processor.h>
+#include <asm/bitops.h>
 
-#define read_sreg(name)                                         \
-({  unsigned int __sel;                                         \
-    asm volatile ( "mov %%" STR(name) ",%0" : "=r" (__sel) );   \
+#define read_segment_register(name)                             \
+({  u16 __sel;                                                  \
+    asm volatile ( "movw %%" STR(name) ",%0" : "=r" (__sel) );  \
     __sel;                                                      \
 })
 
@@ -26,7 +25,11 @@
 struct __xchg_dummy { unsigned long a[100]; };
 #define __xg(x) ((volatile struct __xchg_dummy *)(x))
 
-#include <asm/x86_64/system.h>
+#if defined(__i386__)
+# include <asm/x86_32/system.h>
+#elif defined(__x86_64__)
+# include <asm/x86_64/system.h>
+#endif
 
 /*
  * Note: no "lock" prefix even on SMP: xchg always implies lock anyway
@@ -41,27 +44,36 @@ static always_inline unsigned long __xchg(
     case 1:
         asm volatile ( "xchgb %b0,%1"
                        : "=q" (x)
-                       : "m" (*__xg(ptr)), "0" (x)
+                       : "m" (*__xg((volatile void *)ptr)), "0" (x)
                        : "memory" );
         break;
     case 2:
         asm volatile ( "xchgw %w0,%1"
                        : "=r" (x)
-                       : "m" (*__xg(ptr)), "0" (x)
+                       : "m" (*__xg((volatile void *)ptr)), "0" (x)
                        : "memory" );
         break;
+#if defined(__i386__)
+    case 4:
+        asm volatile ( "xchgl %0,%1"
+                       : "=r" (x)
+                       : "m" (*__xg((volatile void *)ptr)), "0" (x)
+                       : "memory" );
+        break;
+#elif defined(__x86_64__)
     case 4:
         asm volatile ( "xchgl %k0,%1"
                        : "=r" (x)
-                       : "m" (*__xg(ptr)), "0" (x)
+                       : "m" (*__xg((volatile void *)ptr)), "0" (x)
                        : "memory" );
         break;
     case 8:
         asm volatile ( "xchgq %0,%1"
                        : "=r" (x)
-                       : "m" (*__xg(ptr)), "0" (x)
+                       : "m" (*__xg((volatile void *)ptr)), "0" (x)
                        : "memory" );
         break;
+#endif
     }
     return x;
 }
@@ -79,68 +91,48 @@ static always_inline unsigned long __cmpxchg(
     switch ( size )
     {
     case 1:
-        asm volatile ( "lock; cmpxchgb %b1,%2"
+        asm volatile ( LOCK_PREFIX "cmpxchgb %b1,%2"
                        : "=a" (prev)
-                       : "q" (new), "m" (*__xg(ptr)),
+                       : "q" (new), "m" (*__xg((volatile void *)ptr)),
                        "0" (old)
                        : "memory" );
         return prev;
     case 2:
-        asm volatile ( "lock; cmpxchgw %w1,%2"
+        asm volatile ( LOCK_PREFIX "cmpxchgw %w1,%2"
                        : "=a" (prev)
-                       : "r" (new), "m" (*__xg(ptr)),
+                       : "r" (new), "m" (*__xg((volatile void *)ptr)),
                        "0" (old)
                        : "memory" );
         return prev;
+#if defined(__i386__)
     case 4:
-        asm volatile ( "lock; cmpxchgl %k1,%2"
+        asm volatile ( LOCK_PREFIX "cmpxchgl %1,%2"
                        : "=a" (prev)
-                       : "r" (new), "m" (*__xg(ptr)),
+                       : "r" (new), "m" (*__xg((volatile void *)ptr)),
+                       "0" (old)
+                       : "memory" );
+        return prev;
+#elif defined(__x86_64__)
+    case 4:
+        asm volatile ( LOCK_PREFIX "cmpxchgl %k1,%2"
+                       : "=a" (prev)
+                       : "r" (new), "m" (*__xg((volatile void *)ptr)),
                        "0" (old)
                        : "memory" );
         return prev;
     case 8:
-        asm volatile ( "lock; cmpxchgq %1,%2"
+        asm volatile ( LOCK_PREFIX "cmpxchgq %1,%2"
                        : "=a" (prev)
-                       : "r" (new), "m" (*__xg(ptr)),
+                       : "r" (new), "m" (*__xg((volatile void *)ptr)),
                        "0" (old)
                        : "memory" );
         return prev;
+#endif
     }
     return old;
 }
 
-static always_inline unsigned long cmpxchg_local_(
-    void *ptr, unsigned long old, unsigned long new, unsigned int size)
-{
-    unsigned long prev = ~old;
-
-    switch ( size )
-    {
-    case 1:
-        asm volatile ( "cmpxchgb %b2, %1"
-                       : "=a" (prev), "+m" (*(uint8_t *)ptr)
-                       : "q" (new), "0" (old) );
-        break;
-    case 2:
-        asm volatile ( "cmpxchgw %w2, %1"
-                       : "=a" (prev), "+m" (*(uint16_t *)ptr)
-                       : "r" (new), "0" (old) );
-        break;
-    case 4:
-        asm volatile ( "cmpxchgl %k2, %1"
-                       : "=a" (prev), "+m" (*(uint32_t *)ptr)
-                       : "r" (new), "0" (old) );
-        break;
-    case 8:
-        asm volatile ( "cmpxchgq %2, %1"
-                       : "=a" (prev), "+m" (*(uint64_t *)ptr)
-                       : "r" (new), "0" (old) );
-        break;
-    }
-
-    return prev;
-}
+#define __HAVE_ARCH_CMPXCHG
 
 #define cmpxchgptr(ptr,o,n) ({                                          \
     const __typeof__(**(ptr)) *__o = (o);                               \
@@ -150,100 +142,32 @@ static always_inline unsigned long cmpxchg_local_(
 })
 
 /*
- * Undefined symbol to cause link failure if a wrong size is used with
- * arch_fetch_and_add().
- */
-extern unsigned long __bad_fetch_and_add_size(void);
-
-static always_inline unsigned long __xadd(
-    volatile void *ptr, unsigned long v, int size)
-{
-    switch ( size )
-    {
-    case 1:
-        asm volatile ( "lock; xaddb %b0,%1"
-                       : "+r" (v), "+m" (*__xg(ptr))
-                       :: "memory");
-        return v;
-    case 2:
-        asm volatile ( "lock; xaddw %w0,%1"
-                       : "+r" (v), "+m" (*__xg(ptr))
-                       :: "memory");
-        return v;
-    case 4:
-        asm volatile ( "lock; xaddl %k0,%1"
-                       : "+r" (v), "+m" (*__xg(ptr))
-                       :: "memory");
-        return v;
-    case 8:
-        asm volatile ( "lock; xaddq %q0,%1"
-                       : "+r" (v), "+m" (*__xg(ptr))
-                       :: "memory");
-
-        return v;
-    default:
-        return __bad_fetch_and_add_size();
-    }
-}
-
-/*
- * Atomically add @v to the 1, 2, 4, or 8 byte value at @ptr.  Returns
- * the previous value.
- *
- * This is a full memory barrier.
- */
-#define arch_fetch_and_add(ptr, v) \
-    ((typeof(*(ptr)))__xadd(ptr, (typeof(*(ptr)))(v), sizeof(*(ptr))))
-
-/*
- * Mandatory barriers, for enforced ordering of reads and writes, e.g. for use
- * with MMIO devices mapped with reduced cacheability.
- */
-#define mb()            asm volatile ( "mfence" ::: "memory" )
-#define rmb()           asm volatile ( "lfence" ::: "memory" )
-#define wmb()           asm volatile ( "sfence" ::: "memory" )
-
-/*
- * SMP barriers, for ordering of reads and writes between CPUs, most commonly
- * used with shared memory.
- *
  * Both Intel and AMD agree that, from a programmer's viewpoint:
  *  Loads cannot be reordered relative to other loads.
  *  Stores cannot be reordered relative to other stores.
- *  Loads may be reordered ahead of a unaliasing stores.
- *
- * Refer to the vendor system programming manuals for further details.
+ * 
+ * Intel64 Architecture Memory Ordering White Paper
+ * <http://developer.intel.com/products/processor/manuals/318147.pdf>
+ * 
+ * AMD64 Architecture Programmer's Manual, Volume 2: System Programming
+ * <http://www.amd.com/us-en/assets/content_type/\
+ *  white_papers_and_tech_docs/24593.pdf>
  */
+#define rmb()           barrier()
+#define wmb()           barrier()
+
+#ifdef CONFIG_SMP
 #define smp_mb()        mb()
+#define smp_rmb()       rmb()
+#define smp_wmb()       wmb()
+#else
+#define smp_mb()        barrier()
 #define smp_rmb()       barrier()
 #define smp_wmb()       barrier()
+#endif
 
 #define set_mb(var, value) do { xchg(&var, value); } while (0)
-#define set_wmb(var, value) do { var = value; smp_wmb(); } while (0)
-
-/**
- * array_index_mask_nospec() - generate a mask that is ~0UL when the
- *      bounds check succeeds and 0 otherwise
- * @index: array element index
- * @size: number of elements in array
- *
- * Returns:
- *     0 - (index < size)
- */
-static inline unsigned long array_index_mask_nospec(unsigned long index,
-                                                    unsigned long size)
-{
-    unsigned long mask;
-
-    asm volatile ( "cmp %[size], %[index]; sbb %[mask], %[mask];"
-                   : [mask] "=r" (mask)
-                   : [size] "g" (size), [index] "r" (index) );
-
-    return mask;
-}
-
-/* Override default implementation in nospec.h. */
-#define array_index_mask_nospec array_index_mask_nospec
+#define set_wmb(var, value) do { var = value; wmb(); } while (0)
 
 #define local_irq_disable()     asm volatile ( "cli" : : : "memory" )
 #define local_irq_enable()      asm volatile ( "sti" : : : "memory" )
@@ -266,27 +190,21 @@ static inline unsigned long array_index_mask_nospec(unsigned long index,
 #define local_irq_restore(x)                                     \
 ({                                                               \
     BUILD_BUG_ON(sizeof(x) != sizeof(long));                     \
-    asm volatile ( "pushfq\n\t"                                  \
-                   "andq %0, (%%rsp)\n\t"                        \
-                   "orq  %1, (%%rsp)\n\t"                        \
-                   "popfq"                                       \
-                   : : "i?r" ( ~X86_EFLAGS_IF ),                 \
-                       "ri" ( (x) & X86_EFLAGS_IF ) );           \
+    asm volatile ( "push" __OS " %0 ; popf" __OS                 \
+                   : : "g" (x) : "memory", "cc" );               \
 })
 
 static inline int local_irq_is_enabled(void)
 {
     unsigned long flags;
     local_save_flags(flags);
-    return !!(flags & X86_EFLAGS_IF);
+    return !!(flags & (1<<9)); /* EFLAGS_IF */
 }
 
 #define BROKEN_ACPI_Sx          0x0001
 #define BROKEN_INIT_AFTER_S1    0x0002
 
 void trap_init(void);
-void init_idt_traps(void);
-void load_system_tables(void);
 void percpu_traps_init(void);
 void subarch_percpu_traps_init(void);
 

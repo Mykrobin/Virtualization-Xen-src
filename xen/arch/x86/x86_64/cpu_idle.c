@@ -16,21 +16,33 @@
  *  General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License along
- *  with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#define __XEN_TOOLS__ /* for using get_xen_guest_handle macro */
+
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/xmalloc.h>
 #include <xen/guest_access.h>
-#include <xen/pmstat.h>
 #include <compat/platform.h>
 
 CHECK_processor_csd;
 
 DEFINE_XEN_GUEST_HANDLE(compat_processor_csd_t);
 DEFINE_XEN_GUEST_HANDLE(compat_processor_cx_t);
+
+#define xlat_page_start ((unsigned long)COMPAT_ARG_XLAT_VIRT_BASE)
+#define xlat_page_size  COMPAT_ARG_XLAT_SIZE
+#define xlat_page_left_size(xlat_page_current) \
+    (xlat_page_start + xlat_page_size - xlat_page_current)
+
+#define xlat_malloc_init(xlat_page_current)    do { \
+    xlat_page_current = xlat_page_start; \
+} while (0)
 
 void *xlat_malloc(unsigned long *xlat_page_current, size_t size)
 {
@@ -48,23 +60,25 @@ void *xlat_malloc(unsigned long *xlat_page_current, size_t size)
     return ret;
 }
 
+#define xlat_malloc_array(_p, _t, _c) ((_t *) xlat_malloc(&_p, sizeof(_t) * _c))
+
 static int copy_from_compat_state(xen_processor_cx_t *xen_state,
                                   compat_processor_cx_t *state)
 {
 #define XLAT_processor_cx_HNDL_dp(_d_, _s_) do { \
     XEN_GUEST_HANDLE(compat_processor_csd_t) dps; \
-    XEN_GUEST_HANDLE_PARAM(xen_processor_csd_t) dps_param; \
     if ( unlikely(!compat_handle_okay((_s_)->dp, (_s_)->dpcnt)) ) \
             return -EFAULT; \
     guest_from_compat_handle(dps, (_s_)->dp); \
-    dps_param = guest_handle_cast(dps, xen_processor_csd_t); \
-    (_d_)->dp = guest_handle_from_param(dps_param, xen_processor_csd_t); \
+    (_d_)->dp = guest_handle_cast(dps, xen_processor_csd_t); \
 } while (0)
     XLAT_processor_cx(xen_state, state);
 #undef XLAT_processor_cx_HNDL_dp
 
     return 0;
 }
+
+extern long set_cx_pminfo(uint32_t cpu, struct xen_processor_power *power);
 
 long compat_set_cx_pminfo(uint32_t cpu, struct compat_processor_power *power)
 {

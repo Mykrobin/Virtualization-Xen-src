@@ -4,23 +4,28 @@
  * VESA linear frame buffer handling.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
-#include <xen/xmalloc.h>
-#include <xen/kernel.h>
+#include <xen/mm.h>
+#include <xen/errno.h>
+#include <xen/console.h>
 #include <xen/vga.h>
-#include <asm/io.h>
-#include <asm/page.h>
 #include "font.h"
-#include "lfb.h"
 
 #define vlfb_info    vga_console_info.u.vesa_lfb
+#define text_columns (vlfb_info.width / font->width)
+#define text_rows    (vlfb_info.height / font->height)
 
-static void lfb_flush(void);
+static void vesa_redraw_puts(const char *s);
+static void vesa_scroll_puts(const char *s);
 
-static unsigned char *lfb;
+static unsigned char *lfb, *lbuf, *text_buf;
+static unsigned int *__initdata line_len;
 static const struct font_desc *font;
 static bool_t vga_compat;
+static unsigned int pixel_on;
+static unsigned int xpos, ypos;
 
 static unsigned int vram_total;
 integer_param("vesa-ram", vram_total);
@@ -29,21 +34,14 @@ static unsigned int vram_remap;
 integer_param("vesa-map", vram_remap);
 
 static int font_height;
-static int __init parse_font_height(const char *s)
+static void __init parse_font_height(const char *s)
 {
     if ( simple_strtoul(s, &s, 10) == 8 && (*s++ == 'x') )
         font_height = simple_strtoul(s, &s, 10);
     if ( *s != '\0' )
         font_height = 0;
-
-    return 0;
 }
 custom_param("font", parse_font_height);
-
-static inline paddr_t lfb_base(void)
-{
-    return ((paddr_t)vlfb_info.ext_lfb_base << 32) | vlfb_info.lfb_base;
-}
 
 void __init vesa_early_init(void)
 {
@@ -88,28 +86,36 @@ void __init vesa_early_init(void)
 
 void __init vesa_init(void)
 {
-    struct lfb_prop lfbp;
-
     if ( !font )
-        return;
+        goto fail;
 
-    lfbp.font = font;
-    lfbp.bits_per_pixel = vlfb_info.bits_per_pixel;
-    lfbp.bytes_per_line = vlfb_info.bytes_per_line;
-    lfbp.width = vlfb_info.width;
-    lfbp.height = vlfb_info.height;
-    lfbp.flush = lfb_flush;
-    lfbp.text_columns = vlfb_info.width / font->width;
-    lfbp.text_rows = vlfb_info.height / font->height;
+    lbuf = xmalloc_bytes(vlfb_info.bytes_per_line);
+    if ( !lbuf )
+        goto fail;
 
-    lfbp.lfb = lfb = ioremap(lfb_base(), vram_remap);
-    if ( !lfb )
-        return;
+    text_buf = xmalloc_bytes(text_columns * text_rows);
+    if ( !text_buf )
+        goto fail;
 
-    memset(lfb, 0, vram_remap);
+    line_len = xmalloc_array(unsigned int, text_columns);
+    if ( !line_len )
+        goto fail;
 
-    printk(XENLOG_INFO "vesafb: framebuffer at 0x%" PRIpaddr ", mapped to 0x%p, using %uk, total %uk\n",
-           lfb_base(), lfb,
+    if ( map_pages_to_xen(IOREMAP_VIRT_START,
+                          vlfb_info.lfb_base >> PAGE_SHIFT,
+                          vram_remap >> PAGE_SHIFT,
+                          PAGE_HYPERVISOR_NOCACHE) )
+        goto fail;
+
+    lfb = memset((void *)IOREMAP_VIRT_START, 0, vram_remap);
+    memset(text_buf, 0, text_columns * text_rows);
+    memset(line_len, 0, text_columns * sizeof(*line_len));
+
+    vga_puts = vesa_redraw_puts;
+
+    printk(XENLOG_INFO "vesafb: framebuffer at 0x%x, mapped to 0x%p, "
+           "using %uk, total %uk\n",
+           vlfb_info.lfb_base, lfb,
            vram_remap >> 10, vram_total >> 10);
     printk(XENLOG_INFO "vesafb: mode is %dx%dx%u, linelength=%d, font %ux%u\n",
            vlfb_info.width, vlfb_info.height,
@@ -128,7 +134,7 @@ void __init vesa_init(void)
     {
         /* Light grey in truecolor. */
         unsigned int grey = 0xaaaaaaaa;
-        lfbp.pixel_on =
+        pixel_on = 
             ((grey >> (32 - vlfb_info.  red_size)) << vlfb_info.  red_pos) |
             ((grey >> (32 - vlfb_info.green_size)) << vlfb_info.green_pos) |
             ((grey >> (32 - vlfb_info. blue_size)) << vlfb_info. blue_pos);
@@ -136,13 +142,18 @@ void __init vesa_init(void)
     else
     {
         /* White(ish) in default pseudocolor palette. */
-        lfbp.pixel_on = 7;
+        pixel_on = 7;
     }
 
-    if ( lfb_init(&lfbp) < 0 )
-        return;
-    video_puts = lfb_redraw_puts;
+    return;
+
+ fail:
+    xfree(lbuf);
+    xfree(text_buf);
+    xfree(line_len);
 }
+
+#if defined(CONFIG_X86)
 
 #include <asm/mtrr.h>
 
@@ -171,7 +182,7 @@ void __init vesa_mtrr_init(void)
 
     /* Try and find a power of two to add */
     do {
-        rc = mtrr_add(lfb_base(), size_total, type, 1);
+        rc = mtrr_add(vlfb_info.lfb_base, size_total, type, 1);
         size_total >>= 1;
     } while ( (size_total >= PAGE_SIZE) && (rc == -EINVAL) );
 }
@@ -182,12 +193,18 @@ static void lfb_flush(void)
         __asm__ __volatile__ ("sfence" : : : "memory");
 }
 
+#else /* !defined(CONFIG_X86) */
+
+#define lfb_flush() ((void)0)
+
+#endif
+
 void __init vesa_endboot(bool_t keep)
 {
     if ( keep )
     {
-        video_puts = lfb_scroll_puts;
-        lfb_carriage_return();
+        xpos = 0;
+        vga_puts = vesa_scroll_puts;
     }
     else
     {
@@ -196,6 +213,124 @@ void __init vesa_endboot(bool_t keep)
             memset(lfb + i * vlfb_info.bytes_per_line, 0,
                    vlfb_info.width * bpp);
         lfb_flush();
-        lfb_free();
     }
+
+    xfree(line_len);
+}
+
+/* Render one line of text to given linear framebuffer line. */
+static void vesa_show_line(
+    const unsigned char *text_line,
+    unsigned char *video_line,
+    unsigned int nr_chars,
+    unsigned int nr_cells)
+{
+    unsigned int i, j, b, bpp, pixel;
+
+    bpp = (vlfb_info.bits_per_pixel + 7) >> 3;
+
+    for ( i = 0; i < font->height; i++ )
+    {
+        unsigned char *ptr = lbuf;
+
+        for ( j = 0; j < nr_chars; j++ )
+        {
+            const unsigned char *bits = font->data;
+            bits += ((text_line[j] * font->height + i) *
+                     ((font->width + 7) >> 3));
+            for ( b = font->width; b--; )
+            {
+                pixel = (*bits & (1u<<b)) ? pixel_on : 0;
+                memcpy(ptr, &pixel, bpp);
+                ptr += bpp;
+            }
+        }
+
+        memset(ptr, 0, (vlfb_info.width - nr_chars * font->width) * bpp);
+        memcpy(video_line, lbuf, nr_cells * font->width * bpp);
+        video_line += vlfb_info.bytes_per_line;
+    }
+}
+
+/* Fast mode which redraws all modified parts of a 2D text buffer. */
+static void __init vesa_redraw_puts(const char *s)
+{
+    unsigned int i, min_redraw_y = ypos;
+    char c;
+
+    /* Paste characters into text buffer. */
+    while ( (c = *s++) != '\0' )
+    {
+        if ( (c == '\n') || (xpos >= text_columns) )
+        {
+            if ( ++ypos >= text_rows )
+            {
+                min_redraw_y = 0;
+                ypos = text_rows - 1;
+                memmove(text_buf, text_buf + text_columns,
+                        ypos * text_columns);
+                memset(text_buf + ypos * text_columns, 0, xpos);
+            }
+            xpos = 0;
+        }
+
+        if ( c != '\n' )
+            text_buf[xpos++ + ypos * text_columns] = c;
+    }
+
+    /* Render modified section of text buffer to VESA linear framebuffer. */
+    for ( i = min_redraw_y; i <= ypos; i++ )
+    {
+        const unsigned char *line = text_buf + i * text_columns;
+        unsigned int width;
+
+        for ( width = text_columns; width; --width )
+            if ( line[width - 1] )
+                 break;
+        vesa_show_line(line,
+                       lfb + i * font->height * vlfb_info.bytes_per_line,
+                       width, max(line_len[i], width));
+        line_len[i] = width;
+    }
+
+    lfb_flush();
+}
+
+/* Slower line-based scroll mode which interacts better with dom0. */
+static void vesa_scroll_puts(const char *s)
+{
+    unsigned int i;
+    char c;
+
+    while ( (c = *s++) != '\0' )
+    {
+        if ( (c == '\n') || (xpos >= text_columns) )
+        {
+            unsigned int bytes = (vlfb_info.width *
+                                  ((vlfb_info.bits_per_pixel + 7) >> 3));
+            unsigned char *src = lfb + font->height * vlfb_info.bytes_per_line;
+            unsigned char *dst = lfb;
+            
+            /* New line: scroll all previous rows up one line. */
+            for ( i = font->height; i < vlfb_info.height; i++ )
+            {
+                memcpy(dst, src, bytes);
+                src += vlfb_info.bytes_per_line;
+                dst += vlfb_info.bytes_per_line;
+            }
+
+            /* Render new line. */
+            vesa_show_line(
+                text_buf,
+                lfb + (text_rows-1) * font->height * vlfb_info.bytes_per_line,
+                xpos, text_columns);
+
+            xpos = 0;
+        }
+
+        if ( c != '\n' )
+            text_buf[xpos++] = c;
+    }
+
+    lfb_flush();
 }

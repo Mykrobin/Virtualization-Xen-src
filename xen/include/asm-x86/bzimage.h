@@ -1,11 +1,12 @@
 #ifndef __X86_BZIMAGE_H__
 #define __X86_BZIMAGE_H__
 
-#include <xen/init.h>
+#include <xen/config.h>
 
-unsigned long bzimage_headroom(void *image_start, unsigned long image_length);
+int __init bzimage_headroom(char *image_start, unsigned long image_length);
 
-int bzimage_parse(void *image_base, void **image_start,
-                  unsigned long *image_len);
+int __init bzimage_parse(char *image_base,
+			char **image_start,
+			unsigned long *image_len);
 
 #endif /* __X86_BZIMAGE_H__ */

@@ -13,96 +13,59 @@
  * GNU Lesser General Public License for more details.
  */
 
-#include "libxl_internal.h"
-#include <stdarg.h>
+#include <stdlib.h>
+#include "flexarray.h"
 
-/*
- * It is safe to store gc in the struct because:
- * - If it an actual gc, then the flexarray should not be used after the gc
- *   have been freed.
- * - If it is a NOGC, then this point to a structure embedded in libxl_ctx,
- *   therefore will survive across several libxl calls.
- */
-
-flexarray_t *flexarray_make(libxl__gc *gc, int size, int autogrow)
+flexarray_t *flexarray_make(int size, int autogrow)
 {
-    flexarray_t *array;
-
-    GCNEW(array);
-    array->size = size;
-    array->autogrow = autogrow;
-    array->count = 0;
-    array->gc = gc;
-    GCNEW_ARRAY(array->data, size);
-
+    flexarray_t *array = malloc(sizeof(struct flexarray));
+    if (array) {
+        array->size = size;
+        array->autogrow = autogrow;
+        array->data = calloc(size, sizeof(void *));
+    }
     return array;
 }
 
 void flexarray_free(flexarray_t *array)
 {
-    assert(!libxl__gc_is_real(array->gc));
     free(array->data);
     free(array);
 }
 
-void flexarray_grow(flexarray_t *array, int extents)
+int flexarray_grow(flexarray_t *array, int extents)
 {
+    void **data;
     int newsize;
-    libxl__gc *gc = array->gc;
 
     newsize = array->size + extents;
-    GCREALLOC_ARRAY(array->data, newsize);
+    data = realloc(array->data, sizeof(void *) * newsize);
+    if (!data)
+        return 1;
     array->size += extents;
-}
-
-int flexarray_set(flexarray_t *array, unsigned int idx, void *ptr)
-{
-    if (idx >= array->size) {
-        int newsize;
-        if (!array->autogrow)
-            return 1;
-        newsize = (array->size * 2 < idx) ? idx + 1 : array->size * 2;
-        flexarray_grow(array, newsize - array->size);
-    }
-    if ( idx + 1 > array->count )
-        array->count = idx + 1;
-    array->data[idx] = ptr;
+    array->data = data;
     return 0;
 }
 
-int flexarray_append(flexarray_t *array, void *ptr)
+int flexarray_set(flexarray_t *array, unsigned int index, void *ptr)
 {
-    return flexarray_set(array, array->count, ptr);
-}
-
-int flexarray_append_pair(flexarray_t *array, void *ptr1, void *ptr2)
-{
-    int rc = flexarray_append(array, ptr1);
-    if (!rc)
-        rc = flexarray_append(array, ptr2);
-    return rc;
-}
-
-int flexarray_vappend(flexarray_t *array, ...)
-{
-    va_list va;
-    void *ptr;
-    int ret;
-
-    va_start(va, array);
-    for(ret = 0; (ptr = va_arg(va, void *)); ret++) {
-        if ( flexarray_append(array, ptr) )
-            break;
+    if (index >= array->size) {
+        int newsize;
+        if (!array->autogrow)
+            return 1;
+        newsize = (array->size * 2 < index) ? index + 1 : array->size * 2;
+        if (flexarray_grow(array, newsize - array->size))
+            return 2;
     }
-    va_end(va);
-    return ret;
+    array->data[index] = ptr;
+    return 0;
 }
 
-int flexarray_get(flexarray_t *array, int idx, void **ptr)
+int flexarray_get(flexarray_t *array, int index, void **ptr)
 {
-    if (idx >= array->size)
+    if (index >= array->size)
         return 1;
-    *ptr = array->data[idx];
+    *ptr = array->data[index];
     return 0;
 }
 
@@ -110,15 +73,6 @@ void **flexarray_contents(flexarray_t *array)
 {
     void **data;
     data = array->data;
-    if (!libxl__gc_is_real(array->gc))
-        free(array);
+    free(array);
     return data;
 }
-
-/*
- * Local variables:
- * mode: C
- * c-basic-offset: 4
- * indent-tabs-mode: nil
- * End:
- */

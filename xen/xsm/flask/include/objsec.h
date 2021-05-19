@@ -18,9 +18,16 @@
 #include "avc.h"
 
 struct domain_security_struct {
+    struct domain *d;      /* back pointer to domain object */
     u32 sid;               /* current SID */
-    u32 self_sid;          /* SID for target when operating on DOMID_SELF */
-    u32 target_sid;        /* SID for device model target domain */
+    u32 create_sid;
 };
+
+struct evtchn_security_struct {
+    struct evtchn *chn;      /* back pointer to evtchn object */
+    u32 sid;                 /* current SID */
+};
+
+extern unsigned int selinux_checkreqprot;
 
 #endif /* _FLASK_OBJSEC_H_ */

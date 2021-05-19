@@ -4,11 +4,6 @@ import re,sys
 
 pats = [
  [ r"__InClUdE__(.*)", r"#include\1\n#pragma pack(4)" ],
- [ r"__IfDeF__ (XEN_HAVE.*)", r"#ifdef \1" ],
- [ r"__ElSe__", r"#else" ],
- [ r"__EnDif__", r"#endif" ],
- [ r"__DeFiNe__", r"#define" ],
- [ r"__UnDeF__", r"#undef" ],
  [ r"\"xen-compat.h\"", r"<public/xen-compat.h>" ],
  [ r"(struct|union|enum)\s+(xen_?)?(\w)", r"\1 compat_\3" ],
  [ r"@KeeP@", r"" ],
@@ -23,4 +18,4 @@ pats = [
 for line in sys.stdin.readlines():
     for pat in pats:
         line = re.subn(pat[0], pat[1], line)[0]
-    print(line.rstrip())
+    print line.rstrip()

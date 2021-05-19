@@ -33,6 +33,7 @@
 
 /*
  * Bind a fresh port to VIRQ @virq.
+ * Return allocated port.
  */
 #define IOCTL_EVTCHN_BIND_VIRQ				\
 	_IOWR('E', 4, struct ioctl_evtchn_bind_virq)
@@ -43,6 +44,7 @@ struct ioctl_evtchn_bind_virq {
 
 /*
  * Bind a fresh port to remote <@remote_domain, @remote_port>.
+ * Return allocated port.
  */
 #define IOCTL_EVTCHN_BIND_INTERDOMAIN			\
 	_IOWR('E', 5, struct ioctl_evtchn_bind_interdomain)
@@ -53,6 +55,7 @@ struct ioctl_evtchn_bind_interdomain {
 
 /*
  * Allocate a fresh port for binding to @remote_domain.
+ * Return allocated port.
  */
 #define IOCTL_EVTCHN_BIND_UNBOUND_PORT			\
 	_IOWR('E', 6, struct ioctl_evtchn_bind_unbound_port)

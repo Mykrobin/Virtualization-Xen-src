@@ -15,15 +15,12 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
-
-/* get curses header from configure */
-#include INCLUDE_CURSES_H
-
+#include <curses.h>
 #include <ctype.h>
 #include <errno.h>
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -44,7 +41,7 @@
 "Copyright (C) 2005  International Business Machines  Corp\n"\
 "This is free software; see the source for copying conditions.There is NO\n"\
 "warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.\n"
-#define XENTOP_BUGSTO "Report bugs to <xen-devel@lists.xen.org>.\n"
+#define XENTOP_BUGSTO "Report bugs to <xen-tools@lists.xensource.com>.\n"
 
 #define _GNU_SOURCE
 #include <getopt.h>
@@ -54,7 +51,6 @@
 #endif
 
 #define KEY_ESCAPE '\x1B'
-#define KEY_REPAINT '\x0C'
 
 #ifdef HOST_SunOS
 /* Old curses library on Solaris takes non-const strings. Also, ERR interferes
@@ -66,8 +62,6 @@
 #else
 #define curses_str_t const char *
 #endif
-
-#define INT_FIELD_WIDTH(n) ((unsigned int)(log10(n) + 1))
 
 /*
  * Function prototypes
@@ -126,8 +120,7 @@ static int compare_vbd_rsect(xenstat_domain *domain1, xenstat_domain *domain2);
 static void print_vbd_rsect(xenstat_domain *domain);
 static int compare_vbd_wsect(xenstat_domain *domain1, xenstat_domain *domain2);
 static void print_vbd_wsect(xenstat_domain *domain);
-static void reset_field_widths(void);
-static void adjust_field_widths(xenstat_domain *domain);
+
 
 /* Section printing functions */
 static void do_summary(void);
@@ -384,9 +377,6 @@ static int handle_key(int ch)
 		case 'd': case 'D':
 			set_prompt("Delay(sec)", set_delay);
 			break;
-		case KEY_REPAINT:
-			clear();
-			break;
 		case 'q': case 'Q': case KEY_ESCAPE:
 			return 0;
 		}
@@ -403,7 +393,6 @@ static int handle_key(int ch)
 		case KEY_BACKSPACE:
 			if(prompt_val_len > 0)
 				prompt_val[--prompt_val_len] = '\0';
-                        break;
 		default:
 			if((prompt_val_len+1) < PROMPT_VAL_LEN
 			   && isprint(ch)) {
@@ -445,7 +434,7 @@ int compare_name(xenstat_domain *domain1, xenstat_domain *domain2)
 void print_name(xenstat_domain *domain)
 {
 	if(show_full_name)
-		print("%*s", fields[FIELD_NAME-1].default_width, xenstat_domain_name(domain));
+		print("%10s", xenstat_domain_name(domain));
 	else
 		print("%10.10s", xenstat_domain_name(domain));
 }
@@ -624,7 +613,7 @@ static int compare_net_tx(xenstat_domain *domain1, xenstat_domain *domain2)
 /* Prints number of total network tx bytes statistic */
 static void print_net_tx(xenstat_domain *domain)
 {
-	print("%*llu", fields[FIELD_NET_TX-1].default_width, tot_net_bytes(domain, FALSE)/1024);
+	print("%8llu", tot_net_bytes(domain, FALSE)/1024);
 }
 
 /* Compares number of total network rx bytes of two domains, returning -1,0,1
@@ -638,7 +627,7 @@ static int compare_net_rx(xenstat_domain *domain1, xenstat_domain *domain2)
 /* Prints number of total network rx bytes statistic */
 static void print_net_rx(xenstat_domain *domain)
 {
-	print("%*llu", fields[FIELD_NET_RX-1].default_width, tot_net_bytes(domain, TRUE)/1024);
+	print("%8llu", tot_net_bytes(domain, TRUE)/1024);
 }
 
 /* Gets number of total network bytes statistic, if rx true, then rx bytes
@@ -706,7 +695,7 @@ static int compare_vbd_rd(xenstat_domain *domain1, xenstat_domain *domain2)
 /* Prints number of total VBD READ requests statistic */
 static void print_vbd_rd(xenstat_domain *domain)
 {
-	print("%*llu", fields[FIELD_VBD_RD-1].default_width, tot_vbd_reqs(domain, FIELD_VBD_RD));
+	print("%8llu", tot_vbd_reqs(domain, FIELD_VBD_RD));
 }
 
 /* Compares number of total VBD WRITE requests of two domains,
@@ -720,7 +709,7 @@ static int compare_vbd_wr(xenstat_domain *domain1, xenstat_domain *domain2)
 /* Prints number of total VBD WRITE requests statistic */
 static void print_vbd_wr(xenstat_domain *domain)
 {
-	print("%*llu", fields[FIELD_VBD_WR-1].default_width, tot_vbd_reqs(domain, FIELD_VBD_WR));
+	print("%8llu", tot_vbd_reqs(domain, FIELD_VBD_WR));
 }
 
 /* Compares number of total VBD READ sectors of two domains,
@@ -734,7 +723,7 @@ static int compare_vbd_rsect(xenstat_domain *domain1, xenstat_domain *domain2)
 /* Prints number of total VBD READ sectors statistic */
 static void print_vbd_rsect(xenstat_domain *domain)
 {
-	print("%*llu", fields[FIELD_VBD_RSECT-1].default_width, tot_vbd_reqs(domain, FIELD_VBD_RSECT));
+	print("%10llu", tot_vbd_reqs(domain, FIELD_VBD_RSECT));
 }
 
 /* Compares number of total VBD WRITE sectors of two domains,
@@ -748,7 +737,7 @@ static int compare_vbd_wsect(xenstat_domain *domain1, xenstat_domain *domain2)
 /* Prints number of total VBD WRITE sectors statistic */
 static void print_vbd_wsect(xenstat_domain *domain)
 {
-	print("%*llu", fields[FIELD_VBD_WSECT-1].default_width, tot_vbd_reqs(domain, FIELD_VBD_WSECT));
+	print("%10llu", tot_vbd_reqs(domain, FIELD_VBD_WSECT));
 }
 
 
@@ -806,54 +795,6 @@ static void print_ssid(xenstat_domain *domain)
 {
 	print("%4u", xenstat_domain_ssid(domain));
 }
-
-/* Resets default_width for fields with potentially large numbers */
-void reset_field_widths(void)
-{
-	fields[FIELD_NET_TX-1].default_width = 8;
-	fields[FIELD_NET_RX-1].default_width = 8;
-	fields[FIELD_VBD_RD-1].default_width = 8;
-	fields[FIELD_VBD_WR-1].default_width = 8;
-	fields[FIELD_VBD_RSECT-1].default_width = 10;
-	fields[FIELD_VBD_WSECT-1].default_width = 10;
-}
-
-/* Adjusts default_width for fields with potentially large numbers */
-void adjust_field_widths(xenstat_domain *domain)
-{
-	unsigned int length;
-
-	if (show_full_name) {
-		length = strlen(xenstat_domain_name(domain));
-		if (length > fields[FIELD_NAME-1].default_width)
-			fields[FIELD_NAME-1].default_width = length;
-	}
-
-	length = INT_FIELD_WIDTH((tot_net_bytes(domain, FALSE)/1024) + 1);
-	if (length > fields[FIELD_NET_TX-1].default_width)
-		fields[FIELD_NET_TX-1].default_width = length;
-
-	length = INT_FIELD_WIDTH((tot_net_bytes(domain, TRUE)/1024) + 1);
-	if (length > fields[FIELD_NET_RX-1].default_width)
-		fields[FIELD_NET_RX-1].default_width = length;
-
-	length = INT_FIELD_WIDTH((tot_vbd_reqs(domain, FIELD_VBD_RD)) + 1);
-	if (length > fields[FIELD_VBD_RD-1].default_width)
-		fields[FIELD_VBD_RD-1].default_width = length;
-
-	length = INT_FIELD_WIDTH((tot_vbd_reqs(domain, FIELD_VBD_WR)) + 1);
-	if (length > fields[FIELD_VBD_WR-1].default_width)
-		fields[FIELD_VBD_WR-1].default_width = length;
-
-	length = INT_FIELD_WIDTH((tot_vbd_reqs(domain, FIELD_VBD_RSECT)) + 1);
-	if (length > fields[FIELD_VBD_RSECT-1].default_width)
-		fields[FIELD_VBD_RSECT-1].default_width = length;
-
-	length = INT_FIELD_WIDTH((tot_vbd_reqs(domain, FIELD_VBD_WSECT)) + 1);
-	if (length > fields[FIELD_VBD_WSECT-1].default_width)
-		fields[FIELD_VBD_WSECT-1].default_width = length;
-}
-
 
 /* Section printing functions */
 /* Prints the top summary, above the domain table */
@@ -1137,12 +1078,6 @@ static void top(void)
 	if(first_domain_index >= num_domains)
 		first_domain_index = num_domains-1;
 
-	/* Adjust default_width for fields with potentially large numbers */
-	reset_field_widths();
-	for (i = first_domain_index; i < num_domains; i++) {
-		adjust_field_widths(domains[i]);
-	}
-
 	for (i = first_domain_index; i < num_domains; i++) {
 		if(!batch && current_row() == lines()-1)
 			break;
@@ -1260,7 +1195,7 @@ int main(int argc, char **argv)
 		do {
 			gettimeofday(&curtime, NULL);
 			if(ch != ERR || (curtime.tv_sec - oldtime.tv_sec) >= delay) {
-				erase();
+				clear();
 				top();
 				oldtime = curtime;
 				refresh();

@@ -47,9 +47,7 @@ DECLARE_HVM_SAVE_TYPE(HEADER, 1, struct hvm_save_header);
 /*
  * Processor
  *
- * Compat:
- *     - Pre-3.4 didn't have msr_tsc_aux
- *     - Pre-4.7 didn't have fpu_initialised
+ * Compat: Pre-3.4 didn't have msr_tsc_aux
  */
 
 struct hvm_hw_cpu {
@@ -135,7 +133,7 @@ struct hvm_hw_cpu {
     uint64_t shadow_gs;
 
     /* msr content saved/restored. */
-    uint64_t msr_flags; /* Obsolete, ignored. */
+    uint64_t msr_flags;
     uint64_t msr_lstar;
     uint64_t msr_star;
     uint64_t msr_cstar;
@@ -159,11 +157,6 @@ struct hvm_hw_cpu {
     };
     /* error code for pending event */
     uint32_t error_code;
-
-#define _XEN_X86_FPU_INITIALISED        0
-#define XEN_X86_FPU_INITIALISED         (1U<<_XEN_X86_FPU_INITIALISED)
-    uint32_t flags;
-    uint32_t pad0;
 };
 
 struct hvm_hw_cpu_compat {
@@ -249,7 +242,7 @@ struct hvm_hw_cpu_compat {
     uint64_t shadow_gs;
 
     /* msr content saved/restored. */
-    uint64_t msr_flags; /* Obsolete, ignored. */
+    uint64_t msr_flags;
     uint64_t msr_lstar;
     uint64_t msr_star;
     uint64_t msr_cstar;
@@ -275,26 +268,16 @@ struct hvm_hw_cpu_compat {
     uint32_t error_code;
 };
 
-static inline int _hvm_hw_fix_cpu(void *h, uint32_t size) {
+static inline int _hvm_hw_fix_cpu(void *h) {
+    struct hvm_hw_cpu *new=h;
+    struct hvm_hw_cpu_compat *old=h;
 
-    union hvm_hw_cpu_union {
-        struct hvm_hw_cpu nat;
-        struct hvm_hw_cpu_compat cmp;
-    } *ucpu = (union hvm_hw_cpu_union *)h;
-
-    if ( size == sizeof(struct hvm_hw_cpu_compat) )
-    {
-        /*
-         * If we copy from the end backwards, we should
-         * be able to do the modification in-place.
-         */
-        ucpu->nat.error_code = ucpu->cmp.error_code;
-        ucpu->nat.pending_event = ucpu->cmp.pending_event;
-        ucpu->nat.tsc = ucpu->cmp.tsc;
-        ucpu->nat.msr_tsc_aux = 0;
-    }
-    /* Mimic the old behaviour by unconditionally setting fpu_initialised. */
-    ucpu->nat.flags = XEN_X86_FPU_INITIALISED;
+    /* If we copy from the end backwards, we should
+     * be able to do the modification in-place */
+    new->error_code=old->error_code;
+    new->pending_event=old->pending_event;
+    new->tsc=old->tsc;
+    new->msr_tsc_aux=0;
 
     return 0;
 }
@@ -361,41 +344,40 @@ DECLARE_HVM_SAVE_TYPE(PIC, 3, struct hvm_hw_vpic);
  * IO-APIC
  */
 
-union vioapic_redir_entry
-{
-    uint64_t bits;
-    struct {
-        uint8_t vector;
-        uint8_t delivery_mode:3;
-        uint8_t dest_mode:1;
-        uint8_t delivery_status:1;
-        uint8_t polarity:1;
-        uint8_t remote_irr:1;
-        uint8_t trig_mode:1;
-        uint8_t mask:1;
-        uint8_t reserve:7;
-        uint8_t reserved[4];
-        uint8_t dest_id;
-    } fields;
-};
-
-#define VIOAPIC_NUM_PINS  48 /* 16 ISA IRQs, 32 non-legacy PCI IRQS. */
-
-#define XEN_HVM_VIOAPIC(name, cnt)                      \
-    struct name {                                       \
-        uint64_t base_address;                          \
-        uint32_t ioregsel;                              \
-        uint32_t id;                                    \
-        union vioapic_redir_entry redirtbl[cnt];        \
-    }
-
-XEN_HVM_VIOAPIC(hvm_hw_vioapic, VIOAPIC_NUM_PINS);
-
-#ifndef __XEN__
-#undef XEN_HVM_VIOAPIC
+#ifdef __ia64__
+#define VIOAPIC_IS_IOSAPIC 1
+#define VIOAPIC_NUM_PINS  24
 #else
-#undef VIOAPIC_NUM_PINS
+#define VIOAPIC_NUM_PINS  48 /* 16 ISA IRQs, 32 non-legacy PCI IRQS. */
 #endif
+
+struct hvm_hw_vioapic {
+    uint64_t base_address;
+    uint32_t ioregsel;
+    uint32_t id;
+    union vioapic_redir_entry
+    {
+        uint64_t bits;
+        struct {
+            uint8_t vector;
+            uint8_t delivery_mode:3;
+            uint8_t dest_mode:1;
+            uint8_t delivery_status:1;
+            uint8_t polarity:1;
+            uint8_t remote_irr:1;
+            uint8_t trig_mode:1;
+            uint8_t mask:1;
+            uint8_t reserve:7;
+#if !VIOAPIC_IS_IOSAPIC
+            uint8_t reserved[4];
+            uint8_t dest_id;
+#else
+            uint8_t reserved[3];
+            uint16_t dest_id;
+#endif
+        } fields;
+    } redirtbl[VIOAPIC_NUM_PINS];
+};
 
 DECLARE_HVM_SAVE_TYPE(IOAPIC, 4, struct hvm_hw_vioapic);
 
@@ -408,7 +390,6 @@ struct hvm_hw_lapic {
     uint64_t             apic_base_msr;
     uint32_t             disabled; /* VLAPIC_xx_DISABLED */
     uint32_t             timer_divisor;
-    uint64_t             tdt_msr;
 };
 
 DECLARE_HVM_SAVE_TYPE(LAPIC, 5, struct hvm_hw_lapic);
@@ -565,93 +546,19 @@ struct hvm_hw_mtrr {
 DECLARE_HVM_SAVE_TYPE(MTRR, 14, struct hvm_hw_mtrr);
 
 /*
- * The save area of XSAVE/XRSTOR.
- */
-
-struct hvm_hw_cpu_xsave {
-    uint64_t xfeature_mask;        /* Ignored */
-    uint64_t xcr0;                 /* Updated by XSETBV */
-    uint64_t xcr0_accum;           /* Updated by XSETBV */
-    struct {
-        struct { char x[512]; } fpu_sse;
-
-        struct hvm_hw_cpu_xsave_hdr {
-            uint64_t xstate_bv;         /* Updated by XRSTOR */
-            uint64_t xcomp_bv;          /* Updated by XRSTOR{C,S} */
-            uint64_t reserved[6];
-        } xsave_hdr;                    /* The 64-byte header */
-    } save_area;
-};
-
-#define CPU_XSAVE_CODE  16
-
-/*
  * Viridian hypervisor context.
  */
 
-struct hvm_viridian_domain_context {
+struct hvm_viridian_context {
     uint64_t hypercall_gpa;
     uint64_t guest_os_id;
-    uint64_t time_ref_count;
-    uint64_t reference_tsc;
 };
 
-DECLARE_HVM_SAVE_TYPE(VIRIDIAN_DOMAIN, 15, struct hvm_viridian_domain_context);
-
-struct hvm_viridian_vcpu_context {
-    uint64_t vp_assist_msr;
-    uint8_t  vp_assist_pending;
-    uint8_t  _pad[7];
-};
-
-DECLARE_HVM_SAVE_TYPE(VIRIDIAN_VCPU, 17, struct hvm_viridian_vcpu_context);
-
-struct hvm_vmce_vcpu {
-    uint64_t caps;
-    uint64_t mci_ctl2_bank0;
-    uint64_t mci_ctl2_bank1;
-    uint64_t mcg_ext_ctl;
-};
-
-DECLARE_HVM_SAVE_TYPE(VMCE_VCPU, 18, struct hvm_vmce_vcpu);
-
-struct hvm_tsc_adjust {
-    uint64_t tsc_adjust;
-};
-
-DECLARE_HVM_SAVE_TYPE(TSC_ADJUST, 19, struct hvm_tsc_adjust);
-
-
-struct hvm_msr {
-    uint32_t count;
-    struct hvm_one_msr {
-        uint32_t index;
-        uint32_t _rsvd;
-        uint64_t val;
-#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
-    } msr[];
-#elif defined(__GNUC__)
-    } msr[0];
-#else
-    } msr[1 /* variable size */];
-#endif
-};
-
-#define CPU_MSR_CODE  20
+DECLARE_HVM_SAVE_TYPE(VIRIDIAN, 15, struct hvm_viridian_context);
 
 /* 
  * Largest type-code in use
  */
-#define HVM_SAVE_CODE_MAX 20
+#define HVM_SAVE_CODE_MAX 15
 
 #endif /* __XEN_PUBLIC_HVM_SAVE_X86_H__ */
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * tab-width: 4
- * indent-tabs-mode: nil
- * End:
- */

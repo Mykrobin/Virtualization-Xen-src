@@ -28,11 +28,4 @@
 #define irq_access_permitted(d, i)                      \
     rangeset_contains_singleton((d)->irq_caps, i)
 
-#define pirq_access_permitted(d, i) ({                  \
-    struct domain *d__ = (d);                           \
-    int irq__ = domain_pirq_to_irq(d__, i);             \
-    irq__ > 0 && irq_access_permitted(d__, irq__)       \
-    ? irq__ : 0;                                        \
-})
-
 #endif /* __XEN_IOCAP_H__ */

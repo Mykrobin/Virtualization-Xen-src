@@ -2,7 +2,6 @@
 #include <xen/ctype.h>
 #include <xen/lib.h>
 #include <xen/types.h>
-#include <xen/init.h>
 #include <asm/byteorder.h>
 
 /* for ctype.h */
@@ -110,8 +109,7 @@ union uu {
 /*
  * Extract high and low shortwords from longword, and move low shortword of
  * longword to upper half of long, i.e., produce the upper longword of
- * ((quad_t)(x) << (number_of_bits_in_long/2)).  (`x' must actually be
- * unsigned long.)
+ * ((quad_t)(x) << (number_of_bits_in_long/2)).  (`x' must actually be u_long.)
  *
  * These are used in the multiply code, to split a longword into upper
  * and lower halves, and to reassemble a product as a quad_t, shifted left
@@ -128,10 +126,10 @@ union uu {
 #define B (1 << HALF_BITS) /* digit base */
 
 /* Combine two `digits' to make a single two-digit number. */
-#define COMBINE(a, b) (((unsigned long)(a) << HALF_BITS) | (b))
+#define COMBINE(a, b) (((u_long)(a) << HALF_BITS) | (b))
 
 /* select a type for digits in base B */
-typedef unsigned long digit;
+typedef u_long digit;
 
 /*
  * Shift p[0]..p[len] left `sh' bits, ignoring any bits that
@@ -151,8 +149,8 @@ static void shl(register digit *p, register int len, register int sh)
  * __qdivrem(u, v, rem) returns u/v and, optionally, sets *rem to u%v.
  *
  * We do this in base 2-sup-HALF_BITS, so that all intermediate products
- * fit within unsigned long.  As a consequence, the maximum length dividend
- * and divisor are 4 `digits' in this base (they are shorter if they have
+ * fit within u_long.  As a consequence, the maximum length dividend and
+ * divisor are 4 `digits' in this base (they are shorter if they have
  * leading zeros).
  */
 u64 __qdivrem(u64 uq, u64 vq, u64 *arq)
@@ -160,7 +158,7 @@ u64 __qdivrem(u64 uq, u64 vq, u64 *arq)
     union uu tmp;
     digit *u, *v, *q;
     register digit v1, v2;
-    unsigned long qhat, rhat, t;
+    u_long qhat, rhat, t;
     int m, n, d, j, i;
     digit uspace[5], vspace[5], qspace[5];
 
@@ -211,7 +209,7 @@ u64 __qdivrem(u64 uq, u64 vq, u64 *arq)
     v[4] = LHALF(tmp.ul[L]);
     for (n = 4; v[1] == 0; v++) {
         if (--n == 1) {
-            unsigned long rbj; /* r*B+u[j] (not root boy jim) */
+            u_long rbj; /* r*B+u[j] (not root boy jim) */
             digit q1, q2, q3, q4;
 
             /*
@@ -287,8 +285,7 @@ u64 __qdivrem(u64 uq, u64 vq, u64 *arq)
             rhat = uj1;
             goto qhat_too_big;
         } else {
-            unsigned long nn = COMBINE(uj0, uj1);
-
+            u_long nn = COMBINE(uj0, uj1);
             qhat = nn / v1;
             rhat = nn % v1;
         }
@@ -402,31 +399,12 @@ s64 __moddi3(s64 a, s64 b)
     return (neg ? -urem : urem);
 }
 
-/*
- * Quotient and remainder of unsigned long long division
- */
-s64 __ldivmod_helper(s64 a, s64 b, s64 *r)
-{
-    u64 ua, ub, rem, quot;
-
-    ua = ABS(a);
-    ub = ABS(b);
-    quot = __qdivrem(ua, ub, &rem);
-    if ( a < 0 )
-        *r = -rem;
-    else
-        *r = rem;
-    if ( (a < 0) ^ (b < 0) )
-        return -quot;
-    else
-        return quot;
-}
 #endif /* BITS_PER_LONG == 32 */
 
 /* Compute with 96 bit intermediate result: (a*b)/c */
 uint64_t muldiv64(uint64_t a, uint32_t b, uint32_t c)
 {
-#ifdef CONFIG_X86
+#ifdef __x86_64__
     asm ( "mul %%rdx; div %%rcx" : "=a" (a) : "0" (a), "d" (b), "c" (c) );
     return a;
 #else
@@ -461,18 +439,12 @@ unsigned long long parse_size_and_unit(const char *s, const char **ps)
 
     switch ( *s1 )
     {
-    case 'T': case 't':
-        ret <<= 10;
-        /* fallthrough */
     case 'G': case 'g':
         ret <<= 10;
-        /* fallthrough */
     case 'M': case 'm':
         ret <<= 10;
-        /* fallthrough */
     case 'K': case 'k':
         ret <<= 10;
-        /* fallthrough */
     case 'B': case 'b':
         s1++;
         break;
@@ -487,23 +459,10 @@ unsigned long long parse_size_and_unit(const char *s, const char **ps)
     return ret;
 }
 
-typedef void (*ctor_func_t)(void);
-extern const ctor_func_t __ctors_start[], __ctors_end[];
-
-void __init init_constructors(void)
-{
-    const ctor_func_t *f;
-    for ( f = __ctors_start; f < __ctors_end; ++f )
-        (*f)();
-
-    /* Putting this here seems as good (or bad) as any other place. */
-    BUILD_BUG_ON(sizeof(size_t) != sizeof(ssize_t));
-}
-
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

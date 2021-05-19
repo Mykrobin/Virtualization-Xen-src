@@ -43,6 +43,7 @@
 
 #include <xen/init.h>
 #include <acpi/acpi.h>
+#include <acpi/acnamesp.h>
 #include <acpi/actables.h>
 
 #define _COMPONENT          ACPI_TABLES
@@ -59,7 +60,7 @@ ACPI_MODULE_NAME("tbinstal")
  * DESCRIPTION: this function is called to verify and map table
  *
  *****************************************************************************/
-acpi_status __init acpi_tb_verify_table(struct acpi_table_desc *table_desc)
+acpi_status acpi_tb_verify_table(struct acpi_table_desc *table_desc)
 {
 	acpi_status status = AE_OK;
 

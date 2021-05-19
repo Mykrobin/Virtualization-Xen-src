@@ -5,7 +5,6 @@
 #include <compat/xenoprof.h>
 
 #define COMPAT
-#define ret_t int
 
 #define do_xenoprof_op compat_xenoprof_op
 
@@ -34,7 +33,7 @@ CHECK_oprof_passive;
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

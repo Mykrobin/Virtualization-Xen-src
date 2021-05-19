@@ -1,6 +1,6 @@
 /////////////////////////////////////////////////////////////////////////
 // $Id: rombios.c,v 1.221 2008/12/07 17:32:29 sshwarts Exp $
-////////////////////////////#/////////////////////////////////////////////
+/////////////////////////////////////////////////////////////////////////
 //
 //  Copyright (C) 2002  MandrakeSoft S.A.
 //
@@ -21,14 +21,15 @@
 //  Lesser General Public License for more details.
 //
 //  You should have received a copy of the GNU Lesser General Public
-//  License along with this library; If not, see <http://www.gnu.org/licenses/>.
+//  License along with this library; if not, write to the Free Software
+//  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA
 
 // ROM BIOS for use with Bochs/Plex86/QEMU emulation environment
 
 #define uint8_t unsigned char
 #define uint16_t unsigned short
 #define uint32_t unsigned long
-#include "config.h"
+#include "../hvmloader/config.h"
 
 #define HVMASSIST
 #undef HVMTEST
@@ -1804,12 +1805,12 @@ keyboard_init()
     while ( (inb(0x64) & 0x02) && (--max>0)) outb(0x80, 0x00);
 
     /* flush incoming keys */
-    max=2;
+    max=0x2000;
     while (--max > 0) {
         outb(0x80, 0x00);
         if (inb(0x64) & 0x01) {
             inb(0x60);
-            max = 2;
+            max = 0x2000;
             }
         }
 
@@ -2194,19 +2195,21 @@ interactive_bootkey()
 //--------------------------------------------------------------------------
 
 void
-print_boot_device(type, desc)
-  Bit16u type; Bit32u desc;
+print_boot_device(e)
+  ipl_entry_t *e;
 {
+  Bit16u type;
   char description[33];
   Bit16u ss = get_SS();
+  type = e->type;
   /* NIC appears as type 0x80 */
   if (type == IPL_TYPE_BEV) type = 0x4;
   if (type == 0 || type > 0x4) BX_PANIC("Bad drive type\n");
   printf("Booting from %s", drivetypes[type]);
   /* print product string if BEV */
-  if (type == 4 && desc != 0) {
+  if (type == 4 && e->description != 0) {
     /* first 32 bytes are significant */
-    memcpyb(ss, &description, (Bit16u)(desc >> 16), (Bit16u)(desc & 0xffff), 32);
+    memcpyb(ss, &description, (Bit16u)(e->description >> 16), (Bit16u)(e->description & 0xffff), 32);
     /* terminate string */
     description[32] = 0;
     printf(" [%S]", ss, description);
@@ -2530,15 +2533,16 @@ void ata_init( )
 
 #define IDE_TIMEOUT 32000u //32 seconds max for IDE ops
 
-Bit8u await_ide();
-static Bit8u await_ide(when_done,base,timeout)
+int await_ide();
+static int await_ide(when_done,base,timeout)
   Bit8u when_done;
   Bit16u base;
   Bit16u timeout;
 {
   Bit32u time=0,last=0;
-  Bit8u status;
+  Bit16u status;
   Bit8u result;
+  status = inb(base + ATA_CB_STAT); // for the times you're supposed to throw one away
   for(;;) {
     status = inb(base+ATA_CB_STAT);
     time++;
@@ -2555,7 +2559,7 @@ static Bit8u await_ide(when_done,base,timeout)
     else if (when_done == TIMEOUT)
       result = 0;
 
-    if (result) return status;
+    if (result) return 0;
     if (time>>16 != last) // mod 2048 each 16 ms
     {
       last = time >>16;
@@ -2564,12 +2568,12 @@ static Bit8u await_ide(when_done,base,timeout)
     if (status & ATA_CB_STAT_ERR)
     {
       BX_DEBUG_ATA("await_ide: ERROR (TIMEOUT,BSY,!BSY,!BSY_DRQ,!BSY_!DRQ,!BSY_RDY) %d time= %ld timeout= %d\n",when_done,time>>11, timeout);
-      return status;
+      return -1;
     }
     if ((timeout == 0) || ((time>>11) > timeout)) break;
   }
   BX_INFO("IDE time out\n");
-  return status;
+  return -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -2912,8 +2916,8 @@ Bit16u device;
 // 8.2.1 (a) -- set SRST in DC
   outb(iobase2+ATA_CB_DC, ATA_CB_DC_HD15 | ATA_CB_DC_NIEN | ATA_CB_DC_SRST);
 
-// 8.2.1 (b) -- wait
-  outb(0x80, 0x00);
+// 8.2.1 (b) -- wait for BSY
+  await_ide(BSY, iobase1, 20);
 
 // 8.2.1 (f) -- clear SRST
   outb(iobase2+ATA_CB_DC, ATA_CB_DC_HD15 | ATA_CB_DC_NIEN);
@@ -3015,7 +3019,8 @@ Bit32u lba_low, lba_high;
   outb(iobase1 + ATA_CB_DH, (slave ? ATA_CB_DH_DEV1 : ATA_CB_DH_DEV0) | (Bit8u) head );
   outb(iobase1 + ATA_CB_CMD, command);
 
-  status = await_ide(NOT_BSY_DRQ, iobase1, IDE_TIMEOUT);
+  await_ide(NOT_BSY_DRQ, iobase1, IDE_TIMEOUT);
+  status = inb(iobase1 + ATA_CB_STAT);
 
   if (status & ATA_CB_STAT_ERR) {
     BX_DEBUG_ATA("ata_cmd_data_in : read error\n");
@@ -3075,7 +3080,8 @@ ASM_END
     current++;
     write_word(ebda_seg, &EbdaData->ata.trsfsectors,current);
     count--;
-    status = await_ide(NOT_BSY, iobase1, IDE_TIMEOUT);
+    await_ide(NOT_BSY, iobase1, IDE_TIMEOUT);
+    status = inb(iobase1 + ATA_CB_STAT);
     if (count == 0) {
       if ( (status & (ATA_CB_STAT_BSY | ATA_CB_STAT_RDY | ATA_CB_STAT_DRQ | ATA_CB_STAT_ERR) )
           != ATA_CB_STAT_RDY ) {
@@ -3164,7 +3170,8 @@ Bit32u lba_low, lba_high;
   outb(iobase1 + ATA_CB_DH, (slave ? ATA_CB_DH_DEV1 : ATA_CB_DH_DEV0) | (Bit8u) head );
   outb(iobase1 + ATA_CB_CMD, command);
 
-  status = await_ide(NOT_BSY_DRQ, iobase1, IDE_TIMEOUT);
+  await_ide(NOT_BSY_DRQ, iobase1, IDE_TIMEOUT);
+  status = inb(iobase1 + ATA_CB_STAT);
 
   if (status & ATA_CB_STAT_ERR) {
     BX_DEBUG_ATA("ata_cmd_data_out : read error\n");
@@ -3226,7 +3233,7 @@ ASM_END
     current++;
     write_word(ebda_seg, &EbdaData->ata.trsfsectors,current);
     count--;
-    status = await_ide(NOT_BSY, iobase1, IDE_TIMEOUT);
+    status = inb(iobase1 + ATA_CB_STAT);
     if (count == 0) {
       if ( (status & (ATA_CB_STAT_BSY | ATA_CB_STAT_RDY | ATA_CB_STAT_DF | ATA_CB_STAT_DRQ | ATA_CB_STAT_ERR) )
           != ATA_CB_STAT_RDY ) {
@@ -3312,7 +3319,8 @@ Bit32u length;
   outb(iobase1 + ATA_CB_CMD, ATA_CMD_PACKET);
 
   // Device should ok to receive command
-  status = await_ide(NOT_BSY_DRQ, iobase1, IDE_TIMEOUT);
+  await_ide(NOT_BSY_DRQ, iobase1, IDE_TIMEOUT);
+  status = inb(iobase1 + ATA_CB_STAT);
 
   if (status & ATA_CB_STAT_ERR) {
     BX_DEBUG_ATA("ata_cmd_packet : error, status is %02x\n",status);
@@ -3348,7 +3356,8 @@ ASM_START
 ASM_END
 
   if (inout == ATA_DATA_NO) {
-    status = await_ide(NOT_BSY, iobase1, IDE_TIMEOUT);
+    await_ide(NOT_BSY, iobase1, IDE_TIMEOUT);
+    status = inb(iobase1 + ATA_CB_STAT);
     }
   else {
         Bit16u loops = 0;
@@ -3357,12 +3366,13 @@ ASM_END
 
       if (loops == 0) {//first time through
         status = inb(iobase2 + ATA_CB_ASTAT);
-        status = await_ide(NOT_BSY_DRQ, iobase1, IDE_TIMEOUT);
+        await_ide(NOT_BSY_DRQ, iobase1, IDE_TIMEOUT);
       }
       else
-        status = await_ide(NOT_BSY, iobase1, IDE_TIMEOUT);
+        await_ide(NOT_BSY, iobase1, IDE_TIMEOUT);
       loops++;
 
+      status = inb(iobase1 + ATA_CB_STAT);
       sc = inb(iobase1 + ATA_CB_SC);
 
       // Check if command completed
@@ -3727,10 +3737,10 @@ cdrom_boot()
   // Validity checks
   if(buffer[0]!=0)return 4;
   for(i=0;i<5;i++){
-    if(read_byte(get_SS(),&buffer[1+i])!=read_byte(0xf000,&isotag[i]))return 5;
+    if(buffer[1+i]!=read_byte(0xf000,&isotag[i]))return 5;
    }
   for(i=0;i<23;i++)
-    if(read_byte(get_SS(),&buffer[7+i])!=read_byte(0xf000,&eltorito[i]))return 6;
+    if(buffer[7+i]!=read_byte(0xf000,&eltorito[i]))return 6;
 
   // ok, now we calculate the Boot catalog address
   lba=buffer[0x4A]*0x1000000+buffer[0x49]*0x10000+buffer[0x48]*0x100+buffer[0x47];
@@ -8265,7 +8275,7 @@ ASM_END
 
   /* Do the loading, and set up vector as a far pointer to the boot
    * address, and bootdrv as the boot drive */
-  print_boot_device(e.type, e.description);
+  print_boot_device(&e);
 
   switch(e.type) {
   case IPL_TYPE_FLOPPY: /* FDD */
@@ -8854,14 +8864,13 @@ int13_out:
 int18_handler: ;; Boot Failure recovery: try the next device.
 
   ;; Reset SP and SS
-  mov  ax, #0x0ffe
+  mov  ax, #0xfffe
   mov  sp, ax
-  mov  ax, #0x9e00
+  xor  ax, ax
   mov  ss, ax
 
   ;; The first time we do this it will have been set to -1 so 
   ;; we will start from device 0.
-  xor  ax, ax
   mov  ds, ax
   mov  bx, word ptr [0x40E]       ;; EBDA segment
   mov  ds, bx                     ;; Set segment
@@ -8895,9 +8904,9 @@ int19_relocated: ;; Boot function, relocated
   ;; 
   ;; Reset SP and SS
 
-  mov  ax, #0x0ffe
+  mov  ax, #0xfffe
   mov  sp, ax
-  mov  ax, #0x9e00
+  xor  ax, ax
   mov  ss, ax
 
   call _machine_reset
@@ -10832,9 +10841,10 @@ normal_post:
   ; case 0: normal startup
 
   cli
-  mov  ax, #0x0ffe
+  mov  ax, #0xfffe
   mov  sp, ax
-  mov  ax, #0x9e00
+  xor  ax, ax
+  mov  ds, ax
   mov  ss, ax
 
   ;; Save shutdown status

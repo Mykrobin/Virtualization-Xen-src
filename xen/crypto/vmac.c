@@ -7,6 +7,7 @@
  * ----------------------------------------------------------------------- */
 
 /* start for Xen */
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/lib.h>
@@ -172,12 +173,15 @@ const uint64_t mpoly = UINT64_C(0x1fffffff1fffffff);  /* Poly key mask     */
 #if __GNUC__
 #define ALIGN(n)      __attribute__ ((aligned(n))) 
 #define NOINLINE      __attribute__ ((noinline))
+#define FASTCALL
 #elif _MSC_VER
 #define ALIGN(n)      __declspec(align(n))
 #define NOINLINE      __declspec(noinline)
+#define FASTCALL      __fastcall
 #else
 #define ALIGN(n)
 #define NOINLINE
+#define FASTCALL
 #endif
 
 /* ----------------------------------------------------------------------- */
@@ -718,7 +722,7 @@ static void poly_step_func(uint64_t *ahi, uint64_t *alo, const uint64_t *kh,
 
 /* ----------------------------------------------------------------------- */
 
-static void vhash_abort(vmac_ctx_t *ctx)
+void vhash_abort(vmac_ctx_t *ctx)
 {
     ctx->polytmp[0] = ctx->polykey[0] ;
     ctx->polytmp[1] = ctx->polykey[1] ;

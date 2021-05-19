@@ -14,7 +14,8 @@
  * GNU General Public License for more details.
  * 
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #ifndef __XEN_GDBSTUB_H__
@@ -23,7 +24,7 @@
 #include <asm/atomic.h>
 #include <asm/page.h>
 
-#ifdef CONFIG_CRASH_DEBUG
+#ifdef CRASH_DEBUG
 
 struct gdb_context {
     int                 serhnd;           /* handle on our serial line */
@@ -87,6 +88,12 @@ void gdb_arch_exit(struct cpu_user_regs *regs);
 #define SIGALRM         14
 #define SIGTERM         15
 
+void initialise_gdb(void);
+
+#else
+
+#define initialise_gdb() ((void)0)
+
 #endif
 
 #endif /* __XEN_GDBSTUB_H__ */
@@ -94,7 +101,7 @@ void gdb_arch_exit(struct cpu_user_regs *regs);
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * End:

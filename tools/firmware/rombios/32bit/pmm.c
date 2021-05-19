@@ -14,7 +14,8 @@
  *  Lesser General Public License for more details.
  *
  *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ *  License along with this library; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  *
  *  Copyright (C) 2009 FUJITSU LIMITED
  *
@@ -64,8 +65,8 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "config.h"
-#include "e820.h"
+#include <../hvmloader/config.h>
+#include <../hvmloader/e820.h>
 #include "util.h"
 
 #define DEBUG_PMM 0
@@ -146,7 +147,7 @@ typedef struct heap {
  *
  * - conventional memroy (below 1MB)
  *    In HVM, the area is fixed. 0x00010000-0x0007FFFF
- *    (LOWHEAP_SIZE bytes from LOWHEAP_PHYSICAL_ADDRESS)
+ *    (from SCRATCH_PHYSICAL_ADDRESS to HYPERCALL_PHYSICAL_ADDRESS)
  *
  * - extended memory (start at 1MB, below 4GB)
  *    In HVM, the area starts at memory address 0x00100000.
@@ -282,9 +283,8 @@ pmm_initalize(void)
     }
 
     /* convectional memory: RAM below 1MB, 0x10000-0x7FFFF */
-    pmm_init_heap(&pmm_data.heap,
-		  LOWHEAP_PHYSICAL_ADDRESS,
-		  LOWHEAP_PHYSICAL_ADDRESS+LOWHEAP_SIZE);
+    pmm_init_heap(&pmm_data.heap, SCRATCH_PHYSICAL_ADDRESS,
+                  HYPERCALL_PHYSICAL_ADDRESS);
 }
 
 static uint32_t

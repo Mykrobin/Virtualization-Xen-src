@@ -47,6 +47,7 @@
 #define ACPI_USE_SYSTEM_CLIBRARY
 #define ACPI_USE_DO_WHILE_0
 
+#include <xen/config.h>
 #include <xen/cache.h>
 #include <xen/string.h>
 #include <xen/kernel.h>
@@ -75,12 +76,11 @@
 
 #define acpi_thread_id struct vcpu *
 
-void *acpi_os_alloc_memory(size_t);
-void *acpi_os_zalloc_memory(size_t);
-void acpi_os_free_memory(void *);
-
-#define ACPI_ALLOCATE(a)	acpi_os_alloc_memory(a)
-#define ACPI_ALLOCATE_ZEROED(a)	acpi_os_zalloc_memory(a)
-#define ACPI_FREE(a)		acpi_os_free_memory(a)
+#define ACPI_ALLOCATE(a)	xmalloc_bytes(a)
+#define ACPI_ALLOCATE_ZEROED(a)	({              \
+    void *p = xmalloc_bytes(a);                 \
+    if ( p ) memset(p, 0, a);                   \
+    p; })
+#define ACPI_FREE(a)		xfree(a)
 
 #endif				/* __ACLINUX_H__ */

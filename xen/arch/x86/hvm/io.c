@@ -15,9 +15,11 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/lib.h>
@@ -25,7 +27,6 @@
 #include <xen/trace.h>
 #include <xen/event.h>
 #include <xen/hypercall.h>
-#include <xen/vpci.h>
 #include <asm/current.h>
 #include <asm/cpufeature.h>
 #include <asm/processor.h>
@@ -35,7 +36,6 @@
 #include <asm/shadow.h>
 #include <asm/p2m.h>
 #include <asm/hvm/hvm.h>
-#include <asm/hvm/ioreq.h>
 #include <asm/hvm/support.h>
 #include <asm/hvm/vpt.h>
 #include <asm/hvm/vpic.h>
@@ -46,533 +46,327 @@
 #include <xen/iocap.h>
 #include <public/hvm/ioreq.h>
 
+int hvm_buffered_io_send(ioreq_t *p)
+{
+    struct vcpu *v = current;
+    struct hvm_ioreq_page *iorp = &v->domain->arch.hvm_domain.buf_ioreq;
+    buffered_iopage_t *pg = iorp->va;
+    buf_ioreq_t bp;
+    /* Timeoffset sends 64b data, but no address. Use two consecutive slots. */
+    int qw = 0;
+
+    /* Ensure buffered_iopage fits in a page */
+    BUILD_BUG_ON(sizeof(buffered_iopage_t) > PAGE_SIZE);
+
+    /*
+     * Return 0 for the cases we can't deal with:
+     *  - 'addr' is only a 20-bit field, so we cannot address beyond 1MB
+     *  - we cannot buffer accesses to guest memory buffers, as the guest
+     *    may expect the memory buffer to be synchronously accessed
+     *  - the count field is usually used with data_is_ptr and since we don't
+     *    support data_is_ptr we do not waste space for the count field either
+     */
+    if ( (p->addr > 0xffffful) || p->data_is_ptr || (p->count != 1) )
+        return 0;
+
+    bp.type = p->type;
+    bp.dir  = p->dir;
+    switch ( p->size )
+    {
+    case 1:
+        bp.size = 0;
+        break;
+    case 2:
+        bp.size = 1;
+        break;
+    case 4:
+        bp.size = 2;
+        break;
+    case 8:
+        bp.size = 3;
+        qw = 1;
+        break;
+    default:
+        gdprintk(XENLOG_WARNING, "unexpected ioreq size: %u\n", p->size);
+        return 0;
+    }
+    
+    bp.data = p->data;
+    bp.addr = p->addr;
+    
+    spin_lock(&iorp->lock);
+
+    if ( (pg->write_pointer - pg->read_pointer) >=
+         (IOREQ_BUFFER_SLOT_NUM - qw) )
+    {
+        /* The queue is full: send the iopacket through the normal path. */
+        spin_unlock(&iorp->lock);
+        return 0;
+    }
+    
+    memcpy(&pg->buf_ioreq[pg->write_pointer % IOREQ_BUFFER_SLOT_NUM],
+           &bp, sizeof(bp));
+    
+    if ( qw )
+    {
+        bp.data = p->data >> 32;
+        memcpy(&pg->buf_ioreq[(pg->write_pointer+1) % IOREQ_BUFFER_SLOT_NUM],
+               &bp, sizeof(bp));
+    }
+
+    /* Make the ioreq_t visible /before/ write_pointer. */
+    wmb();
+    pg->write_pointer += qw ? 2 : 1;
+
+    spin_unlock(&iorp->lock);
+    
+    return 1;
+}
+
 void send_timeoffset_req(unsigned long timeoff)
 {
-    ioreq_t p = {
-        .type = IOREQ_TYPE_TIMEOFFSET,
-        .size = 8,
-        .count = 1,
-        .dir = IOREQ_WRITE,
-        .data = timeoff,
-        .state = STATE_IOREQ_READY,
-    };
+    ioreq_t p[1];
 
     if ( timeoff == 0 )
         return;
 
-    if ( hvm_broadcast_ioreq(&p, true) != 0 )
-        gprintk(XENLOG_ERR, "Unsuccessful timeoffset update\n");
+    memset(p, 0, sizeof(*p));
+
+    p->type = IOREQ_TYPE_TIMEOFFSET;
+    p->size = 8;
+    p->count = 1;
+    p->dir = IOREQ_WRITE;
+    p->data = timeoff;
+
+    p->state = STATE_IOREQ_READY;
+
+    if ( !hvm_buffered_io_send(p) )
+        printk("Unsuccessful timeoffset update\n");
 }
 
 /* Ask ioemu mapcache to invalidate mappings. */
 void send_invalidate_req(void)
 {
-    ioreq_t p = {
-        .type = IOREQ_TYPE_INVALIDATE,
-        .size = 4,
-        .dir = IOREQ_WRITE,
-        .data = ~0UL, /* flush all */
-    };
+    struct vcpu *v = current;
+    ioreq_t *p = get_ioreq(v);
 
-    if ( hvm_broadcast_ioreq(&p, false) != 0 )
-        gprintk(XENLOG_ERR, "Unsuccessful map-cache invalidate\n");
+    if ( p->state != STATE_IOREQ_NONE )
+    {
+        gdprintk(XENLOG_ERR, "WARNING: send invalidate req with something "
+                 "already pending (%d)?\n", p->state);
+        domain_crash(v->domain);
+        return;
+    }
+
+    p->type = IOREQ_TYPE_INVALIDATE;
+    p->size = 4;
+    p->dir = IOREQ_WRITE;
+    p->data = ~0UL; /* flush all */
+
+    (void)hvm_send_assist_req(v);
 }
 
-bool hvm_emulate_one_insn(hvm_emulate_validate_t *validate, const char *descr)
+int handle_mmio(void)
 {
     struct hvm_emulate_ctxt ctxt;
     struct vcpu *curr = current;
-    struct hvm_vcpu_io *vio = &curr->arch.hvm_vcpu.hvm_io;
     int rc;
 
-    hvm_emulate_init_once(&ctxt, validate, guest_cpu_user_regs());
+    hvm_emulate_prepare(&ctxt, guest_cpu_user_regs());
 
     rc = hvm_emulate_one(&ctxt);
 
-    if ( hvm_vcpu_io_need_completion(vio) )
-        vio->io_completion = HVMIO_mmio_completion;
+    if ( rc != X86EMUL_RETRY )
+        curr->arch.hvm_vcpu.io_state = HVMIO_none;
+    if ( curr->arch.hvm_vcpu.io_state == HVMIO_awaiting_completion )
+        curr->arch.hvm_vcpu.io_state = HVMIO_handle_mmio_awaiting_completion;
     else
-        vio->mmio_access = (struct npfec){};
+        curr->arch.hvm_vcpu.mmio_gva = 0;
 
     switch ( rc )
     {
     case X86EMUL_UNHANDLEABLE:
-        hvm_dump_emulation_state(XENLOG_G_WARNING, descr, &ctxt, rc);
-        return false;
-
-    case X86EMUL_UNRECOGNIZED:
-        hvm_dump_emulation_state(XENLOG_G_WARNING, descr, &ctxt, rc);
-        hvm_inject_hw_exception(TRAP_invalid_op, X86_EVENT_NO_EC);
-        break;
-
+        gdprintk(XENLOG_WARNING,
+                 "MMIO emulation failed @ %04x:%lx: "
+                 "%02x %02x %02x %02x %02x %02x\n",
+                 hvmemul_get_seg_reg(x86_seg_cs, &ctxt)->sel,
+                 ctxt.insn_buf_eip,
+                 ctxt.insn_buf[0], ctxt.insn_buf[1],
+                 ctxt.insn_buf[2], ctxt.insn_buf[3],
+                 ctxt.insn_buf[4], ctxt.insn_buf[5]);
+        return 0;
     case X86EMUL_EXCEPTION:
-        hvm_inject_event(&ctxt.ctxt.event);
+        if ( ctxt.exn_pending )
+            hvm_inject_exception(ctxt.exn_vector, ctxt.exn_error_code, 0);
+        break;
+    default:
         break;
     }
 
     hvm_emulate_writeback(&ctxt);
 
-    return true;
+    return 1;
 }
 
-bool handle_mmio_with_translation(unsigned long gla, unsigned long gpfn,
-                                  struct npfec access)
+int handle_mmio_with_translation(unsigned long gva, unsigned long gpfn)
 {
-    struct hvm_vcpu_io *vio = &current->arch.hvm_vcpu.hvm_io;
-
-    vio->mmio_access = access.gla_valid &&
-                       access.kind == npfec_kind_with_gla
-                       ? access : (struct npfec){};
-    vio->mmio_gla = gla & PAGE_MASK;
-    vio->mmio_gpfn = gpfn;
+    current->arch.hvm_vcpu.mmio_gva = gva & PAGE_MASK;
+    current->arch.hvm_vcpu.mmio_gpfn = gpfn;
     return handle_mmio();
 }
 
-bool handle_pio(uint16_t port, unsigned int size, int dir)
+void hvm_io_assist(void)
 {
     struct vcpu *curr = current;
-    struct hvm_vcpu_io *vio = &curr->arch.hvm_vcpu.hvm_io;
-    unsigned long data;
-    int rc;
+    ioreq_t *p = get_ioreq(curr);
+    enum hvm_io_state io_state;
 
-    ASSERT((size - 1) < 4 && size != 3);
+    rmb(); /* see IORESP_READY /then/ read contents of ioreq */
 
-    if ( dir == IOREQ_WRITE )
-        data = guest_cpu_user_regs()->eax;
+    p->state = STATE_IOREQ_NONE;
 
-    rc = hvmemul_do_pio_buffer(port, size, dir, &data);
+    io_state = curr->arch.hvm_vcpu.io_state;
+    curr->arch.hvm_vcpu.io_state = HVMIO_none;
 
-    if ( hvm_vcpu_io_need_completion(vio) )
-        vio->io_completion = HVMIO_pio_completion;
-
-    switch ( rc )
+    if ( (io_state == HVMIO_awaiting_completion) ||
+         (io_state == HVMIO_handle_mmio_awaiting_completion) )
     {
-    case X86EMUL_OKAY:
-        if ( dir == IOREQ_READ )
+        curr->arch.hvm_vcpu.io_state = HVMIO_completed;
+        curr->arch.hvm_vcpu.io_data = p->data;
+        if ( io_state == HVMIO_handle_mmio_awaiting_completion )
+            (void)handle_mmio();
+    }
+
+    if ( p->state == STATE_IOREQ_NONE )
+        vcpu_end_shutdown_deferral(curr);
+}
+
+static int dpci_ioport_read(uint32_t mport, ioreq_t *p)
+{
+    int i, sign = p->df ? -1 : 1;
+    uint32_t data = 0;
+
+    for ( i = 0; i < p->count; i++ )
+    {
+        switch ( p->size )
         {
-            if ( size == 4 ) /* Needs zero extension. */
-                guest_cpu_user_regs()->rax = (uint32_t)data;
-            else
-                memcpy(&guest_cpu_user_regs()->rax, &data, size);
+        case 1:
+            data = inb(mport);
+            break;
+        case 2:
+            data = inw(mport);
+            break;
+        case 4:
+            data = inl(mport);
+            break;
+        default:
+            BUG();
         }
-        break;
 
-    case X86EMUL_RETRY:
-        /*
-         * We should not advance RIP/EIP if the domain is shutting down or
-         * if X86EMUL_RETRY has been returned by an internal handler.
-         */
-        if ( curr->domain->is_shutting_down || !hvm_io_pending(curr) )
-            return false;
-        break;
-
-    default:
-        gdprintk(XENLOG_ERR, "Weird HVM ioemulation status %d.\n", rc);
-        domain_crash(curr->domain);
-        return false;
-    }
-
-    return true;
-}
-
-static bool_t g2m_portio_accept(const struct hvm_io_handler *handler,
-                                const ioreq_t *p)
-{
-    struct vcpu *curr = current;
-    const struct hvm_domain *hvm_domain = &curr->domain->arch.hvm_domain;
-    struct hvm_vcpu_io *vio = &curr->arch.hvm_vcpu.hvm_io;
-    struct g2m_ioport *g2m_ioport;
-    unsigned int start, end;
-
-    list_for_each_entry( g2m_ioport, &hvm_domain->g2m_ioport_list, list )
-    {
-        start = g2m_ioport->gport;
-        end = start + g2m_ioport->np;
-        if ( (p->addr >= start) && (p->addr + p->size <= end) )
+        if ( p->data_is_ptr )
         {
-            vio->g2m_ioport = g2m_ioport;
-            return 1;
+            int ret;
+            ret = hvm_copy_to_guest_phys(p->data + (sign * i * p->size), &data,
+                                         p->size);
+            if ( (ret == HVMCOPY_gfn_paged_out) ||
+                 (ret == HVMCOPY_gfn_shared) )
+                return X86EMUL_RETRY;
+        }
+        else
+            p->data = data;
+    }
+    
+    return X86EMUL_OKAY;
+}
+
+static int dpci_ioport_write(uint32_t mport, ioreq_t *p)
+{
+    int i, sign = p->df ? -1 : 1;
+    uint32_t data;
+
+    for ( i = 0; i < p->count; i++ )
+    {
+        data = p->data;
+        if ( p->data_is_ptr )
+        {
+            int ret;
+            
+            ret = hvm_copy_from_guest_phys(&data, 
+                                           p->data + (sign * i * p->size),
+                                           p->size);
+            if ( (ret == HVMCOPY_gfn_paged_out) &&
+                 (ret == HVMCOPY_gfn_shared) )
+                return X86EMUL_RETRY;
+        }
+
+        switch ( p->size )
+        {
+        case 1:
+            outb(data, mport);
+            break;
+        case 2:
+            outw(data, mport);
+            break;
+        case 4:
+            outl(data, mport);
+            break;
+        default:
+            BUG();
         }
     }
 
-    return 0;
-}
-
-static int g2m_portio_read(const struct hvm_io_handler *handler,
-                           uint64_t addr, uint32_t size, uint64_t *data)
-{
-    struct hvm_vcpu_io *vio = &current->arch.hvm_vcpu.hvm_io;
-    const struct g2m_ioport *g2m_ioport = vio->g2m_ioport;
-    unsigned int mport = (addr - g2m_ioport->gport) + g2m_ioport->mport;
-
-    switch ( size )
-    {
-    case 1:
-        *data = inb(mport);
-        break;
-    case 2:
-        *data = inw(mport);
-        break;
-    case 4:
-        *data = inl(mport);
-        break;
-    default:
-        BUG();
-    }
-
     return X86EMUL_OKAY;
 }
 
-static int g2m_portio_write(const struct hvm_io_handler *handler,
-                            uint64_t addr, uint32_t size, uint64_t data)
-{
-    struct hvm_vcpu_io *vio = &current->arch.hvm_vcpu.hvm_io;
-    const struct g2m_ioport *g2m_ioport = vio->g2m_ioport;
-    unsigned int mport = (addr - g2m_ioport->gport) + g2m_ioport->mport;
-
-    switch ( size )
-    {
-    case 1:
-        outb(data, mport);
-        break;
-    case 2:
-        outw(data, mport);
-        break;
-    case 4:
-        outl(data, mport);
-        break;
-    default:
-        BUG();
-    }
-
-    return X86EMUL_OKAY;
-}
-
-static const struct hvm_io_ops g2m_portio_ops = {
-    .accept = g2m_portio_accept,
-    .read = g2m_portio_read,
-    .write = g2m_portio_write
-};
-
-void register_g2m_portio_handler(struct domain *d)
-{
-    struct hvm_io_handler *handler = hvm_next_io_handler(d);
-
-    if ( handler == NULL )
-        return;
-
-    handler->type = IOREQ_TYPE_PIO;
-    handler->ops = &g2m_portio_ops;
-}
-
-unsigned int hvm_pci_decode_addr(unsigned int cf8, unsigned int addr,
-                                 pci_sbdf_t *sbdf)
-{
-    ASSERT(CF8_ENABLED(cf8));
-
-    sbdf->bdf = CF8_BDF(cf8);
-    sbdf->seg = 0;
-    /*
-     * NB: the lower 2 bits of the register address are fetched from the
-     * offset into the 0xcfc register when reading/writing to it.
-     */
-    return CF8_ADDR_LO(cf8) | (addr & 3);
-}
-
-/* Do some sanity checks. */
-static bool vpci_access_allowed(unsigned int reg, unsigned int len)
-{
-    /* Check access size. */
-    if ( len != 1 && len != 2 && len != 4 && len != 8 )
-        return false;
-
-    /* Check that access is size aligned. */
-    if ( (reg & (len - 1)) )
-        return false;
-
-    return true;
-}
-
-/* vPCI config space IO ports handlers (0xcf8/0xcfc). */
-static bool vpci_portio_accept(const struct hvm_io_handler *handler,
-                               const ioreq_t *p)
-{
-    return (p->addr == 0xcf8 && p->size == 4) || (p->addr & ~3) == 0xcfc;
-}
-
-static int vpci_portio_read(const struct hvm_io_handler *handler,
-                            uint64_t addr, uint32_t size, uint64_t *data)
-{
-    const struct domain *d = current->domain;
-    unsigned int reg;
-    pci_sbdf_t sbdf;
-    uint32_t cf8;
-
-    *data = ~(uint64_t)0;
-
-    if ( addr == 0xcf8 )
-    {
-        ASSERT(size == 4);
-        *data = d->arch.hvm_domain.pci_cf8;
-        return X86EMUL_OKAY;
-    }
-
-    ASSERT((addr & ~3) == 0xcfc);
-    cf8 = ACCESS_ONCE(d->arch.hvm_domain.pci_cf8);
-    if ( !CF8_ENABLED(cf8) )
-        return X86EMUL_UNHANDLEABLE;
-
-    reg = hvm_pci_decode_addr(cf8, addr, &sbdf);
-
-    if ( !vpci_access_allowed(reg, size) )
-        return X86EMUL_OKAY;
-
-    *data = vpci_read(sbdf, reg, size);
-
-    return X86EMUL_OKAY;
-}
-
-static int vpci_portio_write(const struct hvm_io_handler *handler,
-                             uint64_t addr, uint32_t size, uint64_t data)
+int dpci_ioport_intercept(ioreq_t *p)
 {
     struct domain *d = current->domain;
-    unsigned int reg;
-    pci_sbdf_t sbdf;
-    uint32_t cf8;
+    struct hvm_iommu *hd = domain_hvm_iommu(d);
+    struct g2m_ioport *g2m_ioport;
+    unsigned int mport, gport = p->addr;
+    unsigned int s = 0, e = 0;
+    int rc;
 
-    if ( addr == 0xcf8 )
+    list_for_each_entry( g2m_ioport, &hd->g2m_ioport_list, list )
     {
-        ASSERT(size == 4);
-        d->arch.hvm_domain.pci_cf8 = data;
-        return X86EMUL_OKAY;
+        s = g2m_ioport->gport;
+        e = s + g2m_ioport->np;
+        if ( (gport >= s) && (gport < e) )
+            goto found;
     }
 
-    ASSERT((addr & ~3) == 0xcfc);
-    cf8 = ACCESS_ONCE(d->arch.hvm_domain.pci_cf8);
-    if ( !CF8_ENABLED(cf8) )
+    return X86EMUL_UNHANDLEABLE;
+
+ found:
+    mport = (gport - s) + g2m_ioport->mport;
+
+    if ( !ioports_access_permitted(d, mport, mport + p->size - 1) ) 
+    {
+        gdprintk(XENLOG_ERR, "Error: access to gport=0x%x denied!\n",
+                 (uint32_t)p->addr);
         return X86EMUL_UNHANDLEABLE;
-
-    reg = hvm_pci_decode_addr(cf8, addr, &sbdf);
-
-    if ( !vpci_access_allowed(reg, size) )
-        return X86EMUL_OKAY;
-
-    vpci_write(sbdf, reg, size, data);
-
-    return X86EMUL_OKAY;
-}
-
-static const struct hvm_io_ops vpci_portio_ops = {
-    .accept = vpci_portio_accept,
-    .read = vpci_portio_read,
-    .write = vpci_portio_write,
-};
-
-void register_vpci_portio_handler(struct domain *d)
-{
-    struct hvm_io_handler *handler;
-
-    if ( !has_vpci(d) )
-        return;
-
-    handler = hvm_next_io_handler(d);
-    if ( !handler )
-        return;
-
-    handler->type = IOREQ_TYPE_PIO;
-    handler->ops = &vpci_portio_ops;
-}
-
-struct hvm_mmcfg {
-    struct list_head next;
-    paddr_t addr;
-    unsigned int size;
-    uint16_t segment;
-    uint8_t start_bus;
-};
-
-/* Handlers to trap PCI MMCFG config accesses. */
-static const struct hvm_mmcfg *vpci_mmcfg_find(const struct domain *d,
-                                               paddr_t addr)
-{
-    const struct hvm_mmcfg *mmcfg;
-
-    list_for_each_entry ( mmcfg, &d->arch.hvm_domain.mmcfg_regions, next )
-        if ( addr >= mmcfg->addr && addr < mmcfg->addr + mmcfg->size )
-            return mmcfg;
-
-    return NULL;
-}
-
-static unsigned int vpci_mmcfg_decode_addr(const struct hvm_mmcfg *mmcfg,
-                                           paddr_t addr, pci_sbdf_t *sbdf)
-{
-    addr -= mmcfg->addr;
-    sbdf->bdf = MMCFG_BDF(addr);
-    sbdf->bus += mmcfg->start_bus;
-    sbdf->seg = mmcfg->segment;
-
-    return addr & (PCI_CFG_SPACE_EXP_SIZE - 1);
-}
-
-static int vpci_mmcfg_accept(struct vcpu *v, unsigned long addr)
-{
-    struct domain *d = v->domain;
-    bool found;
-
-    read_lock(&d->arch.hvm_domain.mmcfg_lock);
-    found = vpci_mmcfg_find(d, addr);
-    read_unlock(&d->arch.hvm_domain.mmcfg_lock);
-
-    return found;
-}
-
-static int vpci_mmcfg_read(struct vcpu *v, unsigned long addr,
-                           unsigned int len, unsigned long *data)
-{
-    struct domain *d = v->domain;
-    const struct hvm_mmcfg *mmcfg;
-    unsigned int reg;
-    pci_sbdf_t sbdf;
-
-    *data = ~0ul;
-
-    read_lock(&d->arch.hvm_domain.mmcfg_lock);
-    mmcfg = vpci_mmcfg_find(d, addr);
-    if ( !mmcfg )
-    {
-        read_unlock(&d->arch.hvm_domain.mmcfg_lock);
-        return X86EMUL_RETRY;
     }
 
-    reg = vpci_mmcfg_decode_addr(mmcfg, addr, &sbdf);
-    read_unlock(&d->arch.hvm_domain.mmcfg_lock);
-
-    if ( !vpci_access_allowed(reg, len) ||
-         (reg + len) > PCI_CFG_SPACE_EXP_SIZE )
-        return X86EMUL_OKAY;
-
-    /*
-     * According to the PCIe 3.1A specification:
-     *  - Configuration Reads and Writes must usually be DWORD or smaller
-     *    in size.
-     *  - Because Root Complex implementations are not required to support
-     *    accesses to a RCRB that cross DW boundaries [...] software
-     *    should take care not to cause the generation of such accesses
-     *    when accessing a RCRB unless the Root Complex will support the
-     *    access.
-     *  Xen however supports 8byte accesses by splitting them into two
-     *  4byte accesses.
-     */
-    *data = vpci_read(sbdf, reg, min(4u, len));
-    if ( len == 8 )
-        *data |= (uint64_t)vpci_read(sbdf, reg + 4, 4) << 32;
-
-    return X86EMUL_OKAY;
-}
-
-static int vpci_mmcfg_write(struct vcpu *v, unsigned long addr,
-                            unsigned int len, unsigned long data)
-{
-    struct domain *d = v->domain;
-    const struct hvm_mmcfg *mmcfg;
-    unsigned int reg;
-    pci_sbdf_t sbdf;
-
-    read_lock(&d->arch.hvm_domain.mmcfg_lock);
-    mmcfg = vpci_mmcfg_find(d, addr);
-    if ( !mmcfg )
+    switch ( p->dir )
     {
-        read_unlock(&d->arch.hvm_domain.mmcfg_lock);
-        return X86EMUL_RETRY;
+    case IOREQ_READ:
+        rc = dpci_ioport_read(mport, p);
+        break;
+    case IOREQ_WRITE:
+        rc = dpci_ioport_write(mport, p);
+        break;
+    default:
+        gdprintk(XENLOG_ERR, "Error: couldn't handle p->dir = %d", p->dir);
+        rc = X86EMUL_UNHANDLEABLE;
     }
 
-    reg = vpci_mmcfg_decode_addr(mmcfg, addr, &sbdf);
-    read_unlock(&d->arch.hvm_domain.mmcfg_lock);
-
-    if ( !vpci_access_allowed(reg, len) ||
-         (reg + len) > PCI_CFG_SPACE_EXP_SIZE )
-        return X86EMUL_OKAY;
-
-    vpci_write(sbdf, reg, min(4u, len), data);
-    if ( len == 8 )
-        vpci_write(sbdf, reg + 4, 4, data >> 32);
-
-    return X86EMUL_OKAY;
-}
-
-static const struct hvm_mmio_ops vpci_mmcfg_ops = {
-    .check = vpci_mmcfg_accept,
-    .read = vpci_mmcfg_read,
-    .write = vpci_mmcfg_write,
-};
-
-int register_vpci_mmcfg_handler(struct domain *d, paddr_t addr,
-                                unsigned int start_bus, unsigned int end_bus,
-                                unsigned int seg)
-{
-    struct hvm_mmcfg *mmcfg, *new;
-
-    ASSERT(is_hardware_domain(d));
-
-    if ( start_bus > end_bus )
-        return -EINVAL;
-
-    new = xmalloc(struct hvm_mmcfg);
-    if ( !new )
-        return -ENOMEM;
-
-    new->addr = addr + (start_bus << 20);
-    new->start_bus = start_bus;
-    new->segment = seg;
-    new->size = (end_bus - start_bus + 1) << 20;
-
-    write_lock(&d->arch.hvm_domain.mmcfg_lock);
-    list_for_each_entry ( mmcfg, &d->arch.hvm_domain.mmcfg_regions, next )
-        if ( new->addr < mmcfg->addr + mmcfg->size &&
-             mmcfg->addr < new->addr + new->size )
-        {
-            int ret = -EEXIST;
-
-            if ( new->addr == mmcfg->addr &&
-                 new->start_bus == mmcfg->start_bus &&
-                 new->segment == mmcfg->segment &&
-                 new->size == mmcfg->size )
-                ret = 0;
-            write_unlock(&d->arch.hvm_domain.mmcfg_lock);
-            xfree(new);
-            return ret;
-        }
-
-    if ( list_empty(&d->arch.hvm_domain.mmcfg_regions) )
-        register_mmio_handler(d, &vpci_mmcfg_ops);
-
-    list_add(&new->next, &d->arch.hvm_domain.mmcfg_regions);
-    write_unlock(&d->arch.hvm_domain.mmcfg_lock);
-
-    return 0;
-}
-
-void destroy_vpci_mmcfg(struct domain *d)
-{
-    struct list_head *mmcfg_regions = &d->arch.hvm_domain.mmcfg_regions;
-
-    write_lock(&d->arch.hvm_domain.mmcfg_lock);
-    while ( !list_empty(mmcfg_regions) )
-    {
-        struct hvm_mmcfg *mmcfg = list_first_entry(mmcfg_regions,
-                                                   struct hvm_mmcfg, next);
-
-        list_del(&mmcfg->next);
-        xfree(mmcfg);
-    }
-    write_unlock(&d->arch.hvm_domain.mmcfg_lock);
+    return rc;
 }
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

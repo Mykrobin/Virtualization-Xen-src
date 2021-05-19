@@ -1,31 +1,25 @@
-XEN_ROOT=$(CURDIR)/../..
+XEN_ROOT=../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-CFLAGS += -Werror
-CFLAGS += $(CFLAGS_libxenstore)
+CFLAGS  += -Werror
+CFLAGS  += $(CFLAGS_libxenstore)
+LDFLAGS += $(LDFLAGS_libxenstore)
 
-LDLIBS += $(LDLIBS_libxenstore)
+BIN      = xenpmd
 
 .PHONY: all
-all: xenpmd
+all: $(BIN)
 
 .PHONY: install
 install: all
-	$(INSTALL_DIR) $(DESTDIR)$(sbindir)
-	$(INSTALL_PROG) xenpmd $(DESTDIR)$(sbindir)
+	$(INSTALL_DIR) $(DESTDIR)$(SBINDIR)
+	$(INSTALL_PROG) $(BIN) $(DESTDIR)$(SBINDIR)
 
 .PHONY: clean
 clean:
-	$(RM) -f xenpmd xenpmd.o $(DEPS_RM)
+	$(RM) -f $(BIN) $(DEPS)
 
-.PHONY: distclean
-distclean: clean
+%: %.c Makefile
+	$(CC) $(CFLAGS) $< $(LDFLAGS) -o $@
 
-.PHONY: uninstall
-uninstall:
-	rm -f $(DESTDIR)$(sbindir)/xenpmd
-
-xenpmd: xenpmd.o Makefile
-	$(CC) $(LDFLAGS) $< -o $@ $(LDLIBS) $(APPEND_LDFLAGS)
-
--include $(DEPS_INCLUDE)
+-include $(DEPS)

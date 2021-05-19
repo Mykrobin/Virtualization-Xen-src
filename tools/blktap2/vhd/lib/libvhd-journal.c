@@ -237,7 +237,7 @@ vhd_journal_add_journal_header(vhd_journal_t *j)
 	if (err)
 		return err;
 
-	vhd_uuid_copy(&j->header.uuid, &vhd->footer.uuid);
+	blk_uuid_copy(&j->header.uuid, &vhd->footer.uuid);
 	memcpy(j->header.cookie,
 	       VHD_JOURNAL_HEADER_COOKIE, sizeof(j->header.cookie));
 	j->header.vhd_footer_offset = off - sizeof(vhd_footer_t);
@@ -1260,6 +1260,7 @@ vhd_journal_create(vhd_journal_t *j, const char *file, const char *jfile)
 	int i, err;
 	size_t size;
 	off_t off;
+	struct stat stats;
 
 	memset(j, 0, sizeof(vhd_journal_t));
 	j->jfd = -1;

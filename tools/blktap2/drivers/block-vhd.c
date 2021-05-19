@@ -58,7 +58,6 @@
 #include "tapdisk.h"
 #include "tapdisk-driver.h"
 #include "tapdisk-interface.h"
-#include "tapdisk-disktype.h"
 
 unsigned int SPB;
 
@@ -85,7 +84,7 @@ unsigned int SPB;
 		DBG(TLOG_WARN, "%s:%d: FAILED ASSERTION: '%s'\n",	\
 		    __FILE__, __LINE__, #_p);				\
 		tlog_flush();						\
-		abort();                                                \
+		*(int*)0 = 0;						\
 	}
 
 #if (DEBUGGING == 1)
@@ -807,7 +806,7 @@ vhd_validate_parent(td_driver_t *child_driver,
 	}
 	*/
 
-	if (vhd_uuid_compare(&child->vhd.header.prt_uuid, &parent->vhd.footer.uuid)) {
+	if (blk_uuid_compare(&child->vhd.header.prt_uuid, &parent->vhd.footer.uuid)) {
 		DPRINTF("ERROR: %s: %s, %s: parent uuid has changed since "
 			"snapshot.  Child image no longer valid.\n",
 			__func__, child->vhd.file, parent->vhd.file);

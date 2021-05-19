@@ -15,7 +15,8 @@
 //  Lesser General Public License for more details.
 //
 //  You should have received a copy of the GNU Lesser General Public
-//  License along with this library; If not, see <http://www.gnu.org/licenses/>.
+//  License along with this library; if not, write to the Free Software
+//  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA
 
 /* define it to include QEMU specific code */
 //#define BX_QEMU
@@ -47,11 +48,10 @@
 // per-device basis. Debug info are sent only in debug mode
 #if DEBUG_ROMBIOS
 #  define BX_DEBUG(format, p...)  bios_printf(BIOS_PRINTF_INFO, format, ##p)
-#  define BX_INFO(format, p...)   bios_printf(BIOS_PRINTF_INFO, format, ##p)
 #else
 #  define BX_DEBUG(format, p...)
-#  define BX_INFO(format, p...)
 #endif
+#define BX_INFO(format, p...)   bios_printf(BIOS_PRINTF_INFO, format, ##p)
 #define BX_PANIC(format, p...)  bios_printf(BIOS_PRINTF_DEBHALT, format, ##p)
 
 #define ACPI_DATA_SIZE    0x00010000L

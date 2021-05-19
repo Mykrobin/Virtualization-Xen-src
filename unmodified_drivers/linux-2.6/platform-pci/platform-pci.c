@@ -15,7 +15,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  */
 
@@ -23,13 +24,13 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
-#include <linux/crash_dump.h>
 #include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/version.h>
 #include <linux/interrupt.h>
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
+#include <asm/system.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/uaccess.h>
@@ -66,7 +67,7 @@ MODULE_LICENSE("GPL");
 static char *dev_unplug;
 module_param(dev_unplug, charp, 0644);
 MODULE_PARM_DESC(dev_unplug, "Emulated devices to unplug: "
-		 "[all,][ide-disks,][aux-ide-disks,][nics,][never] (default is 'all')\n");
+		 "[all,][ide-disks,][aux-ide-disks,][nics]\n");
 
 struct pci_dev *xen_platform_pdev;
 
@@ -117,7 +118,6 @@ unsigned long alloc_xen_mmio(unsigned long len)
 
 #ifndef __ia64__
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,38)
 static uint32_t xen_cpuid_base(void)
 {
 	uint32_t base, eax, ebx, ecx, edx;
@@ -136,7 +136,6 @@ static uint32_t xen_cpuid_base(void)
 
 	return 0;
 }
-#endif
 
 static int init_hypercall_stubs(void)
 {
@@ -290,10 +289,6 @@ static int check_platform_magic(struct device *dev, long ioaddr, long iolen)
 	short magic, unplug = 0;
 	char protocol, *p, *q, *err;
 
-	/* Unconditionally unplug everything */
-	if (!dev_unplug)
-		unplug = UNPLUG_ALL;
-
 	for (p = dev_unplug; p; p = q) {
 		q = strchr(dev_unplug, ',');
 		if (q)
@@ -306,8 +301,6 @@ static int check_platform_magic(struct device *dev, long ioaddr, long iolen)
 			unplug |= UNPLUG_AUX_IDE_DISKS;
 		else if (!strcmp(p, "nics"))
 			unplug |= UNPLUG_ALL_NICS;
-		else if (!strcmp(p, "never"))
-			unplug = 0;
 		else
 			dev_warn(dev, "unrecognised option '%s' "
 				 "in module parameter 'dev_unplug'\n", p);
@@ -355,32 +348,6 @@ static int check_platform_magic(struct device *dev, long ioaddr, long iolen)
 	dev_err(dev, "failed to execute specified dev_unplug options!\n");
 	return -ENODEV;
 }
-
-#ifdef HAVE_OLDMEM_PFN_IS_RAM
-static int xen_oldmem_pfn_is_ram(unsigned long pfn)
-{
-	struct xen_hvm_get_mem_type a;
-	int ret;
-
-	a.domid = DOMID_SELF;
-	a.pfn = pfn;
-	if (HYPERVISOR_hvm_op(HVMOP_get_mem_type, &a))
-		return -ENXIO;
-
-	switch (a.mem_type) {
-		case HVMMEM_mmio_dm:
-			ret = 0;
-			break;
-		case HVMMEM_ram_rw:
-		case HVMMEM_ram_ro:
-		default:
-			ret = 1;
-			break;
-	}
-
-	return ret;
-}
-#endif
 
 static int __devinit platform_pci_init(struct pci_dev *pdev,
 				       const struct pci_device_id *ent)
@@ -450,9 +417,6 @@ static int __devinit platform_pci_init(struct pci_dev *pdev,
 	if ((ret = xen_panic_handler_init()))
 		goto out;
 
-#ifdef HAVE_OLDMEM_PFN_IS_RAM
-	register_oldmem_pfn_is_ram(&xen_oldmem_pfn_is_ram);
-#endif
  out:
 	if (ret) {
 		pci_release_region(pdev, 0);

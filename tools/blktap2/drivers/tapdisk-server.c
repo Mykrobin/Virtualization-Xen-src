@@ -30,8 +30,9 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
-#include <signal.h>
+#include <sys/signal.h>
 
+#define TAPDISK
 #include "tapdisk-utils.h"
 #include "tapdisk-server.h"
 #include "tapdisk-driver.h"
@@ -44,6 +45,18 @@
 
 #define tapdisk_server_for_each_vbd(vbd, tmp)			        \
 	list_for_each_entry_safe(vbd, tmp, &server.vbds, next)
+
+struct tap_disk *
+tapdisk_server_find_driver_interface(int type)
+{
+	int n;
+
+	n = sizeof(dtypes) / sizeof(struct disk_info_t *);
+	if (type >= n)
+		return NULL;
+
+	return dtypes[type]->drv;
+}
 
 td_image_t *
 tapdisk_server_get_shared_image(td_image_t *image)
@@ -61,12 +74,6 @@ tapdisk_server_get_shared_image(td_image_t *image)
 				return img;
 
 	return NULL;
-}
-
-struct list_head *
-tapdisk_server_get_all_vbds(void)
-{
-	return &server.vbds;
 }
 
 td_vbd_t *
@@ -205,6 +212,27 @@ tapdisk_server_stop_vbds(void)
 		tapdisk_vbd_kill_queue(vbd);
 }
 
+static void
+tapdisk_server_send_error(const char *message)
+{
+	td_vbd_t *vbd, *tmp;
+
+	tapdisk_server_for_each_vbd(vbd, tmp)
+		tapdisk_ipc_write_error(&vbd->ipc, message);
+}
+
+static int
+tapdisk_server_init_ipc(const char *read, const char *write)
+{
+	return tapdisk_ipc_open(&server.ipc, read, write);
+}
+
+static void
+tapdisk_server_close_ipc(void)
+{
+	tapdisk_ipc_close(&server.ipc);
+}
+
 static int
 tapdisk_server_init_aio(void)
 {
@@ -222,31 +250,27 @@ static void
 tapdisk_server_close(void)
 {
 	tapdisk_server_close_aio();
-}
-
-void
-tapdisk_server_iterate(void)
-{
-	int ret;
-
-	tapdisk_server_assert_locks();
-	tapdisk_server_set_retry_timeout();
-	tapdisk_server_check_progress();
-
-	ret = scheduler_wait_for_events(&server.scheduler);
-	if (ret < 0)
-		DBG(TLOG_WARN, "server wait returned %d\n", ret);
-
-	tapdisk_server_check_vbds();
-	tapdisk_server_submit_tiocbs();
-	tapdisk_server_kick_responses();
+	tapdisk_server_close_ipc();
 }
 
 static void
 __tapdisk_server_run(void)
 {
-	while (server.run)
-		tapdisk_server_iterate();
+	int ret;
+
+	while (server.run) {
+		tapdisk_server_assert_locks();
+		tapdisk_server_set_retry_timeout();
+		tapdisk_server_check_progress();
+
+		ret = scheduler_wait_for_events(&server.scheduler);
+		if (ret < 0)
+			DBG(TLOG_WARN, "server wait returned %d\n", ret);
+
+		tapdisk_server_check_vbds();
+		tapdisk_server_submit_tiocbs();
+		tapdisk_server_kick_responses();
+	}
 }
 
 static void
@@ -268,6 +292,7 @@ tapdisk_server_signal_handler(int signal)
 		if (xfsz_error_sent)
 			break;
 
+		tapdisk_server_send_error("received SIGXFSZ, closing queues");
 		xfsz_error_sent = 1;
 		break;
 
@@ -278,20 +303,18 @@ tapdisk_server_signal_handler(int signal)
 }
 
 int
-tapdisk_server_init(void)
+tapdisk_server_initialize(const char *read, const char *write)
 {
-	memset(&server, 0, sizeof(server));
+	int err;
+
+	memset(&server, 0, sizeof(tapdisk_server_t));
 	INIT_LIST_HEAD(&server.vbds);
 
 	scheduler_initialize(&server.scheduler);
 
-	return 0;
-}
-
-int
-tapdisk_server_complete(void)
-{
-	int err;
+	err = tapdisk_server_init_ipc(read, write);
+	if (err)
+		goto fail;
 
 	err = tapdisk_server_init_aio();
 	if (err)
@@ -302,25 +325,7 @@ tapdisk_server_complete(void)
 	return 0;
 
 fail:
-	tapdisk_server_close_aio();
-	return err;
-}
-
-int
-tapdisk_server_initialize(void)
-{
-	int err;
-
-	tapdisk_server_init();
-
-	err = tapdisk_server_complete();
-	if (err)
-		goto fail;
-
-	return 0;
-
-fail:
-	tapdisk_server_close();
+	tapdisk_server_close_ipc();
 	return err;
 }
 

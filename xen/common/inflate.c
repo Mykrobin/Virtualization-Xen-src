@@ -120,7 +120,6 @@ static char rcsid[] = "#Id: inflate.c,v 0.14 1993/06/10 13:27:04 jloup Exp #";
 
 #ifndef INIT
 #define INIT
-#define INITDATA
 #endif
  
 #define slide window
@@ -217,8 +216,8 @@ static const ush cpdext[] = {         /* Extra bits for distance codes */
    the stream.
  */
 
-STATIC ulg INITDATA bb;                /* bit buffer */
-STATIC unsigned INITDATA bk;           /* bits in bit buffer */
+STATIC ulg bb;                         /* bit buffer */
+STATIC unsigned bk;                    /* bits in bit buffer */
 
 STATIC const ush mask_bits[] = {
     0x0000,
@@ -235,10 +234,10 @@ STATIC const ush mask_bits[] = {
  *  malloc by Hannu Savolainen 1993 and Matthias Urlichs 1994
  */
 
-static unsigned long INITDATA malloc_ptr;
-static int INITDATA malloc_count;
+static unsigned long malloc_ptr;
+static int malloc_count;
 
-static void *INIT malloc(int size)
+static void *malloc(int size)
 {
     void *p;
 
@@ -259,7 +258,7 @@ static void *INIT malloc(int size)
     return p;
 }
 
-static void INIT free(void *where)
+static void free(void *where)
 {
     malloc_count--;
     if (!malloc_count)
@@ -312,7 +311,7 @@ STATIC const int dbits = 6;          /* bits in base distance lookup table */
 #define N_MAX 288       /* maximum number of codes in any set */
 
 
-STATIC unsigned INITDATA hufts;      /* track memory usage */
+STATIC unsigned hufts;         /* track memory usage */
 
 
 STATIC int INIT huft_build(
@@ -1130,8 +1129,8 @@ STATIC int INIT inflate(void)
  *
  **********************************************************************/
 
-static ulg INITDATA crc_32_tab[256];
-static ulg INITDATA crc;  /* initialized in makecrc() so it'll reside in bss */
+static ulg crc_32_tab[256];
+static ulg crc;  /* initialized in makecrc() so it'll reside in bss */
 #define CRC_VALUE (crc ^ 0xffffffffUL)
 
 /*

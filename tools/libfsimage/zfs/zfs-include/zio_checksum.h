@@ -13,10 +13,11 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 /*
- * Copyright 2010 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -34,7 +35,7 @@ typedef void zio_checksum_t(const void *data, uint64_t size, zio_cksum_t *zcp);
 typedef struct zio_checksum_info {
 	zio_checksum_t	*ci_func[2]; /* checksum function for each byteorder */
 	int		ci_correctable;	/* number of correctable bits	*/
-	int		ci_eck;		/* uses zio embedded checksum? */
+	int		ci_zbt;		/* uses zio block tail?	*/
 	char		*ci_name;	/* descriptive name */
 } zio_checksum_info_t;
 

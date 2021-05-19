@@ -8,9 +8,8 @@
  * See detailed comments in the file linux/bitmap.h describing the
  * data type on which these nodemasks are based.
  *
- * For details of nodemask_scnprintf(), nodelist_scnpintf() and
- * nodemask_parse(), see bitmap_scnprintf() and bitmap_parse()
- * in lib/bitmap.c.
+ * For details of nodemask_scnprintf() and nodemask_parse(),
+ * see bitmap_scnprintf() and bitmap_parse() in lib/bitmap.c.
  *
  * The available nodemask operations are:
  *
@@ -42,8 +41,6 @@
  * int last_node(mask)			Number highest set bit, or MAX_NUMNODES
  * int first_unset_node(mask)		First node not set in mask, or 
  *					MAX_NUMNODES.
- * int cycle_node(node, mask)		Next node cycling from 'node', or
- *					MAX_NUMNODES
  *
  * nodemask_t nodemask_of_node(node)	Return nodemask with bit 'node' set
  * NODE_MASK_ALL			Initializer - all bits set
@@ -51,20 +48,22 @@
  * unsigned long *nodes_addr(mask)	Array of unsigned long's in mask
  *
  * int nodemask_scnprintf(buf, len, mask) Format nodemask for printing
- * int nodelist_scnprintf(buf, len, mask) Format nodemask as a list for printing
  * int nodemask_parse(ubuf, ulen, mask)	Parse ascii string as nodemask
  *
  * for_each_node_mask(node, mask)	for-loop node over mask
  *
  * int num_online_nodes()		Number of online Nodes
+ * int num_possible_nodes()		Number of all possible Nodes
  *
  * int node_online(node)		Is some node online?
+ * int node_possible(node)		Is some node possible?
  *
  * int any_online_node(mask)		First online node in mask
  *
  * node_set_online(node)		set bit 'node' in node_online_map
  * node_set_offline(node)		clear bit 'node' in node_online_map
  *
+ * for_each_node(node)			for-loop node over node_possible_map
  * for_each_online_node(node)		for-loop node over node_online_map
  *
  * Subtlety:
@@ -258,16 +257,6 @@ static inline int __first_unset_node(const nodemask_t *maskp)
 			find_first_zero_bit(maskp->bits, MAX_NUMNODES));
 }
 
-#define cycle_node(n, src) __cycle_node((n), &(src), MAX_NUMNODES)
-static inline int __cycle_node(int n, const nodemask_t *maskp, int nbits)
-{
-    int nxt = __next_node(n, maskp, nbits);
-
-    if (nxt == nbits)
-        nxt = __first_node(maskp, nbits);
-    return nxt;
-}
-
 #define NODE_MASK_LAST_WORD BITMAP_LAST_WORD_MASK(MAX_NUMNODES)
 
 #if MAX_NUMNODES <= BITS_PER_LONG
@@ -293,14 +282,6 @@ static inline int __cycle_node(int n, const nodemask_t *maskp, int nbits)
 } })
 
 #define nodes_addr(src) ((src).bits)
-
-#define nodelist_scnprintf(buf, len, src) \
-			__nodelist_scnprintf((buf), (len), (src), MAX_NUMNODES)
-static inline int __nodelist_scnprintf(char *buf, int len,
-					const nodemask_t *srcp, int nbits)
-{
-	return bitmap_scnlistprintf(buf, len, srcp->bits, nbits);
-}
 
 #if 0
 #define nodemask_scnprintf(buf, len, src) \
@@ -333,17 +314,22 @@ static inline int __nodemask_parse(const char __user *buf, int len,
 
 /*
  * The following particular system nodemasks and operations
- * on them manage online nodes.
+ * on them manage all possible and online nodes.
  */
 
 extern nodemask_t node_online_map;
+extern nodemask_t node_possible_map;
 
 #if MAX_NUMNODES > 1
 #define num_online_nodes()	nodes_weight(node_online_map)
+#define num_possible_nodes()	nodes_weight(node_possible_map)
 #define node_online(node)	node_isset((node), node_online_map)
+#define node_possible(node)	node_isset((node), node_possible_map)
 #else
 #define num_online_nodes()	1
+#define num_possible_nodes()	1
 #define node_online(node)	((node) == 0)
+#define node_possible(node)	((node) == 0)
 #endif
 
 #define any_online_node(mask)			\
@@ -358,6 +344,7 @@ extern nodemask_t node_online_map;
 #define node_set_online(node)	   set_bit((node), node_online_map.bits)
 #define node_set_offline(node)	   clear_bit((node), node_online_map.bits)
 
+#define for_each_node(node)	   for_each_node_mask((node), node_possible_map)
 #define for_each_online_node(node) for_each_node_mask((node), node_online_map)
 
 #endif /* __LINUX_NODEMASK_H */

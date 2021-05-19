@@ -1,4 +1,4 @@
-XEN_ROOT = $(CURDIR)/../../..
+XEN_ROOT = ../../..
 include $(XEN_ROOT)/tools/Rules.mk
 
 LDFLAGS=-static
@@ -11,7 +11,4 @@ console-domU: console-domU.o
 procpipe: procpipe.o
 
 .PHONY: clean
-clean: $(RM) *.o console-domU console-dom0 procpipe
-
-.PHONY: distclean
-distclean: clean
+clean:; $(RM) *.o console-domU console-dom0 procpipe

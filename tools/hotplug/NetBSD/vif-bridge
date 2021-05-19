@@ -7,7 +7,7 @@
 DIR=$(dirname "$0")
 . "${DIR}/hotplugpath.sh"
 
-PATH=${bindir}:${sbindir}:${LIBEXEC_BIN}:/bin:/usr/bin:/sbin:/usr/sbin
+PATH=${BINDIR}:${SBINDIR}:${LIBEXEC}:${PRIVATE_BINDIR}:/bin:/usr/bin:/sbin:/usr/sbin
 export PATH
 
 xpath=$1
@@ -23,10 +23,13 @@ case $xstatus in
 	xbridge=$(xenstore-read "$xpath/bridge")
 	xfid=$(xenstore-read "$xpath/frontend-id")
 	xhandle=$(xenstore-read "$xpath/handle")
-	iface=$(xenstore-read "$xpath/vifname")
+	iface=xvif$xfid.$xhandle
+	echo ifconfig $iface up
 	ifconfig $iface up
 	brconfig $xbridge add $iface
+	echo brconfig $xbridge add $iface
 	xenstore-write $xpath/hotplug-status connected
+	echo xenstore-write $xpath/hotplug-status connected
 	exit 0
 	;;
 *)

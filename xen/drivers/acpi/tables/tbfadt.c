@@ -41,6 +41,7 @@
  * POSSIBILITY OF SUCH DAMAGES.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <acpi/acpi.h>
 #include <acpi/actables.h>
@@ -61,14 +62,13 @@ static void acpi_tb_validate_fadt(void);
 
 typedef struct acpi_fadt_info {
 	char *name;
-	u16 target;
-	u16 source;
-	u16 length;
+	u8 target;
+	u8 source;
+	u8 length;
 	u8 type;
 
 } acpi_fadt_info;
 
-#define ACPI_FADT_OPTIONAL          0
 #define ACPI_FADT_REQUIRED          1
 #define ACPI_FADT_SEPARATE_LENGTH   2
 
@@ -79,7 +79,7 @@ static struct acpi_fadt_info __initdata fadt_info_table[] = {
 
 	{"Pm1bEventBlock", ACPI_FADT_OFFSET(xpm1b_event_block),
 	 ACPI_FADT_OFFSET(pm1b_event_block),
-	 ACPI_FADT_OFFSET(pm1_event_length), ACPI_FADT_OPTIONAL},
+	 ACPI_FADT_OFFSET(pm1_event_length), 0},
 
 	{"Pm1aControlBlock", ACPI_FADT_OFFSET(xpm1a_control_block),
 	 ACPI_FADT_OFFSET(pm1a_control_block),
@@ -87,7 +87,7 @@ static struct acpi_fadt_info __initdata fadt_info_table[] = {
 
 	{"Pm1bControlBlock", ACPI_FADT_OFFSET(xpm1b_control_block),
 	 ACPI_FADT_OFFSET(pm1b_control_block),
-	 ACPI_FADT_OFFSET(pm1_control_length), ACPI_FADT_OPTIONAL},
+	 ACPI_FADT_OFFSET(pm1_control_length), 0},
 
 	{"Pm2ControlBlock", ACPI_FADT_OFFSET(xpm2_control_block),
 	 ACPI_FADT_OFFSET(pm2_control_block),
@@ -95,8 +95,7 @@ static struct acpi_fadt_info __initdata fadt_info_table[] = {
 
 	{"PmTimerBlock", ACPI_FADT_OFFSET(xpm_timer_block),
 	 ACPI_FADT_OFFSET(pm_timer_block),
-	 ACPI_FADT_OFFSET(pm_timer_length),
-	 ACPI_FADT_SEPARATE_LENGTH}, /* ACPI 5.0A: Timer is optional */
+	 ACPI_FADT_OFFSET(pm_timer_length), ACPI_FADT_REQUIRED},
 
 	{"Gpe0Block", ACPI_FADT_OFFSET(xgpe0_block),
 	 ACPI_FADT_OFFSET(gpe0_block),
@@ -198,13 +197,8 @@ void __init acpi_tb_parse_fadt(acpi_native_uint table_index, u8 flags)
 	acpi_tb_install_table((acpi_physical_address) acpi_gbl_FADT.Xdsdt,
 			      flags, ACPI_SIG_DSDT, ACPI_TABLE_INDEX_DSDT);
 
-	/* If Hardware Reduced flag is set, there is no FACS */
-
-	if (!acpi_gbl_reduced_hardware) {
-		acpi_tb_install_table((acpi_physical_address) acpi_gbl_FADT.
-				      Xfacs, flags, ACPI_SIG_FACS,
-				      ACPI_TABLE_INDEX_FACS);
-	}
+	acpi_tb_install_table((acpi_physical_address) acpi_gbl_FADT.Xfacs,
+			      flags, ACPI_SIG_FACS, ACPI_TABLE_INDEX_FACS);
 }
 
 /*******************************************************************************
@@ -228,13 +222,12 @@ void __init acpi_tb_create_local_fadt(struct acpi_table_header *table, u32 lengt
 
 	/*
 	 * Check if the FADT is larger than the largest table that we expect
-	 * (the ACPI 5.0 version). If so, truncate the table, and issue
+	 * (the ACPI 2.0/3.0 version). If so, truncate the table, and issue
 	 * a warning.
 	 */
 	if (length > sizeof(struct acpi_table_fadt)) {
 		ACPI_WARNING((AE_INFO,
-			      "FADT (revision %u) is longer than ACPI 5.0 version,"
-			      " truncating length %u to %zu",
+			      "FADT (revision %u) is longer than ACPI 2.0 version, truncating length 0x%X to 0x%zX",
 			      table->revision, (unsigned)length,
 			      sizeof(struct acpi_table_fadt)));
 	}
@@ -247,13 +240,6 @@ void __init acpi_tb_create_local_fadt(struct acpi_table_header *table, u32 lengt
 
 	ACPI_MEMCPY(&acpi_gbl_FADT, table,
 		    ACPI_MIN(length, sizeof(struct acpi_table_fadt)));
-
-	/* Take a copy of the Hardware Reduced flag */
-
-	acpi_gbl_reduced_hardware = FALSE;
-	if (acpi_gbl_FADT.flags & ACPI_FADT_HW_REDUCED) {
-		acpi_gbl_reduced_hardware = TRUE;
-	}
 
 	/*
 	 * 1) Convert the local copy of the FADT to the common internal format
@@ -414,12 +400,6 @@ static void __init acpi_tb_validate_fadt(void)
 	u8 length;
 	acpi_native_uint i;
 
-	/* If Hardware Reduced flag is set, we are all done */
-
-	if (acpi_gbl_reduced_hardware) {
-		return;
-	}
-
 	/* Examine all of the 64-bit extended address fields (X fields) */
 
 	for (i = 0; i < ACPI_FADT_INFO_ENTRIES; i++) {
@@ -438,7 +418,7 @@ static void __init acpi_tb_validate_fadt(void)
 
 		if (fadt_info_table[i].type & ACPI_FADT_REQUIRED) {
 			/*
-			 * Field is required (Pm1a_event, Pm1a_control).
+			 * Field is required (Pm1a_event, Pm1a_control, pm_timer).
 			 * Both the address and length must be non-zero.
 			 */
 			if (!address64->address || !length) {

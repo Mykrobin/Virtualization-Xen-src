@@ -3,10 +3,19 @@
  *
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/guest_access.h>
-#include <xen/hypercall.h>
+#include <asm/hypercall.h>
 #include <compat/vcpu.h>
+
+#define xen_vcpu_info vcpu_info
+CHECK_SIZE_(struct, vcpu_info);
+#undef xen_vcpu_info
+
+#define xen_vcpu_register_vcpu_info vcpu_register_vcpu_info
+CHECK_vcpu_register_vcpu_info;
+#undef xen_vcpu_register_vcpu_info
 
 #define xen_vcpu_get_physid vcpu_get_physid
 CHECK_vcpu_get_physid;
@@ -14,7 +23,7 @@ CHECK_vcpu_get_physid;
 
 int
 arch_compat_vcpu_op(
-    int cmd, struct vcpu *v, XEN_GUEST_HANDLE_PARAM(void) arg)
+    int cmd, struct vcpu *v, XEN_GUEST_HANDLE(void) arg)
 {
     int rc = -ENOSYS;
 
@@ -54,6 +63,7 @@ arch_compat_vcpu_op(
         break;
     }
 
+    case VCPUOP_register_vcpu_info:
     case VCPUOP_get_physid:
         rc = arch_do_vcpu_op(cmd, v, arg);
         break;
@@ -65,7 +75,7 @@ arch_compat_vcpu_op(
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

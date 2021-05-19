@@ -66,7 +66,7 @@ struct ioctl_gntdev_map_grant_ref {
  * before this ioctl is called, or an error will result.
  */
 #define IOCTL_GNTDEV_UNMAP_GRANT_REF \
-_IOC(_IOC_NONE, 'G', 1, sizeof(struct ioctl_gntdev_unmap_grant_ref))
+_IOC(_IOC_NONE, 'G', 1, sizeof(struct ioctl_gntdev_unmap_grant_ref))       
 struct ioctl_gntdev_unmap_grant_ref {
 	/* IN parameters */
 	/* The offset was returned by the corresponding map operation. */
@@ -114,58 +114,6 @@ struct ioctl_gntdev_set_max_grants {
 	/* IN parameter */
 	/* The maximum number of grants that may be mapped at once. */
 	uint32_t count;
-};
-
-/*
- * Sets up an unmap notification within the page, so that the other side can do
- * cleanup if this side crashes. Required to implement cross-domain robust
- * mutexes or close notification on communication channels.
- *
- * Each mapped page only supports one notification; multiple calls referring to
- * the same page overwrite the previous notification. You must clear the
- * notification prior to the IOCTL_GNTALLOC_DEALLOC_GREF if you do not want it
- * to occur.
- */
-#define IOCTL_GNTDEV_SET_UNMAP_NOTIFY \
-_IOC(_IOC_NONE, 'G', 7, sizeof(struct ioctl_gntdev_unmap_notify))
-struct ioctl_gntdev_unmap_notify {
-	/* IN parameters */
-	/* Offset in the file descriptor for a byte within the page. This offset
-	 * is the result of the IOCTL_GNTDEV_MAP_GRANT_REF and is the same as
-	 * is used with mmap(). If using UNMAP_NOTIFY_CLEAR_BYTE, this is the byte
-	 * within the page to be cleared.
-	 */
-	uint64_t index;
-	/* Action(s) to take on unmap */
-	uint32_t action;
-	/* Event channel to notify */
-	uint32_t event_channel_port;
-};
-
-/* Clear (set to zero) the byte specified by index */
-#define UNMAP_NOTIFY_CLEAR_BYTE 0x1
-/* Send an interrupt on the indicated event channel */
-#define UNMAP_NOTIFY_SEND_EVENT 0x2
-
-struct ioctl_gntdev_grant_copy_segment {
-    union {
-        void *virt;
-        struct {
-            uint32_t ref;
-            uint16_t offset;
-            uint16_t domid;
-        } foreign;
-    } source, dest;
-    uint16_t len;
-    uint16_t flags;
-    int16_t status;
-};
-
-#define IOCTL_GNTDEV_GRANT_COPY \
-_IOC(_IOC_NONE, 'G', 8, sizeof(struct ioctl_gntdev_grant_copy))
-struct ioctl_gntdev_grant_copy {
-    unsigned int count;
-    struct ioctl_gntdev_grant_copy_segment *segments;
 };
 
 #endif /* __LINUX_PUBLIC_GNTDEV_H__ */

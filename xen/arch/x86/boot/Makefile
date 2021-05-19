@@ -1,20 +1,9 @@
-obj-bin-y += head.o
+obj-y += head.o
 
-DEFS_H_DEPS = defs.h $(BASEDIR)/include/xen/stdbool.h
+head.o: reloc.S
 
-CMDLINE_DEPS = $(DEFS_H_DEPS) video.h
+BOOT_TRAMPOLINE := $(shell sed -n 's,^\#define[[:space:]]\{1\,\}BOOT_TRAMPOLINE[[:space:]]\{1\,\},,p' $(BASEDIR)/include/asm-x86/config.h)
+%.S: %.c
+	RELOC=$(BOOT_TRAMPOLINE) XEN_BITSPERLONG=$(patsubst x86_%,%,$(TARGET_SUBARCH)) $(MAKE) -f build32.mk $@
 
-RELOC_DEPS = $(DEFS_H_DEPS) \
-	     $(BASEDIR)/include/generated/autoconf.h \
-	     $(BASEDIR)/include/xen/kconfig.h \
-	     $(BASEDIR)/include/xen/multiboot.h \
-	     $(BASEDIR)/include/xen/multiboot2.h \
-	     $(BASEDIR)/include/public/arch-x86/hvm/start_info.h
-
-head.o: cmdline.S reloc.S
-
-cmdline.S: cmdline.c $(CMDLINE_DEPS)
-	$(MAKE) -f build32.mk $@ CMDLINE_DEPS="$(CMDLINE_DEPS)"
-
-reloc.S: reloc.c $(RELOC_DEPS)
-	$(MAKE) -f build32.mk $@ RELOC_DEPS="$(RELOC_DEPS)"
+reloc.S: $(BASEDIR)/include/asm-x86/config.h

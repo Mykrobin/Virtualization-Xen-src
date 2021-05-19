@@ -11,9 +11,14 @@
 #ifndef OP_X86_MODEL_H
 #define OP_X86_MODEL_H
 
+struct op_saved_msr {
+	unsigned int high;
+	unsigned int low;
+};
+
 struct op_msr {
 	unsigned long addr;
-	uint64_t value;
+	struct op_saved_msr saved;
 };
 
 struct op_msrs {
@@ -33,7 +38,7 @@ struct op_x86_model_spec {
 	void (*setup_ctrs)(struct op_msrs const * const msrs);
 	int (*check_ctrs)(unsigned int const cpu, 
 			  struct op_msrs const * const msrs,
-			  struct cpu_user_regs const * const regs);
+			  struct cpu_user_regs * const regs);
 	void (*start)(struct op_msrs const * const msrs);
 	void (*stop)(struct op_msrs const * const msrs);
 	int (*is_arch_pmu_msr)(u64 msr_index, int *type, int *index);
@@ -48,11 +53,6 @@ extern struct op_x86_model_spec op_arch_perfmon_spec;
 extern struct op_x86_model_spec const op_p4_spec;
 extern struct op_x86_model_spec const op_p4_ht2_spec;
 extern struct op_x86_model_spec const op_athlon_spec;
-extern struct op_x86_model_spec const op_amd_fam15h_spec;
 
 void arch_perfmon_setup_counters(void);
-
-extern int ppro_has_global_ctrl;
-extern struct op_x86_model_spec const *model;
-
 #endif /* OP_X86_MODEL_H */

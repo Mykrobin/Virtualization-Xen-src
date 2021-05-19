@@ -28,14 +28,15 @@
 #include <xen/sched.h>
 #include <xen/timer.h>
 #include <xen/trace.h>
+#include <asm/config.h>
 #include <acpi/cpufreq/cpufreq.h>
 #include <public/sysctl.h>
 
 struct cpufreq_driver   *cpufreq_driver;
 struct processor_pminfo *__read_mostly processor_pminfo[NR_CPUS];
-DEFINE_PER_CPU_READ_MOSTLY(struct cpufreq_policy *, cpufreq_cpu_policy);
+struct cpufreq_policy   *__read_mostly cpufreq_cpu_policy[NR_CPUS];
 
-DEFINE_PER_CPU(spinlock_t, cpufreq_statistic_lock);
+DEFINE_PER_CPU(spinlock_t, cpufreq_statistic_lock) = SPIN_LOCK_UNLOCKED;
 
 /*********************************************************************
  *                    Px STATISTIC INFO                              *
@@ -45,7 +46,7 @@ void cpufreq_residency_update(unsigned int cpu, uint8_t state)
 {
     uint64_t now, total_idle_ns;
     int64_t delta;
-    struct pm_px *pxpt = per_cpu(cpufreq_statistic_data, cpu);
+    struct pm_px *pxpt = cpufreq_statistic_data[cpu];
 
     total_idle_ns = get_cpu_idle_time(cpu);
     now = NOW();
@@ -69,7 +70,7 @@ void cpufreq_statistic_update(unsigned int cpu, uint8_t from, uint8_t to)
 
     spin_lock(cpufreq_statistic_lock);
 
-    pxpt = per_cpu(cpufreq_statistic_data, cpu);
+    pxpt = cpufreq_statistic_data[cpu];
     if ( !pxpt || !pmpt ) {
         spin_unlock(cpufreq_statistic_lock);
         return;
@@ -94,14 +95,12 @@ int cpufreq_statistic_init(unsigned int cpuid)
     spinlock_t *cpufreq_statistic_lock = 
                           &per_cpu(cpufreq_statistic_lock, cpuid);
 
-    spin_lock_init(cpufreq_statistic_lock);
-
     if ( !pmpt )
         return -EINVAL;
 
     spin_lock(cpufreq_statistic_lock);
 
-    pxpt = per_cpu(cpufreq_statistic_data, cpuid);
+    pxpt = cpufreq_statistic_data[cpuid];
     if ( pxpt ) {
         spin_unlock(cpufreq_statistic_lock);
         return 0;
@@ -109,27 +108,31 @@ int cpufreq_statistic_init(unsigned int cpuid)
 
     count = pmpt->perf.state_count;
 
-    pxpt = xzalloc(struct pm_px);
+    pxpt = xmalloc(struct pm_px);
     if ( !pxpt ) {
         spin_unlock(cpufreq_statistic_lock);
         return -ENOMEM;
     }
-    per_cpu(cpufreq_statistic_data, cpuid) = pxpt;
+    memset(pxpt, 0, sizeof(*pxpt));
+    cpufreq_statistic_data[cpuid] = pxpt;
 
-    pxpt->u.trans_pt = xzalloc_array(uint64_t, count * count);
+    pxpt->u.trans_pt = xmalloc_array(uint64_t, count * count);
     if (!pxpt->u.trans_pt) {
         xfree(pxpt);
         spin_unlock(cpufreq_statistic_lock);
         return -ENOMEM;
     }
 
-    pxpt->u.pt = xzalloc_array(struct pm_px_val, count);
+    pxpt->u.pt = xmalloc_array(struct pm_px_val, count);
     if (!pxpt->u.pt) {
         xfree(pxpt->u.trans_pt);
         xfree(pxpt);
         spin_unlock(cpufreq_statistic_lock);
         return -ENOMEM;
     }
+
+    memset(pxpt->u.trans_pt, 0, count * count * (sizeof(uint64_t)));
+    memset(pxpt->u.pt, 0, count * (sizeof(struct pm_px_val)));
 
     pxpt->u.total = pmpt->perf.state_count;
     pxpt->u.usable = pmpt->perf.state_count - pmpt->perf.platform_limit;
@@ -153,7 +156,7 @@ void cpufreq_statistic_exit(unsigned int cpuid)
 
     spin_lock(cpufreq_statistic_lock);
 
-    pxpt = per_cpu(cpufreq_statistic_data, cpuid);
+    pxpt = cpufreq_statistic_data[cpuid];
     if (!pxpt) {
         spin_unlock(cpufreq_statistic_lock);
         return;
@@ -162,7 +165,7 @@ void cpufreq_statistic_exit(unsigned int cpuid)
     xfree(pxpt->u.trans_pt);
     xfree(pxpt->u.pt);
     xfree(pxpt);
-    per_cpu(cpufreq_statistic_data, cpuid) = NULL;
+    cpufreq_statistic_data[cpuid] = NULL;
 
     spin_unlock(cpufreq_statistic_lock);
 }
@@ -177,7 +180,7 @@ void cpufreq_statistic_reset(unsigned int cpuid)
 
     spin_lock(cpufreq_statistic_lock);
 
-    pxpt = per_cpu(cpufreq_statistic_data, cpuid);
+    pxpt = cpufreq_statistic_data[cpuid];
     if ( !pmpt || !pxpt || !pxpt->u.pt || !pxpt->u.trans_pt ) {
         spin_unlock(cpufreq_statistic_lock);
         return;
@@ -377,7 +380,8 @@ int cpufreq_driver_getavg(unsigned int cpu, unsigned int flag)
     struct cpufreq_policy *policy;
     int freq_avg;
 
-    if (!cpu_online(cpu) || !(policy = per_cpu(cpufreq_cpu_policy, cpu)))
+    policy = cpufreq_cpu_policy[cpu];
+    if (!cpu_online(cpu) || !policy)
         return 0;
 
     if (cpufreq_driver->getavg)
@@ -390,46 +394,6 @@ int cpufreq_driver_getavg(unsigned int cpu, unsigned int flag)
     return policy->cur;
 }
 
-int cpufreq_update_turbo(int cpuid, int new_state)
-{
-    struct cpufreq_policy *policy;
-    int curr_state;
-    int ret = 0;
-
-    if (new_state != CPUFREQ_TURBO_ENABLED &&
-        new_state != CPUFREQ_TURBO_DISABLED)
-        return -EINVAL;
-
-    policy = per_cpu(cpufreq_cpu_policy, cpuid);
-    if (!policy)
-        return -EACCES;
-
-    if (policy->turbo == CPUFREQ_TURBO_UNSUPPORTED)
-        return -EOPNOTSUPP;
-
-    curr_state = policy->turbo;
-    if (curr_state == new_state)
-        return 0;
-
-    policy->turbo = new_state;
-    if (cpufreq_driver->update)
-    {
-        ret = cpufreq_driver->update(cpuid, policy);
-        if (ret)
-            policy->turbo = curr_state;
-    }
-
-    return ret;
-}
-
-
-int cpufreq_get_turbo_status(int cpuid)
-{
-    struct cpufreq_policy *policy;
-
-    policy = per_cpu(cpufreq_cpu_policy, cpuid);
-    return policy && policy->turbo == CPUFREQ_TURBO_ENABLED;
-}
 
 /*********************************************************************
  *                 POLICY                                            *
@@ -456,9 +420,6 @@ int __cpufreq_set_policy(struct cpufreq_policy *data,
 
     data->min = policy->min;
     data->max = policy->max;
-    data->limits = policy->limits;
-    if (cpufreq_driver->setpolicy)
-        return cpufreq_driver->setpolicy(data);
 
     if (policy->governor != data->governor) {
         /* save old, working values */
@@ -475,8 +436,8 @@ int __cpufreq_set_policy(struct cpufreq_policy *data,
                                  data->governor->name);
 
             /* new governor failed, so re-start old one */
-            data->governor = old_gov;
             if (old_gov) {
+                data->governor = old_gov;
                 __cpufreq_governor(data, CPUFREQ_GOV_START);
                 printk(KERN_WARNING "Still stay at %s governor\n",
                                      data->governor->name);

@@ -1,4 +1,4 @@
-XEN_ROOT=$(CURDIR)/../../..
+XEN_ROOT=../../..
 BLKTAP_ROOT := ..
 include $(XEN_ROOT)/tools/Rules.mk
 
@@ -6,7 +6,7 @@ SUBDIRS-y         :=
 SUBDIRS-y         += lib
 
 IBIN               = vhd-util vhd-update
-INST_DIR           = $(sbindir)
+INST_DIR           = $(SBINDIR)
 
 CFLAGS            += -Werror
 CFLAGS            += -Wno-unused
@@ -22,6 +22,13 @@ CFLAGS            += -static
 endif
 
 LIBS              := -Llib -lvhd
+ifeq ($(CONFIG_Linux),y)
+LIBS              += -luuid
+endif
+
+# Get gcc to generate the dependencies for us.
+CFLAGS            += -Wp,-MD,.$(@F).d
+DEPS               = .*.d
 
 all: subdirs-all build
 
@@ -31,25 +38,19 @@ LIBS_DEPENDS	  := lib/libvhd.so lib/vhd.a
 $(LIBS_DEPENDS):subdirs-all
 
 vhd-util: vhd-util.o $(LIBS_DEPENDS)
-	$(CC) $(LDFLAGS) -o vhd-util vhd-util.o $(LIBS) $(APPEND_LDFLAGS)
+	$(CC) $(CFLAGS) -o vhd-util vhd-util.o $(LDFLAGS) $(LIBS)
 
 vhd-update: vhd-update.o $(LIBS_DEPENDS)
-	$(CC) $(LDFLAGS) -o vhd-update vhd-update.o $(LIBS) $(APPEND_LDFLAGS)
+	$(CC) $(CFLAGS) -o vhd-update vhd-update.o $(LDFLAGS) $(LIBS)
 
 install: all
 	$(MAKE) subdirs-install
 	$(INSTALL_DIR) -p $(DESTDIR)$(INST_DIR)
 	$(INSTALL_PROG) $(IBIN) $(DESTDIR)$(INST_DIR)
 
-uninstall:
-	$(MAKE) subdirs-uninstall
-	rm -f $(addprefix $(DESTDIR)$(INST_DIR)/, $(IBIN))
-
 clean: subdirs-clean
-	rm -rf *.o *~ $(DEPS_RM) $(IBIN)
+	rm -rf *.o *~ $(DEPS) $(IBIN)
 
-distclean: clean
+.PHONY: all build clean install vhd-util vhd-update
 
-.PHONY: all build clean distclean install uninstall vhd-util vhd-update
-
--include $(DEPS_INCLUDE)
+-include $(DEPS)

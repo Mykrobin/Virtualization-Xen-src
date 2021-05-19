@@ -13,7 +13,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 
@@ -50,6 +51,7 @@
  * http://www.amd.com/us-en/assets/content_type/white_papers_and_tech_docs/32559.pdf
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/kernel.h>
@@ -62,7 +64,6 @@
 #include <asm/msr.h>
 
 #include "mce.h"
-#include "vmce.h"
 
 static struct timer mce_timer;
 
@@ -99,14 +100,14 @@ static void mce_amd_checkregs(void *info)
 
 		if (dom0_vmce_enabled()) {
 			mctelem_commit(mctc);
-			send_global_virq(VIRQ_MCA);
+			send_guest_global_virq(dom0, VIRQ_MCA);
 		} else if (++dumpcount >= 10) {
 			x86_mcinfo_dump((struct mc_info *)mctelem_dataptr(mctc));
 			mctelem_dismiss(mctc);
 		} else {
 			mctelem_dismiss(mctc);
 		}
-
+		
 	} else if (mctc != NULL) {
 		mctelem_dismiss(mctc);
 	}
@@ -143,7 +144,7 @@ static void mce_amd_work_fn(void *data)
 		uint64_t value;
 		uint32_t counter;
 
-		value = mca_rdmsr(MSR_IA32_MCx_MISC(4));
+		mca_rdmsrl(MSR_IA32_MC4_MISC, value);
 		/* Only the error counter field is of interest
 		 * Bit field is described in AMD K8 BKDG chapter 6.4.5.5
 		 */
@@ -151,7 +152,7 @@ static void mce_amd_work_fn(void *data)
 
 		/* HW does not count *all* kinds of correctable errors.
 		 * Thus it is possible, that the polling routine finds an
-		 * correctable error even if the HW reports nothing. */
+		 * correctable error even if the HW reports nothing. */ 
 		if (counter > 0) {
 			/* HW reported correctable errors,
 			 * the polling routine did not find...
@@ -164,8 +165,8 @@ static void mce_amd_work_fn(void *data)
 					(counter == 1 ? "" : "s"),
 					(counter == 1 ? "was" : "were"));
 			}
-			/* subtract 1 to not double count the error
-			 * from the polling service routine */
+			/* subtract 1 to not double count the error 
+			 * from the polling service routine */ 
 			adjust += (counter - 1);
 
 			/* Restart counter */
@@ -173,7 +174,8 @@ static void mce_amd_work_fn(void *data)
 			value &= ~(0x60FFF00000000ULL);
 			/* Counter enable */
 			value |= (1ULL << 51);
-			mca_wrmsr(MSR_IA32_MCx_MISC(4), value);
+			mca_wrmsrl(MSR_IA32_MC4_MISC, value);
+			wmb();
 		}
 	}
 
@@ -201,7 +203,7 @@ static void mce_amd_work_fn(void *data)
 	adjust = 0;
 }
 
-void __init amd_nonfatal_mcheck_init(struct cpuinfo_x86 *c)
+void amd_nonfatal_mcheck_init(struct cpuinfo_x86 *c)
 {
 	if (c->x86_vendor != X86_VENDOR_AMD)
 		return;
@@ -210,12 +212,12 @@ void __init amd_nonfatal_mcheck_init(struct cpuinfo_x86 *c)
 
 	/* The threshold bitfields in MSR_IA32_MC4_MISC has
 	 * been introduced along with the SVME feature bit. */
-	if (variable_period && cpu_has(c, X86_FEATURE_SVM)) {
+	if (variable_period && cpu_has(c, X86_FEATURE_SVME)) {
 		uint64_t value;
 
 		/* hw threshold registers present */
 		hw_threshold = 1;
-		rdmsrl(MSR_IA32_MCx_MISC(4), value);
+		rdmsrl(MSR_IA32_MC4_MISC, value);
 
 		if (value & (1ULL << 61)) { /* Locked bit */
 			/* Locked by BIOS. Not available for use */
@@ -236,11 +238,15 @@ void __init amd_nonfatal_mcheck_init(struct cpuinfo_x86 *c)
 			value &= ~(0x60FFF00000000ULL);
 			/* Counter enable */
 			value |= (1ULL << 51);
-			wrmsrl(MSR_IA32_MCx_MISC(4), value);
+			wrmsrl(MSR_IA32_MC4_MISC, value);
+			/* serialize */
+			wmb();
 			printk(XENLOG_INFO "MCA: Use hw thresholding to adjust polling frequency\n");
 		}
 	}
 
 	init_timer(&mce_timer, mce_amd_work_fn, NULL, 0);
 	set_timer(&mce_timer, NOW() + period);
+
+	return;
 }

@@ -18,17 +18,23 @@
  *  Lesser General Public License for more details.
  *
  *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; If not, see <http://www.gnu.org/licenses/>.
+ *  License along with this library; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #ifndef __ASM_X86_HVM_VIOAPIC_H__
 #define __ASM_X86_HVM_VIOAPIC_H__
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/smp.h>
 #include <public/hvm/save.h>
 
+#if !VIOAPIC_IS_IOSAPIC
 #define VIOAPIC_VERSION_ID 0x11 /* IOAPIC version */
+#else
+#define VIOAPIC_VERSION_ID 0x21 /* IOSAPIC version */
+#endif
 
 #define VIOAPIC_EDGE_TRIG  0
 #define VIOAPIC_LEVEL_TRIG 1
@@ -39,36 +45,26 @@
 /* Direct registers. */
 #define VIOAPIC_REG_SELECT  0x00
 #define VIOAPIC_REG_WINDOW  0x10
-#define VIOAPIC_REG_EOI     0x40
+#define VIOAPIC_REG_EOI     0x40 /* IA64 IOSAPIC only */
 
 /* Indirect registers. */
 #define VIOAPIC_REG_APIC_ID 0x00 /* x86 IOAPIC only */
 #define VIOAPIC_REG_VERSION 0x01
 #define VIOAPIC_REG_ARB_ID  0x02 /* x86 IOAPIC only */
-#define VIOAPIC_REG_RTE0    0x10
 
 struct hvm_vioapic {
+    struct hvm_hw_vioapic hvm_hw_vioapic;
     struct domain *domain;
-    uint32_t nr_pins;
-    unsigned int base_gsi;
-    union {
-        XEN_HVM_VIOAPIC(,);
-        struct hvm_hw_vioapic domU;
-    };
 };
 
-#define hvm_vioapic_size(cnt) offsetof(struct hvm_vioapic, redirtbl[cnt])
-#define domain_vioapic(d, i) ((d)->arch.hvm_domain.vioapic[i])
-#define vioapic_domain(v) ((v)->domain)
+#define domain_vioapic(d) (&(d)->arch.hvm_domain.vioapic->hvm_hw_vioapic)
+#define vioapic_domain(v) (container_of((v), struct hvm_vioapic, \
+                                        hvm_hw_vioapic)->domain)
 
 int vioapic_init(struct domain *d);
 void vioapic_deinit(struct domain *d);
 void vioapic_reset(struct domain *d);
 void vioapic_irq_positive_edge(struct domain *d, unsigned int irq);
-void vioapic_update_EOI(struct domain *d, u8 vector);
-
-int vioapic_get_mask(const struct domain *d, unsigned int gsi);
-int vioapic_get_vector(const struct domain *d, unsigned int gsi);
-int vioapic_get_trigger_mode(const struct domain *d, unsigned int gsi);
+void vioapic_update_EOI(struct domain *d, int vector);
 
 #endif /* __ASM_X86_HVM_VIOAPIC_H__ */

@@ -21,10 +21,6 @@
     (is_hvm_vcpu(current) ?                     \
      copy_from_user_hvm((dst), (src), (len)) :  \
      copy_from_user((dst), (src), (len)))
-#define raw_clear_guest(dst,  len)              \
-    (is_hvm_vcpu(current) ?                     \
-     clear_user_hvm((dst), (len)) :             \
-     clear_user((dst), (len)))
 #define __raw_copy_to_guest(dst, src, len)      \
     (is_hvm_vcpu(current) ?                     \
      copy_to_user_hvm((dst), (src), (len)) :    \
@@ -33,10 +29,6 @@
     (is_hvm_vcpu(current) ?                     \
      copy_from_user_hvm((dst), (src), (len)) :  \
      __copy_from_user((dst), (src), (len)))
-#define __raw_clear_guest(dst,  len)            \
-    (is_hvm_vcpu(current) ?                     \
-     clear_user_hvm((dst), (len)) :             \
-     clear_user((dst), (len)))
 
 /* Is the guest handle a NULL reference? */
 #define guest_handle_is_null(hnd)        ((hnd).p == NULL)
@@ -45,40 +37,16 @@
 #define guest_handle_add_offset(hnd, nr) ((hnd).p += (nr))
 #define guest_handle_subtract_offset(hnd, nr) ((hnd).p -= (nr))
 
-/* Cast a guest handle (either XEN_GUEST_HANDLE or XEN_GUEST_HANDLE_PARAM)
- * to the specified type of XEN_GUEST_HANDLE_PARAM. */
+/* Cast a guest handle to the specified type of handle. */
 #define guest_handle_cast(hnd, type) ({         \
     type *_x = (hnd).p;                         \
-    (XEN_GUEST_HANDLE_PARAM(type)) { _x };            \
+    (XEN_GUEST_HANDLE(type)) { _x };            \
 })
-
-/* Cast a XEN_GUEST_HANDLE to XEN_GUEST_HANDLE_PARAM */
-#define guest_handle_to_param(hnd, type) ({                  \
-    /* type checking: make sure that the pointers inside     \
-     * XEN_GUEST_HANDLE and XEN_GUEST_HANDLE_PARAM are of    \
-     * the same type, then return hnd */                     \
-    (void)((typeof(&(hnd).p)) 0 ==                           \
-        (typeof(&((XEN_GUEST_HANDLE_PARAM(type)) {}).p)) 0); \
-    (hnd);                                                   \
-})
-
-/* Cast a XEN_GUEST_HANDLE_PARAM to XEN_GUEST_HANDLE */
-#define guest_handle_from_param(hnd, type) ({                \
-    /* type checking: make sure that the pointers inside     \
-     * XEN_GUEST_HANDLE and XEN_GUEST_HANDLE_PARAM are of    \
-     * the same type, then return hnd */                     \
-    (void)((typeof(&(hnd).p)) 0 ==                           \
-        (typeof(&((XEN_GUEST_HANDLE_PARAM(type)) {}).p)) 0); \
-    (hnd);                                                   \
-})
-
-#define guest_handle_for_field(hnd, type, fld)          \
-    ((XEN_GUEST_HANDLE(type)) { &(hnd).p->fld })
 
 #define guest_handle_from_ptr(ptr, type)        \
-    ((XEN_GUEST_HANDLE_PARAM(type)) { (type *)ptr })
+    ((XEN_GUEST_HANDLE(type)) { (type *)ptr })
 #define const_guest_handle_from_ptr(ptr, type)  \
-    ((XEN_GUEST_HANDLE_PARAM(const_##type)) { (const type *)ptr })
+    ((XEN_GUEST_HANDLE(const_##type)) { (const type *)ptr })
 
 /*
  * Copy an array of objects to guest context via a guest handle,
@@ -99,11 +67,6 @@
     const typeof(*(ptr)) *_s = (hnd).p;                 \
     typeof(*(ptr)) *_d = (ptr);                         \
     raw_copy_from_guest(_d, _s+(off), sizeof(*_d)*(nr));\
-})
-
-#define clear_guest_offset(hnd, off, nr) ({    \
-    void *_d = (hnd).p;                        \
-    raw_clear_guest(_d+(off), nr);             \
 })
 
 /* Copy sub-field of a structure to guest context via a guest handle. */
@@ -145,11 +108,6 @@
     const typeof(*(ptr)) *_s = (hnd).p;                 \
     typeof(*(ptr)) *_d = (ptr);                         \
     __raw_copy_from_guest(_d, _s+(off), sizeof(*_d)*(nr));\
-})
-
-#define __clear_guest_offset(hnd, off, nr) ({    \
-    void *_d = (hnd).p;                          \
-    __raw_clear_guest(_d+(off), nr);             \
 })
 
 #define __copy_field_to_guest(hnd, ptr, field) ({       \

@@ -13,46 +13,41 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #include <xen/time.h>
 #include <asm/hvm/support.h>
 #include <asm/hvm/vpt.h>
 #include <asm/event.h>
-#include <asm/apic.h>
-#include <asm/mc146818rtc.h>
 
 #define mode_is(d, name) \
     ((d)->arch.hvm_domain.params[HVM_PARAM_TIMER_MODE] == HVMPTM_##name)
 
 void hvm_init_guest_time(struct domain *d)
 {
-    struct pl_time *pl = d->arch.hvm_domain.pl_time;
+    struct pl_time *pl = &d->arch.hvm_domain.pl_time;
 
     spin_lock_init(&pl->pl_time_lock);
     pl->stime_offset = -(u64)get_s_time();
     pl->last_guest_time = 0;
 }
 
-uint64_t hvm_get_guest_time_fixed(const struct vcpu *v, uint64_t at_tsc)
+u64 hvm_get_guest_time(struct vcpu *v)
 {
-    struct pl_time *pl = v->domain->arch.hvm_domain.pl_time;
+    struct pl_time *pl = &v->domain->arch.hvm_domain.pl_time;
     u64 now;
 
     /* Called from device models shared with PV guests. Be careful. */
     ASSERT(is_hvm_vcpu(v));
 
     spin_lock(&pl->pl_time_lock);
-    now = get_s_time_fixed(at_tsc) + pl->stime_offset;
-
-    if ( !at_tsc )
-    {
-        if ( (int64_t)(now - pl->last_guest_time) > 0 )
-            pl->last_guest_time = now;
-        else
-            now = ++pl->last_guest_time;
-    }
+    now = get_s_time() + pl->stime_offset;
+    if ( (int64_t)(now - pl->last_guest_time) > 0 )
+        pl->last_guest_time = now;
+    else
+        now = ++pl->last_guest_time;
     spin_unlock(&pl->pl_time_lock);
 
     return now + v->arch.hvm_vcpu.stime_offset;
@@ -60,26 +55,13 @@ uint64_t hvm_get_guest_time_fixed(const struct vcpu *v, uint64_t at_tsc)
 
 void hvm_set_guest_time(struct vcpu *v, u64 guest_time)
 {
-    u64 offset = guest_time - hvm_get_guest_time(v);
-
-    if ( offset )
-    {
-        v->arch.hvm_vcpu.stime_offset += offset;
-        /*
-         * If hvm_vcpu.stime_offset is updated make sure to
-         * also update vcpu time, since this value is used to
-         * calculate the TSC.
-         */
-        if ( v == current )
-            update_vcpu_system_time(v);
-    }
+    v->arch.hvm_vcpu.stime_offset += guest_time - hvm_get_guest_time(v);
 }
 
 static int pt_irq_vector(struct periodic_time *pt, enum hvm_intsrc src)
 {
     struct vcpu *v = pt->vcpu;
     unsigned int gsi, isa_irq;
-    int vector;
 
     if ( pt->source == PTSRC_lapic )
         return pt->irq;
@@ -92,64 +74,28 @@ static int pt_irq_vector(struct periodic_time *pt, enum hvm_intsrc src)
                 + (isa_irq & 7));
 
     ASSERT(src == hvm_intsrc_lapic);
-    vector = vioapic_get_vector(v->domain, gsi);
-    if ( vector < 0 )
-    {
-        dprintk(XENLOG_WARNING, "d%u: invalid GSI (%u) for platform timer\n",
-                v->domain->domain_id, gsi);
-        domain_crash(v->domain);
-        return -1;
-    }
-
-    return vector;
+    return domain_vioapic(v->domain)->redirtbl[gsi].fields.vector;
 }
 
 static int pt_irq_masked(struct periodic_time *pt)
 {
     struct vcpu *v = pt->vcpu;
-    unsigned int gsi = pt->irq;
+    unsigned int gsi, isa_irq;
+    uint8_t pic_imr;
 
-    switch ( pt->source )
-    {
-    case PTSRC_lapic:
+    if ( pt->source == PTSRC_lapic )
     {
         struct vlapic *vlapic = vcpu_vlapic(v);
-
         return (!vlapic_enabled(vlapic) ||
                 (vlapic_get_reg(vlapic, APIC_LVTT) & APIC_LVT_MASKED));
     }
 
-    case PTSRC_isa:
-    {
-        uint8_t pic_imr = v->domain->arch.hvm_domain.vpic[pt->irq >> 3].imr;
+    isa_irq = pt->irq;
+    gsi = hvm_isa_irq_to_gsi(isa_irq);
+    pic_imr = v->domain->arch.hvm_domain.vpic[isa_irq >> 3].imr;
 
-        /* Check if the interrupt is unmasked in the PIC. */
-        if ( !(pic_imr & (1 << (pt->irq & 7))) && vlapic_accept_pic_intr(v) )
-            return 0;
-
-        gsi = hvm_isa_irq_to_gsi(pt->irq);
-    }
-
-    /* Fallthrough to check if the interrupt is masked on the IO APIC. */
-    case PTSRC_ioapic:
-    {
-        int mask = vioapic_get_mask(v->domain, gsi);
-
-        if ( mask < 0 )
-        {
-            dprintk(XENLOG_WARNING,
-                    "d%d: invalid GSI (%u) for platform timer\n",
-                    v->domain->domain_id, gsi);
-            domain_crash(v->domain);
-            return -1;
-        }
-
-        return mask;
-    }
-    }
-
-    ASSERT_UNREACHABLE();
-    return 1;
+    return (((pic_imr & (1 << (isa_irq & 7))) || !vlapic_accept_pic_intr(v)) &&
+            domain_vioapic(v->domain)->redirtbl[gsi].fields.mask);
 }
 
 static void pt_lock(struct periodic_time *pt)
@@ -215,7 +161,7 @@ void pt_save_timer(struct vcpu *v)
     struct list_head *head = &v->arch.hvm_vcpu.tm_list;
     struct periodic_time *pt;
 
-    if ( v->pause_flags & VPF_blocked )
+    if ( test_bit(_VPF_blocked, &v->pause_flags) )
         return;
 
     spin_lock(&v->arch.hvm_vcpu.tm_lock);
@@ -265,23 +211,20 @@ static void pt_timer_fn(void *data)
     pt_unlock(pt);
 }
 
-int pt_update_irq(struct vcpu *v)
+void pt_update_irq(struct vcpu *v)
 {
     struct list_head *head = &v->arch.hvm_vcpu.tm_list;
-    struct periodic_time *pt, *temp, *earliest_pt;
-    uint64_t max_lag;
-    int irq, pt_vector = -1;
+    struct periodic_time *pt, *temp, *earliest_pt = NULL;
+    uint64_t max_lag = -1ULL;
+    int irq, is_lapic;
 
     spin_lock(&v->arch.hvm_vcpu.tm_lock);
 
-    earliest_pt = NULL;
-    max_lag = -1ULL;
     list_for_each_entry_safe ( pt, temp, head, list )
     {
         if ( pt->pending_intr_nr )
         {
-            /* RTC code takes care of disabling the timer itself. */
-            if ( (pt->irq != RTC_IRQ || !pt->priv) && pt_irq_masked(pt) )
+            if ( pt_irq_masked(pt) )
             {
                 /* suspend timer emulation */
                 list_del(&pt->list);
@@ -301,55 +244,24 @@ int pt_update_irq(struct vcpu *v)
     if ( earliest_pt == NULL )
     {
         spin_unlock(&v->arch.hvm_vcpu.tm_lock);
-        return -1;
+        return;
     }
 
     earliest_pt->irq_issued = 1;
     irq = earliest_pt->irq;
+    is_lapic = (earliest_pt->source == PTSRC_lapic);
 
     spin_unlock(&v->arch.hvm_vcpu.tm_lock);
 
-    switch ( earliest_pt->source )
+    if ( is_lapic )
     {
-    case PTSRC_lapic:
-        /*
-         * If periodic timer interrupt is handled by lapic, its vector in
-         * IRR is returned and used to set eoi_exit_bitmap for virtual
-         * interrupt delivery case. Otherwise return -1 to do nothing.
-         */
         vlapic_set_irq(vcpu_vlapic(v), irq, 0);
-        pt_vector = irq;
-        break;
-
-    case PTSRC_isa:
-        hvm_isa_irq_deassert(v->domain, irq);
-        if ( platform_legacy_irq(irq) && vlapic_accept_pic_intr(v) &&
-             v->domain->arch.hvm_domain.vpic[irq >> 3].int_output )
-            hvm_isa_irq_assert(v->domain, irq, NULL);
-        else
-        {
-            pt_vector = hvm_isa_irq_assert(v->domain, irq, vioapic_get_vector);
-            /*
-             * hvm_isa_irq_assert may not set the corresponding bit in vIRR
-             * when mask field of IOAPIC RTE is set. Check it again.
-             */
-            if ( pt_vector < 0 || !vlapic_test_irq(vcpu_vlapic(v), pt_vector) )
-                pt_vector = -1;
-        }
-        break;
-
-    case PTSRC_ioapic:
-        /*
-         * NB: At the moment IO-APIC routed interrupts generated by vpt devices
-         * (HPET) are edge-triggered.
-         */
-        pt_vector = hvm_ioapic_assert(v->domain, irq, false);
-        if ( pt_vector < 0 || !vlapic_test_irq(vcpu_vlapic(v), pt_vector) )
-            pt_vector = -1;
-        break;
     }
-
-    return pt_vector;
+    else
+    {
+        hvm_isa_irq_deassert(v->domain, irq);
+        hvm_isa_irq_assert(v->domain, irq);
+    }
 }
 
 static struct periodic_time *is_pt_irq(
@@ -444,14 +356,7 @@ void create_periodic_time(
     struct vcpu *v, struct periodic_time *pt, uint64_t delta,
     uint64_t period, uint8_t irq, time_cb *cb, void *data)
 {
-    if ( !pt->source ||
-         (pt->irq >= NR_ISAIRQS && pt->source == PTSRC_isa) ||
-         (pt->irq >= hvm_domain_irq(v->domain)->nr_gsis &&
-          pt->source == PTSRC_ioapic) )
-    {
-        ASSERT_UNREACHABLE();
-        return;
-    }
+    ASSERT(pt->source != 0);
 
     destroy_periodic_time(pt);
 
@@ -531,7 +436,7 @@ static void pt_adjust_vcpu(struct periodic_time *pt, struct vcpu *v)
 {
     int on_list;
 
-    ASSERT(pt->source == PTSRC_isa || pt->source == PTSRC_ioapic);
+    ASSERT(pt->source == PTSRC_isa);
 
     if ( pt->vcpu == NULL )
         return;
@@ -557,29 +462,26 @@ static void pt_adjust_vcpu(struct periodic_time *pt, struct vcpu *v)
 
 void pt_adjust_global_vcpu_target(struct vcpu *v)
 {
-    struct PITState *vpit;
     struct pl_time *pl_time;
     int i;
 
-    if ( !v || !has_vpit(v->domain) )
+    if ( v == NULL )
         return;
 
-    vpit = &v->domain->arch.vpit;
+    pl_time = &v->domain->arch.hvm_domain.pl_time;
 
-    spin_lock(&vpit->lock);
-    pt_adjust_vcpu(&vpit->pt0, v);
-    spin_unlock(&vpit->lock);
-
-    pl_time = v->domain->arch.hvm_domain.pl_time;
+    spin_lock(&pl_time->vpit.lock);
+    pt_adjust_vcpu(&pl_time->vpit.pt0, v);
+    spin_unlock(&pl_time->vpit.lock);
 
     spin_lock(&pl_time->vrtc.lock);
     pt_adjust_vcpu(&pl_time->vrtc.pt, v);
     spin_unlock(&pl_time->vrtc.lock);
 
-    write_lock(&pl_time->vhpet.lock);
+    spin_lock(&pl_time->vhpet.lock);
     for ( i = 0; i < HPET_TIMER_NUM; i++ )
         pt_adjust_vcpu(&pl_time->vhpet.pt[i], v);
-    write_unlock(&pl_time->vhpet.lock);
+    spin_unlock(&pl_time->vhpet.lock);
 }
 
 
@@ -604,10 +506,10 @@ void pt_may_unmask_irq(struct domain *d, struct periodic_time *vlapic_pt)
 
     if ( d )
     {
-        pt_resume(&d->arch.vpit.pt0);
-        pt_resume(&d->arch.hvm_domain.pl_time->vrtc.pt);
+        pt_resume(&d->arch.hvm_domain.pl_time.vpit.pt0);
+        pt_resume(&d->arch.hvm_domain.pl_time.vrtc.pt);
         for ( i = 0; i < HPET_TIMER_NUM; i++ )
-            pt_resume(&d->arch.hvm_domain.pl_time->vhpet.pt[i]);
+            pt_resume(&d->arch.hvm_domain.pl_time.vhpet.pt[i]);
     }
 
     if ( vlapic_pt )

@@ -16,7 +16,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 
@@ -24,51 +25,38 @@
 #define __XEN_PAGING2_H__
 
 
-#include <xenevtchn.h>
-#define XC_WANT_COMPAT_MAP_FOREIGN_API
-#include <xenctrl.h>
+#include "spinlock.h"
+#include "xc.h"
 #include <xc_private.h>
+
 #include <xen/event_channel.h>
-#include <xen/vm_event.h>
+#include <xen/mem_event.h>
 
-#define XENPAGING_PAGEIN_QUEUE_SIZE 64
+#include "mem_event.h"
 
-struct vm_event {
-    domid_t domain_id;
-    xenevtchn_handle *xce_handle;
-    int port;
-    vm_event_back_ring_t back_ring;
-    uint32_t evtchn_port;
-    void *ring_page;
-};
 
-struct xenpaging {
-    xc_interface *xc_handle;
-    struct xs_handle *xs_handle;
+typedef struct xenpaging {
+    int xc_handle;
 
+    xc_platform_info_t *platform_info;
+    xc_domaininfo_t    *domain_info;
+
+    unsigned long  bitmap_size;
     unsigned long *bitmap;
 
-    unsigned long *slot_to_gfn;
-    int *gfn_to_slot;
+    mem_event_t mem_event;
+} xenpaging_t;
 
-    void *paging_buffer;
 
-    struct vm_event vm_event;
-    int fd;
-    /* number of pages for which data structures were allocated */
-    int max_pages;
-    int num_paged_out;
-    int target_tot_pages;
-    int policy_mru_size;
-    int use_poll_timeout;
-    int debug;
-    int stack_count;
-    int *free_slot_stack;
-    unsigned long pagein_queue[XENPAGING_PAGEIN_QUEUE_SIZE];
-};
+typedef struct xenpaging_victim {
+    /* the domain to evict a page from */
+    domid_t domain_id;
+    /* the gfn of the page to evict */
+    unsigned long gfn;
+    /* the mfn of evicted page */
+    unsigned long mfn;
+} xenpaging_victim_t;
 
-extern void create_page_in_thread(struct xenpaging *paging);
-extern void page_in_trigger(void);
 
 #endif // __XEN_PAGING_H__
 
@@ -76,7 +64,7 @@ extern void page_in_trigger(void);
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

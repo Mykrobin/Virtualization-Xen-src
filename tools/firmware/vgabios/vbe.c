@@ -13,7 +13,8 @@
 //  Lesser General Public License for more details.
 //
 //  You should have received a copy of the GNU Lesser General Public
-//  License along with this library; If not, see <http://www.gnu.org/licenses/>.
+//  License along with this library; if not, write to the Free Software
+//  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
 // 
 // ============================================================================================
 //  
@@ -741,29 +742,6 @@ no_vbe_flag:
   jmp  _display_string
 ASM_END  
 
-ASM_START
-_size64:
-  push bp
-  mov  bp, sp
-  push dx
-
-; multiply bbp by yres first as results fit in 16bits
-; then multiply by xres
-  mov  ax, 8[bp]
-  mul  word 6[bp]
-  mul  word 4[bp]
-; divide by 2^19 ceiling result
-  add  ax, #0xffff
-  adc  dx, #7
-  mov  ax, dx
-  shr  ax, #3
-
-  pop  dx
-  pop  bp
-  ret
-ASM_END
-
-
 /** Function 00h - Return VBE Controller Information
  * 
  * Input:
@@ -866,12 +844,9 @@ Bit16u *AX;Bit16u ES;Bit16u DI;
                 
         do
         {
-                Bit16u size_64k = size64(cur_info->info.XResolution, cur_info->info.YResolution, cur_info->info.BitsPerPixel);
-                Bit16u max_bpp = dispi_get_max_bpp();
-
                 if ((cur_info->info.XResolution <= dispi_get_max_xres()) &&
-                    (cur_info->info.BitsPerPixel <= max_bpp) &&
-                    (size_64k <= vbe_info_block.TotalMemory)) {
+                    (cur_info->info.BitsPerPixel <= dispi_get_max_bpp()) &&
+                    (cur_info->info.XResolution * cur_info->info.XResolution * cur_info->info.BitsPerPixel <= vbe_info_block.TotalMemory << 19 )) {
 #ifdef DEBUG
                   printf("VBE found mode %x => %x\n", cur_info->mode,cur_mode);
 #endif
@@ -908,12 +883,11 @@ Bit16u *AX;Bit16u ES;Bit16u DI;
 void vbe_biosfn_return_mode_information(AX, CX, ES, DI)
 Bit16u *AX;Bit16u CX; Bit16u ES;Bit16u DI;
 {
-        // error by default is 0x014f which means supported but error
-        Bit16u                 result=0x014f;
+        Bit16u            result=0x0100;
         Bit16u            ss=get_SS();
+        ModeInfoBlock     info;
         ModeInfoListItem  *cur_info;
         Boolean           using_lfb;
-        ModeInfoBlockCompact   info;
 
 #ifdef DEBUG
         printf("VBE vbe_biosfn_return_mode_information ES%x DI%x CX%x\n",ES,DI,CX);
@@ -927,25 +901,14 @@ Bit16u *AX;Bit16u CX; Bit16u ES;Bit16u DI;
 
         if (cur_info != 0)
         {
-                Bit16u max_bpp = dispi_get_max_bpp();
-                Bit16u size_64k;
-                Bit16u totalMemory;
-
-                outw(VBE_DISPI_IOPORT_INDEX, VBE_DISPI_INDEX_VIDEO_MEMORY_64K);
-                totalMemory = inw(VBE_DISPI_IOPORT_DATA);
 #ifdef DEBUG
                 printf("VBE found mode %x\n",CX);
 #endif        
+                memsetb(ss, &info, 0, sizeof(ModeInfoBlock));
                 memcpyb(ss, &info, 0xc000, &(cur_info->info), sizeof(ModeInfoBlockCompact));
-                size_64k = size64(info.XResolution, info.YResolution, info.BitsPerPixel);
-                if ((info.XResolution > dispi_get_max_xres()) ||
-                    (info.BitsPerPixel > max_bpp) ||
-                    (size_64k > totalMemory))
-                  info.ModeAttributes &= ~VBE_MODE_ATTRIBUTE_SUPPORTED;
-
-                /* Windows 8 require this to be 1! */
-                info.NumberOfBanks = 1;
-
+                if (using_lfb) {
+                  info.NumberOfBanks = 1;
+                }
                 if (info.WinAAttributes & VBE_WINDOW_ATTRIBUTE_RELOCATABLE) {
                   info.WinFuncPtr = 0xC0000000UL;
                   *(Bit16u *)&(info.WinFuncPtr) = (Bit16u)(dispi_set_bank_farcall);
@@ -958,16 +921,19 @@ Bit16u *AX;Bit16u CX; Bit16u ES;Bit16u DI;
                 info.PhysBasePtr |= inw(VBE_DISPI_IOPORT_DATA);
 #endif 							
                 result = 0x4f;
-
-                // copy updates in mode_info_block back
-                memsetb(ES, DI, 0, sizeof(ModeInfoBlock));
-                memcpyb(ES, DI, ss, &info, sizeof(info));
         }
         else
         {
 #ifdef DEBUG
                 printf("VBE *NOT* found mode %x\n",CX);
 #endif
+                result = 0x100;
+        }
+        
+        if (result == 0x4f)
+        {
+                // copy updates in mode_info_block back
+                memcpyb(ES, DI, ss, &info, sizeof(info));
         }
 
         write_word(ss, AX, result);

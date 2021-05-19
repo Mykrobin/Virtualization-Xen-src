@@ -16,63 +16,55 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 
 #include <asm/p2m.h>
-#include <xen/guest_access.h>
-#include <xen/vm_event.h>
-#include <xsm/xsm.h>
+#include <asm/mem_event.h>
 
-int mem_paging_memop(XEN_GUEST_HANDLE_PARAM(xen_mem_paging_op_t) arg)
+
+int mem_paging_domctl(struct domain *d, xen_domctl_mem_event_op_t *mec,
+                      XEN_GUEST_HANDLE(void) u_domctl)
 {
     int rc;
-    xen_mem_paging_op_t mpo;
-    struct domain *d;
-    bool_t copyback = 0;
 
-    if ( copy_from_guest(&mpo, arg, 1) )
-        return -EFAULT;
-
-    rc = rcu_lock_live_remote_domain_by_id(mpo.domain, &d);
-    if ( rc )
-        return rc;
-
-    rc = xsm_mem_paging(XSM_DM_PRIV, d);
-    if ( rc )
-        goto out;
-
-    rc = -ENODEV;
-    if ( unlikely(!vm_event_check_ring(d->vm_event_paging)) )
-        goto out;
-
-    switch( mpo.op )
+    switch( mec->op )
     {
-    case XENMEM_paging_op_nominate:
-        rc = p2m_mem_paging_nominate(d, mpo.gfn);
-        break;
+    case XEN_DOMCTL_MEM_EVENT_OP_PAGING_NOMINATE:
+    {
+        unsigned long gfn = mec->gfn;
+        rc = p2m_mem_paging_nominate(d, gfn);
+    }
+    break;
 
-    case XENMEM_paging_op_evict:
-        rc = p2m_mem_paging_evict(d, mpo.gfn);
-        break;
+    case XEN_DOMCTL_MEM_EVENT_OP_PAGING_EVICT:
+    {
+        unsigned long gfn = mec->gfn;
+        rc = p2m_mem_paging_evict(d, gfn);
+    }
+    break;
 
-    case XENMEM_paging_op_prep:
-        rc = p2m_mem_paging_prep(d, mpo.gfn, mpo.buffer);
-        if ( !rc )
-            copyback = 1;
-        break;
+    case XEN_DOMCTL_MEM_EVENT_OP_PAGING_PREP:
+    {
+        unsigned long gfn = mec->gfn;
+        rc = p2m_mem_paging_prep(d, gfn);
+    }
+    break;
+
+    case XEN_DOMCTL_MEM_EVENT_OP_PAGING_RESUME:
+    {
+        p2m_mem_paging_resume(d);
+        rc = 0;
+    }
+    break;
 
     default:
         rc = -ENOSYS;
         break;
     }
 
-    if ( copyback && __copy_to_guest(arg, &mpo, 1) )
-        rc = -EFAULT;
-
-out:
-    rcu_unlock_domain(d);
     return rc;
 }
 
@@ -80,7 +72,7 @@ out:
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * indent-tabs-mode: nil
  * End:

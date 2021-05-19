@@ -23,14 +23,6 @@
 #define LINUX_PCI_REGS_H
 
 /*
- * Conventional PCI and PCI-X Mode 1 devices have 256 bytes of
- * configuration space.  PCI-X Mode 2 and PCIe devices have 4096 bytes of
- * configuration space.
- */
-#define PCI_CFG_SPACE_SIZE	256
-#define PCI_CFG_SPACE_EXP_SIZE	4096
-
-/*
  * Under PCI, each device has 256 bytes of configuration address space,
  * of which the first 64 bytes are standardized as follows:
  */
@@ -133,7 +125,7 @@
 #define  PCI_IO_RANGE_TYPE_16	0x00
 #define  PCI_IO_RANGE_TYPE_32	0x01
 #define  PCI_IO_RANGE_MASK	(~0x0fUL)
-#define PCI_SEC_STATUS		0x1e	/* Secondary status register */
+#define PCI_SEC_STATUS		0x1e	/* Secondary status register, only bit 14 used */
 #define PCI_MEMORY_BASE		0x20	/* Memory range behind */
 #define PCI_MEMORY_LIMIT	0x22
 #define  PCI_MEMORY_RANGE_TYPE_MASK 0x0fUL
@@ -160,7 +152,6 @@
 #define  PCI_BRIDGE_CTL_MASTER_ABORT	0x20  /* Report master aborts */
 #define  PCI_BRIDGE_CTL_BUS_RESET	0x40	/* Secondary bus reset */
 #define  PCI_BRIDGE_CTL_FAST_BACK	0x80	/* Fast Back2Back enabled on secondary interface */
-#define  PCI_BRIDGE_CTL_DTMR_SERR	0x800	/* SERR upon discard timer expiry */
 
 /* Header type 2 (CardBus bridges) */
 #define PCI_CB_CAPABILITY_LIST	0x14
@@ -310,9 +301,7 @@
 #define  PCI_MSIX_FLAGS_QSIZE	0x7FF
 #define  PCI_MSIX_FLAGS_ENABLE	(1 << 15)
 #define  PCI_MSIX_FLAGS_MASKALL	(1 << 14)
-#define PCI_MSIX_TABLE		4
-#define PCI_MSIX_PBA		8
-#define  PCI_MSIX_BIRMASK	(7 << 0)
+#define PCI_MSIX_FLAGS_BIRMASK	(7 << 0)
 
 #define PCI_MSIX_ENTRY_SIZE			16
 #define  PCI_MSIX_ENTRY_LOWER_ADDR_OFFSET	0
@@ -320,7 +309,7 @@
 #define  PCI_MSIX_ENTRY_DATA_OFFSET		8
 #define  PCI_MSIX_ENTRY_VECTOR_CTRL_OFFSET	12
 
-#define PCI_MSIX_VECTOR_BITMASK	(1 << 0)
+#define PCI_MSIX_FLAGS_BITMASK	(1 << 0)
 
 /* CompactPCI Hotswap Register */
 
@@ -380,9 +369,6 @@
 #define  PCI_EXP_TYPE_UPSTREAM	0x5	/* Upstream Port */
 #define  PCI_EXP_TYPE_DOWNSTREAM 0x6	/* Downstream Port */
 #define  PCI_EXP_TYPE_PCI_BRIDGE 0x7	/* PCI/PCI-X Bridge */
-#define  PCI_EXP_TYPE_PCIE_BRIDGE 0x8	/* PCI/PCI-X to PCIE Bridge */
-#define  PCI_EXP_TYPE_RC_END	0x9	/* Root Complex Integrated Endpoint */
-#define  PCI_EXP_TYPE_RC_EC	0xa	/* Root Complex Event Collector */
 #define PCI_EXP_FLAGS_SLOT	0x0100	/* Slot implemented */
 #define PCI_EXP_FLAGS_IRQ	0x3e00	/* Interrupt message number */
 #define PCI_EXP_DEVCAP		4	/* Device capabilities */
@@ -440,11 +426,10 @@
 #define PCI_EXT_CAP_ID_VC	2
 #define PCI_EXT_CAP_ID_DSN	3
 #define PCI_EXT_CAP_ID_PWR	4
-#define PCI_EXT_CAP_ID_VNDR	11
 #define PCI_EXT_CAP_ID_ACS	13
 #define PCI_EXT_CAP_ID_ARI	14
 #define PCI_EXT_CAP_ID_ATS	15
-#define PCI_EXT_CAP_ID_SRIOV	16
+#define PCI_EXT_CAP_ID_IOV	16
 
 /* Advanced Error Reporting */
 #define PCI_ERR_UNCOR_STATUS	4	/* Uncorrectable Error Status */
@@ -469,7 +454,6 @@
 #define  PCI_ERR_COR_BAD_DLLP	0x00000080	/* Bad DLLP Status */
 #define  PCI_ERR_COR_REP_ROLL	0x00000100	/* REPLAY_NUM Rollover */
 #define  PCI_ERR_COR_REP_TIMER	0x00001000	/* Replay Timer Timeout */
-#define  PCI_ERR_COR_ADV_NFAT	0x00002000	/* Advisory Non-Fatal */
 #define PCI_ERR_COR_MASK	20	/* Correctable Error Mask */
 	/* Same bits as above */
 #define PCI_ERR_CAP		24	/* Advanced Error Capabilities */
@@ -521,12 +505,6 @@
 #define PCI_PWR_CAP		12	/* Capability */
 #define  PCI_PWR_CAP_BUDGET(x)	((x) & 1)	/* Included in system budget */
 
-/* Vendor-Specific (VSEC, PCI_EXT_CAP_ID_VNDR) */
-#define PCI_VNDR_HEADER		4	/* Vendor-Specific Header */
-#define  PCI_VNDR_HEADER_ID(x)	((x) & 0xffff)
-#define  PCI_VNDR_HEADER_REV(x)	(((x) >> 16) & 0xf)
-#define  PCI_VNDR_HEADER_LEN(x)	(((x) >> 20) & 0xfff)
-
 /*
  * Hypertransport sub capability types
  *
@@ -570,36 +548,5 @@
 #define  PCI_ACS_DT		0x40	/* Direct Translated P2P */
 #define PCI_ACS_CTRL		0x06	/* ACS Control Register */
 #define PCI_ACS_EGRESS_CTL_V	0x08	/* ACS Egress Control Vector */
-
-/* Single Root I/O Virtualization */
-#define PCI_SRIOV_CAP		0x04	/* SR-IOV Capabilities */
-#define  PCI_SRIOV_CAP_VFM	0x01	/* VF Migration Capable */
-#define  PCI_SRIOV_CAP_INTR(x)	((x) >> 21) /* Interrupt Message Number */
-#define PCI_SRIOV_CTRL		0x08	/* SR-IOV Control */
-#define  PCI_SRIOV_CTRL_VFE	0x01	/* VF Enable */
-#define  PCI_SRIOV_CTRL_VFM	0x02	/* VF Migration Enable */
-#define  PCI_SRIOV_CTRL_INTR	0x04	/* VF Migration Interrupt Enable */
-#define  PCI_SRIOV_CTRL_MSE	0x08	/* VF Memory Space Enable */
-#define  PCI_SRIOV_CTRL_ARI	0x10	/* ARI Capable Hierarchy */
-#define PCI_SRIOV_STATUS	0x0a	/* SR-IOV Status */
-#define  PCI_SRIOV_STATUS_VFM	0x01	/* VF Migration Status */
-#define PCI_SRIOV_INITIAL_VF	0x0c	/* Initial VFs */
-#define PCI_SRIOV_TOTAL_VF	0x0e	/* Total VFs */
-#define PCI_SRIOV_NUM_VF	0x10	/* Number of VFs */
-#define PCI_SRIOV_FUNC_LINK	0x12	/* Function Dependency Link */
-#define PCI_SRIOV_VF_OFFSET	0x14	/* First VF Offset */
-#define PCI_SRIOV_VF_STRIDE	0x16	/* Following VF Stride */
-#define PCI_SRIOV_VF_DID	0x1a	/* VF Device ID */
-#define PCI_SRIOV_SUP_PGSIZE	0x1c	/* Supported Page Sizes */
-#define PCI_SRIOV_SYS_PGSIZE	0x20	/* System Page Size */
-#define PCI_SRIOV_BAR		0x24	/* VF BAR0 */
-#define  PCI_SRIOV_NUM_BARS	6	/* Number of VF BARs */
-#define PCI_SRIOV_VFM		0x3c	/* VF Migration State Array Offset*/
-#define  PCI_SRIOV_VFM_BIR(x)	((x) & 7)	/* State BIR */
-#define  PCI_SRIOV_VFM_OFFSET(x) ((x) & ~7)	/* State Offset */
-#define  PCI_SRIOV_VFM_UA	0x0	/* Inactive.Unavailable */
-#define  PCI_SRIOV_VFM_MI	0x1	/* Dormant.MigrateIn */
-#define  PCI_SRIOV_VFM_MO	0x2	/* Active.MigrateOut */
-#define  PCI_SRIOV_VFM_AV	0x3	/* Active.Available */
 
 #endif /* LINUX_PCI_REGS_H */

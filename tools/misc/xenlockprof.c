@@ -18,14 +18,30 @@
 #include <string.h>
 #include <inttypes.h>
 
+static int lock_pages(void *addr, size_t len)
+{
+    int e = 0;
+#ifndef __sun__
+    e = mlock(addr, len);
+#endif
+    return (e);
+}
+
+static void unlock_pages(void *addr, size_t len)
+{
+#ifndef __sun__
+    munlock(addr, len);
+#endif
+}
+
 int main(int argc, char *argv[])
 {
-    xc_interface      *xc_handle;
+    int                xc_handle;
     uint32_t           i, j, n;
     uint64_t           time;
     double             l, b, sl, sb;
-    char               name[100];
-    DECLARE_HYPERCALL_BUFFER(xc_lockprof_data_t, data);
+    char               name[60];
+    xc_lockprof_data_t *data;
 
     if ( (argc > 2) || ((argc == 2) && (strcmp(argv[1], "-r") != 0)) )
     {
@@ -35,7 +51,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    if ( (xc_handle = xc_interface_open(0,0,0)) == 0 )
+    if ( (xc_handle = xc_interface_open()) == -1 )
     {
         fprintf(stderr, "Error opening xc interface: %d (%s)\n",
                 errno, strerror(errno));
@@ -44,7 +60,8 @@ int main(int argc, char *argv[])
 
     if ( argc > 1 )
     {
-        if ( xc_lockprof_reset(xc_handle) != 0 )
+        if ( xc_lockprof_control(xc_handle, XEN_SYSCTL_LOCKPROF_reset, NULL,
+                                 NULL, NULL) != 0 )
         {
             fprintf(stderr, "Error reseting profile data: %d (%s)\n",
                     errno, strerror(errno));
@@ -54,7 +71,8 @@ int main(int argc, char *argv[])
     }
 
     n = 0;
-    if ( xc_lockprof_query_number(xc_handle, &n) != 0 )
+    if ( xc_lockprof_control(xc_handle, XEN_SYSCTL_LOCKPROF_query, &n,
+                             NULL, NULL) != 0 )
     {
         fprintf(stderr, "Error getting number of profile records: %d (%s)\n",
                 errno, strerror(errno));
@@ -62,21 +80,24 @@ int main(int argc, char *argv[])
     }
 
     n += 32;    /* just to be sure */
-    data = xc_hypercall_buffer_alloc(xc_handle, data, sizeof(*data) * n);
-    if ( data == NULL )
+    data = malloc(sizeof(*data) * n);
+    if ( (data == NULL) || (lock_pages(data, sizeof(*data) * n) != 0) )
     {
-        fprintf(stderr, "Could not allocate buffers: %d (%s)\n",
+        fprintf(stderr, "Could not alloc or lock buffers: %d (%s)\n",
                 errno, strerror(errno));
         return 1;
     }
 
     i = n;
-    if ( xc_lockprof_query(xc_handle, &i, &time, HYPERCALL_BUFFER(data)) != 0 )
+    if ( xc_lockprof_control(xc_handle, XEN_SYSCTL_LOCKPROF_query, &i,
+                             &time, data) != 0 )
     {
         fprintf(stderr, "Error getting profile records: %d (%s)\n",
                 errno, strerror(errno));
         return 1;
     }
+
+    unlock_pages(data, sizeof(*data) * n);
 
     if ( i > n )
     {
@@ -113,8 +134,6 @@ int main(int argc, char *argv[])
     printf("total profiling time: %20.9fs\n", l);
     printf("total locked time:    %20.9fs\n", sl);
     printf("total blocked time:   %20.9fs\n", sb);
-
-    xc_hypercall_buffer_free(xc_handle, data);
 
     return 0;
 }

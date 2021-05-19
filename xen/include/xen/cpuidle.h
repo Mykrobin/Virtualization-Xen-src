@@ -19,17 +19,15 @@
  *  General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License along
- *  with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  with this program; if not, write to the Free Software Foundation, Inc.,
+ *  59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
  *
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 #ifndef _XEN_CPUIDLE_H
 #define _XEN_CPUIDLE_H
 
-#include <xen/cpumask.h>
-#include <xen/spinlock.h>
-
-#define ACPI_PROCESSOR_MAX_POWER        12
+#define ACPI_PROCESSOR_MAX_POWER        8
 #define CPUIDLE_NAME_LEN                16
 
 #define ACPI_CSTATE_EM_NONE     0
@@ -40,13 +38,16 @@
 struct acpi_processor_cx
 {
     u8 idx;
-    u8 type;         /* ACPI_STATE_Cn */
-    u8 entry_method; /* ACPI_CSTATE_EM_xxx */
+    u8 valid;
+    u8 type;
     u32 address;
+    u8 entry_method; /* ACPI_CSTATE_EM_xxx */
     u32 latency;
-    u32 target_residency;
+    u32 latency_ticks;
+    u32 power;
     u32 usage;
     u64 time;
+    u32 target_residency;
 };
 
 struct acpi_processor_flags
@@ -64,11 +65,9 @@ struct acpi_processor_power
     struct acpi_processor_flags flags;
     struct acpi_processor_cx *last_state;
     struct acpi_processor_cx *safe_state;
-    void *gdata; /* governor specific data */
-    u64 last_state_update_tick;
     u32 last_residency;
+    void *gdata; /* governor specific data */
     u32 count;
-    spinlock_t stat_lock;
     struct acpi_processor_cx states[ACPI_PROCESSOR_MAX_POWER];
 };
 
@@ -87,13 +86,9 @@ struct cpuidle_governor
 extern s8 xen_cpuidle;
 extern struct cpuidle_governor *cpuidle_current_governor;
 
-bool cpuidle_using_deep_cstate(void);
+bool_t cpuidle_using_deep_cstate(void);
 void cpuidle_disable_deep_cstate(void);
 
-extern void cpuidle_wakeup_mwait(cpumask_t *mask);
-
 #define CPUIDLE_DRIVER_STATE_START  1
-
-extern void menu_get_trace_data(u32 *expected, u32 *pred);
 
 #endif /* _XEN_CPUIDLE_H */

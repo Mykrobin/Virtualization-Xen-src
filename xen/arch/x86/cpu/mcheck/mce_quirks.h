@@ -12,7 +12,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #ifndef _MCE_QUIRK_H
@@ -32,7 +33,8 @@ struct mce_quirkdata {
  */
 
 enum mcequirk_amd_flags {
-	MCEQUIRK_K8_GART = 2,
+	MCEQUIRK_K7_BANK0 = 1,
+	MCEQUIRK_K8_GART,
 	MCEQUIRK_F10_GART
 };
 

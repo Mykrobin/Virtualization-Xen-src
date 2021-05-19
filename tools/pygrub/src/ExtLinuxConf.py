@@ -7,7 +7,8 @@
 # general public license.
 #
 # You should have received a copy of the GNU General Public License
-# along with this program; If not, see <http://www.gnu.org/licenses/>.
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #
 
 import sys, re, os
@@ -59,13 +60,6 @@ class ExtLinuxImage(object):
 
                 # Bypass regular self.commands handling
                 com = None
-            elif "initrd=" in arg:
-                # find initrd image in append line
-                args = arg.strip().split(" ")
-                for a in args:
-                    if a.lower().startswith("initrd="):
-                        setattr(self, "initrd", a.replace("initrd=", ""))
-                        arg = arg.replace(a, "")
 
         if com is not None and self.commands.has_key(com):
             if self.commands[com] is not None:
@@ -92,12 +86,10 @@ class ExtLinuxImage(object):
         self._args = args
     def get_kernel(self):
         return self._kernel
-    def set_args(self, val):
-        self._args = val
     def get_args(self):
         return self._args
     kernel = property(get_kernel, set_kernel)
-    args = property(get_args, set_args)
+    args = property(get_args)
 
     def set_initrd(self, val):
         self._initrd = (None,val)
@@ -206,7 +198,7 @@ class ExtLinuxConfigFile(object):
                  }
         
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
+    if sys.argv < 2:
         raise RuntimeError, "Need a configuration file to read"
     g = ExtLinuxConfigFile(sys.argv[1])
     for i in g.images:

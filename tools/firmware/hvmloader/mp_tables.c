@@ -24,7 +24,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
 #include <stdint.h>
@@ -210,8 +211,7 @@ static void fill_mp_proc_entry(struct mp_proc_entry *mppe, int vcpu_id)
 
 
 /* fills in an MP bus entry of type 'type' and bus ID 'bus_id' */
-static void fill_mp_bus_entry(
-    struct mp_bus_entry *mpbe, int bus_id, const char *type)
+static void fill_mp_bus_entry(struct mp_bus_entry *mpbe, int bus_id, const char *type)
 {
     int i;
 
@@ -227,9 +227,9 @@ static void fill_mp_ioapic_entry(struct mp_ioapic_entry *mpie)
 {
     mpie->type = ENTRY_TYPE_IOAPIC;
     mpie->ioapic_id = IOAPIC_ID;
-    mpie->ioapic_version = ioapic_version;
+    mpie->ioapic_version = IOAPIC_VERSION;
     mpie->ioapic_flags = 1; /* enabled */
-    mpie->ioapic_addr = ioapic_base_address;
+    mpie->ioapic_addr = IOAPIC_BASE_ADDRESS;
 }
 
 
@@ -259,38 +259,63 @@ static void fill_mpfps(struct mp_floating_pointer_struct *mpfps, uint32_t mpct)
     mpfps->checksum = -checksum;
 }
 
-/* create_mp_tables - creates MP tables for the guest based upon config data */
-unsigned long create_mp_tables(void *_mpfps)
+
+/*
+ * find_mp_table_start - searchs through BIOS memory for '___HVMMP' signature
+ *
+ * The '___HVMMP' signature is created by the ROMBIOS and designates a chunk
+ * of space inside the ROMBIOS that is safe for us to write our MP table info
+ */
+static void *get_mp_table_start(void)
 {
+    char *bios_mem;
+
+    for ( bios_mem = (char *)ROMBIOS_BEGIN; 
+          bios_mem != (char *)ROMBIOS_END; 
+          bios_mem++ )
+    {
+        if ( strncmp(bios_mem, "___HVMMP", 8) == 0)
+            return bios_mem;
+    }
+
+    return NULL;
+}
+
+
+/* recalculate the new ROMBIOS checksum after adding MP tables */
+static void reset_bios_checksum(void)
+{
+    uint32_t i;
+    uint8_t checksum;
+
+    checksum = 0;
+    for (i = 0; i < ROMBIOS_MAXOFFSET; ++i)
+        checksum += ((uint8_t *)(ROMBIOS_BEGIN))[i];
+
+    *((uint8_t *)(ROMBIOS_BEGIN + ROMBIOS_MAXOFFSET)) = -checksum;
+}
+
+/* create_mp_tables - creates MP tables for the guest based upon config data */
+void create_mp_tables(void)
+{
+    void *mp_table_base;
     char *p;
     int vcpu_nr, i, length;
-    void *base;
     struct mp_io_intr_entry *mpiie;
-    struct mp_floating_pointer_struct *mpfps;
 
     vcpu_nr = hvm_info->nr_vcpus;
 
     printf("Creating MP tables ...\n");
 
-    if ( _mpfps == NULL )
+    /* Find the 'safe' place in ROMBIOS for the MP tables. */
+    mp_table_base = get_mp_table_start();
+    if ( mp_table_base == NULL )
     {
-        int sz;
-
-        sz  = sizeof(struct mp_floating_pointer_struct);
-        sz += sizeof(struct mp_config_table);
-        sz += sizeof(struct mp_proc_entry) * vcpu_nr;
-        sz += sizeof(struct mp_bus_entry);
-        sz += sizeof(struct mp_ioapic_entry);
-        sz += sizeof(struct mp_io_intr_entry) * 16;
-
-        _mpfps = mem_alloc(sz, 0);
+        printf("Couldn't find start point for MP tables\n");
+        return;
     }
 
-    mpfps = _mpfps;
-
-    base = &mpfps[1];
-
-    p = base + sizeof(struct mp_config_table);
+    p = mp_table_base + sizeof(struct mp_config_table);
 
     for ( i = 0; i < vcpu_nr; i++ )
     {
@@ -328,21 +353,15 @@ unsigned long create_mp_tables(void *_mpfps)
         p += sizeof(*mpiie);
     }
 
-    length = p - (char *)base;
+    length = p - (char *)mp_table_base;
 
-    fill_mp_config_table((struct mp_config_table *)base, length);
+    /* find the next 16-byte boundary to place the mp floating pointer */
+    while ( (unsigned long)p & 0xF )
+        p++;
 
-    fill_mpfps(mpfps, (uint32_t)base);
+    fill_mpfps((struct mp_floating_pointer_struct *)p, 
+               (uint32_t)mp_table_base);
 
-    return (unsigned long)mpfps;
+    fill_mp_config_table((struct mp_config_table *)mp_table_base, length);
+    reset_bios_checksum();
 }
-
-/*
- * Local variables:
- * mode: C
- * c-file-style: "BSD"
- * c-basic-offset: 4
- * tab-width: 4
- * indent-tabs-mode: nil
- * End:
- */

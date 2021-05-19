@@ -13,7 +13,8 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 /*
  * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
@@ -22,8 +23,6 @@
 
 #ifndef	_SYS_DSL_DIR_H
 #define	_SYS_DSL_DIR_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 typedef struct dsl_dir_phys {
 	uint64_t dd_creation_time; /* not actually used */

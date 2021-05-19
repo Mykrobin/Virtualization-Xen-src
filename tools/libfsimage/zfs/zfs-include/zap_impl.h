@@ -13,10 +13,11 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program; If not, see <http://www.gnu.org/licenses/>.
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 /*
- * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -25,6 +26,7 @@
 
 #define	ZAP_MAGIC 0x2F52AB2ABULL
 
+#define	ZAP_HASHBITS		28
 #define	MZAP_ENT_LEN		64
 #define	MZAP_NAME_LEN		(MZAP_ENT_LEN - 8 - 4 - 2)
 #define	MZAP_MAX_BLKSHIFT	SPA_MAXBLOCKSHIFT
@@ -97,8 +99,6 @@ typedef struct zap_phys {
 	uint64_t zap_num_leafs;		/* number of leafs */
 	uint64_t zap_num_entries;	/* number of entries */
 	uint64_t zap_salt;		/* salt to stir into hash function */
-	uint64_t zap_normflags;		/* flags for u8_textprep_str() */
-	uint64_t zap_flags;		/* zap_flag_t */
 	/*
 	 * This structure is followed by padding, and then the embedded
 	 * pointer table.  The embedded pointer table takes up second

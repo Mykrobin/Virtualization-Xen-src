@@ -13,7 +13,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 #ifndef __SHM_H__
 #define __SHM_H__
@@ -43,7 +44,7 @@ typedef struct shared_memshr_info {
 shared_memshr_info_t * shm_shared_info_open(int unlink);
 struct fgprtshr_hash * shm_fgprtshr_hash_open(int unlink);
 struct blockshr_hash * shm_blockshr_hash_open(int unlink);
-uint16_t shm_vbd_image_get(const char* file, vbd_image_info_t *vbd_imgs);
+uint16_t shm_vbd_image_get(char* file, vbd_image_info_t *vbd_imgs);
 void     shm_vbd_image_put(uint16_t memshr_id, vbd_image_info_t *vbd_imgs);
 
 #endif /* __SHM_H__ */

@@ -7,4 +7,3 @@ LDFLAGS += $(DEF_LDFLAGS) $(ARCH_LDFLAGS)
 
 # Override settings for this OS
 PTHREAD_LIBS =
-nosharedlibs=y

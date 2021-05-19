@@ -12,6 +12,7 @@
 #ifndef __ASM_X86_X86_EMULATE_H__
 #define __ASM_X86_X86_EMULATE_H__
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <asm/regs.h>

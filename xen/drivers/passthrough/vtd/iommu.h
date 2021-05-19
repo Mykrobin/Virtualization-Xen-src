@@ -11,7 +11,8 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  *
  * Copyright (C) Ashok Raj <ashok.raj@intel.com>
  */
@@ -19,8 +20,7 @@
 #ifndef _INTEL_IOMMU_H_
 #define _INTEL_IOMMU_H_
 
-#include <xen/iommu.h>
-#include <asm/msi.h>
+#include <xen/types.h>
 
 /*
  * Intel IOMMU register specification per version 1.0 public spec.
@@ -50,10 +50,17 @@
 #define    DMAR_IRTA_REG   0xB8    /* intr remap */
 
 #define OFFSET_STRIDE        (9)
-#define dmar_readl(dmar, reg) readl((dmar) + (reg))
-#define dmar_readq(dmar, reg) readq((dmar) + (reg))
-#define dmar_writel(dmar, reg, val) writel(val, (dmar) + (reg))
-#define dmar_writeq(dmar, reg, val) writeq(val, (dmar) + (reg))
+#define dmar_readl(dmar, reg) readl(dmar + reg)
+#define dmar_writel(dmar, reg, val) writel(val, dmar + reg)
+#define dmar_readq(dmar, reg) ({ \
+        u32 lo, hi; \
+        lo = dmar_readl(dmar, reg); \
+        hi = dmar_readl(dmar, reg + 4); \
+        (((u64) hi) << 32) + lo; })
+#define dmar_writeq(dmar, reg, val) do {\
+        dmar_writel(dmar, reg, (u32)val); \
+        dmar_writel(dmar, reg + 4, (u32)((u64) val >> 32)); \
+    } while (0)
 
 #define VER_MAJOR(v)        (((v) & 0xf0) >> 4)
 #define VER_MINOR(v)        ((v) & 0x0f)
@@ -61,20 +68,15 @@
 /*
  * Decoding Capability Register
  */
-#define cap_intr_post(c)       (((c) >> 59) & 1)
-#define cap_read_drain(c)      (((c) >> 55) & 1)
-#define cap_write_drain(c)     (((c) >> 54) & 1)
-#define cap_max_amask_val(c)   (((c) >> 48) & 0x3f)
-#define cap_num_fault_regs(c)  ((((c) >> 40) & 0xff) + 1)
+#define cap_read_drain(c)    (((c) >> 55) & 1)
+#define cap_write_drain(c)    (((c) >> 54) & 1)
+#define cap_max_amask_val(c)    (((c) >> 48) & 0x3f)
+#define cap_num_fault_regs(c)    ((((c) >> 40) & 0xff) + 1)
 #define cap_pgsel_inv(c)       (((c) >> 39) & 1)
 
-#define cap_super_page_val(c)  (((c) >> 34) & 0xf)
+#define cap_super_page_val(c)    (((c) >> 34) & 0xf)
 #define cap_super_offset(c)    (((find_first_bit(&cap_super_page_val(c), 4)) \
-                                 * OFFSET_STRIDE) + 21)
-#define cap_sps_2mb(c)         ((c >> 34) & 1)
-#define cap_sps_1gb(c)         ((c >> 35) & 1)
-#define cap_sps_512gb(c)       ((c >> 36) & 1)
-#define cap_sps_1tb(c)         ((c >> 37) & 1)
+                    * OFFSET_STRIDE) + 21)
 
 #define cap_fault_reg_offset(c)    ((((c) >> 24) & 0x3ff) * 16)
 
@@ -242,8 +244,6 @@ struct context_entry {
 #define level_to_offset_bits(l) (12 + (l - 1) * LEVEL_STRIDE)
 #define address_level_offset(addr, level) \
             ((addr >> level_to_offset_bits(level)) & LEVEL_MASK)
-#define offset_level_address(offset, level) \
-            ((u64)(offset) << level_to_offset_bits(level))
 #define level_mask(l) (((u64)(-1)) << level_to_offset_bits(l))
 #define level_size(l) (1 << level_to_offset_bits(l))
 #define align_to_level(addr, l) ((addr + level_size(l) - 1) & level_mask(l))
@@ -261,73 +261,47 @@ struct dma_pte {
 };
 #define DMA_PTE_READ (1)
 #define DMA_PTE_WRITE (2)
-#define DMA_PTE_PROT (DMA_PTE_READ | DMA_PTE_WRITE)
-#define DMA_PTE_SP   (1 << 7)
 #define DMA_PTE_SNP  (1 << 11)
 #define dma_clear_pte(p)    do {(p).val = 0;} while(0)
 #define dma_set_pte_readable(p) do {(p).val |= DMA_PTE_READ;} while(0)
 #define dma_set_pte_writable(p) do {(p).val |= DMA_PTE_WRITE;} while(0)
-#define dma_set_pte_superpage(p) do {(p).val |= DMA_PTE_SP;} while(0)
+#define dma_set_pte_superpage(p) do {(p).val |= (1 << 7);} while(0)
 #define dma_set_pte_snp(p)  do {(p).val |= DMA_PTE_SNP;} while(0)
-#define dma_set_pte_prot(p, prot) do { \
-        (p).val = ((p).val & ~DMA_PTE_PROT) | ((prot) & DMA_PTE_PROT); \
-    } while (0)
-#define dma_pte_addr(p) ((p).val & PADDR_MASK & PAGE_MASK_4K)
+#define dma_set_pte_prot(p, prot) \
+            do {(p).val = ((p).val & ~3) | ((prot) & 3); } while (0)
+#define dma_pte_addr(p) ((p).val & PAGE_MASK_4K)
 #define dma_set_pte_addr(p, addr) do {\
             (p).val |= ((addr) & PAGE_MASK_4K); } while (0)
-#define dma_pte_present(p) (((p).val & DMA_PTE_PROT) != 0)
-#define dma_pte_superpage(p) (((p).val & DMA_PTE_SP) != 0)
+#define dma_pte_present(p) (((p).val & 3) != 0)
 
 /* interrupt remap entry */
 struct iremap_entry {
   union {
-    __uint128_t val;
-    struct { u64 lo, hi; };
+    u64 lo_val;
     struct {
-        u16 p       : 1,
+        u64 p       : 1,
             fpd     : 1,
             dm      : 1,
             rh      : 1,
             tm      : 1,
             dlm     : 3,
             avail   : 4,
-            res_1   : 3,
-            im      : 1;
-        u8  vector;
-        u8  res_2;
-        u32 dst;
-        u16 sid;
-        u16 sq      : 2,
-            svt     : 2,
-            res_3   : 12;
-        u32 res_4;
-    } remap;
+            res_1   : 4,
+            vector  : 8,
+            res_2   : 8,
+            dst     : 32;
+    }lo;
+  };
+  union {
+    u64 hi_val;
     struct {
-        u16 p       : 1,
-            fpd     : 1,
-            res_1   : 6,
-            avail   : 4,
-            res_2   : 2,
-            urg     : 1,
-            im      : 1;
-        u8  vector;
-        u8  res_3;
-        u32 res_4   : 6,
-            pda_l   : 26;
-        u16 sid;
-        u16 sq      : 2,
+        u64 sid     : 16,
+            sq      : 2,
             svt     : 2,
-            res_5   : 12;
-        u32 pda_h;
-    } post;
+            res_1   : 44;
+    }hi;
   };
 };
-
-/*
- * Posted-interrupt descriptor address is 64 bits with 64-byte aligned, only
- * the upper 26 bits of lest significiant 32 bits is available.
- */
-#define PDA_LOW_BIT    26
 
 /* Max intr remapping table page order is 8, as max number of IRTEs is 64K */
 #define IREMAP_PAGE_ORDER  8
@@ -441,7 +415,8 @@ struct qinval_entry {
                     sdata   : 32;
             }lo;
             struct {
-                u64 saddr;
+                u64 res_1   : 2,
+                    saddr   : 62;
             }hi;
         }inv_wait_dsc;
     }q;
@@ -488,7 +463,7 @@ struct qinval_entry {
 
 #define IEC_GLOBAL_INVL         0
 #define IEC_INDEX_INVL          1
-#define IRTA_EIME               (((u64)1) << 11)
+#define IRTA_REG_EIME_SHIFT     11
 
 /* 2^(IRTA_REG_TABLE_SIZE + 1) = IREMAP_ENTRY_NR */
 #define IRTA_REG_TABLE_SIZE     ( IREMAP_PAGE_ORDER + 7 )
@@ -496,6 +471,7 @@ struct qinval_entry {
 #define VTD_PAGE_TABLE_LEVEL_3  3
 #define VTD_PAGE_TABLE_LEVEL_4  4
 
+#define DEFAULT_DOMAIN_ADDRESS_WIDTH 48
 #define MAX_IOMMU_REGS 0xc0
 
 extern struct list_head acpi_drhd_units;
@@ -504,6 +480,8 @@ extern struct list_head acpi_ioapic_units;
 
 struct qi_ctrl {
     u64 qinval_maddr;  /* queue invalidation page machine address */
+    int qinval_index;                    /* queue invalidation index */
+    spinlock_t qinval_lock;      /* lock for queue invalidation page */
 };
 
 struct ir_ctrl {
@@ -513,59 +491,16 @@ struct ir_ctrl {
 };
 
 struct iommu_flush {
-    int __must_check (*context)(void *iommu, u16 did, u16 source_id,
-                                u8 function_mask, u64 type,
-                                bool_t non_present_entry_flush);
-    int __must_check (*iotlb)(void *iommu, u16 did, u64 addr,
-                              unsigned int size_order, u64 type,
-                              bool_t flush_non_present_entry,
-                              bool_t flush_dev_iotlb);
+    int (*context)(void *iommu, u16 did, u16 source_id,
+                   u8 function_mask, u64 type, int non_present_entry_flush);
+    int (*iotlb)(void *iommu, u16 did, u64 addr, unsigned int size_order,
+                 u64 type, int flush_non_present_entry, int flush_dev_iotlb);
 };
 
 struct intel_iommu {
     struct qi_ctrl qi_ctrl;
     struct ir_ctrl ir_ctrl;
     struct iommu_flush flush;
-    struct acpi_drhd_unit *drhd;
 };
-
-struct iommu {
-    struct list_head list;
-    void __iomem *reg; /* Pointer to hardware regs, virtual addr */
-    u32	index;         /* Sequence number of iommu */
-    u32 nr_pt_levels;
-    u64	cap;
-    u64	ecap;
-    spinlock_t lock; /* protect context, domain ids */
-    spinlock_t register_lock; /* protect iommu register handling */
-    u64 root_maddr; /* root entry machine address */
-    struct msi_desc msi;
-    struct intel_iommu *intel;
-    struct list_head ats_devices;
-    unsigned long *domid_bitmap;  /* domain id bitmap */
-    u16 *domid_map;               /* domain id mapping array */
-};
-
-static inline struct qi_ctrl *iommu_qi_ctrl(struct iommu *iommu)
-{
-    return iommu ? &iommu->intel->qi_ctrl : NULL;
-}
-
-static inline struct ir_ctrl *iommu_ir_ctrl(struct iommu *iommu)
-{
-    return iommu ? &iommu->intel->ir_ctrl : NULL;
-}
-
-static inline struct iommu_flush *iommu_get_flush(struct iommu *iommu)
-{
-    return iommu ? &iommu->intel->flush : NULL;
-}
-
-#define INTEL_IOMMU_DEBUG(fmt, args...) \
-    do  \
-    {   \
-        if ( iommu_debug )  \
-            dprintk(XENLOG_WARNING VTDPREFIX, fmt, ## args);    \
-    } while(0)
 
 #endif

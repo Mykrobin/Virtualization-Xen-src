@@ -33,10 +33,8 @@ struct dmi_system_id {
 #define DMI_MATCH(a,b)	{ a, b }
 
 extern int dmi_check_system(struct dmi_system_id *list);
+extern char * dmi_get_system_info(int field);
 extern void dmi_scan_machine(void);
-extern const char *dmi_get_table(paddr_t *base, u32 *len);
-extern void dmi_efi_get_table(const void *smbios, const void *smbios3);
-bool dmi_get_date(int field, int *yearp, int *monthp, int *dayp);
-extern void dmi_end_boot(void);
+extern int dmi_get_table(u32 *base, u32 *len);
 
 #endif	/* __DMI_H__ */

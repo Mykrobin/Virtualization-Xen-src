@@ -3,6 +3,7 @@
  * 
  * Generic x86 APIC driver probe layer.
  */  
+#include <xen/config.h>
 #include <xen/cpumask.h>
 #include <xen/string.h>
 #include <xen/kernel.h>
@@ -15,17 +16,20 @@
 #include <asm/mach-generic/mach_apic.h>
 #include <asm/setup.h>
 
+extern const struct genapic apic_summit;
 extern const struct genapic apic_bigsmp;
+extern const struct genapic apic_default;
 
 const struct genapic *__read_mostly genapic;
 
 const struct genapic *apic_probe[] __initdata = {
+	&apic_summit,
 	&apic_bigsmp, 
 	&apic_default,	/* must be last */
 	NULL,
 };
 
-static bool_t __initdata cmdline_apic;
+static int cmdline_apic;
 
 void __init generic_bigsmp_probe(void)
 {
@@ -44,29 +48,19 @@ void __init generic_bigsmp_probe(void)
 		}
 }
 
-static int __init genapic_apic_force(const char *str)
+static void __init genapic_apic_force(char *str)
 {
-	int i, rc = -EINVAL;
-
+	int i;
 	for (i = 0; apic_probe[i]; i++)
-		if (!strcmp(apic_probe[i]->name, str)) {
+		if (!strcmp(apic_probe[i]->name, str))
 			genapic = apic_probe[i];
-			rc = 0;
-		}
-
-	return rc;
 }
 custom_param("apic", genapic_apic_force);
 
 void __init generic_apic_probe(void) 
 { 
-	bool changed;
 	int i;
-
-	record_boot_APIC_mode();
-
-	check_x2apic_preenabled();
-	cmdline_apic = changed = (genapic != NULL);
+	int changed = cmdline_apic = (genapic != NULL);
 
 	for (i = 0; !changed && apic_probe[i]; i++) { 
 		if (apic_probe[i]->probe()) {

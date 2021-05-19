@@ -11,7 +11,8 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public
-# License along with this library; If not, see <http://www.gnu.org/licenses/>.
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 #
 
 
@@ -79,30 +80,14 @@ find_dhcpd_arg_file()
 }
 
 # configure interfaces which act as pure bridge ports:
-_setup_bridge_port() {
+setup_bridge_port() {
     local dev="$1"
-    local virtual="$2"
 
     # take interface down ...
-    ip link set dev ${dev} down
-
-    if [ $virtual -ne 0 ] ; then
-        # Initialise a dummy MAC address. We choose the numerically
-        # largest non-broadcast address to prevent the address getting
-        # stolen by an Ethernet bridge for STP purposes.
-        # (FE:FF:FF:FF:FF:FF)
-        ip link set dev ${dev} address fe:ff:ff:ff:ff:ff || true
-    fi
+    ip link set ${dev} down
 
     # ... and configure it
-    ip address flush dev ${dev}
-}
-
-setup_physical_bridge_port() {
-    _setup_bridge_port $1 0
-}
-setup_virtual_bridge_port() {
-    _setup_bridge_port $1 1
+    ip addr flush ${dev}
 }
 
 # Usage: create_bridge bridge
@@ -124,20 +109,10 @@ add_to_bridge () {
 
     # Don't add $dev to $bridge if it's already on a bridge.
     if [ -e "/sys/class/net/${bridge}/brif/${dev}" ]; then
-	ip link set dev ${dev} up || true
+	ip link set ${dev} up || true
 	return
     fi
     brctl addif ${bridge} ${dev}
-    ip link set dev ${dev} up
+    ip link set ${dev} up
 }
 
-# Usage: set_mtu bridge dev
-set_mtu () {
-    local bridge=$1
-    local dev=$2
-    mtu="`ip link show dev ${bridge}| awk '/mtu/ { print $5 }'`"
-    if [ -n "$mtu" ] && [ "$mtu" -gt 0 ]
-    then
-            ip link set dev ${dev} mtu $mtu || :
-    fi
-}

@@ -15,62 +15,65 @@
 #include <xen/types.h>
 #include <xen/errno.h>
 #include <xen/init.h>
-#include <xen/string.h>
-#include <xen/delay.h>
-#include <xen/xenoprof.h>
+#include <xen/nmi.h>
 #include <public/xen.h>
 #include <asm/msr.h>
 #include <asm/apic.h>
 #include <asm/regs.h>
 #include <asm/current.h>
-#include <asm/nmi.h>
-
+#include <xen/delay.h>
+#include <xen/string.h>
+ 
 #include "op_counter.h"
 #include "op_x86_model.h"
-
+ 
 struct op_counter_config counter_config[OP_MAX_COUNTER];
-struct op_ibs_config ibs_config;
 
-struct op_x86_model_spec const *__read_mostly model;
+static struct op_x86_model_spec const *__read_mostly model;
 static struct op_msrs cpu_msrs[NR_CPUS];
 static unsigned long saved_lvtpc[NR_CPUS];
 
 static char *cpu_type;
 
-static int passive_domain_msr_op_checks(unsigned int msr, int *typep, int *indexp)
+static int passive_domain_msr_op_checks(struct cpu_user_regs *regs ,int *typep, int *indexp)
 {
 	struct vpmu_struct *vpmu = vcpu_vpmu(current);
 	if ( model == NULL )
 		return 0;
 	if ( model->is_arch_pmu_msr == NULL )
 		return 0;
-	if ( !model->is_arch_pmu_msr(msr, typep, indexp) )
+	if ( !model->is_arch_pmu_msr((u64)regs->ecx, typep, indexp) )
 		return 0;
 
-	if ( !vpmu_is_set(vpmu, VPMU_PASSIVE_DOMAIN_ALLOCATED) )
+	if ( !(vpmu->flags & PASSIVE_DOMAIN_ALLOCATED) )
 		if ( ! model->allocated_msr(current) )
 			return 0;
 	return 1;
 }
 
-int passive_domain_do_rdmsr(unsigned int msr, uint64_t *msr_content)
+int passive_domain_do_rdmsr(struct cpu_user_regs *regs)
 {
+	u64 msr_content;
 	int type, index;
 
-	if ( !passive_domain_msr_op_checks(msr, &type, &index))
+	if ( !passive_domain_msr_op_checks(regs, &type, &index))
 		return 0;
 
-	model->load_msr(current, type, index, msr_content);
+	model->load_msr(current, type, index, &msr_content);
+	regs->eax = msr_content & 0xFFFFFFFF;
+	regs->edx = msr_content >> 32;
 	return 1;
 }
 
-int passive_domain_do_wrmsr(unsigned int msr, uint64_t msr_content)
+int passive_domain_do_wrmsr(struct cpu_user_regs *regs)
 {
+	u64 msr_content;
 	int type, index;
 
-	if ( !passive_domain_msr_op_checks(msr, &type, &index))
+	if ( !passive_domain_msr_op_checks(regs, &type, &index))
 		return 0;
 
+	msr_content = (u32)regs->eax | ((u64)regs->edx << 32);
 	model->save_msr(current, type, index, msr_content);
 	return 1;
 }
@@ -78,11 +81,11 @@ int passive_domain_do_wrmsr(unsigned int msr, uint64_t msr_content)
 void passive_domain_destroy(struct vcpu *v)
 {
 	struct vpmu_struct *vpmu = vcpu_vpmu(v);
-	if ( vpmu_is_set(vpmu, VPMU_PASSIVE_DOMAIN_ALLOCATED) )
+	if ( vpmu->flags & PASSIVE_DOMAIN_ALLOCATED )
 		model->free_msr(v);
 }
 
-static int nmi_callback(const struct cpu_user_regs *regs, int cpu)
+static int nmi_callback(struct cpu_user_regs *regs, int cpu)
 {
 	int xen_mode, ovf;
 
@@ -91,12 +94,12 @@ static int nmi_callback(const struct cpu_user_regs *regs, int cpu)
 	if ( ovf && is_active(current->domain) && !xen_mode )
 		send_guest_vcpu_virq(current, VIRQ_XENOPROF);
 
-	if ( ovf == 2 )
-                current->nmi_pending = 1;
+	if ( ovf == 2 ) 
+                test_and_set_bool(current->nmi_pending);
 	return 1;
 }
-
-
+ 
+ 
 static void nmi_cpu_save_registers(struct op_msrs *msrs)
 {
 	unsigned int const nr_ctrs = model->num_counters;
@@ -106,11 +109,15 @@ static void nmi_cpu_save_registers(struct op_msrs *msrs)
 	unsigned int i;
 
 	for (i = 0; i < nr_ctrs; ++i) {
-		rdmsrl(counters[i].addr, counters[i].value);
+		rdmsr(counters[i].addr,
+			counters[i].saved.low,
+			counters[i].saved.high);
 	}
-
+ 
 	for (i = 0; i < nr_ctrls; ++i) {
-		rdmsrl(controls[i].addr, controls[i].value);
+		rdmsr(controls[i].addr,
+			controls[i].saved.low,
+			controls[i].saved.high);
 	}
 }
 
@@ -127,7 +134,7 @@ static void nmi_save_registers(void * dummy)
 static void free_msrs(void)
 {
 	int i;
-	for (i = 0; i < nr_cpu_ids; ++i) {
+	for (i = 0; i < NR_CPUS; ++i) {
 		xfree(cpu_msrs[i].counters);
 		cpu_msrs[i].counters = NULL;
 		xfree(cpu_msrs[i].controls);
@@ -143,7 +150,10 @@ static int allocate_msrs(void)
 	size_t counters_size = sizeof(struct op_msr) * model->num_counters;
 
 	int i;
-	for_each_online_cpu (i) {
+	for (i = 0; i < NR_CPUS; ++i) {
+		if (!test_bit(i, &cpu_online_map))
+			continue;
+
 		cpu_msrs[i].counters = xmalloc_bytes(counters_size);
 		if (!cpu_msrs[i].counters) {
 			success = 0;
@@ -182,7 +192,7 @@ int nmi_reserve_counters(void)
 	if (!allocate_msrs())
 		return -ENOMEM;
 
-	/*
+	/* We walk a thin line between law and rape here.
 	 * We need to be careful to install our NMI handler
 	 * without actually triggering any NMIs as this will
 	 * break the core code horrifically.
@@ -195,7 +205,7 @@ int nmi_reserve_counters(void)
 	 * of msrs are distinct for save and setup operations
 	 */
 	on_each_cpu(nmi_save_registers, NULL, 1);
-	return 0;
+ 	return 0;
 }
 
 int nmi_enable_virq(void)
@@ -208,7 +218,7 @@ int nmi_enable_virq(void)
 void nmi_disable_virq(void)
 {
 	unset_nmi_callback();
-}
+} 
 
 
 static void nmi_restore_registers(struct op_msrs * msrs)
@@ -220,14 +230,18 @@ static void nmi_restore_registers(struct op_msrs * msrs)
 	unsigned int i;
 
 	for (i = 0; i < nr_ctrls; ++i) {
-		wrmsrl(controls[i].addr, controls[i].value);
+		wrmsr(controls[i].addr,
+			controls[i].saved.low,
+			controls[i].saved.high);
 	}
-
+ 
 	for (i = 0; i < nr_ctrs; ++i) {
-		wrmsrl(counters[i].addr, counters[i].value);
+		wrmsr(counters[i].addr,
+			counters[i].saved.low,
+			counters[i].saved.high);
 	}
 }
-
+ 
 
 static void nmi_cpu_shutdown(void * dummy)
 {
@@ -236,7 +250,7 @@ static void nmi_cpu_shutdown(void * dummy)
 	nmi_restore_registers(msrs);
 }
 
-
+ 
 void nmi_release_counters(void)
 {
 	on_each_cpu(nmi_cpu_shutdown, NULL, 1);
@@ -244,7 +258,7 @@ void nmi_release_counters(void)
 	free_msrs();
 }
 
-
+ 
 static void nmi_cpu_start(void * dummy)
 {
 	int cpu = smp_processor_id();
@@ -253,15 +267,15 @@ static void nmi_cpu_start(void * dummy)
 	apic_write(APIC_LVTPC, APIC_DM_NMI);
 	model->start(msrs);
 }
-
+ 
 
 int nmi_start(void)
 {
 	on_each_cpu(nmi_cpu_start, NULL, 1);
 	return 0;
 }
-
-
+ 
+ 
 static void nmi_cpu_stop(void * dummy)
 {
 	unsigned int v;
@@ -274,7 +288,7 @@ static void nmi_cpu_stop(void * dummy)
 	 * power on apic lvt contain a zero vector nr which are legal only for
 	 * NMI delivery mode. So inhibit apic err before restoring lvtpc
 	 */
-	if ( (apic_read(APIC_LVTPC) & APIC_MODE_MASK) != APIC_DM_NMI
+	if ( !(apic_read(APIC_LVTPC) & APIC_DM_NMI)
 	     || (apic_read(APIC_LVTPC) & APIC_LVT_MASKED) )
 	{
 		printk("nmi_stop: APIC not good %ul\n", apic_read(APIC_LVTPC));
@@ -285,8 +299,8 @@ static void nmi_cpu_stop(void * dummy)
 	apic_write(APIC_LVTPC, saved_lvtpc[cpu]);
 	apic_write(APIC_LVTERR, v);
 }
-
-
+ 
+ 
 void nmi_stop(void)
 {
 	on_each_cpu(nmi_cpu_stop, NULL, 1);
@@ -294,7 +308,7 @@ void nmi_stop(void)
 
 
 static int __init p4_init(char ** cpu_type)
-{
+{ 
 	__u8 cpu_model = current_cpu_data.x86_model;
 
 	if ((cpu_model > 6) || (cpu_model == 5)) {
@@ -304,6 +318,11 @@ static int __init p4_init(char ** cpu_type)
 		return 0;
 	}
 
+#ifndef CONFIG_SMP
+	*cpu_type = "i386/p4", XENOPROF_CPU_TYPE_SIZE);
+	model = &op_p4_spec;
+	return 1;
+#else
 	switch (current_cpu_data.x86_num_siblings) {
 		case 1:
 			*cpu_type = "i386/p4";
@@ -315,7 +334,7 @@ static int __init p4_init(char ** cpu_type)
 			model = &op_p4_ht2_spec;
 			return 1;
 	}
-
+#endif
 	printk("Xenoprof ERROR: P4 HyperThreading detected with > 2 threads\n");
 
 	return 0;
@@ -323,20 +342,18 @@ static int __init p4_init(char ** cpu_type)
 
 
 static int force_arch_perfmon;
-
 static int force_cpu_type(const char *str)
 {
 	if (!strcmp(str, "arch_perfmon")) {
 		force_arch_perfmon = 1;
 		printk(KERN_INFO "oprofile: forcing architectural perfmon\n");
 	}
-	else
-		return -EINVAL;
 
 	return 0;
 }
 custom_param("cpu_type", force_cpu_type);
 
+extern int ppro_has_global_ctrl;
 static int __init ppro_init(char ** cpu_type)
 {
 	__u8 cpu_model = current_cpu_data.x86_model;
@@ -345,12 +362,36 @@ static int __init ppro_init(char ** cpu_type)
 		return 0;
 
 	switch (cpu_model) {
+	case 0 ... 2:
+		*cpu_type = "i386/ppro";
+		break;
+	case 3 ... 5:
+		*cpu_type = "i386/pii";
+		break;
+	case 6 ... 8:
+	case 10 ... 11:
+		*cpu_type = "i386/piii";
+		break;
+	case 9:
+	case 13:
+		*cpu_type = "i386/p6_mobile";
+		break;
 	case 14:
 		*cpu_type = "i386/core";
 		break;
 	case 15:
+	case 23:
+	case 29:
 		*cpu_type = "i386/core_2";
 		ppro_has_global_ctrl = 1;
+		break;
+	case 26:
+		arch_perfmon_setup_counters();
+		*cpu_type = "i386/core_i7";
+		ppro_has_global_ctrl = 1;
+		break;
+	case 28:
+		*cpu_type = "i386/atom";
 		break;
 	default:
 		/* Unknown */
@@ -368,7 +409,6 @@ static int __init arch_perfmon_init(char **cpu_type)
 	*cpu_type = "i386/arch_perfmon";
 	model = &op_arch_perfmon_spec;
 	arch_perfmon_setup_counters();
-	ppro_has_global_ctrl = 1;
 	return 1;
 }
 
@@ -377,7 +417,7 @@ static int __init nmi_init(void)
 	__u8 vendor = current_cpu_data.x86_vendor;
 	__u8 family = current_cpu_data.x86;
 	__u8 _model = current_cpu_data.x86_model;
-
+ 
 	if (!cpu_has_apic) {
 		printk("xenoprof: Initialization failed. No APIC\n");
 		return -ENODEV;
@@ -393,38 +433,39 @@ static int __init nmi_init(void)
 				       "AMD processor family %d is not "
 				       "supported\n", family);
 				return -ENODEV;
+			case 6:
+				model = &op_athlon_spec;
+				cpu_type = "i386/athlon";
+				break;
 			case 0xf:
 				model = &op_athlon_spec;
+				/* Actually it could be i386/hammer too, but
+				   give user space an consistent name. */
 				cpu_type = "x86-64/hammer";
 				break;
 			case 0x10:
 				model = &op_athlon_spec;
 				cpu_type = "x86-64/family10";
-				ibs_init();
 				break;
 			case 0x11:
 				model = &op_athlon_spec;
-				cpu_type = "x86-64/family11h";
+				cpu_type = "x86-64/family11";
 				break;
                         case 0x12:
 				model = &op_athlon_spec;
-				cpu_type = "x86-64/family12h";
+				cpu_type = "x86-64/family12";
 				break;
 			case 0x14:
                                 model = &op_athlon_spec;
-                                cpu_type = "x86-64/family14h";
+                                cpu_type = "x86-64/family14";
                                 break;
                         case 0x15:
-                                model = &op_amd_fam15h_spec;
-                                cpu_type = "x86-64/family15h";
+                                model = &op_athlon_spec;
+                                cpu_type = "x86-64/family15";
                                 break;
-			case 0x16:
-				model = &op_athlon_spec;
-				cpu_type = "x86-64/family16h";
-				break;
 			}
 			break;
-
+ 
 		case X86_VENDOR_INTEL:
 			switch (family) {
 				/* Pentium IV */
@@ -442,7 +483,7 @@ static int __init nmi_init(void)
 			}
 			if (!cpu_type && !arch_perfmon_init(&cpu_type)) {
 				printk("xenoprof: Initialization failed. "
-				       "Intel processor family %d model %d "
+				       "Intel processor family %d model %d"
 				       "is not supported\n", family, _model);
 				return -ENODEV;
 			}

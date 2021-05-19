@@ -1,120 +1,73 @@
-XEN_ROOT = $(CURDIR)/../..
+XEN_ROOT = ../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-MAJOR    = 4.11
+MAJOR    = 4.0
 MINOR    = 0
 
-ifeq ($(CONFIG_LIBXC_MINIOS),y)
-# Save/restore of a domain is currently incompatible with a stubdom environment
-override CONFIG_MIGRATE := n
-endif
-
 CTRL_SRCS-y       :=
-CTRL_SRCS-y       += xc_altp2m.c
 CTRL_SRCS-y       += xc_core.c
 CTRL_SRCS-$(CONFIG_X86) += xc_core_x86.c
-CTRL_SRCS-$(CONFIG_ARM) += xc_core_arm.c
-CTRL_SRCS-y       += xc_cpupool.c
+CTRL_SRCS-$(CONFIG_IA64) += xc_core_ia64.c
 CTRL_SRCS-y       += xc_domain.c
 CTRL_SRCS-y       += xc_evtchn.c
-CTRL_SRCS-y       += xc_gnttab.c
 CTRL_SRCS-y       += xc_misc.c
+CTRL_SRCS-y       += xc_acm.c
 CTRL_SRCS-y       += xc_flask.c
 CTRL_SRCS-y       += xc_physdev.c
 CTRL_SRCS-y       += xc_private.c
+CTRL_SRCS-y       += xc_sedf.c
 CTRL_SRCS-y       += xc_csched.c
-CTRL_SRCS-y       += xc_csched2.c
-CTRL_SRCS-y       += xc_arinc653.c
-CTRL_SRCS-y       += xc_rt.c
 CTRL_SRCS-y       += xc_tbuf.c
 CTRL_SRCS-y       += xc_pm.c
 CTRL_SRCS-y       += xc_cpu_hotplug.c
 CTRL_SRCS-y       += xc_resume.c
 CTRL_SRCS-y       += xc_tmem.c
-CTRL_SRCS-y       += xc_vm_event.c
-CTRL_SRCS-y       += xc_monitor.c
+CTRL_SRCS-y       += xc_mem_event.c
 CTRL_SRCS-y       += xc_mem_paging.c
-CTRL_SRCS-y       += xc_mem_access.c
 CTRL_SRCS-y       += xc_memshr.c
-CTRL_SRCS-y       += xc_hcall_buf.c
-CTRL_SRCS-y       += xc_foreign_memory.c
-CTRL_SRCS-y       += xc_kexec.c
-CTRL_SRCS-y       += xc_resource.c
-CTRL_SRCS-$(CONFIG_X86) += xc_psr.c
 CTRL_SRCS-$(CONFIG_X86) += xc_pagetab.c
 CTRL_SRCS-$(CONFIG_Linux) += xc_linux.c
-CTRL_SRCS-$(CONFIG_FreeBSD) += xc_freebsd.c
 CTRL_SRCS-$(CONFIG_SunOS) += xc_solaris.c
+CTRL_SRCS-$(CONFIG_X86_Linux) += xc_ptrace.c xc_ptrace_core.c
 CTRL_SRCS-$(CONFIG_NetBSD) += xc_netbsd.c
-CTRL_SRCS-$(CONFIG_NetBSDRump) += xc_netbsd.c
 CTRL_SRCS-$(CONFIG_MiniOS) += xc_minios.c
-CTRL_SRCS-y       += xc_evtchn_compat.c
-CTRL_SRCS-y       += xc_gnttab_compat.c
-CTRL_SRCS-y       += xc_devicemodel_compat.c
 
 GUEST_SRCS-y :=
 GUEST_SRCS-y += xg_private.c xc_suspend.c
-ifeq ($(CONFIG_MIGRATE),y)
-GUEST_SRCS-y += xc_sr_common.c
-GUEST_SRCS-$(CONFIG_X86) += xc_sr_common_x86.c
-GUEST_SRCS-$(CONFIG_X86) += xc_sr_common_x86_pv.c
-GUEST_SRCS-$(CONFIG_X86) += xc_sr_restore_x86_pv.c
-GUEST_SRCS-$(CONFIG_X86) += xc_sr_restore_x86_hvm.c
-GUEST_SRCS-$(CONFIG_X86) += xc_sr_save_x86_pv.c
-GUEST_SRCS-$(CONFIG_X86) += xc_sr_save_x86_hvm.c
-GUEST_SRCS-y += xc_sr_restore.c
-GUEST_SRCS-y += xc_sr_save.c
-GUEST_SRCS-y += xc_offline_page.c xc_compression.c
-else
-GUEST_SRCS-y += xc_nomigrate.c
-endif
+GUEST_SRCS-$(CONFIG_MIGRATE) += xc_domain_restore.c xc_domain_save.c
+GUEST_SRCS-$(CONFIG_MIGRATE) += xc_offline_page.c
+GUEST_SRCS-$(CONFIG_HVM) += xc_hvm_build.c
 
 vpath %.c ../../xen/common/libelf
 CFLAGS += -I../../xen/common/libelf
 
-ELF_SRCS-y += libelf-tools.c libelf-loader.c
-ELF_SRCS-y += libelf-dominfo.c
-
-GUEST_SRCS-y += $(ELF_SRCS-y)
-
-$(patsubst %.c,%.o,$(ELF_SRCS-y)): CFLAGS += -Wno-pointer-sign
-$(patsubst %.c,%.opic,$(ELF_SRCS-y)): CFLAGS += -Wno-pointer-sign
+GUEST_SRCS-y += libelf-tools.c libelf-loader.c
+GUEST_SRCS-y += libelf-dominfo.c libelf-relocate.c
 
 # new domain builder
 GUEST_SRCS-y                 += xc_dom_core.c xc_dom_boot.c
 GUEST_SRCS-y                 += xc_dom_elfloader.c
 GUEST_SRCS-$(CONFIG_X86)     += xc_dom_bzimageloader.c
-GUEST_SRCS-$(CONFIG_X86)     += xc_dom_decompress_lz4.c
-GUEST_SRCS-$(CONFIG_X86)     += xc_dom_hvmloader.c
-GUEST_SRCS-$(CONFIG_ARM)     += xc_dom_armzimageloader.c
 GUEST_SRCS-y                 += xc_dom_binloader.c
 GUEST_SRCS-y                 += xc_dom_compat_linux.c
 
 GUEST_SRCS-$(CONFIG_X86)     += xc_dom_x86.c
 GUEST_SRCS-$(CONFIG_X86)     += xc_cpuid_x86.c
-GUEST_SRCS-$(CONFIG_ARM)     += xc_dom_arm.c
-
-ifeq ($(CONFIG_LIBXC_MINIOS),y)
-GUEST_SRCS-y                 += xc_dom_decompress_unsafe.c
-GUEST_SRCS-y                 += xc_dom_decompress_unsafe_bzip2.c
-GUEST_SRCS-y                 += xc_dom_decompress_unsafe_lzma.c
-GUEST_SRCS-y                 += xc_dom_decompress_unsafe_lzo1x.c
-GUEST_SRCS-y                 += xc_dom_decompress_unsafe_xz.c
-endif
+GUEST_SRCS-$(CONFIG_IA64)    += xc_dom_ia64.c
 
 -include $(XEN_TARGET_ARCH)/Makefile
 
 CFLAGS   += -Werror -Wmissing-prototypes
-CFLAGS   += -I. -I./include $(CFLAGS_xeninclude)
-CFLAGS   += -D__XEN_TOOLS__
+CFLAGS   += $(INCLUDES) -I. -I../xenstore -I../include
 
 # Needed for posix_fadvise64() in xc_linux.c
 CFLAGS-$(CONFIG_Linux) += -D_GNU_SOURCE
 
-CFLAGS	+= $(PTHREAD_CFLAGS)
-CFLAGS	+= $(CFLAGS_libxentoollog)
-CFLAGS	+= $(CFLAGS_libxenevtchn)
-CFLAGS	+= $(CFLAGS_libxendevicemodel)
+# Define this to make it possible to run valgrind on code linked with these
+# libraries.
+#CFLAGS   += -DVALGRIND -O0 -ggdb3
+
+LDFLAGS  += -L.
 
 CTRL_LIB_OBJS := $(patsubst %.c,%.o,$(CTRL_SRCS-y))
 CTRL_PIC_OBJS := $(patsubst %.c,%.opic,$(CTRL_SRCS-y))
@@ -122,59 +75,15 @@ CTRL_PIC_OBJS := $(patsubst %.c,%.opic,$(CTRL_SRCS-y))
 GUEST_LIB_OBJS := $(patsubst %.c,%.o,$(GUEST_SRCS-y))
 GUEST_PIC_OBJS := $(patsubst %.c,%.opic,$(GUEST_SRCS-y))
 
-$(CTRL_LIB_OBJS) $(GUEST_LIB_OBJS) \
-$(CTRL_PIC_OBJS) $(GUEST_PIC_OBJS): CFLAGS += -include $(XEN_ROOT)/tools/config.h
-
-# libxenguest includes xc_private.h, so needs this despite not using
-# this functionality directly.
-$(CTRL_LIB_OBJS) $(GUEST_LIB_OBJS) \
-$(CTRL_PIC_OBJS) $(GUEST_PIC_OBJS): CFLAGS += $(CFLAGS_libxencall) $(CFLAGS_libxenforeignmemory)
-
-$(CTRL_LIB_OBJS) $(CTRL_PIC_OBJS): CFLAGS += $(CFLAGS_libxengnttab)
-
 LIB := libxenctrl.a
-ifneq ($(nosharedlibs),y)
+ifneq ($(stubdom),y)
 LIB += libxenctrl.so libxenctrl.so.$(MAJOR) libxenctrl.so.$(MAJOR).$(MINOR)
 endif
 
 LIB += libxenguest.a
-ifneq ($(nosharedlibs),y)
+ifneq ($(stubdom),y)
 LIB += libxenguest.so libxenguest.so.$(MAJOR) libxenguest.so.$(MAJOR).$(MINOR)
 endif
-
-genpath-target = $(call buildmakevars2header,_paths.h)
-$(eval $(genpath-target))
-
-xc_private.h: _paths.h
-
-ifeq ($(CONFIG_X86),y)
-
-_xc_cpuid_autogen.h: $(XEN_ROOT)/xen/include/public/arch-x86/cpufeatureset.h $(XEN_ROOT)/xen/tools/gen-cpuid.py
-	$(PYTHON) $(XEN_ROOT)/xen/tools/gen-cpuid.py -i $^ -o $@.new
-	$(call move-if-changed,$@.new,$@)
-
-build: _xc_cpuid_autogen.h
-endif
-
-$(CTRL_LIB_OBJS) $(GUEST_LIB_OBJS) \
-$(CTRL_PIC_OBJS) $(GUEST_PIC_OBJS): xc_private.h
-
-PKG_CONFIG := xencontrol.pc xenguest.pc
-PKG_CONFIG_VERSION := $(MAJOR).$(MINOR)
-
-ifneq ($(CONFIG_LIBXC_MINIOS),y)
-PKG_CONFIG_INST := $(PKG_CONFIG)
-$(PKG_CONFIG_INST): PKG_CONFIG_PREFIX = $(prefix)
-$(PKG_CONFIG_INST): PKG_CONFIG_INCDIR = $(includedir)
-$(PKG_CONFIG_INST): PKG_CONFIG_LIBDIR = $(libdir)
-endif
-
-PKG_CONFIG_LOCAL := $(foreach pc,$(PKG_CONFIG),$(PKG_CONFIG_DIR)/$(pc))
-
-$(PKG_CONFIG_LOCAL): PKG_CONFIG_PREFIX = $(XEN_ROOT)
-$(PKG_CONFIG_LOCAL): PKG_CONFIG_INCDIR = $(XEN_LIBXC)/include
-$(PKG_CONFIG_LOCAL): PKG_CONFIG_LIBDIR = $(CURDIR)
-$(PKG_CONFIG_LOCAL): PKG_CONFIG_CFLAGS_LOCAL = $(CFLAGS_xeninclude)
 
 .PHONY: all
 all: build
@@ -184,40 +93,23 @@ build:
 	$(MAKE) libs
 
 .PHONY: libs
-libs: $(LIB) $(PKG_CONFIG_INST) $(PKG_CONFIG_LOCAL)
+libs: $(LIB)
 
 .PHONY: install
 install: build
-	$(INSTALL_DIR) $(DESTDIR)$(libdir)
-	$(INSTALL_DIR) $(DESTDIR)$(includedir)
-	$(INSTALL_SHLIB) libxenctrl.so.$(MAJOR).$(MINOR) $(DESTDIR)$(libdir)
-	$(INSTALL_DATA) libxenctrl.a $(DESTDIR)$(libdir)
-	$(SYMLINK_SHLIB) libxenctrl.so.$(MAJOR).$(MINOR) $(DESTDIR)$(libdir)/libxenctrl.so.$(MAJOR)
-	$(SYMLINK_SHLIB) libxenctrl.so.$(MAJOR) $(DESTDIR)$(libdir)/libxenctrl.so
-	$(INSTALL_DATA) include/xenctrl.h include/xenctrl_compat.h $(DESTDIR)$(includedir)
-	$(INSTALL_SHLIB) libxenguest.so.$(MAJOR).$(MINOR) $(DESTDIR)$(libdir)
-	$(INSTALL_DATA) libxenguest.a $(DESTDIR)$(libdir)
-	$(SYMLINK_SHLIB) libxenguest.so.$(MAJOR).$(MINOR) $(DESTDIR)$(libdir)/libxenguest.so.$(MAJOR)
-	$(SYMLINK_SHLIB) libxenguest.so.$(MAJOR) $(DESTDIR)$(libdir)/libxenguest.so
-	$(INSTALL_DATA) include/xenguest.h $(DESTDIR)$(includedir)
-	$(INSTALL_DATA) xencontrol.pc $(DESTDIR)$(PKG_INSTALLDIR)
-	$(INSTALL_DATA) xenguest.pc $(DESTDIR)$(PKG_INSTALLDIR)
+	$(INSTALL_DIR) $(DESTDIR)$(LIBDIR)
+	$(INSTALL_DIR) $(DESTDIR)$(INCLUDEDIR)
+	$(INSTALL_PROG) libxenctrl.so.$(MAJOR).$(MINOR) $(DESTDIR)$(LIBDIR)
+	$(INSTALL_DATA) libxenctrl.a $(DESTDIR)$(LIBDIR)
+	ln -sf libxenctrl.so.$(MAJOR).$(MINOR) $(DESTDIR)$(LIBDIR)/libxenctrl.so.$(MAJOR)
+	ln -sf libxenctrl.so.$(MAJOR) $(DESTDIR)$(LIBDIR)/libxenctrl.so
+	$(INSTALL_DATA) xenctrl.h $(DESTDIR)$(INCLUDEDIR)
 
-.PHONY: uninstall
-uninstall:
-	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xenguest.pc
-	rm -f $(DESTDIR)$(includedir)/xenguest.h
-	rm -f $(DESTDIR)$(libdir)/libxenguest.so
-	rm -f $(DESTDIR)$(libdir)/libxenguest.so.$(MAJOR)
-	rm -f $(DESTDIR)$(libdir)/libxenguest.so.$(MAJOR).$(MINOR)
-	rm -f $(DESTDIR)$(libdir)/libxenguest.a
-	rm -f $(DESTDIR)$(PKG_INSTALLDIR)/xencontrol.pc
-	rm -f $(DESTDIR)$(includedir)/xenctrl.h
-	rm -f $(DESTDIR)$(includedir)/xenctrl_compat.h
-	rm -f $(DESTDIR)$(libdir)/libxenctrl.so
-	rm -f $(DESTDIR)$(libdir)/libxenctrl.so.$(MAJOR)
-	rm -f $(DESTDIR)$(libdir)/libxenctrl.so.$(MAJOR).$(MINOR)
-	rm -f $(DESTDIR)$(libdir)/libxenctrl.a
+	$(INSTALL_PROG) libxenguest.so.$(MAJOR).$(MINOR) $(DESTDIR)$(LIBDIR)
+	$(INSTALL_DATA) libxenguest.a $(DESTDIR)$(LIBDIR)
+	ln -sf libxenguest.so.$(MAJOR).$(MINOR) $(DESTDIR)$(LIBDIR)/libxenguest.so.$(MAJOR)
+	ln -sf libxenguest.so.$(MAJOR) $(DESTDIR)$(LIBDIR)/libxenguest.so
+	$(INSTALL_DATA) xenguest.h $(DESTDIR)$(INCLUDEDIR)
 
 .PHONY: TAGS
 TAGS:
@@ -225,14 +117,9 @@ TAGS:
 
 .PHONY: clean
 clean:
-	rm -rf *.rpm $(LIB) *~ $(DEPS_RM) \
-            _paths.h \
-	    xencontrol.pc xenguest.pc \
+	rm -rf *.rpm $(LIB) *~ $(DEPS) \
             $(CTRL_LIB_OBJS) $(CTRL_PIC_OBJS) \
             $(GUEST_LIB_OBJS) $(GUEST_PIC_OBJS)
-
-.PHONY: distclean
-distclean: clean
 
 .PHONY: rpm
 rpm: build
@@ -250,12 +137,12 @@ libxenctrl.a: $(CTRL_LIB_OBJS)
 	$(AR) rc $@ $^
 
 libxenctrl.so: libxenctrl.so.$(MAJOR)
-	$(SYMLINK_SHLIB) $< $@
+	ln -sf $< $@
 libxenctrl.so.$(MAJOR): libxenctrl.so.$(MAJOR).$(MINOR)
-	$(SYMLINK_SHLIB) $< $@
+	ln -sf $< $@
 
 libxenctrl.so.$(MAJOR).$(MINOR): $(CTRL_PIC_OBJS)
-	$(CC) $(LDFLAGS) $(PTHREAD_LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxenctrl.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $^ $(LDLIBS_libxentoollog) $(LDLIBS_libxenevtchn) $(LDLIBS_libxengnttab) $(LDLIBS_libxencall) $(LDLIBS_libxenforeignmemory) $(LDLIBS_libxendevicemodel) $(PTHREAD_LIBS) $(APPEND_LDFLAGS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxenctrl.so.$(MAJOR) $(SHLIB_CFLAGS) -o $@ $^ $(PTHREAD_LIBS)
 
 # libxenguest
 
@@ -263,22 +150,31 @@ libxenguest.a: $(GUEST_LIB_OBJS)
 	$(AR) rc $@ $^
 
 libxenguest.so: libxenguest.so.$(MAJOR)
-	$(SYMLINK_SHLIB) $< $@
+	ln -sf $< $@
 libxenguest.so.$(MAJOR): libxenguest.so.$(MAJOR).$(MINOR)
-	$(SYMLINK_SHLIB) $< $@
+	ln -sf $< $@
 
 ifeq ($(CONFIG_MiniOS),y)
 zlib-options =
 else
-zlib-options = $(ZLIB)
+zlib-options = $(shell					\
+	(. ../check/funcs.sh;				\
+	 if has_header bzlib.h; then			\
+           echo "-DHAVE_BZLIB";				\
+	   echo "-lbz2";				\
+	 fi;						\
+	 if has_header lzma.h; then			\
+	   echo "-DHAVE_LZMA";				\
+	   echo "-llzma";				\
+	 fi) | grep $(1))
 endif
 
-xc_dom_bzimageloader.o: CFLAGS += $(filter -D%,$(zlib-options))
-xc_dom_bzimageloader.opic: CFLAGS += $(filter -D%,$(zlib-options))
+xc_dom_bzimageloader.o: CFLAGS += $(call zlib-options,D)
+xc_dom_bzimageloader.opic: CFLAGS += $(call zlib-options,D)
 
-libxenguest.so.$(MAJOR).$(MINOR): COMPRESSION_LIBS = $(filter -l%,$(zlib-options))
+libxenguest.so.$(MAJOR).$(MINOR): LDFLAGS += $(call zlib-options,l)
 libxenguest.so.$(MAJOR).$(MINOR): $(GUEST_PIC_OBJS) libxenctrl.so
-	$(CC) $(LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxenguest.so.$(MAJOR) $(SHLIB_LDFLAGS) -o $@ $(GUEST_PIC_OBJS) $(COMPRESSION_LIBS) -lz $(LDLIBS_libxenevtchn) $(LDLIBS_libxenctrl) $(PTHREAD_LIBS) $(APPEND_LDFLAGS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -Wl,$(SONAME_LDFLAG) -Wl,libxenguest.so.$(MAJOR) $(SHLIB_CFLAGS) -o $@ $(GUEST_PIC_OBJS) -lz -lxenctrl $(PTHREAD_LIBS)
 
--include $(DEPS_INCLUDE)
+-include $(DEPS)
 

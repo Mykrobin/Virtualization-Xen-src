@@ -122,15 +122,35 @@ fail:
 static int load_plugins(void)
 {
 	const char *fsdir = getenv("FSIMAGE_FSDIR");
+	const char *isadir = "";
 	struct dirent *dp = NULL;
+	struct dirent *dpp;
 	DIR *dir = NULL;
 	char *tmp = NULL;
 	size_t name_max;
 	int err;
 	int ret = -1;
 
+#if defined(FSIMAGE_FSDIR)
 	if (fsdir == NULL)
 		fsdir = FSIMAGE_FSDIR;
+#elif defined(__sun__)
+	if (fsdir == NULL)
+		fsdir = "/usr/lib/fs";
+
+	if (sizeof(void *) == 8)
+		isadir = "64/";
+#elif defined(__ia64__)
+	if (fsdir == NULL)
+		fsdir = "/usr/lib/fs";
+#else
+	if (fsdir == NULL) {
+		if (sizeof(void *) == 8)
+			fsdir = "/usr/lib64/fs";
+		else
+			fsdir = "/usr/lib/fs";
+	}
+#endif
 
 	if ((name_max = pathconf(fsdir, _PC_NAME_MAX)) == -1)
 		goto fail;
@@ -138,26 +158,22 @@ static int load_plugins(void)
 	if ((tmp = malloc(name_max + 1)) == NULL)
 		goto fail;
 
+	if ((dp = malloc(sizeof (struct dirent) + name_max + 1)) == NULL)
+		goto fail;
+
 	if ((dir = opendir(fsdir)) == NULL)
 		goto fail;
 
-	for (;;) {
-		errno = 0;
-		dp = readdir(dir);
+	bzero(dp, sizeof (struct dirent) + name_max + 1);
 
-		if (dp == NULL && errno != 0)
-			goto fail;
-
-		if (dp == NULL)
-			break;
-
-		if (strcmp(dp->d_name, ".") == 0)
+	while (readdir_r(dir, dp, &dpp) == 0 && dpp != NULL) {
+		if (strcmp(dpp->d_name, ".") == 0)
 			continue;
-		if (strcmp(dp->d_name, "..") == 0)
+		if (strcmp(dpp->d_name, "..") == 0)
 			continue;
 
-		(void) snprintf(tmp, name_max, "%s/%s/fsimage.so", fsdir,
-			dp->d_name);
+		(void) snprintf(tmp, name_max, "%s/%s/%sfsimage.so", fsdir,
+		    dpp->d_name, isadir);
 
 		if (init_plugin(tmp) != 0)
 			goto fail;

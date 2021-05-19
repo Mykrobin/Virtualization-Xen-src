@@ -23,15 +23,12 @@
 #include <string.h>
 #include <getopt.h>
 #include <assert.h>
-#include <ctype.h>
-#include <poll.h>
+#include <sys/poll.h>
 #include <sys/statvfs.h>
 
 #include <xen/xen.h>
 #include <xen/trace.h>
 
-#define XC_WANT_COMPAT_MAP_FOREIGN_API
-#include <xenevtchn.h>
 #include <xenctrl.h>
 
 #define PERROR(_m, _a...)                                       \
@@ -48,14 +45,14 @@ do {                                                            \
 /* sleep for this long (milliseconds) between checking the trace buffers */
 #define POLL_SLEEP_MILLIS 100
 
-#define DEFAULT_TBUF_SIZE 32
+#define DEFAULT_TBUF_SIZE 20
 /***** The code **************************************************************/
 
 typedef struct settings_st {
     char *outfile;
     unsigned long poll_sleep; /* milliseconds to sleep between polls */
     uint32_t evt_mask;
-    char *cpu_mask_str;
+    uint32_t cpu_mask;
     unsigned long tbuf_size;
     unsigned long disk_rsvd;
     unsigned long timeout;
@@ -75,8 +72,8 @@ settings_t opts;
 
 int interrupted = 0; /* gets set if we get a SIGHUP */
 
-static xc_interface *xc_handle;
-static xenevtchn_handle *xce_handle = NULL;
+static int xc_handle = -1;
+static int event_fd = -1;
 static int virq_port = -1;
 static int outfd = 1;
 
@@ -427,19 +424,23 @@ fail:
 
 static void disable_tbufs(void)
 {
-    xc_interface *xc_handle = xc_interface_open(0,0,0);
+    int xc_handle = xc_interface_open();
+    int ret;
 
-    if ( !xc_handle ) 
+    if ( xc_handle < 0 ) 
     {
         perror("Couldn't open xc handle to disable tbufs.");
-        return;
+        goto out;
     }
 
-    if ( xc_tbuf_disable(xc_handle) != 0 )
+    ret = xc_tbuf_disable(xc_handle);
+
+    if ( ret != 0 )
     {
         perror("Couldn't disable trace buffers");
     }
 
+out:
     xc_interface_close(xc_handle);
 }
 
@@ -509,7 +510,7 @@ static struct t_struct *map_tbufs(unsigned long tbufs_mfn, unsigned int num,
         for ( j=0; j<tbufs.t_info->tbuf_size; j++)
             pfn_list[j] = (xen_pfn_t)mfn_list[j];
 
-        tbufs.meta[i] = xc_map_foreign_pages(xc_handle, DOMID_XEN,
+        tbufs.meta[i] = xc_map_foreign_batch(xc_handle, DOMID_XEN,
                                              PROT_READ | PROT_WRITE,
                                              pfn_list,
                                              tbufs.t_info->tbuf_size);
@@ -524,52 +525,23 @@ static struct t_struct *map_tbufs(unsigned long tbufs_mfn, unsigned int num,
     return &tbufs;
 }
 
-void print_cpu_mask(xc_cpumap_t map)
-{
-    unsigned int v, had_printed = 0;
-    int i;
-
-    fprintf(stderr, "change cpumask to 0x");
-
-    for ( i = xc_get_cpumap_size(xc_handle); i >= 0; i-- )
-    {
-        v = map[i];
-        if ( v || had_printed || !i ) {
-            if (had_printed)
-                fprintf(stderr,"%02x", v);
-            else
-                fprintf(stderr,"%x", v);
-            had_printed = 1;
-        }
-   }
-   fprintf(stderr, "\n");
-}
-
-static int set_cpu_mask(xc_cpumap_t map)
-{
-    int ret = xc_tbuf_set_cpu_mask(xc_handle, map);
-
-    if ( ret == 0 )
-    {
-        print_cpu_mask(map);
-        return 0;
-    }
-    PERROR("Failure to get trace buffer pointer from Xen and set the new mask");
-    return EXIT_FAILURE;
-}
-
 /**
- * set_mask - set the event mask in HV
+ * set_mask - set the cpu/event mask in HV
  * @mask:           the new mask 
  * @type:           the new mask type,0-event mask, 1-cpu mask
  *
  */
-static void set_evt_mask(uint32_t mask)
+static void set_mask(uint32_t mask, int type)
 {
     int ret = 0;
 
-    ret = xc_tbuf_set_evt_mask(xc_handle, mask);
-    fprintf(stderr, "change evtmask to 0x%x\n", mask);
+    if (type == 1) {
+        ret = xc_tbuf_set_cpu_mask(xc_handle, mask);
+        fprintf(stderr, "change cpumask to 0x%x\n", mask);
+    } else if (type == 0) {
+        ret = xc_tbuf_set_evt_mask(xc_handle, mask);
+        fprintf(stderr, "change evtmask to 0x%x\n", mask);
+    }
 
     if ( ret != 0 )
     {
@@ -604,13 +576,14 @@ static void event_init(void)
 {
     int rc;
 
-    xce_handle = xenevtchn_open(NULL, 0);
-    if (xce_handle == NULL) {
-        perror("event channel open");
+    rc = xc_evtchn_open();
+    if (rc < 0) {
+        perror(xc_get_last_error()->message);
         exit(EXIT_FAILURE);
     }
+    event_fd = rc;
 
-    rc = xenevtchn_bind_virq(xce_handle, VIRQ_TBUF);
+    rc = xc_evtchn_bind_virq(event_fd, VIRQ_TBUF);
     if (rc == -1) {
         PERROR("failed to bind to VIRQ port");
         exit(EXIT_FAILURE);
@@ -625,7 +598,7 @@ static void event_init(void)
 static void wait_for_event_or_timeout(unsigned long milliseconds)
 {
     int rc;
-    struct pollfd fd = { .fd = xenevtchn_fd(xce_handle),
+    struct pollfd fd = { .fd = event_fd,
                          .events = POLLIN | POLLERR };
     int port;
 
@@ -638,7 +611,7 @@ static void wait_for_event_or_timeout(unsigned long milliseconds)
     }
 
     if (rc == 1) {
-        port = xenevtchn_pending(xce_handle);
+        port = xc_evtchn_pending(event_fd);
         if (port == -1) {
             PERROR("failed to read port from evtchn");
             exit(EXIT_FAILURE);
@@ -649,7 +622,7 @@ static void wait_for_event_or_timeout(unsigned long milliseconds)
                     port, virq_port);
             exit(EXIT_FAILURE);
         }
-        rc = xenevtchn_unmask(xce_handle, port);
+        rc = xc_evtchn_unmask(event_fd, port);
         if (rc == -1) {
             PERROR("failed to write port to evtchn");
             exit(EXIT_FAILURE);
@@ -806,8 +779,7 @@ static void usage(void)
 "Usage: xentrace [OPTION...] [output file]\n" \
 "Tool to capture Xen trace buffer data\n" \
 "\n" \
-"  -c, --cpu-mask=c        Set cpu-mask, using either hex, CPU ranges, or\n" \
-"                          for all CPUs\n" \
+"  -c, --cpu-mask=c        Set cpu-mask\n" \
 "  -e, --evt-mask=e        Set evt-mask\n" \
 "  -s, --poll-sleep=p      Set sleep time, p, in milliseconds between\n" \
 "                          polling the trace buffer for new data\n" \
@@ -891,11 +863,10 @@ long sargtol(const char *restrict arg, int base)
 
 
     return val;
-
 invalid:
+    return 0;
     fprintf(stderr, "Invalid option argument: %s\n\n", arg);
     usage();
-    return 0; /* not actually reached */
 }
 
 /* convert the argument string pointed to by arg to a long int representation */
@@ -939,134 +910,6 @@ static int parse_evtmask(char *arg)
     return 0;
 }
 
-#define ZERO_DIGIT '0'
-
-#define is_terminator(c) ((c)=='\0' || (c)==',')
-
-static int parse_cpumask_range(const char *mask_str, xc_cpumap_t map)
-{
-    unsigned int a, b;
-    int nmaskbits;
-    char c;
-    int in_range;
-    const char *s;
-
-    nmaskbits = xc_get_max_cpus(xc_handle);
-    if ( nmaskbits <= 0 )
-    {
-        fprintf(stderr, "Failed to get max number of CPUs! rc: %d\n", nmaskbits);
-        return EXIT_FAILURE;
-    }
-
-    c = 0;
-    s = mask_str;
-    do {
-        in_range = 0;
-        a = b = 0;
-
-        /* Process until we find a range terminator */
-        for ( c=*s++; !is_terminator(c); c=*s++ )
-        {
-            if ( c == '-' )
-            {
-                if ( in_range )
-                        goto err_out;
-                b = 0;
-                in_range = 1;
-                continue;
-            }
-
-            if ( !isdigit(c) )
-            {
-                fprintf(stderr, "Invalid character in cpumask: %s\n", mask_str);
-                goto err_out;
-            }
-
-            b = b * 10 + (c - ZERO_DIGIT);
-            if ( !in_range )
-                a = b;
-        }
-
-        /* Syntax: <digit>-[,] - expand to number of CPUs. */
-        if ( b == 0 && in_range )
-            b = nmaskbits-1;
-
-        if ( a > b )
-        {
-            fprintf(stderr, "Wrong order of %d and %d\n", a, b);
-            goto err_out;
-        }
-
-        if ( b >= nmaskbits )
-        {
-            fprintf(stderr, "Specified higher value then there are CPUS!\n");
-            goto err_out;
-        }
-
-        while ( a <= b )
-        {
-            xc_cpumap_setcpu(a, map);
-            a++;
-        }
-    } while ( c );
-
-    return 0;
- err_out:
-    errno = EINVAL;
-    return EXIT_FAILURE;
-}
-
-/**
- * Figure out which of the CPU types the user has provided - either the hex
- * variant, the cpu-list, or 'all'. Once done set the CPU mask.
- */
-static int parse_cpu_mask(void)
-{
-    int i, ret = EXIT_FAILURE;
-    xc_cpumap_t map;
-
-    map = xc_cpumap_alloc(xc_handle);
-    if ( !map )
-        goto out;
-
-    if ( strlen(opts.cpu_mask_str) < 1 )
-    {
-        errno = ENOSPC;
-        goto out;
-    }
-
-    ret = 0;
-    if ( strncmp("0x", opts.cpu_mask_str, 2) == 0 )
-    {
-        uint32_t v;
-
-        v = argtol(opts.cpu_mask_str, 0);
-        /*
-         * If mask is set, copy the bits out of it.  This still works for
-         * systems with more than 32 cpus, as the shift will just shift
-         * mask down to zero.
-         */
-        for ( i = 0; i < sizeof(uint32_t); i++ )
-            map[i] = (v >> (i * 8)) & 0xff;
-    }
-    else if ( strcmp("all", opts.cpu_mask_str) == 0 )
-    {
-        for ( i = 0; i < xc_get_cpumap_size(xc_handle); i++ )
-            map[i] = 0xff;
-    }
-    else
-        ret = parse_cpumask_range(opts.cpu_mask_str, map);
-
-    if ( !ret )
-        ret = set_cpu_mask(map);
- out:
-    /* We don't use them pass this point. */
-    free(map);
-    free(opts.cpu_mask_str);
-    opts.cpu_mask_str = NULL;
-    return ret;
-}
-
 /* parse command line arguments */
 static void parse_args(int argc, char **argv)
 {
@@ -1097,9 +940,10 @@ static void parse_args(int argc, char **argv)
             opts.poll_sleep = argtol(optarg, 0);
             break;
 
-        case 'c': /* set new cpu mask for filtering (when xch is set). */
-            opts.cpu_mask_str = strdup(optarg);
+        case 'c': /* set new cpu mask for filtering*/
+            opts.cpu_mask = argtol(optarg, 0);
             break;
+        
         case 'e': /* set new event mask for filtering*/
             parse_evtmask(optarg);
             break;
@@ -1162,7 +1006,7 @@ int main(int argc, char **argv)
     opts.outfile = 0;
     opts.poll_sleep = POLL_SLEEP_MILLIS;
     opts.evt_mask = 0;
-    opts.cpu_mask_str = NULL;
+    opts.cpu_mask = 0;
     opts.disk_rsvd = 0;
     opts.disable_tracing = 1;
     opts.start_disabled = 0;
@@ -1170,21 +1014,18 @@ int main(int argc, char **argv)
 
     parse_args(argc, argv);
 
-    xc_handle = xc_interface_open(0,0,0);
-    if ( !xc_handle ) 
+    xc_handle = xc_interface_open();
+    if ( xc_handle < 0 ) 
     {
-        perror("xenctrl interface open");
+        perror(xc_get_last_error()->message);
         exit(EXIT_FAILURE);
     }
 
     if ( opts.evt_mask != 0 )
-        set_evt_mask(opts.evt_mask);
+        set_mask(opts.evt_mask, 0);
 
-    if ( opts.cpu_mask_str )
-    {
-        if ( parse_cpu_mask() )
-            exit(EXIT_FAILURE);
-    }
+    if ( opts.cpu_mask != 0 )
+        set_mask(opts.cpu_mask, 1);
 
     if ( opts.timeout != 0 ) 
         alarm(opts.timeout);
@@ -1222,11 +1063,10 @@ int main(int argc, char **argv)
 
     return ret;
 }
-
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

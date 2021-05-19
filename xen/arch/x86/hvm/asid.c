@@ -13,19 +13,17 @@
  * more details.
  *
  * You should have received a copy of the GNU General Public License along with
- * this program; If not, see <http://www.gnu.org/licenses/>.
+ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+ * Place - Suite 330, Boston, MA 02111-1307 USA.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
 #include <xen/smp.h>
 #include <xen/percpu.h>
 #include <asm/hvm/asid.h>
-
-/* Xen command-line option to enable ASIDs */
-static int opt_asid_enabled = 1;
-boolean_param("asid", opt_asid_enabled);
 
 /*
  * ASIDs partition the physical TLB.  In the current implementation ASIDs are
@@ -50,21 +48,30 @@ boolean_param("asid", opt_asid_enabled);
 
 /* Per-CPU ASID management. */
 struct hvm_asid_data {
-   uint64_t core_asid_generation;
-   uint32_t next_asid;
-   uint32_t max_asid;
+   u64 core_asid_generation;
+   u32 next_asid;
+   u32 max_asid;
    bool_t disabled;
+   bool_t initialised;
 };
 
 static DEFINE_PER_CPU(struct hvm_asid_data, hvm_asid_data);
 
 void hvm_asid_init(int nasids)
 {
-    static int8_t g_disabled = -1;
+    static s8 g_disabled = -1;
     struct hvm_asid_data *data = &this_cpu(hvm_asid_data);
 
+    /*
+     * If already initialised, we just bump the generation to force a TLB
+     * flush. Resetting the generation could be dangerous, if VCPUs still
+     * exist that reference earlier generations on this CPU.
+     */
+    if ( test_and_set_bool(data->initialised) )
+        return hvm_asid_flush_core();
+
     data->max_asid = nasids - 1;
-    data->disabled = !opt_asid_enabled || (nasids <= 1);
+    data->disabled = (nasids <= 1);
 
     if ( g_disabled != data->disabled )
     {
@@ -80,15 +87,9 @@ void hvm_asid_init(int nasids)
     data->next_asid = 1;
 }
 
-void hvm_asid_flush_vcpu_asid(struct hvm_vcpu_asid *asid)
-{
-    asid->generation = 0;
-}
-
 void hvm_asid_flush_vcpu(struct vcpu *v)
 {
-    hvm_asid_flush_vcpu_asid(&v->arch.hvm_vcpu.n1asid);
-    hvm_asid_flush_vcpu_asid(&vcpu_nestedhvm(v).nv_n2asid);
+    v->arch.hvm_vcpu.asid_generation = 0;
 }
 
 void hvm_asid_flush_core(void)
@@ -99,7 +100,10 @@ void hvm_asid_flush_core(void)
         return;
 
     if ( likely(++data->core_asid_generation != 0) )
+    {
+        data->next_asid = 1;
         return;
+    }
 
     /*
      * ASID generations are 64 bit.  Overflow of generations never happens.
@@ -110,47 +114,42 @@ void hvm_asid_flush_core(void)
     data->disabled = 1;
 }
 
-bool_t hvm_asid_handle_vmenter(struct hvm_vcpu_asid *asid)
+bool_t hvm_asid_handle_vmenter(void)
 {
+    struct vcpu *curr = current;
     struct hvm_asid_data *data = &this_cpu(hvm_asid_data);
 
     /* On erratum #170 systems we must flush the TLB. 
      * Generation overruns are taken here, too. */
     if ( data->disabled )
-        goto disabled;
+    {
+        curr->arch.hvm_vcpu.asid = 0;
+        return 0;
+    }
 
     /* Test if VCPU has valid ASID. */
-    if ( asid->generation == data->core_asid_generation )
+    if ( curr->arch.hvm_vcpu.asid_generation == data->core_asid_generation )
         return 0;
 
     /* If there are no free ASIDs, need to go to a new generation */
     if ( unlikely(data->next_asid > data->max_asid) )
-    {
         hvm_asid_flush_core();
-        data->next_asid = 1;
-        if ( data->disabled )
-            goto disabled;
-    }
 
     /* Now guaranteed to be a free ASID. */
-    asid->asid = data->next_asid++;
-    asid->generation = data->core_asid_generation;
+    curr->arch.hvm_vcpu.asid = data->next_asid++;
+    curr->arch.hvm_vcpu.asid_generation = data->core_asid_generation;
 
     /*
      * When we assign ASID 1, flush all TLB entries as we are starting a new
      * generation, and all old ASID allocations are now stale. 
      */
-    return (asid->asid == 1);
-
- disabled:
-    asid->asid = 0;
-    return 0;
+    return (curr->arch.hvm_vcpu.asid == 1);
 }
 
 /*
  * Local variables:
  * mode: C
- * c-file-style: "BSD"
+ * c-set-style: "BSD"
  * c-basic-offset: 4
  * tab-width: 4
  * indent-tabs-mode: nil

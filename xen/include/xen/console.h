@@ -7,23 +7,22 @@
 #ifndef __CONSOLE_H__
 #define __CONSOLE_H__
 
-#include <xen/inttypes.h>
+#include <xen/spinlock.h>
+#include <xen/guest_access.h>
 #include <public/xen.h>
 
 struct xen_sysctl_readconsole;
 long read_console_ring(struct xen_sysctl_readconsole *op);
 
 void console_init_preirq(void);
-void console_init_ring(void);
 void console_init_postirq(void);
 void console_endboot(void);
 int console_has(const char *device);
 
 int fill_console_start_info(struct dom0_vga_console_info *);
 
-unsigned long console_lock_recursive_irqsave(void);
-void console_unlock_recursive_irqrestore(unsigned long flags);
 void console_force_unlock(void);
+void console_force_lock(void);
 
 void console_start_sync(void);
 void console_end_sync(void);

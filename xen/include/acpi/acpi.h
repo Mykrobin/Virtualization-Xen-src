@@ -44,8 +44,6 @@
 #ifndef __ACPI_H__
 #define __ACPI_H__
 
-#define PREFIX			"ACPI: "
-
 /*
  * Common includes for all ACPI driver files
  * We put them here because we don't want to duplicate them
@@ -62,6 +60,8 @@
 #include "acoutput.h"		/* Error output and Debug macros */
 #include "acpiosxf.h"		/* Interfaces to the ACPI-to-OS layer */
 #include "acpixf.h"		/* ACPI core subsystem external interfaces */
+#include "acobject.h"		/* ACPI internal object */
+#include "acstruct.h"		/* Common structures */
 #include "acglobal.h"		/* All global variables */
 #include "achware.h"		/* Hardware defines and interfaces */
 #include "acutils.h"		/* Utility interfaces */
