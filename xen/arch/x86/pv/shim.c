@@ -37,6 +37,8 @@
 
 #include <compat/grant_table.h>
 
+#undef mfn_to_page
+#define mfn_to_page(mfn) __mfn_to_page(mfn_x(mfn))
 #undef virt_to_mfn
 #define virt_to_mfn(va) _mfn(__virt_to_mfn(va))
 
@@ -158,7 +160,6 @@ void __init pv_shim_setup_dom(struct domain *d, l4_pgentry_t *l4start,
                               unsigned long console_va, unsigned long vphysmap,
                               start_info_t *si)
 {
-    hypercall_table_t *rw_pv_hypercall_table;
     uint64_t param = 0;
     long rc;
 
@@ -169,7 +170,8 @@ void __init pv_shim_setup_dom(struct domain *d, l4_pgentry_t *l4start,
     (si) = param;                                                              \
     if ( va )                                                                  \
     {                                                                          \
-        share_xen_page_with_guest(mfn_to_page(_mfn(param)), d, SHARE_rw);      \
+        share_xen_page_with_guest(mfn_to_page(_mfn(param)), d,                 \
+                                  XENSHARE_writable);                          \
         replace_va_mapping(d, l4start, va, _mfn(param));                       \
         dom0_update_physmap(d, PFN_DOWN((va) - va_start), param, vphysmap);    \
     }                                                                          \
@@ -196,26 +198,19 @@ void __init pv_shim_setup_dom(struct domain *d, l4_pgentry_t *l4start,
         clear_page(page);
         console_mfn = virt_to_mfn(page);
         si->console.domU.mfn = mfn_x(console_mfn);
-        share_xen_page_with_guest(mfn_to_page(console_mfn), d, SHARE_rw);
+        share_xen_page_with_guest(mfn_to_page(console_mfn), d,
+                                  XENSHARE_writable);
         replace_va_mapping(d, l4start, console_va, console_mfn);
         dom0_update_physmap(d, (console_va - va_start) >> PAGE_SHIFT,
                             mfn_x(console_mfn), vphysmap);
         consoled_set_ring_addr(page);
     }
-
-    /*
-     * Locate pv_hypercall_table[] (usually .rodata) in the directmap (which
-     * is writeable) and insert some shim-specific hypercall handlers.
-     */
-    rw_pv_hypercall_table = __va(__pa(pv_hypercall_table));
-    rw_pv_hypercall_table[__HYPERVISOR_event_channel_op].native =
-        rw_pv_hypercall_table[__HYPERVISOR_event_channel_op].compat =
-        (hypercall_fn_t *)pv_shim_event_channel_op;
-
-    rw_pv_hypercall_table[__HYPERVISOR_grant_table_op].native =
-        rw_pv_hypercall_table[__HYPERVISOR_grant_table_op].compat =
-        (hypercall_fn_t *)pv_shim_grant_table_op;
-
+    pv_hypercall_table_replace(__HYPERVISOR_event_channel_op,
+                               (hypercall_fn_t *)pv_shim_event_channel_op,
+                               (hypercall_fn_t *)pv_shim_event_channel_op);
+    pv_hypercall_table_replace(__HYPERVISOR_grant_table_op,
+                               (hypercall_fn_t *)pv_shim_grant_table_op,
+                               (hypercall_fn_t *)pv_shim_grant_table_op);
     guest = d;
 
     /*
@@ -470,9 +465,6 @@ static long pv_shim_event_channel_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         else
             rc = xen_hypercall_event_channel_op(EVTCHNOP_status, &status);
 
-        if ( !rc && __copy_to_guest(arg, &status, 1) )
-            rc = -EFAULT;
-
         break;
     }
 
@@ -612,7 +604,11 @@ void pv_shim_inject_evtchn(unsigned int port)
     {
         struct evtchn *chn = evtchn_from_port(guest, port);
 
-        evtchn_port_set_pending(guest, chn->notify_vcpu_id, chn);
+        if ( evtchn_read_trylock(chn) )
+        {
+            evtchn_port_set_pending(guest, chn->notify_vcpu_id, chn);
+            evtchn_read_unlock(chn);
+        }
     }
 }
 
@@ -847,7 +843,7 @@ static unsigned long batch_memory_op(unsigned int cmd, unsigned int order,
     set_xen_guest_handle(xmr.extent_start, pfns);
     page_list_for_each ( pg, list )
     {
-        pfns[xmr.nr_extents++] = mfn_x(page_to_mfn(pg));
+        pfns[xmr.nr_extents++] = page_to_mfn(pg);
         if ( xmr.nr_extents == ARRAY_SIZE(pfns) || !page_list_next(pg, list) )
         {
             long nr = xen_hypercall_memory_op(cmd, &xmr);

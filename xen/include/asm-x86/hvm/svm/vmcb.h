@@ -325,14 +325,12 @@ typedef union
     {
         u64 tpr:          8;
         u64 irq:          1;
-        u64 vgif:         1;
-        u64 rsvd0:        6;
+        u64 rsvd0:        7;
         u64 prio:         4;
         u64 ign_tpr:      1;
         u64 rsvd1:        3;
         u64 intr_masking: 1;
-        u64 vgif_enable:  1;
-        u64 rsvd2:        6;
+        u64 rsvd2:        7;
         u64 vector:       8;
         u64 rsvd3:       24;
     } fields;
@@ -360,10 +358,9 @@ typedef union
     u64 bytes;
     struct
     {
-        u64 lbr_enable:1;
-        u64 vloadsave_enable:1;
+        u64 enable:1;
     } fields;
-} virt_ext_t;
+} lbrctrl_t;
 
 typedef union
 {
@@ -412,7 +409,7 @@ struct vmcb_struct {
     u64 res04;                  /* offset 0x28 */
     u64 res05;                  /* offset 0x30 */
     u32 res06;                  /* offset 0x38 */
-    u16 _pause_filter_thresh;   /* offset 0x3C - cleanbit 0 */
+    u16 res06a;                 /* offset 0x3C */
     u16 _pause_filter_count;    /* offset 0x3E - cleanbit 0 */
     u64 _iopm_base_pa;          /* offset 0x40 - cleanbit 1 */
     u64 _msrpm_base_pa;         /* offset 0x48 - cleanbit 1 */
@@ -430,7 +427,7 @@ struct vmcb_struct {
     u64 res08[2];
     eventinj_t  eventinj;       /* offset 0xA8 */
     u64 _h_cr3;                 /* offset 0xB0 - cleanbit 4 */
-    virt_ext_t virt_ext;        /* offset 0xB8 */
+    lbrctrl_t lbr_control;      /* offset 0xB8 */
     vmcbcleanbits_t cleanbits;  /* offset 0xC0 */
     u32 res09;                  /* offset 0xC4 */
     u64 nextrip;                /* offset 0xC8 */
@@ -495,28 +492,12 @@ struct vmcb_struct {
 struct svm_domain {
 };
 
-/*
- * VMRUN doesn't switch fs/gs/tr/ldtr and SHADOWGS/SYSCALL/SYSENTER state.
- * Therefore, guest state is in the hardware registers when servicing a
- * VMExit.
- *
- * Immediately after a VMExit, the vmcb is stale, and needs to be brought
- * into sync by VMSAVE.  If state in the vmcb is modified, a VMLOAD is
- * needed before the following VMRUN.
- */
-enum vmcb_sync_state {
-    vmcb_in_sync,
-    vmcb_needs_vmsave,    /* VMCB out of sync (VMSAVE needed)? */
-    vmcb_needs_vmload     /* VMCB dirty (VMLOAD needed)? */
-};
-
 struct arch_svm_struct {
     struct vmcb_struct *vmcb;
     u64    vmcb_pa;
     unsigned long *msrpm;
     int    launch_core;
-
-    uint8_t vmcb_sync_state; /* enum vmcb_sync_state */
+    bool_t vmcb_in_sync;    /* VMCB sync'ed with VMSAVE? */
 
     /* VMCB has a cached instruction from #PF/#NPF Decode Assist? */
     uint8_t cached_insn_len; /* Zero if no cached instruction. */
@@ -584,7 +565,6 @@ VMCB_ACCESSORS(exception_intercepts, intercepts)
 VMCB_ACCESSORS(general1_intercepts, intercepts)
 VMCB_ACCESSORS(general2_intercepts, intercepts)
 VMCB_ACCESSORS(pause_filter_count, intercepts)
-VMCB_ACCESSORS(pause_filter_thresh, intercepts)
 VMCB_ACCESSORS(tsc_offset, intercepts)
 VMCB_ACCESSORS(iopm_base_pa, iopm)
 VMCB_ACCESSORS(msrpm_base_pa, iopm)

@@ -139,7 +139,6 @@ typedef int iommu_grdm_t(xen_pfn_t start, xen_ulong_t nr, u32 id, void *ctxt);
 struct iommu_ops {
     int (*init)(struct domain *d);
     void (*hwdom_init)(struct domain *d);
-    int (*quarantine_init)(struct domain *d);
     int (*add_device)(u8 devfn, device_t *dev);
     int (*enable_device)(device_t *dev);
     int (*remove_device)(u8 devfn, device_t *dev);
@@ -161,6 +160,7 @@ struct iommu_ops {
     void (*update_ire_from_apic)(unsigned int apic, unsigned int reg, unsigned int value);
     unsigned int (*read_apic_from_ire)(unsigned int apic, unsigned int reg);
     int (*setup_hpet_msi)(struct msi_desc *);
+    void (*sync_cache)(const void *addr, unsigned int size);
 #endif /* CONFIG_X86 */
     int __must_check (*suspend)(void);
     void (*resume)(void);

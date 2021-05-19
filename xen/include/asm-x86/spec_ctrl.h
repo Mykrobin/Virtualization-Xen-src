@@ -46,6 +46,8 @@ extern int8_t opt_pv_l1tf_hwdom, opt_pv_l1tf_domu;
  */
 extern paddr_t l1tf_addr_mask, l1tf_safe_maddr;
 
+extern uint64_t default_xen_mcu_opt_ctrl;
+
 static inline void init_shadow_spec_ctrl_state(void)
 {
     struct cpu_info *info = get_cpu_info();
@@ -94,7 +96,7 @@ static always_inline void spec_ctrl_enter_idle(struct cpu_info *info)
      * Note: VERW must be encoded with a memory operand, as it is only that
      * form which causes a flush.
      */
-    alternative_input("", "verw %[sel]", X86_FEATURE_SC_VERW_IDLE,
+    alternative_input(ASM_NOP8, "verw %[sel]", X86_FEATURE_SC_VERW_IDLE,
                       [sel] "m" (info->verw_sel));
 }
 

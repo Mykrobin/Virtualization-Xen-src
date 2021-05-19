@@ -61,6 +61,7 @@ void __dummy__(void)
     OFFSET(VCPU_domain, struct vcpu, domain);
     OFFSET(VCPU_vcpu_info, struct vcpu, vcpu_info);
     OFFSET(VCPU_trap_bounce, struct vcpu, arch.pv_vcpu.trap_bounce);
+    OFFSET(VCPU_int80_bounce, struct vcpu, arch.pv_vcpu.int80_bounce);
     OFFSET(VCPU_thread_flags, struct vcpu, arch.flags);
     OFFSET(VCPU_event_addr, struct vcpu, arch.pv_vcpu.event_callback_eip);
     OFFSET(VCPU_event_sel, struct vcpu, arch.pv_vcpu.event_callback_cs);
@@ -102,6 +103,7 @@ void __dummy__(void)
 
     OFFSET(VCPU_svm_vmcb_pa, struct vcpu, arch.hvm_svm.vmcb_pa);
     OFFSET(VCPU_svm_vmcb, struct vcpu, arch.hvm_svm.vmcb);
+    OFFSET(VCPU_svm_vmcb_in_sync, struct vcpu, arch.hvm_svm.vmcb_in_sync);
     BLANK();
 
     OFFSET(VCPU_vmx_launched, struct vcpu, arch.hvm_vmx.launched);
@@ -117,6 +119,12 @@ void __dummy__(void)
     BLANK();
 
     OFFSET(DOMAIN_is_32bit_pv, struct domain, arch.is_32bit_pv);
+    BLANK();
+
+    OFFSET(VMCB_rax, struct vmcb_struct, rax);
+    OFFSET(VMCB_rip, struct vmcb_struct, rip);
+    OFFSET(VMCB_rsp, struct vmcb_struct, rsp);
+    OFFSET(VMCB_rflags, struct vmcb_struct, rflags);
     BLANK();
 
     OFFSET(VCPUINFO_upcall_pending, struct vcpu_info, evtchn_upcall_pending);
@@ -162,7 +170,7 @@ void __dummy__(void)
     BLANK();
 #endif
 
-    DEFINE(IRQSTAT_shift, ilog2(sizeof(irq_cpustat_t)));
+    DEFINE(IRQSTAT_shift, LOG_2(sizeof(irq_cpustat_t)));
     OFFSET(IRQSTAT_softirq_pending, irq_cpustat_t, __softirq_pending);
     BLANK();
 

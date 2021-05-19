@@ -26,31 +26,31 @@
 
 static xc_interface *xch = NULL;
 
-int cov_sysctl(int op, struct xen_sysctl *sysctl,
-               struct xc_hypercall_buffer *buf, uint32_t buf_size)
+int gcov_sysctl(int op, struct xen_sysctl *sysctl,
+                struct xc_hypercall_buffer *buf, uint32_t buf_size)
 {
     DECLARE_HYPERCALL_BUFFER_ARGUMENT(buf);
 
     memset(sysctl, 0, sizeof(*sysctl));
-    sysctl->cmd = XEN_SYSCTL_coverage_op;
+    sysctl->cmd = XEN_SYSCTL_gcov_op;
 
-    sysctl->u.coverage_op.cmd = op;
-    sysctl->u.coverage_op.size = buf_size;
-    set_xen_guest_handle(sysctl->u.coverage_op.buffer, buf);
+    sysctl->u.gcov_op.cmd = op;
+    sysctl->u.gcov_op.size = buf_size;
+    set_xen_guest_handle(sysctl->u.gcov_op.buffer, buf);
 
     return xc_sysctl(xch, sysctl);
 }
 
-static void cov_read(const char *fn)
+static void gcov_read(const char *fn)
 {
     struct xen_sysctl sys;
     uint32_t total_len;
     DECLARE_HYPERCALL_BUFFER(uint8_t, p);
     FILE *f;
 
-    if (cov_sysctl(XEN_SYSCTL_COVERAGE_get_size, &sys, NULL, 0) < 0)
+    if (gcov_sysctl(XEN_SYSCTL_GCOV_get_size, &sys, NULL, 0) < 0)
         err(1, "getting total length");
-    total_len = sys.u.coverage_op.size;
+    total_len = sys.u.gcov_op.size;
 
     /* Shouldn't exceed a few hundred kilobytes */
     if (total_len > 8u * 1024u * 1024u)
@@ -61,7 +61,7 @@ static void cov_read(const char *fn)
         err(1, "allocating buffer");
 
     memset(p, 0, total_len);
-    if (cov_sysctl(XEN_SYSCTL_COVERAGE_read, &sys, HYPERCALL_BUFFER(p),
+    if (gcov_sysctl(XEN_SYSCTL_GCOV_read, &sys, HYPERCALL_BUFFER(p),
                     total_len) < 0)
         err(1, "getting gcov data");
 
@@ -82,11 +82,11 @@ static void cov_read(const char *fn)
     xc_hypercall_buffer_free(xch, p);
 }
 
-static void cov_reset(void)
+static void gcov_reset(void)
 {
     struct xen_sysctl sys;
 
-    if (cov_sysctl(XEN_SYSCTL_COVERAGE_reset, &sys, NULL, 0) < 0)
+    if (gcov_sysctl(XEN_SYSCTL_GCOV_reset, &sys, NULL, 0) < 0)
         err(1, "resetting gcov information");
 }
 
@@ -126,9 +126,9 @@ int main(int argc, char **argv)
         err(1, "opening xc interface");
 
     if (strcmp(argv[0], "reset") == 0)
-        cov_reset();
+        gcov_reset();
     else if (strcmp(argv[0], "read") == 0)
-        cov_read(argc > 1 ? argv[1] : "-");
+        gcov_read(argc > 1 ? argv[1] : "-");
     else
         usage(1);
 

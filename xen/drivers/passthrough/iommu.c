@@ -192,7 +192,7 @@ void __hwdom_init iommu_hwdom_init(struct domain *d)
 
         page_list_for_each ( page, &d->page_list )
         {
-            unsigned long mfn = mfn_x(page_to_mfn(page));
+            unsigned long mfn = page_to_mfn(page);
             unsigned long gfn = mfn_to_gmfn(d, mfn);
             unsigned int mapping = IOMMUF_readable;
             int ret;
@@ -380,21 +380,6 @@ int iommu_iotlb_flush_all(struct domain *d)
     return rc;
 }
 
-static int __init iommu_quarantine_init(void)
-{
-    const struct domain_iommu *hd = dom_iommu(dom_io);
-    int rc;
-
-    rc = iommu_domain_init(dom_io);
-    if ( rc )
-        return rc;
-
-    if ( !hd->platform_ops->quarantine_init )
-        return 0;
-
-    return hd->platform_ops->quarantine_init(dom_io);
-}
-
 int __init iommu_setup(void)
 {
     int rc = -ENODEV;
@@ -428,7 +413,7 @@ int __init iommu_setup(void)
     printk("I/O virtualisation %sabled\n", iommu_enabled ? "en" : "dis");
     if ( iommu_enabled )
     {
-        if ( iommu_quarantine_init() )
+        if ( iommu_domain_init(dom_io) )
             panic("Could not set up quarantine\n");
 
         printk(" - Dom0 mode: %s\n",

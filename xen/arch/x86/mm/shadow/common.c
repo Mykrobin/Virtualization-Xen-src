@@ -62,7 +62,7 @@ int shadow_domain_init(struct domain *d, unsigned int domcr_flags)
 
 #if (SHADOW_OPTIMIZATIONS & SHOPT_OUT_OF_SYNC)
     d->arch.paging.shadow.oos_active = 0;
-    d->arch.paging.shadow.oos_off = domcr_flags & XEN_DOMCTL_CDF_oos_off;
+    d->arch.paging.shadow.oos_off = (domcr_flags & DOMCRF_oos_off) ?  1 : 0;
 #endif
     d->arch.paging.shadow.pagetable_dying_op = 0;
 
@@ -116,20 +116,6 @@ __initcall(shadow_audit_key_init);
 /**************************************************************************/
 /* x86 emulator support for the shadow code
  */
-
-/*
- * Returns a mapped pointer to write to, or one of the following error
- * indicators.
- */
-#define MAPPING_UNHANDLEABLE ERR_PTR(~(long)X86EMUL_UNHANDLEABLE)
-#define MAPPING_EXCEPTION    ERR_PTR(~(long)X86EMUL_EXCEPTION)
-#define MAPPING_SILENT_FAIL  ERR_PTR(~(long)X86EMUL_OKAY)
-static void *sh_emulate_map_dest(struct vcpu *v, unsigned long vaddr,
-                                 unsigned int bytes,
-                                 struct sh_emulate_ctxt *sh_ctxt);
-static void sh_emulate_unmap_dest(struct vcpu *v, void *addr,
-                                  unsigned int bytes,
-                                  struct sh_emulate_ctxt *sh_ctxt);
 
 /*
  * Callers which pass a known in-range x86_segment can rely on the return
@@ -274,7 +260,6 @@ hvm_emulate_write(enum x86_segment seg,
         container_of(ctxt, struct sh_emulate_ctxt, ctxt);
     struct vcpu *v = current;
     unsigned long addr;
-    void *ptr;
     int rc;
 
     /* How many emulations could we save if we unshadowed on stack writes? */
@@ -286,26 +271,8 @@ hvm_emulate_write(enum x86_segment seg,
     if ( rc || !bytes )
         return rc;
 
-    /* Unaligned writes are only acceptable on HVM */
-    if ( (addr & (bytes - 1)) && !is_hvm_vcpu(v)  )
-        return X86EMUL_UNHANDLEABLE;
-
-    ptr = sh_emulate_map_dest(v, addr, bytes, sh_ctxt);
-    if ( IS_ERR(ptr) )
-        return ~PTR_ERR(ptr);
-
-    paging_lock(v->domain);
-    memcpy(ptr, p_data, bytes);
-
-    if ( tb_init_done )
-        v->arch.paging.mode->shadow.trace_emul_write_val(ptr, addr,
-                                                         p_data, bytes);
-
-    sh_emulate_unmap_dest(v, ptr, bytes, sh_ctxt);
-    shadow_audit_tables(v);
-    paging_unlock(v->domain);
-
-    return X86EMUL_OKAY;
+    return v->arch.paging.mode->shadow.x86_emulate_write(
+        v, addr, p_data, bytes, sh_ctxt);
 }
 
 static int
@@ -314,14 +281,12 @@ hvm_emulate_cmpxchg(enum x86_segment seg,
                     void *p_old,
                     void *p_new,
                     unsigned int bytes,
-                    bool lock,
                     struct x86_emulate_ctxt *ctxt)
 {
     struct sh_emulate_ctxt *sh_ctxt =
         container_of(ctxt, struct sh_emulate_ctxt, ctxt);
     struct vcpu *v = current;
-    unsigned long addr, old, new, prev;
-    void *ptr;
+    unsigned long addr, old, new;
     int rc;
 
     if ( bytes > sizeof(long) )
@@ -332,45 +297,12 @@ hvm_emulate_cmpxchg(enum x86_segment seg,
     if ( rc )
         return rc;
 
-    /* Unaligned writes are only acceptable on HVM */
-    if ( (addr & (bytes - 1)) && !is_hvm_vcpu(v)  )
-        return X86EMUL_UNHANDLEABLE;
-
-    ptr = sh_emulate_map_dest(v, addr, bytes, sh_ctxt);
-    if ( IS_ERR(ptr) )
-        return ~PTR_ERR(ptr);
-
     old = new = 0;
     memcpy(&old, p_old, bytes);
     memcpy(&new, p_new, bytes);
 
-    paging_lock(v->domain);
-    switch ( bytes )
-    {
-    case 1: prev = cmpxchg((uint8_t  *)ptr, old, new); break;
-    case 2: prev = cmpxchg((uint16_t *)ptr, old, new); break;
-    case 4: prev = cmpxchg((uint32_t *)ptr, old, new); break;
-    case 8: prev = cmpxchg((uint64_t *)ptr, old, new); break;
-    default:
-        SHADOW_PRINTK("cmpxchg size %u is not supported\n", bytes);
-        prev = ~old;
-    }
-
-    if ( prev != old )
-    {
-        memcpy(p_old, &prev, bytes);
-        rc = X86EMUL_CMPXCHG_FAILED;
-    }
-
-    SHADOW_DEBUG(EMULATE,
-                 "va %#lx was %#lx expected %#lx wanted %#lx now %#lx bytes %u\n",
-                 addr, prev, old, new, *(unsigned long *)ptr, bytes);
-
-    sh_emulate_unmap_dest(v, ptr, bytes, sh_ctxt);
-    shadow_audit_tables(v);
-    paging_unlock(v->domain);
-
-    return rc;
+    return v->arch.paging.mode->shadow.x86_emulate_cmpxchg(
+               v, addr, old, new, bytes, sh_ctxt);
 }
 
 static const struct x86_emulate_ops hvm_shadow_emulator_ops = {
@@ -382,8 +314,7 @@ static const struct x86_emulate_ops hvm_shadow_emulator_ops = {
 };
 
 const struct x86_emulate_ops *shadow_init_emulation(
-    struct sh_emulate_ctxt *sh_ctxt, struct cpu_user_regs *regs,
-    unsigned int pte_size)
+    struct sh_emulate_ctxt *sh_ctxt, struct cpu_user_regs *regs)
 {
     struct segment_register *creg, *sreg;
     struct vcpu *v = current;
@@ -409,8 +340,6 @@ const struct x86_emulate_ops *shadow_init_emulation(
         sh_ctxt->ctxt.addr_size = creg->db ? 32 : 16;
         sh_ctxt->ctxt.sp_size   = sreg->db ? 32 : 16;
     }
-
-    sh_ctxt->pte_size = pte_size;
 
     /* Attempt to prefetch whole instruction. */
     sh_ctxt->insn_buf_eip = regs->rip;
@@ -708,7 +637,7 @@ static int oos_remove_write_access(struct vcpu *v, mfn_t gmfn,
     }
 
     if ( ftlb )
-        flush_tlb_mask(d->dirty_cpumask);
+        flush_tlb_mask(d->domain_dirty_cpumask);
 
     return 0;
 }
@@ -1142,7 +1071,7 @@ sh_validate_guest_pt_write(struct vcpu *v, mfn_t gmfn,
     rc = sh_validate_guest_entry(v, gmfn, entry, size);
     if ( rc & SHADOW_SET_FLUSH )
         /* Need to flush TLBs to pick up shadow PT changes */
-        flush_tlb_mask(d->dirty_cpumask);
+        flush_tlb_mask(d->domain_dirty_cpumask);
     if ( rc & SHADOW_SET_ERROR )
     {
         /* This page is probably not a pagetable any more: tear it out of the
@@ -1221,7 +1150,13 @@ const u8 sh_type_to_size[] = {
  * worth to make sure we never return zero. */
 static unsigned int shadow_min_acceptable_pages(const struct domain *d)
 {
-    return (d->max_vcpus + 1) * 128;
+    u32 vcpu_count = 1;
+    struct vcpu *v;
+
+    for_each_vcpu(d, v)
+        vcpu_count++;
+
+    return (vcpu_count * 128);
 }
 
 /* Dispatcher function: call the per-mode function that will unhook the
@@ -1305,7 +1240,7 @@ static void _shadow_prealloc(struct domain *d, unsigned int pages)
                 /* See if that freed up enough space */
                 if ( d->arch.paging.shadow.free_pages >= pages )
                 {
-                    flush_tlb_mask(d->dirty_cpumask);
+                    flush_tlb_mask(d->domain_dirty_cpumask);
                     return;
                 }
             }
@@ -1359,7 +1294,7 @@ static void shadow_blow_tables(struct domain *d)
                                pagetable_get_mfn(v->arch.shadow_table[i]), 0);
 
     /* Make sure everyone sees the unshadowings */
-    flush_tlb_mask(d->dirty_cpumask);
+    flush_tlb_mask(d->domain_dirty_cpumask);
 }
 
 void shadow_blow_tables_per_domain(struct domain *d)
@@ -1463,7 +1398,7 @@ mfn_t shadow_alloc(struct domain *d,
         sp = page_list_remove_head(&d->arch.paging.shadow.freelist);
         /* Before we overwrite the old contents of this page,
          * we need to be sure that no TLB holds a pointer to it. */
-        cpumask_copy(&mask, d->dirty_cpumask);
+        cpumask_copy(&mask, d->domain_dirty_cpumask);
         tlbflush_filter(&mask, sp->tlbflush_timestamp);
         if ( unlikely(!cpumask_empty(&mask)) )
         {
@@ -1761,9 +1696,9 @@ static mfn_t emulate_gva_to_mfn(struct vcpu *v, unsigned long vaddr,
  * returned, page references will be held on sh_ctxt->mfn[0] and
  * sh_ctxt->mfn[1] iff !INVALID_MFN.
  */
-static void *sh_emulate_map_dest(struct vcpu *v, unsigned long vaddr,
-                                 unsigned int bytes,
-                                 struct sh_emulate_ctxt *sh_ctxt)
+void *sh_emulate_map_dest(struct vcpu *v, unsigned long vaddr,
+                          unsigned int bytes,
+                          struct sh_emulate_ctxt *sh_ctxt)
 {
     struct domain *d = v->domain;
     void *map;
@@ -1850,68 +1785,13 @@ static void *sh_emulate_map_dest(struct vcpu *v, unsigned long vaddr,
 }
 
 /*
- * Optimization: If we see two emulated writes of zeros to the same
- * page-table without another kind of page fault in between, we guess
- * that this is a batch of changes (for process destruction) and
- * unshadow the page so we don't take a pagefault on every entry.  This
- * should also make finding writeable mappings of pagetables much
- * easier.
- *
- * Look to see if this is the second emulated write in a row to this
- * page, and unshadow if it is.
- */
-static inline void check_for_early_unshadow(struct vcpu *v, mfn_t gmfn)
-{
-#if SHADOW_OPTIMIZATIONS & SHOPT_EARLY_UNSHADOW
-    struct domain *d = v->domain;
-
-    /*
-     * If the domain has never made a "dying" op, use the two-writes
-     * heuristic; otherwise, unshadow as soon as we write a zero for a dying
-     * process.
-     *
-     * Don't bother trying to unshadow if it's not a PT, or if it's > l1.
-     */
-    if ( ( v->arch.paging.shadow.pagetable_dying
-           || ( !d->arch.paging.shadow.pagetable_dying_op
-                && v->arch.paging.shadow.last_emulated_mfn_for_unshadow == mfn_x(gmfn) ) )
-         && sh_mfn_is_a_page_table(gmfn)
-         && (!d->arch.paging.shadow.pagetable_dying_op ||
-             !(mfn_to_page(gmfn)->shadow_flags
-               & (SHF_L2_32|SHF_L2_PAE|SHF_L2H_PAE|SHF_L4_64))) )
-    {
-        perfc_incr(shadow_early_unshadow);
-        sh_remove_shadows(d, gmfn, 1, 0 /* Fast, can fail to unshadow */ );
-        TRACE_SHADOW_PATH_FLAG(TRCE_SFLAG_EARLY_UNSHADOW);
-    }
-    v->arch.paging.shadow.last_emulated_mfn_for_unshadow = mfn_x(gmfn);
-#endif
-}
-
-/*
  * Tidy up after the emulated write: mark pages dirty, verify the new
  * contents, and undo the mapping.
  */
-static void sh_emulate_unmap_dest(struct vcpu *v, void *addr,
-                                  unsigned int bytes,
-                                  struct sh_emulate_ctxt *sh_ctxt)
+void sh_emulate_unmap_dest(struct vcpu *v, void *addr, unsigned int bytes,
+                           struct sh_emulate_ctxt *sh_ctxt)
 {
     u32 b1 = bytes, b2 = 0, shflags;
-
-    ASSERT(mfn_valid(sh_ctxt->mfn[0]));
-
-    /* If we are writing lots of PTE-aligned zeros, might want to unshadow */
-    if ( likely(bytes >= 4) && (*(u32 *)addr == 0) )
-    {
-        if ( !((unsigned long)addr & (sh_ctxt->pte_size - 1)) )
-            check_for_early_unshadow(v, sh_ctxt->mfn[0]);
-        /*
-         * Don't reset the heuristic if we're writing zeros at non-aligned
-         * addresses, otherwise it doesn't catch REP MOVSD on PAE guests.
-         */
-    }
-    else
-        sh_reset_early_unshadow(v);
 
     /*
      * We can avoid re-verifying the page contents after the write if:
@@ -2937,7 +2817,7 @@ void sh_remove_shadows(struct domain *d, mfn_t gmfn, int fast, int all)
 
     /* Need to flush TLBs now, so that linear maps are safe next time we
      * take a fault. */
-    flush_tlb_mask(d->dirty_cpumask);
+    flush_tlb_mask(d->domain_dirty_cpumask);
 
     paging_unlock(d);
 }
@@ -3190,7 +3070,7 @@ static void sh_update_paging_modes(struct vcpu *v)
     }
 #endif /* OOS */
 
-    v->arch.paging.mode->update_cr3(v, 0, false);
+    v->arch.paging.mode->update_cr3(v, 0);
 }
 
 void shadow_update_paging_modes(struct vcpu *v)
@@ -3506,8 +3386,7 @@ static int shadow_one_bit_enable(struct domain *d, u32 mode)
 
     mode |= PG_SH_enable;
 
-    if ( d->arch.paging.shadow.total_pages <
-         sh_min_allocation(d) + d->arch.paging.shadow.p2m_pages )
+    if ( d->arch.paging.shadow.total_pages == 0 )
     {
         /* Init the shadow memory allocation if the user hasn't done so */
         if ( shadow_set_allocation(d, 1, NULL) != 0 )
@@ -3547,10 +3426,7 @@ static int shadow_one_bit_disable(struct domain *d, u32 mode)
     }
 
     /* Update the bits */
-    mode = d->arch.paging.mode & ~mode;
-    if ( mode == PG_SH_enable )
-        mode = 0;
-    sh_new_mode(d, mode);
+    sh_new_mode(d, d->arch.paging.mode & ~mode);
     if ( d->arch.paging.mode == 0 )
     {
         /* Get this domain off shadows */
@@ -3651,7 +3527,7 @@ static void sh_unshadow_for_p2m_change(struct domain *d, unsigned long gfn,
         {
             sh_remove_all_shadows_and_parents(d, mfn);
             if ( sh_remove_all_mappings(d, mfn, _gfn(gfn)) )
-                flush_tlb_mask(d->dirty_cpumask);
+                flush_tlb_mask(d->domain_dirty_cpumask);
         }
     }
 
@@ -3687,7 +3563,8 @@ static void sh_unshadow_for_p2m_change(struct domain *d, unsigned long gfn,
                     sh_remove_all_shadows_and_parents(d, omfn);
                     if ( sh_remove_all_mappings(d, omfn,
                                                 _gfn(gfn + (i << PAGE_SHIFT))) )
-                        cpumask_or(&flushmask, &flushmask, d->dirty_cpumask);
+                        cpumask_or(&flushmask, &flushmask,
+                                   d->domain_dirty_cpumask);
                 }
                 omfn = _mfn(mfn_x(omfn) + 1);
             }
@@ -3881,10 +3758,8 @@ int shadow_track_dirty_vram(struct domain *d,
             int dirty = 0;
             paddr_t sl1ma = dirty_vram->sl1ma[i];
 
-            if ( !mfn_eq(mfn, INVALID_MFN) )
-            {
+            if ( mfn_eq(mfn, INVALID_MFN) )
                 dirty = 1;
-            }
             else
             {
                 page = mfn_to_page(mfn);
@@ -3964,7 +3839,7 @@ int shadow_track_dirty_vram(struct domain *d,
         }
     }
     if ( flush_tlb )
-        flush_tlb_mask(d->dirty_cpumask);
+        flush_tlb_mask(d->domain_dirty_cpumask);
     goto out;
 
 out_sl1ma:

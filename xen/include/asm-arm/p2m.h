@@ -23,6 +23,10 @@ extern void memory_type_changed(struct domain *);
 struct p2m_domain {
     /*
      * Lock that protects updates to the p2m.
+     *
+     * Please note that we use this lock in a nested way by calling
+     * access_guest_memory_by_ipa in guest_walk_(sd|ld). This must be
+     * considered in the future implementation.
      */
     rwlock_t lock;
 
@@ -197,8 +201,6 @@ static inline int p2m_is_write_locked(struct p2m_domain *p2m)
     return rw_is_write_locked(&p2m->lock);
 }
 
-void p2m_tlb_flush_sync(struct p2m_domain *p2m);
-
 /* Look up the MFN corresponding to a domain's GFN. */
 mfn_t p2m_lookup(struct domain *d, gfn_t gfn, p2m_type_t *t);
 
@@ -271,7 +273,7 @@ static inline struct page_info *get_page_from_gfn(
 {
     struct page_info *page;
     p2m_type_t p2mt;
-    mfn_t mfn = p2m_lookup(d, _gfn(gfn), &p2mt);
+    unsigned long mfn = mfn_x(p2m_lookup(d, _gfn(gfn), &p2mt));
 
     if (t)
         *t = p2mt;
@@ -279,7 +281,7 @@ static inline struct page_info *get_page_from_gfn(
     if ( !p2m_is_any_ram(p2mt) )
         return NULL;
 
-    if ( !mfn_valid(mfn) )
+    if ( !mfn_valid(_mfn(mfn)) )
         return NULL;
     page = mfn_to_page(mfn);
 
@@ -339,16 +341,6 @@ static inline gfn_t gfn_next_boundary(gfn_t gfn, unsigned int order)
     gfn = _gfn(gfn_x(gfn) & ~((1UL << order) - 1));
 
     return gfn_add(gfn, 1UL << order);
-}
-
-static inline int set_foreign_p2m_entry(struct domain *d, unsigned long gfn,
-                                        mfn_t mfn)
-{
-    /*
-     * NOTE: If this is implemented then proper reference counting of
-     *       foreign entries will need to be implemented.
-     */
-    return -EOPNOTSUPP;
 }
 
 #endif /* _XEN_P2M_H */

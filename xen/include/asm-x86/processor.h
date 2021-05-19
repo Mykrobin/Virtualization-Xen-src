@@ -102,6 +102,16 @@
 struct domain;
 struct vcpu;
 
+/*
+ * Default implementation of macro that returns current
+ * instruction pointer ("program counter").
+ */
+#define current_text_addr() ({                      \
+    void *pc;                                       \
+    asm ( "leaq 1f(%%rip),%0\n1:" : "=r" (pc) );    \
+    pc;                                             \
+})
+
 struct x86_cpu_id {
     uint16_t vendor;
     uint16_t family;
@@ -407,6 +417,37 @@ static inline bool_t read_pkru_wd(uint32_t pkru, unsigned int pkey)
     return (pkru >> (pkey * PKRU_ATTRS + PKRU_WRITE)) & 1;
 }
 
+/*
+ *      NSC/Cyrix CPU configuration register indexes
+ */
+
+#define CX86_PCR0 0x20
+#define CX86_GCR  0xb8
+#define CX86_CCR0 0xc0
+#define CX86_CCR1 0xc1
+#define CX86_CCR2 0xc2
+#define CX86_CCR3 0xc3
+#define CX86_CCR4 0xe8
+#define CX86_CCR5 0xe9
+#define CX86_CCR6 0xea
+#define CX86_CCR7 0xeb
+#define CX86_PCR1 0xf0
+#define CX86_DIR0 0xfe
+#define CX86_DIR1 0xff
+#define CX86_ARR_BASE 0xc4
+#define CX86_RCR_BASE 0xdc
+
+/*
+ *      NSC/Cyrix CPU indexed register access macros
+ */
+
+#define getCx86(reg) ({ outb((reg), 0x22); inb(0x23); })
+
+#define setCx86(reg, data) do { \
+    outb((reg), 0x22); \
+    outb((data), 0x23); \
+} while (0)
+
 static always_inline void __monitor(const void *eax, unsigned long ecx,
                                     unsigned long edx)
 {
@@ -427,7 +468,7 @@ static always_inline void __mwait(unsigned long eax, unsigned long ecx)
 #define IOBMP_BYTES             8192
 #define IOBMP_INVALID_OFFSET    0x8000
 
-struct __packed tss64 {
+struct __packed __cacheline_aligned tss_struct {
     uint32_t :32;
     uint64_t rsp0, rsp1, rsp2;
     uint64_t :64;
@@ -438,11 +479,9 @@ struct __packed tss64 {
     uint64_t ist[7];
     uint64_t :64;
     uint16_t :16, bitmap;
+    /* Pads the TSS to be cacheline-aligned (total size is 0x80). */
+    uint8_t __cacheline_filler[24];
 };
-struct tss_page {
-    struct tss64 __aligned(PAGE_SIZE) tss;
-};
-DECLARE_PER_CPU(struct tss_page, tss_page);
 
 #define IST_NONE 0UL
 #define IST_DF   1UL
@@ -451,37 +490,26 @@ DECLARE_PER_CPU(struct tss_page, tss_page);
 #define IST_DB   4UL
 #define IST_MAX  4UL
 
-/* Set the Interrupt Stack Table used by a particular IDT entry. */
-static inline void set_ist(idt_entry_t *idt, unsigned int ist)
+/* Set the interrupt stack table used by a particular interrupt
+ * descriptor table entry. */
+static always_inline void set_ist(idt_entry_t *idt, unsigned long ist)
 {
+    idt_entry_t new = *idt;
+
     /* IST is a 3 bit field, 32 bits into the IDT entry. */
     ASSERT(ist <= IST_MAX);
-
-    /* Typically used on a live idt.  Disuade any clever optimisations. */
-    ACCESS_ONCE(idt->ist) = ist;
-}
-
-static inline void enable_each_ist(idt_entry_t *idt)
-{
-    set_ist(&idt[TRAP_double_fault],  IST_DF);
-    set_ist(&idt[TRAP_nmi],           IST_NMI);
-    set_ist(&idt[TRAP_machine_check], IST_MCE);
-    set_ist(&idt[TRAP_debug],         IST_DB);
-}
-
-static inline void disable_each_ist(idt_entry_t *idt)
-{
-    set_ist(&idt[TRAP_double_fault],  IST_NONE);
-    set_ist(&idt[TRAP_nmi],           IST_NONE);
-    set_ist(&idt[TRAP_machine_check], IST_NONE);
-    set_ist(&idt[TRAP_debug],         IST_NONE);
+    new.a = (idt->a & ~(7UL << 32)) | (ist << 32);
+    _write_gate_lower(idt, &new);
 }
 
 #define IDT_ENTRIES 256
 extern idt_entry_t idt_table[];
 extern idt_entry_t *idt_tables[];
 
+DECLARE_PER_CPU(struct tss_struct, init_tss);
 DECLARE_PER_CPU(root_pgentry_t *, root_pgt);
+
+extern void init_int80_direct_trap(struct vcpu *v);
 
 extern void write_ptbase(struct vcpu *v);
 
@@ -493,7 +521,6 @@ static always_inline void rep_nop(void)
 
 #define cpu_relax() rep_nop()
 
-void show_code(const struct cpu_user_regs *regs);
 void show_stack(const struct cpu_user_regs *regs);
 void show_stack_overflow(unsigned int cpu, const struct cpu_user_regs *regs);
 void show_registers(const struct cpu_user_regs *regs);
@@ -543,23 +570,8 @@ DECLARE_TRAP_HANDLER(entry_int82);
 #undef DECLARE_TRAP_HANDLER
 
 void trap_nop(void);
-
-static inline void enable_nmis(void)
-{
-    unsigned long tmp;
-
-    asm volatile ( "mov %%rsp, %[tmp]     \n\t"
-                   "push %[ss]            \n\t"
-                   "push %[tmp]           \n\t"
-                   "pushf                 \n\t"
-                   "push %[cs]            \n\t"
-                   "lea 1f(%%rip), %[tmp] \n\t"
-                   "push %[tmp]           \n\t"
-                   "iretq; 1:             \n\t"
-                   : [tmp] "=&r" (tmp)
-                   : [ss] "i" (__HYPERVISOR_DS),
-                     [cs] "i" (__HYPERVISOR_CS) );
-}
+void enable_nmis(void);
+void do_reserved_trap(struct cpu_user_regs *regs);
 
 void sysenter_entry(void);
 void sysenter_eflags_saved(void);

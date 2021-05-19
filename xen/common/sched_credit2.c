@@ -299,12 +299,6 @@
  */
 #define __CSFLAG_vcpu_yield 4
 #define CSFLAG_vcpu_yield (1U<<__CSFLAG_vcpu_yield)
-/*
- * CSFLAGS_pinned: this vcpu is currently 'pinned', i.e., has its hard
- * affinity set to one and only 1 cpu (and, hence, can only run there).
- */
-#define __CSFLAG_pinned 5
-#define CSFLAG_pinned (1U<<__CSFLAG_pinned)
 
 static unsigned int __read_mostly opt_migrate_resist = 500;
 integer_param("sched_credit2_migrate_resist", opt_migrate_resist);
@@ -553,7 +547,7 @@ struct csched2_dom {
     s_time_t tot_budget;        /* Total amount of budget                     */
     s_time_t budget;            /* Currently available budget                 */
 
-    struct timer repl_timer;    /* Timer for periodic replenishment of budget */
+    struct timer *repl_timer;   /* Timer for periodic replenishment of budget */
     s_time_t next_repl;         /* Time at which next replenishment occurs    */
     struct list_head parked_vcpus; /* List of CPUs waiting for budget         */
 
@@ -705,7 +699,8 @@ static int get_fallback_cpu(struct csched2_vcpu *svc)
     {
         int cpu = v->processor;
 
-        if ( bs == BALANCE_SOFT_AFFINITY && !has_soft_affinity(v) )
+        if ( bs == BALANCE_SOFT_AFFINITY &&
+             !has_soft_affinity(v, v->cpu_hard_affinity) )
             continue;
 
         affinity_balance_cpumask(v, bs, cpumask_scratch_cpu(cpu));
@@ -1465,30 +1460,11 @@ runq_tickle(const struct scheduler *ops, struct csched2_vcpu *new, s_time_t now)
                     (unsigned char *)&d);
     }
 
-    /*
-     * Exclusive pinning is when a vcpu has hard-affinity with only one
-     * cpu, and there is no other vcpu that has hard-affinity with that
-     * same cpu. This is infrequent, but if it happens, is for achieving
-     * the most possible determinism, and least possible overhead for
-     * the vcpus in question.
-     *
-     * Try to identify the vast majority of these situations, and deal
-     * with them quickly.
-     */
-    if ( unlikely((new->flags & CSFLAG_pinned) &&
-                  cpumask_test_cpu(cpu, &rqd->idle) &&
-                  !cpumask_test_cpu(cpu, &rqd->tickled)) )
-    {
-        ASSERT(cpumask_cycle(cpu, new->vcpu->cpu_hard_affinity) == cpu);
-        SCHED_STAT_CRANK(tickled_idle_cpu_excl);
-        ipid = cpu;
-        goto tickle;
-    }
-
     for_each_affinity_balance_step( bs )
     {
         /* Just skip first step, if we don't have a soft affinity */
-        if ( bs == BALANCE_SOFT_AFFINITY && !has_soft_affinity(new->vcpu) )
+        if ( bs == BALANCE_SOFT_AFFINITY &&
+             !has_soft_affinity(new->vcpu, new->vcpu->cpu_hard_affinity) )
             continue;
 
         affinity_balance_cpumask(new->vcpu, bs, cpumask_scratch_cpu(cpu));
@@ -2003,7 +1979,7 @@ static void replenish_domain_budget(void* data)
     unpark_parked_vcpus(sdom->dom->cpupool->sched, &parked);
 
  out:
-    set_timer(&sdom->repl_timer, sdom->next_repl);
+    set_timer(sdom->repl_timer, sdom->next_repl);
 }
 
 #ifndef NDEBUG
@@ -2092,7 +2068,7 @@ csched2_vcpu_sleep(const struct scheduler *ops, struct vcpu *vc)
         update_load(ops, svc->rqd, svc, -1, NOW());
         runq_remove(svc);
     }
-    else
+    else if ( svc->flags & CSFLAG_delayed_runq_add )
         __clear_bit(__CSFLAG_delayed_runq_add, &svc->flags);
 }
 
@@ -2288,7 +2264,7 @@ csched2_cpu_pick(const struct scheduler *ops, struct vcpu *vc)
      *
      * Find both runqueues in one pass.
      */
-    has_soft = has_soft_affinity(vc);
+    has_soft = has_soft_affinity(vc, vc->cpu_hard_affinity);
     for_each_cpu(i, &prv->active_queues)
     {
         struct csched2_runqueue_data *rqd;
@@ -2903,7 +2879,7 @@ csched2_dom_cntl(
                  */
                 sdom->budget = sdom->tot_budget;
                 sdom->next_repl = NOW() + CSCHED2_BDGT_REPL_PERIOD;
-                set_timer(&sdom->repl_timer, sdom->next_repl);
+                set_timer(sdom->repl_timer, sdom->next_repl);
 
                 /*
                  * Now, let's enable budget accounting for all the vCPUs.
@@ -2962,7 +2938,7 @@ csched2_dom_cntl(
         {
             LIST_HEAD(parked);
 
-            stop_timer(&sdom->repl_timer);
+            stop_timer(sdom->repl_timer);
 
             /* Disable budget accounting for all the vCPUs. */
             for_each_vcpu ( d, v )
@@ -2998,22 +2974,6 @@ csched2_dom_cntl(
 
 
     return rc;
-}
-
-static void
-csched2_aff_cntl(const struct scheduler *ops, struct vcpu *v,
-                 const cpumask_t *hard, const cpumask_t *soft)
-{
-    struct csched2_vcpu *svc = csched2_vcpu(v);
-
-    if ( !hard )
-        return;
-
-    /* Are we becoming exclusively pinned? */
-    if ( cpumask_weight(hard) == 1 )
-        __set_bit(__CSFLAG_pinned, &svc->flags);
-    else
-        __clear_bit(__CSFLAG_pinned, &svc->flags);
 }
 
 static int csched2_sys_cntl(const struct scheduler *ops,
@@ -3057,7 +3017,14 @@ csched2_alloc_domdata(const struct scheduler *ops, struct domain *dom)
 
     sdom = xzalloc(struct csched2_dom);
     if ( sdom == NULL )
-        return ERR_PTR(-ENOMEM);
+        return NULL;
+
+    sdom->repl_timer = xzalloc(struct timer);
+    if ( sdom->repl_timer == NULL )
+    {
+        xfree(sdom);
+        return NULL;
+    }
 
     /* Initialize credit, cap and weight */
     INIT_LIST_HEAD(&sdom->sdom_elem);
@@ -3066,7 +3033,7 @@ csched2_alloc_domdata(const struct scheduler *ops, struct domain *dom)
     sdom->cap = 0U;
     sdom->nr_vcpus = 0;
 
-    init_timer(&sdom->repl_timer, replenish_domain_budget, sdom,
+    init_timer(sdom->repl_timer, replenish_domain_budget, sdom,
                cpumask_any(cpupool_domain_cpumask(dom)));
     spin_lock_init(&sdom->budget_lock);
     INIT_LIST_HEAD(&sdom->parked_vcpus);
@@ -3077,27 +3044,51 @@ csched2_alloc_domdata(const struct scheduler *ops, struct domain *dom)
 
     write_unlock_irqrestore(&prv->lock, flags);
 
-    return sdom;
+    return (void *)sdom;
+}
+
+static int
+csched2_dom_init(const struct scheduler *ops, struct domain *dom)
+{
+    struct csched2_dom *sdom;
+
+    if ( is_idle_domain(dom) )
+        return 0;
+
+    sdom = csched2_alloc_domdata(ops, dom);
+    if ( sdom == NULL )
+        return -ENOMEM;
+
+    dom->sched_priv = sdom;
+
+    return 0;
 }
 
 static void
 csched2_free_domdata(const struct scheduler *ops, void *data)
 {
+    unsigned long flags;
     struct csched2_dom *sdom = data;
     struct csched2_private *prv = csched2_priv(ops);
 
-    if ( sdom )
-    {
-        unsigned long flags;
+    kill_timer(sdom->repl_timer);
 
-        kill_timer(&sdom->repl_timer);
+    write_lock_irqsave(&prv->lock, flags);
 
-        write_lock_irqsave(&prv->lock, flags);
-        list_del_init(&sdom->sdom_elem);
-        write_unlock_irqrestore(&prv->lock, flags);
+    list_del_init(&sdom->sdom_elem);
 
-        xfree(sdom);
-    }
+    write_unlock_irqrestore(&prv->lock, flags);
+
+    xfree(sdom->repl_timer);
+    xfree(data);
+}
+
+static void
+csched2_dom_destroy(const struct scheduler *ops, struct domain *dom)
+{
+    ASSERT(csched2_dom(dom)->nr_vcpus == 0);
+
+    csched2_free_domdata(ops, csched2_dom(dom));
 }
 
 static void
@@ -3310,7 +3301,7 @@ runq_candidate(struct csched2_runqueue_data *rqd,
     }
 
     /* If scurr has a soft-affinity, let's check whether cpu is part of it */
-    if ( has_soft_affinity(scurr->vcpu) )
+    if ( has_soft_affinity(scurr->vcpu, scurr->vcpu->cpu_hard_affinity) )
     {
         affinity_balance_cpumask(scurr->vcpu, BALANCE_SOFT_AFFINITY,
                                  cpumask_scratch);
@@ -4075,8 +4066,6 @@ csched2_deinit(struct scheduler *ops)
 
     prv = csched2_priv(ops);
     ops->sched_data = NULL;
-    if ( prv )
-        xfree(prv->rqd);
     xfree(prv);
 }
 
@@ -4086,6 +4075,9 @@ static const struct scheduler sched_credit2_def = {
     .sched_id       = XEN_SCHEDULER_CREDIT2,
     .sched_data     = NULL,
 
+    .init_domain    = csched2_dom_init,
+    .destroy_domain = csched2_dom_destroy,
+
     .insert_vcpu    = csched2_vcpu_insert,
     .remove_vcpu    = csched2_vcpu_remove,
 
@@ -4094,7 +4086,6 @@ static const struct scheduler sched_credit2_def = {
     .yield          = csched2_vcpu_yield,
 
     .adjust         = csched2_dom_cntl,
-    .adjust_affinity= csched2_aff_cntl,
     .adjust_global  = csched2_sys_cntl,
 
     .pick_cpu       = csched2_cpu_pick,

@@ -9,10 +9,14 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
 {
     switch(d_config->c_info.type) {
     case LIBXL_DOMAIN_TYPE_HVM:
-        xc_config->emulation_flags = (XEN_X86_EMU_ALL & ~XEN_X86_EMU_VPCI);
+        xc_config->emulation_flags = XEN_X86_EMU_ALL;
         break;
     case LIBXL_DOMAIN_TYPE_PVH:
-        xc_config->emulation_flags = XEN_X86_EMU_LAPIC;
+        if (libxl_defbool_val(d_config->b_info.apic))
+            /* PVH guests may want to have LAPIC emulation. */
+            xc_config->emulation_flags = XEN_X86_EMU_LAPIC;
+        else
+            xc_config->emulation_flags = 0;
         break;
     case LIBXL_DOMAIN_TYPE_PV:
         xc_config->emulation_flags = 0;
@@ -26,7 +30,6 @@ int libxl__arch_domain_prepare_config(libxl__gc *gc,
 
 int libxl__arch_domain_save_config(libxl__gc *gc,
                                    libxl_domain_config *d_config,
-                                   libxl__domain_build_state *state,
                                    const xc_domain_configuration_t *xc_config)
 {
     return 0;
@@ -374,6 +377,21 @@ int libxl__arch_domain_init_hw_description(libxl__gc *gc,
     return 0;
 }
 
+int libxl__arch_domain_finalise_hw_description(libxl__gc *gc,
+                                               libxl_domain_build_info *info,
+                                               struct xc_dom_image *dom)
+{
+    int rc = 0;
+
+    if (info->type == LIBXL_DOMAIN_TYPE_PVH) {
+        rc = libxl__dom_load_acpi(gc, info, dom);
+        if (rc != 0)
+            LOGE(ERROR, "libxl_dom_load_acpi failed");
+    }
+
+    return rc;
+}
+
 int libxl__arch_build_dom_finish(libxl__gc *gc,
                                  libxl_domain_build_info *info,
                                  struct xc_dom_image *dom,
@@ -492,10 +510,10 @@ int libxl__arch_domain_map_irq(libxl__gc *gc, uint32_t domid, int irq)
  * to adjust them. Please refer to libxl__domain_device_construct_rdm().
  */
 #define GUEST_LOW_MEM_START_DEFAULT 0x100000
-static int domain_construct_memmap(libxl__gc *gc,
-                                   libxl_domain_config *d_config,
-                                   uint32_t domid,
-                                   struct xc_dom_image *dom)
+int libxl__arch_domain_construct_memmap(libxl__gc *gc,
+                                        libxl_domain_config *d_config,
+                                        uint32_t domid,
+                                        struct xc_dom_image *dom)
 {
     int rc = 0;
     unsigned int nr = 0, i;
@@ -512,9 +530,6 @@ static int domain_construct_memmap(libxl__gc *gc,
         if (d_config->rdms[i].policy != LIBXL_RDM_RESERVE_POLICY_INVALID)
             e820_entries++;
 
-    /* Add the HVM special pages to PVH memmap as RESERVED. */
-    if (d_config->b_info.type == LIBXL_DOMAIN_TYPE_PVH)
-        e820_entries++;
 
     /* If we should have a highmem range. */
     if (highmem_size)
@@ -549,15 +564,6 @@ static int domain_construct_memmap(libxl__gc *gc,
         nr++;
     }
 
-    /* HVM special pages */
-    if (d_config->b_info.type == LIBXL_DOMAIN_TYPE_PVH) {
-        e820[nr].addr = (X86_HVM_END_SPECIAL_REGION - X86_HVM_NR_SPECIAL_PAGES)
-                        << XC_PAGE_SHIFT;
-        e820[nr].size = X86_HVM_NR_SPECIAL_PAGES << XC_PAGE_SHIFT;
-        e820[nr].type = E820_RESERVED;
-        nr++;
-    }
-
     for (i = 0; i < MAX_ACPI_MODULES; i++) {
         if (dom->acpi_modules[i].length) {
             e820[nr].addr = dom->acpi_modules[i].guest_addr_out & ~(page_size - 1);
@@ -580,36 +586,7 @@ static int domain_construct_memmap(libxl__gc *gc,
         goto out;
     }
 
-    dom->e820 = e820;
-    dom->e820_entries = e820_entries;
-
 out:
-    return rc;
-}
-
-int libxl__arch_domain_finalise_hw_description(libxl__gc *gc,
-                                               uint32_t domid,
-                                               libxl_domain_config *d_config,
-                                               struct xc_dom_image *dom)
-{
-    libxl_domain_build_info *const info = &d_config->b_info;
-    int rc;
-
-    if (info->type == LIBXL_DOMAIN_TYPE_PV)
-        return 0;
-
-    if (info->type == LIBXL_DOMAIN_TYPE_PVH) {
-        rc = libxl__dom_load_acpi(gc, info, dom);
-        if (rc != 0) {
-            LOGE(ERROR, "libxl_dom_load_acpi failed");
-            return rc;
-        }
-    }
-
-    rc = domain_construct_memmap(gc, d_config, domid, dom);
-    if (rc != 0)
-        LOGE(ERROR, "setting domain memory map failed");
-
     return rc;
 }
 

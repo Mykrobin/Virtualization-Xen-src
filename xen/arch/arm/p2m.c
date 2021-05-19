@@ -10,6 +10,7 @@
 #include <xen/xmalloc.h>
 #include <public/vm_event.h>
 #include <asm/flushtlb.h>
+#include <asm/gic.h>
 #include <asm/event.h>
 #include <asm/hardirq.h>
 #include <asm/page.h>
@@ -37,6 +38,12 @@ static unsigned int __read_mostly max_vmid = MAX_VMID_8_BIT;
 
 #define P2M_ROOT_PAGES    (1<<P2M_ROOT_ORDER)
 
+/* Override macros from asm/mm.h to make them work with mfn_t */
+#undef mfn_to_page
+#define mfn_to_page(mfn) __mfn_to_page(mfn_x(mfn))
+#undef page_to_mfn
+#define page_to_mfn(pg) _mfn(__page_to_mfn(pg))
+
 unsigned int __read_mostly p2m_ipa_bits;
 
 /* Helpers to lookup the properties of each level */
@@ -45,15 +52,21 @@ static const paddr_t level_masks[] =
 static const uint8_t level_orders[] =
     { ZEROETH_ORDER, FIRST_ORDER, SECOND_ORDER, THIRD_ORDER };
 
+static void p2m_flush_tlb(struct p2m_domain *p2m);
+
 /* Unlock the flush and do a P2M TLB flush if necessary */
 void p2m_write_unlock(struct p2m_domain *p2m)
 {
-    /*
-     * The final flush is done with the P2M write lock taken to avoid
-     * someone else modifying the P2M wbefore the TLB invalidation has
-     * completed.
-     */
-    p2m_tlb_flush_sync(p2m);
+    if ( p2m->need_flush )
+    {
+        p2m->need_flush = false;
+        /*
+         * The final flush is done with the P2M write lock taken to
+         * to avoid someone else modify the P2M before the TLB
+         * invalidation has completed.
+         */
+        p2m_flush_tlb(p2m);
+    }
 
     write_unlock(&p2m->lock);
 }
@@ -84,8 +97,8 @@ void dump_p2m_lookup(struct domain *d, paddr_t addr)
 
     printk("dom%d IPA 0x%"PRIpaddr"\n", d->domain_id, addr);
 
-    printk("P2M @ %p mfn:%#"PRI_mfn"\n",
-           p2m->root, mfn_x(page_to_mfn(p2m->root)));
+    printk("P2M @ %p mfn:0x%lx\n",
+           p2m->root, __page_to_mfn(p2m->root));
 
     dump_pt_walk(page_to_maddr(p2m->root), addr,
                  P2M_ROOT_LEVEL, P2M_ROOT_PAGES);
@@ -125,17 +138,10 @@ void p2m_restore_state(struct vcpu *n)
     *last_vcpu_ran = n->vcpu_id;
 }
 
-/*
- * Force a synchronous P2M TLB flush.
- *
- * Must be called with the p2m lock held.
- */
-static void p2m_force_tlb_flush_sync(struct p2m_domain *p2m)
+static void p2m_flush_tlb(struct p2m_domain *p2m)
 {
     unsigned long flags = 0;
     uint64_t ovttbr;
-
-    ASSERT(p2m_is_write_locked(p2m));
 
     /*
      * ARM only provides an instruction to flush TLBs for the current
@@ -157,14 +163,19 @@ static void p2m_force_tlb_flush_sync(struct p2m_domain *p2m)
         isb();
         local_irq_restore(flags);
     }
-
-    p2m->need_flush = false;
 }
 
-void p2m_tlb_flush_sync(struct p2m_domain *p2m)
+/*
+ * Force a synchronous P2M TLB flush.
+ *
+ * Must be called with the p2m lock held.
+ */
+static void p2m_flush_tlb_sync(struct p2m_domain *p2m)
 {
-    if ( p2m->need_flush )
-        p2m_force_tlb_flush_sync(p2m);
+    ASSERT(p2m_is_write_locked(p2m));
+
+    p2m_flush_tlb(p2m);
+    p2m->need_flush = false;
 }
 
 /*
@@ -380,10 +391,10 @@ int guest_physmap_mark_populate_on_demand(struct domain *d,
     return -ENOSYS;
 }
 
-unsigned long p2m_pod_decrease_reservation(struct domain *d, gfn_t gfn,
-                                           unsigned int order)
+int p2m_pod_decrease_reservation(struct domain *d, gfn_t gfn,
+                                 unsigned int order)
 {
-    return 0;
+    return -ENOSYS;
 }
 
 static void p2m_set_permission(lpae_t *e, p2m_type_t t, p2m_access_t a)
@@ -661,7 +672,8 @@ static void p2m_free_entry(struct p2m_domain *p2m,
      * XXX: Should we defer the free of the page table to avoid the
      * flush?
      */
-    p2m_tlb_flush_sync(p2m);
+    if ( p2m->need_flush )
+        p2m_flush_tlb_sync(p2m);
 
     mfn = _mfn(entry.p2m.base);
     ASSERT(mfn_valid(mfn));
@@ -850,7 +862,7 @@ static int __p2m_set_entry(struct p2m_domain *p2m,
          * For more details see (D4.7.1 in ARM DDI 0487A.j).
          */
         p2m_remove_pte(entry, p2m->clean_pte);
-        p2m_force_tlb_flush_sync(p2m);
+        p2m_flush_tlb_sync(p2m);
 
         p2m_write_pte(entry, split_pte, p2m->clean_pte);
 
@@ -926,7 +938,7 @@ static int __p2m_set_entry(struct p2m_domain *p2m,
         {
             if ( likely(!p2m->mem_access_enabled) ||
                  P2M_CLEAR_PERM(pte) != P2M_CLEAR_PERM(orig_pte) )
-                p2m_force_tlb_flush_sync(p2m);
+                p2m_flush_tlb_sync(p2m);
             else
                 p2m->need_flush = true;
         }
@@ -940,18 +952,18 @@ static int __p2m_set_entry(struct p2m_domain *p2m,
         p2m->lowest_mapped_gfn = gfn_min(p2m->lowest_mapped_gfn, sgfn);
     }
 
-    if ( need_iommu(p2m->domain) &&
-         (lpae_valid(orig_pte) || lpae_valid(*entry)) )
-        rc = iommu_iotlb_flush(p2m->domain, gfn_x(sgfn), 1UL << page_order);
-    else
-        rc = 0;
-
     /*
      * Free the entry only if the original pte was valid and the base
      * is different (to avoid freeing when permission is changed).
      */
     if ( lpae_valid(orig_pte) && entry->p2m.base != orig_pte.p2m.base )
         p2m_free_entry(p2m, orig_pte, level);
+
+    if ( need_iommu(p2m->domain) &&
+         (lpae_valid(orig_pte) || lpae_valid(*entry)) )
+        rc = iommu_iotlb_flush(p2m->domain, gfn_x(sgfn), 1UL << page_order);
+    else
+        rc = 0;
 
 out:
     unmap_domain_page(table);
@@ -1130,9 +1142,7 @@ static int p2m_alloc_table(struct domain *d)
      * Make sure that all TLBs corresponding to the new VMID are flushed
      * before using it
      */
-    p2m_write_lock(p2m);
-    p2m_force_tlb_flush_sync(p2m);
-    p2m_write_unlock(p2m);
+    p2m_flush_tlb(p2m);
 
     return 0;
 }
@@ -1441,10 +1451,10 @@ struct page_info *get_page_from_gva(struct vcpu *v, vaddr_t va,
     }
 
 err:
-    p2m_read_unlock(p2m);
-
     if ( !page && p2m->mem_access_enabled )
         page = p2m_mem_access_check_and_get_page(va, flags, v);
+
+    p2m_read_unlock(p2m);
 
     return page;
 }

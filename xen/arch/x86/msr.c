@@ -26,30 +26,11 @@
 
 DEFINE_PER_CPU(uint32_t, tsc_aux);
 
-struct msr_domain_policy __read_mostly     raw_msr_domain_policy,
-                         __read_mostly    host_msr_domain_policy,
-                         __read_mostly hvm_max_msr_domain_policy,
+struct msr_domain_policy __read_mostly hvm_max_msr_domain_policy,
                          __read_mostly  pv_max_msr_domain_policy;
 
 struct msr_vcpu_policy __read_mostly hvm_max_msr_vcpu_policy,
                        __read_mostly  pv_max_msr_vcpu_policy;
-
-static void __init calculate_raw_policy(void)
-{
-    /* 0x000000ce  MSR_INTEL_PLATFORM_INFO */
-    /* Was already added by probe_cpuid_faulting() */
-}
-
-static void __init calculate_host_policy(void)
-{
-    struct msr_domain_policy *dp = &host_msr_domain_policy;
-
-    *dp = raw_msr_domain_policy;
-
-    /* 0x000000ce  MSR_INTEL_PLATFORM_INFO */
-    /* probe_cpuid_faulting() sanity checks presence of MISC_FEATURES_ENABLES */
-    dp->plaform_info.cpuid_faulting = cpu_has_cpuid_faulting;
-}
 
 static void __init calculate_hvm_max_policy(void)
 {
@@ -59,10 +40,7 @@ static void __init calculate_hvm_max_policy(void)
     if ( !hvm_enabled )
         return;
 
-    *dp = host_msr_domain_policy;
-
     /* 0x000000ce  MSR_INTEL_PLATFORM_INFO */
-    /* It's always possible to emulate CPUID faulting for HVM guests */
     if ( boot_cpu_data.x86_vendor == X86_VENDOR_INTEL ||
          boot_cpu_data.x86_vendor == X86_VENDOR_AMD )
     {
@@ -71,7 +49,7 @@ static void __init calculate_hvm_max_policy(void)
     }
 
     /* 0x00000140  MSR_INTEL_MISC_FEATURES_ENABLES */
-    vp->misc_features_enables.available = dp->plaform_info.cpuid_faulting;
+    vp->misc_features_enables.available = dp->plaform_info.available;
 }
 
 static void __init calculate_pv_max_policy(void)
@@ -79,16 +57,19 @@ static void __init calculate_pv_max_policy(void)
     struct msr_domain_policy *dp = &pv_max_msr_domain_policy;
     struct msr_vcpu_policy *vp = &pv_max_msr_vcpu_policy;
 
-    *dp = host_msr_domain_policy;
+    /* 0x000000ce  MSR_INTEL_PLATFORM_INFO */
+    if ( cpu_has_cpuid_faulting )
+    {
+        dp->plaform_info.available = true;
+        dp->plaform_info.cpuid_faulting = true;
+    }
 
     /* 0x00000140  MSR_INTEL_MISC_FEATURES_ENABLES */
-    vp->misc_features_enables.available = dp->plaform_info.cpuid_faulting;
+    vp->misc_features_enables.available = dp->plaform_info.available;
 }
 
 void __init init_guest_msr_policy(void)
 {
-    calculate_raw_policy();
-    calculate_host_policy();
     calculate_hvm_max_policy();
     calculate_pv_max_policy();
 }
@@ -141,6 +122,7 @@ int init_vcpu_msr_policy(struct vcpu *v)
 
 int guest_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val)
 {
+    const struct domain *d = v->domain;
     const struct cpuid_policy *cp = v->domain->arch.cpuid;
     const struct msr_domain_policy *dp = v->domain->arch.msr;
     const struct msr_vcpu_policy *vp = v->arch.msr;
@@ -154,30 +136,18 @@ int guest_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val)
         /* Write-only */
     case MSR_TSX_FORCE_ABORT:
     case MSR_TSX_CTRL:
+    case MSR_MCU_OPT_CTRL:
+    case MSR_RAPL_POWER_UNIT:
+    case MSR_PKG_POWER_LIMIT  ... MSR_PKG_POWER_INFO:
+    case MSR_DRAM_POWER_LIMIT ... MSR_DRAM_POWER_INFO:
+    case MSR_PP0_POWER_LIMIT  ... MSR_PP0_POLICY:
+    case MSR_PP1_POWER_LIMIT  ... MSR_PP1_POLICY:
+    case MSR_PLATFORM_ENERGY_COUNTER:
+    case MSR_PLATFORM_POWER_LIMIT:
+    case MSR_F15H_CU_POWER ... MSR_F15H_CU_MAX_POWER:
+    case MSR_AMD_RAPL_POWER_UNIT ... MSR_AMD_PKG_ENERGY_STATUS:
         /* Not offered to guests. */
         goto gp_fault;
-
-    case MSR_AMD_PATCHLEVEL:
-        BUILD_BUG_ON(MSR_IA32_UCODE_REV != MSR_AMD_PATCHLEVEL);
-        /*
-         * AMD and Intel use the same MSR for the current microcode version.
-         *
-         * There is no need to jump through the SDM-provided hoops for Intel.
-         * A guest might itself perform the "write 0, CPUID, read" sequence,
-         * but servicing the CPUID for the guest typically wont result in
-         * actually executing a CPUID instruction.
-         *
-         * As a guest can't influence the value of this MSR, the value will be
-         * from Xen's last microcode load, which can be forwarded straight to
-         * the guest.
-         */
-        if ( (cp->x86_vendor != X86_VENDOR_INTEL &&
-              cp->x86_vendor != X86_VENDOR_AMD) ||
-             (boot_cpu_data.x86_vendor != X86_VENDOR_INTEL &&
-              boot_cpu_data.x86_vendor != X86_VENDOR_AMD) ||
-             rdmsr_safe(MSR_AMD_PATCHLEVEL, *val) )
-            goto gp_fault;
-        break;
 
     case MSR_SPEC_CTRL:
         if ( !cp->feat.ibrsb )
@@ -202,6 +172,25 @@ int guest_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val)
         *val = (uint64_t)vp->misc_features_enables.cpuid_faulting <<
                _MSR_MISC_FEATURES_CPUID_FAULTING;
         break;
+
+        /*
+         * These MSRs are not enumerated in CPUID.  They have been around
+         * since the Pentium 4, and implemented by other vendors.
+         *
+         * Some versions of Windows try reading these before setting up a #GP
+         * handler, and Linux has several unguarded reads as well.  Provide
+         * RAZ semantics, in general, but permit a cpufreq controller dom0 to
+         * have full access.
+         */
+    case MSR_IA32_PERF_STATUS:
+    case MSR_IA32_PERF_CTL:
+        if ( !(cp->x86_vendor & (X86_VENDOR_INTEL | X86_VENDOR_CENTAUR)) )
+            goto gp_fault;
+
+        *val = 0;
+        if ( likely(!is_cpufreq_controller(d)) || rdmsr_safe(msr, *val) == 0 )
+            break;
+        goto gp_fault;
 
         /*
          * TODO: Implement when we have better topology representation.
@@ -232,24 +221,22 @@ int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
     case MSR_INTEL_CORE_THREAD_COUNT:
     case MSR_INTEL_PLATFORM_INFO:
     case MSR_ARCH_CAPABILITIES:
+    case MSR_IA32_PERF_STATUS:
         /* Read-only */
     case MSR_TSX_FORCE_ABORT:
     case MSR_TSX_CTRL:
+    case MSR_MCU_OPT_CTRL:
+    case MSR_RAPL_POWER_UNIT:
+    case MSR_PKG_POWER_LIMIT  ... MSR_PKG_POWER_INFO:
+    case MSR_DRAM_POWER_LIMIT ... MSR_DRAM_POWER_INFO:
+    case MSR_PP0_POWER_LIMIT  ... MSR_PP0_POLICY:
+    case MSR_PP1_POWER_LIMIT  ... MSR_PP1_POLICY:
+    case MSR_PLATFORM_ENERGY_COUNTER:
+    case MSR_PLATFORM_POWER_LIMIT:
+    case MSR_F15H_CU_POWER ... MSR_F15H_CU_MAX_POWER:
+    case MSR_AMD_RAPL_POWER_UNIT ... MSR_AMD_PKG_ENERGY_STATUS:
         /* Not offered to guests. */
         goto gp_fault;
-
-    case MSR_AMD_PATCHLEVEL:
-        BUILD_BUG_ON(MSR_IA32_UCODE_REV != MSR_AMD_PATCHLEVEL);
-        /*
-         * AMD and Intel use the same MSR for the current microcode version.
-         *
-         * Both document it as read-only.  However Intel also document that,
-         * for backwards compatiblity, the OS should write 0 to it before
-         * trying to access the current microcode version.
-         */
-        if ( d->arch.cpuid->x86_vendor != X86_VENDOR_INTEL || val != 0 )
-            goto gp_fault;
-        break;
 
     case MSR_AMD_PATCHLOADER:
         /*
@@ -334,6 +321,21 @@ int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
             ctxt_switch_levelling(v);
         break;
     }
+
+        /*
+         * This MSR is not enumerated in CPUID.  It has been around since the
+         * Pentium 4, and implemented by other vendors.
+         *
+         * To match the RAZ semantics, implement as write-discard, except for
+         * a cpufreq controller dom0 which has full access.
+         */
+    case MSR_IA32_PERF_CTL:
+        if ( !(cp->x86_vendor & (X86_VENDOR_INTEL | X86_VENDOR_CENTAUR)) )
+            goto gp_fault;
+
+        if ( likely(!is_cpufreq_controller(d)) || wrmsr_safe(msr, val) == 0 )
+            break;
+        goto gp_fault;
 
     default:
         return X86EMUL_UNHANDLEABLE;

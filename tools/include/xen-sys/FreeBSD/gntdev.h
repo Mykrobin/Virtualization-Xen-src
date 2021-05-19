@@ -138,7 +138,7 @@ struct ioctl_gntdev_alloc_gref {
     /* OUT parameters */
     uint64_t index;
     /* Variable OUT parameter */
-    uint32_t *gref_ids;
+    uint32_t gref_ids[1];
 };
 
 #define GNTDEV_ALLOC_FLAG_WRITABLE 1
@@ -167,7 +167,7 @@ struct ioctl_gntdev_map_grant_ref {
     /* OUT parameters */
     uint64_t index;
     /* Variable IN parameter */
-    struct ioctl_gntdev_grant_ref *refs;
+    struct ioctl_gntdev_grant_ref refs[1];
 };
 
 #define IOCTL_GNTDEV_UNMAP_GRANT_REF					\

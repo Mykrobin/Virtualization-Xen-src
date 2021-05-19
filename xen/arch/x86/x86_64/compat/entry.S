@@ -45,11 +45,11 @@ ENTRY(compat_test_all_events)
         testb $TBF_EXCEPTION, TRAPBOUNCE_flags(%rdx)
         jnz   .Lcompat_process_trapbounce
 
-        cmpb  $0, VCPU_mce_pending(%rbx)
-        jne   compat_process_mce
+        testb $1,VCPU_mce_pending(%rbx)
+        jnz   compat_process_mce
 .Lcompat_test_guest_nmi:
-        cmpb  $0, VCPU_nmi_pending(%rbx)
-        jne   compat_process_nmi
+        testb $1,VCPU_nmi_pending(%rbx)
+        jnz   compat_process_nmi
 compat_test_guest_events:
         movq  VCPU_vcpu_info(%rbx),%rax
         movzwl COMPAT_VCPUINFO_upcall_pending(%rax),%eax
@@ -80,7 +80,6 @@ compat_process_softirqs:
         sti
 .Lcompat_bounce_exception:
         call  compat_create_bounce_frame
-        movb  $0, TRAPBOUNCE_flags(%rdx)
         jmp   compat_test_all_events
 
 	ALIGN
@@ -124,10 +123,13 @@ ENTRY(compat_restore_all_guest)
         ASSERT_INTERRUPTS_DISABLED
         mov   $~(X86_EFLAGS_IOPL|X86_EFLAGS_NT|X86_EFLAGS_VM),%r11d
         and   UREGS_eflags(%rsp),%r11d
-
-.macro alt_cr4_pv32
+.Lcr4_orig:
+        .skip .Lcr4_alt_end - .Lcr4_alt, 0x90
+.Lcr4_orig_end:
+        .pushsection .altinstr_replacement, "ax"
+.Lcr4_alt:
         testb $3,UREGS_cs(%rsp)
-        jpe   2f
+        jpe   .Lcr4_alt_end
         mov   CPUINFO_cr4-CPUINFO_guest_cpu_user_regs(%rsp), %rax
         and   $~XEN_CR4_PV32_BITS, %rax
 1:
@@ -145,12 +147,17 @@ ENTRY(compat_restore_all_guest)
          */
         cmp   %rax, CPUINFO_cr4-CPUINFO_guest_cpu_user_regs(%rsp)
         jne   1b
-2:
-.endm
-	ALTERNATIVE_2 "", \
-            alt_cr4_pv32, X86_FEATURE_XEN_SMEP, \
-            alt_cr4_pv32, X86_FEATURE_XEN_SMAP
-
+.Lcr4_alt_end:
+        .section .altinstructions, "a"
+        altinstruction_entry .Lcr4_orig, .Lcr4_orig, X86_FEATURE_ALWAYS, \
+                             (.Lcr4_orig_end - .Lcr4_orig), 0
+        altinstruction_entry .Lcr4_orig, .Lcr4_alt, X86_FEATURE_XEN_SMEP, \
+                             (.Lcr4_orig_end - .Lcr4_orig), \
+                             (.Lcr4_alt_end - .Lcr4_alt)
+        altinstruction_entry .Lcr4_orig, .Lcr4_alt, X86_FEATURE_XEN_SMAP, \
+                             (.Lcr4_orig_end - .Lcr4_orig), \
+                             (.Lcr4_alt_end - .Lcr4_alt)
+        .popsection
         or    $X86_EFLAGS_IF,%r11
         mov   %r11d,UREGS_eflags(%rsp)
 
@@ -224,7 +231,7 @@ ENTRY(cstar_enter)
 .Lcstar_cr3_okay:
         sti
 
-        movq  STACK_CPUINFO_FIELD(current_vcpu)(%rbx), %rbx
+        __GET_CURRENT(bx)
         movq  VCPU_domain(%rbx),%rcx
         cmpb  $0,DOMAIN_is_32bit_pv(%rcx)
         je    switch_to_kernel
@@ -349,7 +356,13 @@ __UNLIKELY_END(compat_bounce_null_selector)
         movl  %eax,UREGS_cs+8(%rsp)
         movl  TRAPBOUNCE_eip(%rdx),%eax
         movl  %eax,UREGS_rip+8(%rsp)
+
+        /* Trapbounce complete.  Clobber state to avoid an erroneous second injection. */
+        xor   %eax, %eax
+        mov   %ax,  TRAPBOUNCE_cs(%rdx)
+        mov   %al,  TRAPBOUNCE_flags(%rdx)
         ret
+
 .section .fixup,"ax"
 .Lfx13:
         xorl  %edi,%edi

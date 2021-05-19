@@ -12,7 +12,7 @@ void mce_barrier_init(struct mce_softirq_barrier *bar)
 void mce_barrier_dec(struct mce_softirq_barrier *bar)
 {
     atomic_inc(&bar->outgen);
-    smp_wmb();
+    wmb();
     atomic_dec(&bar->val);
 }
 
@@ -24,12 +24,12 @@ void mce_barrier_enter(struct mce_softirq_barrier *bar, bool wait)
         return;
     atomic_inc(&bar->ingen);
     gen = atomic_read(&bar->outgen);
-    smp_mb();
+    mb();
     atomic_inc(&bar->val);
     while ( atomic_read(&bar->val) != num_online_cpus() &&
             atomic_read(&bar->outgen) == gen )
     {
-            smp_mb();
+            mb();
             mce_panic_check();
     }
 }
@@ -42,12 +42,12 @@ void mce_barrier_exit(struct mce_softirq_barrier *bar, bool wait)
         return;
     atomic_inc(&bar->outgen);
     gen = atomic_read(&bar->ingen);
-    smp_mb();
+    mb();
     atomic_dec(&bar->val);
     while ( atomic_read(&bar->val) != 0 &&
             atomic_read(&bar->ingen) == gen )
     {
-            smp_mb();
+            mb();
             mce_panic_check();
     }
 }

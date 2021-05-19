@@ -269,8 +269,8 @@ void __init discard_initial_modules(void)
         if ( mi->module[i].kind == BOOTMOD_XEN )
             continue;
 
-        if ( !mfn_valid(maddr_to_mfn(s)) ||
-             !mfn_valid(maddr_to_mfn(e)) )
+        if ( !mfn_valid(_mfn(paddr_to_pfn(s))) ||
+             !mfn_valid(_mfn(paddr_to_pfn(e))))
             continue;
 
         dt_unreserved_regions(s, e, init_domheap_pages, 0);
@@ -681,7 +681,20 @@ static void __init setup_mm(unsigned long dtb_paddr, size_t dtb_size)
 }
 #endif
 
-size_t __read_mostly dcache_line_bytes;
+size_t __read_mostly cacheline_bytes;
+
+/* Very early check of the CPU cache properties */
+void __init setup_cache(void)
+{
+    uint32_t ccsid;
+
+    /* Read the cache size ID register for the level-0 data cache */
+    WRITE_SYSREG32(0, CSSELR_EL1);
+    ccsid = READ_SYSREG32(CCSIDR_EL1);
+
+    /* Low 3 bits are log2(cacheline size in words) - 2. */
+    cacheline_bytes = 1U << (4 + (ccsid & 0x7));
+}
 
 /* C entry point for boot CPU */
 void __init start_xen(unsigned long boot_phys_offset,
@@ -694,9 +707,9 @@ void __init start_xen(unsigned long boot_phys_offset,
     const char *cmdline;
     struct bootmodule *xen_bootmodule;
     struct domain *dom0;
-    struct xen_domctl_createdomain dom0_cfg = {};
+    struct xen_arch_domainconfig config;
 
-    dcache_line_bytes = read_dcache_line_bytes();
+    setup_cache();
 
     percpu_init_areas();
     set_processor_id(0); /* needed early, for smp_processor_id() */
@@ -726,7 +739,7 @@ void __init start_xen(unsigned long boot_phys_offset,
     /* Register Xen's load address as a boot module. */
     xen_bootmodule = add_boot_module(BOOTMOD_XEN,
                              (paddr_t)(uintptr_t)(_start + boot_phys_offset),
-                             (paddr_t)(uintptr_t)(_end - _start), NULL);
+                             (paddr_t)(uintptr_t)(_end - _start + 1), NULL);
     BUG_ON(!xen_bootmodule);
 
     xen_paddr = get_xen_paddr();
@@ -808,7 +821,7 @@ void __init start_xen(unsigned long boot_phys_offset,
     local_irq_enable();
     local_abort_enable();
 
-    smp_prepare_cpus();
+    smp_prepare_cpus(cpus);
 
     initialize_keytable();
 
@@ -844,10 +857,10 @@ void __init start_xen(unsigned long boot_phys_offset,
 
     /* Create initial domain 0. */
     /* The vGIC for DOM0 is exactly emulating the hardware GIC */
-    dom0_cfg.arch.gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE;
-    dom0_cfg.arch.nr_spis = gic_number_lines() - 32;
+    config.gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE;
+    config.nr_spis = gic_number_lines() - 32;
 
-    dom0 = domain_create(0, &dom0_cfg);
+    dom0 = domain_create(0, 0, 0, &config);
     if ( IS_ERR(dom0) || (alloc_dom0_vcpu0(dom0) == NULL) )
             panic("Error creating domain 0");
 

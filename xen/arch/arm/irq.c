@@ -27,8 +27,6 @@
 #include <asm/gic.h>
 #include <asm/vgic.h>
 
-const unsigned int nr_irqs = NR_IRQS;
-
 static unsigned int local_irqs_type[NR_LOCAL_IRQS];
 static DEFINE_SPINLOCK(local_irqs_type_lock);
 
@@ -44,14 +42,7 @@ static void ack_none(struct irq_desc *irq)
     printk("unexpected IRQ trap at irq %02x\n", irq->irq);
 }
 
-static void end_none(struct irq_desc *irq)
-{
-    /*
-     * Still allow a CPU to end an interrupt if we receive a spurious
-     * interrupt. This will prevent the CPU to lose interrupt forever.
-     */
-    gic_hw_ops->gic_host_irq_type->end(irq);
-}
+static void end_none(struct irq_desc *irq) { }
 
 hw_irq_controller no_irq_type = {
     .typename = "none",
@@ -232,7 +223,7 @@ void do_IRQ(struct cpu_user_regs *regs, unsigned int irq, int is_fiq)
          * The irq cannot be a PPI, we only support delivery of SPIs to
          * guests.
 	 */
-        vgic_inject_irq(info->d, NULL, info->virq, true);
+        vgic_vcpu_inject_spi(info->d, info->virq);
         goto out_no_end;
     }
 
@@ -541,15 +532,18 @@ int release_guest_irq(struct domain *d, unsigned int virq)
     struct irq_desc *desc;
     struct irq_guest *info;
     unsigned long flags;
+    struct pending_irq *p;
     int ret;
 
     /* Only SPIs are supported */
     if ( virq < NR_LOCAL_IRQS || virq >= vgic_num_irqs(d) )
         return -EINVAL;
 
-    desc = vgic_get_hw_irq_desc(d, NULL, virq);
-    if ( !desc )
+    p = spi_to_pending(d, virq);
+    if ( !p->desc )
         return -EINVAL;
+
+    desc = p->desc;
 
     spin_lock_irqsave(&desc->lock, flags);
 

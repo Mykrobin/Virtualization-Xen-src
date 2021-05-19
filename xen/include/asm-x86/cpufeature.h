@@ -50,7 +50,6 @@
 #define cpu_has_vmx             boot_cpu_has(X86_FEATURE_VMX)
 #define cpu_has_eist            boot_cpu_has(X86_FEATURE_EIST)
 #define cpu_has_ssse3           boot_cpu_has(X86_FEATURE_SSSE3)
-#define cpu_has_fma             boot_cpu_has(X86_FEATURE_FMA)
 #define cpu_has_cx16            boot_cpu_has(X86_FEATURE_CX16)
 #define cpu_has_pdcm            boot_cpu_has(X86_FEATURE_PDCM)
 #define cpu_has_pcid            boot_cpu_has(X86_FEATURE_PCID)
@@ -61,7 +60,6 @@
 #define cpu_has_aesni           boot_cpu_has(X86_FEATURE_AESNI)
 #define cpu_has_xsave           boot_cpu_has(X86_FEATURE_XSAVE)
 #define cpu_has_avx             boot_cpu_has(X86_FEATURE_AVX)
-#define cpu_has_f16c            boot_cpu_has(X86_FEATURE_F16C)
 #define cpu_has_rdrand          boot_cpu_has(X86_FEATURE_RDRAND)
 #define cpu_has_hypervisor      boot_cpu_has(X86_FEATURE_HYPERVISOR)
 
@@ -71,16 +69,12 @@
                                  && boot_cpu_has(X86_FEATURE_FFXSR))
 #define cpu_has_page1gb         boot_cpu_has(X86_FEATURE_PAGE1GB)
 #define cpu_has_rdtscp          boot_cpu_has(X86_FEATURE_RDTSCP)
-#define cpu_has_3dnow_ext       boot_cpu_has(X86_FEATURE_3DNOWEXT)
-#define cpu_has_3dnow           boot_cpu_has(X86_FEATURE_3DNOW)
 
 /* CPUID level 0x80000001.ecx */
 #define cpu_has_cmp_legacy      boot_cpu_has(X86_FEATURE_CMP_LEGACY)
 #define cpu_has_svm             boot_cpu_has(X86_FEATURE_SVM)
 #define cpu_has_sse4a           boot_cpu_has(X86_FEATURE_SSE4A)
-#define cpu_has_xop             boot_cpu_has(X86_FEATURE_XOP)
 #define cpu_has_lwp             boot_cpu_has(X86_FEATURE_LWP)
-#define cpu_has_fma4            boot_cpu_has(X86_FEATURE_FMA4)
 #define cpu_has_tbm             boot_cpu_has(X86_FEATURE_TBM)
 
 /* CPUID level 0x0000000D:1.eax */

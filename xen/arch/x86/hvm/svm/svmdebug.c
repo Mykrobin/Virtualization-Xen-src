@@ -29,15 +29,6 @@ static void svm_dump_sel(const char *name, const struct segment_register *s)
 
 void svm_vmcb_dump(const char *from, const struct vmcb_struct *vmcb)
 {
-    struct vcpu *curr = current;
-
-    /*
-     * If we are dumping the VMCB currently in context, some guest state may
-     * still be cached in hardware.  Retrieve it.
-     */
-    if ( vmcb == curr->arch.hvm_svm.vmcb )
-        svm_sync_vmcb(curr, vmcb_in_sync);
-
     printk("Dumping guest's current state at %s...\n", from);
     printk("Size of VMCB = %zu, paddr = %"PRIpaddr", vaddr = %p\n",
            sizeof(struct vmcb_struct), virt_to_maddr(vmcb), vmcb);
@@ -64,8 +55,6 @@ void svm_vmcb_dump(const char *from, const struct vmcb_struct *vmcb)
            vmcb->exitinfo1, vmcb->exitinfo2);
     printk("np_enable = %#"PRIx64" guest_asid = %#x\n",
            vmcb_get_np_enable(vmcb), vmcb_get_guest_asid(vmcb));
-    printk("virtual vmload/vmsave = %d, virt_ext = %#"PRIx64"\n",
-           vmcb->virt_ext.fields.vloadsave_enable, vmcb->virt_ext.bytes);
     printk("cpl = %d efer = %#"PRIx64" star = %#"PRIx64" lstar = %#"PRIx64"\n",
            vmcb_get_cpl(vmcb), vmcb_get_efer(vmcb), vmcb->star, vmcb->lstar);
     printk("CR0 = 0x%016"PRIx64" CR2 = 0x%016"PRIx64"\n",
@@ -130,9 +119,9 @@ bool svm_vmcb_isvalid(const char *from, const struct vmcb_struct *vmcb,
            (cr3 >> v->domain->arch.cpuid->extd.maxphysaddr))) )
         PRINTF("CR3: MBZ bits are set (%#"PRIx64")\n", cr3);
 
-    if ( cr4 & ~hvm_cr4_guest_valid_bits(v->domain, false) )
+    if ( cr4 & ~hvm_cr4_guest_valid_bits(v, false) )
         PRINTF("CR4: invalid bits are set (%#"PRIx64", valid: %#"PRIx64")\n",
-               cr4, hvm_cr4_guest_valid_bits(v->domain, false));
+               cr4, hvm_cr4_guest_valid_bits(v, false));
 
     if ( vmcb_get_dr6(vmcb) >> 32 )
         PRINTF("DR6: bits [63:32] are not zero (%#"PRIx64")\n",

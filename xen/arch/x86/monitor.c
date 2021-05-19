@@ -25,8 +25,7 @@
 int arch_monitor_init_domain(struct domain *d)
 {
     if ( !d->arch.monitor.msr_bitmap )
-        d->arch.monitor.msr_bitmap = xzalloc_array(struct monitor_msr_bitmap,
-                                                   2);
+        d->arch.monitor.msr_bitmap = xzalloc(struct monitor_msr_bitmap);
 
     if ( !d->arch.monitor.msr_bitmap )
         return -ENOMEM;
@@ -68,7 +67,7 @@ static unsigned long *monitor_bitmap_for_msr(const struct domain *d, u32 *msr)
     }
 }
 
-static int monitor_enable_msr(struct domain *d, u32 msr, bool onchangeonly)
+static int monitor_enable_msr(struct domain *d, u32 msr)
 {
     unsigned long *bitmap;
     u32 index = msr;
@@ -84,11 +83,6 @@ static int monitor_enable_msr(struct domain *d, u32 msr, bool onchangeonly)
     __set_bit(index, bitmap);
 
     hvm_enable_msr_interception(d, msr);
-
-    if ( onchangeonly )
-        __set_bit(index + sizeof(struct monitor_msr_bitmap) * 8, bitmap);
-    else
-        __clear_bit(index + sizeof(struct monitor_msr_bitmap) * 8, bitmap);
 
     return 0;
 }
@@ -123,21 +117,6 @@ bool monitored_msr(const struct domain *d, u32 msr)
         return false;
 
     return test_bit(msr, bitmap);
-}
-
-bool monitored_msr_onchangeonly(const struct domain *d, u32 msr)
-{
-    const unsigned long *bitmap;
-
-    if ( !d->arch.monitor.msr_bitmap )
-        return false;
-
-    bitmap = monitor_bitmap_for_msr(d, &msr);
-
-    if ( !bitmap )
-        return false;
-
-    return test_bit(msr + sizeof(struct monitor_msr_bitmap) * 8, bitmap);
 }
 
 int arch_monitor_domctl_event(struct domain *d,
@@ -189,11 +168,10 @@ int arch_monitor_domctl_event(struct domain *d,
             ad->monitor.write_ctrlreg_enabled &= ~ctrlreg_bitmask;
         }
 
-        if ( VM_EVENT_X86_CR3 == mop->u.mov_to_cr.index ||
-             VM_EVENT_X86_CR4 == mop->u.mov_to_cr.index )
+        if ( VM_EVENT_X86_CR3 == mop->u.mov_to_cr.index )
         {
             struct vcpu *v;
-            /* Latches new CR3 or CR4 mask through CR0 code. */
+            /* Latches new CR3 mask through CR0 code. */
             for_each_vcpu ( d, v )
                 hvm_update_guest_cr(v, 0);
         }
@@ -220,7 +198,7 @@ int arch_monitor_domctl_event(struct domain *d,
         }
 
         if ( requested_status )
-            rc = monitor_enable_msr(d, msr, mop->u.mov_to_msr.onchangeonly);
+            rc = monitor_enable_msr(d, msr);
         else
             rc = monitor_disable_msr(d, msr);
 

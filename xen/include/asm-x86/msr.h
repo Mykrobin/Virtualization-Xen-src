@@ -132,7 +132,7 @@ static inline unsigned long __rdfsbase(void)
 {
     unsigned long base;
 
-#ifdef HAVE_AS_FSGSBASE
+#ifdef HAVE_GAS_FSGSBASE
     asm volatile ( "rdfsbase %0" : "=r" (base) );
 #else
     asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xc0" : "=a" (base) );
@@ -145,7 +145,7 @@ static inline unsigned long __rdgsbase(void)
 {
     unsigned long base;
 
-#ifdef HAVE_AS_FSGSBASE
+#ifdef HAVE_GAS_FSGSBASE
     asm volatile ( "rdgsbase %0" : "=r" (base) );
 #else
     asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xc8" : "=a" (base) );
@@ -178,26 +178,10 @@ static inline unsigned long rdgsbase(void)
     return base;
 }
 
-static inline unsigned long rdgsshadow(void)
-{
-    unsigned long base;
-
-    if ( read_cr4() & X86_CR4_FSGSBASE )
-    {
-        asm volatile ( "swapgs" );
-        base = __rdgsbase();
-        asm volatile ( "swapgs" );
-    }
-    else
-        rdmsrl(MSR_SHADOW_GS_BASE, base);
-
-    return base;
-}
-
 static inline void wrfsbase(unsigned long base)
 {
     if ( read_cr4() & X86_CR4_FSGSBASE )
-#ifdef HAVE_AS_FSGSBASE
+#ifdef HAVE_GAS_FSGSBASE
         asm volatile ( "wrfsbase %0" :: "r" (base) );
 #else
         asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xd0" :: "a" (base) );
@@ -209,7 +193,7 @@ static inline void wrfsbase(unsigned long base)
 static inline void wrgsbase(unsigned long base)
 {
     if ( read_cr4() & X86_CR4_FSGSBASE )
-#ifdef HAVE_AS_FSGSBASE
+#ifdef HAVE_GAS_FSGSBASE
         asm volatile ( "wrgsbase %0" :: "r" (base) );
 #else
         asm volatile ( ".byte 0xf3, 0x48, 0x0f, 0xae, 0xd8" :: "a" (base) );
@@ -218,36 +202,9 @@ static inline void wrgsbase(unsigned long base)
         wrmsrl(MSR_GS_BASE, base);
 }
 
-static inline void wrgsshadow(unsigned long base)
-{
-    if ( read_cr4() & X86_CR4_FSGSBASE )
-    {
-        asm volatile ( "swapgs\n\t"
-#ifdef HAVE_AS_FSGSBASE
-                       "wrgsbase %0\n\t"
-                       "swapgs"
-                       :: "r" (base) );
-#else
-                       ".byte 0xf3, 0x48, 0x0f, 0xae, 0xd8\n\t"
-                       "swapgs"
-                       :: "a" (base) );
-#endif
-    }
-    else
-        wrmsrl(MSR_SHADOW_GS_BASE, base);
-}
-
-DECLARE_PER_CPU(uint64_t, efer);
-static inline uint64_t read_efer(void)
-{
-    return this_cpu(efer);
-}
-
-static inline void write_efer(uint64_t val)
-{
-    this_cpu(efer) = val;
-    wrmsrl(MSR_EFER, val);
-}
+DECLARE_PER_CPU(u64, efer);
+u64 read_efer(void);
+void write_efer(u64 val);
 
 extern unsigned int ler_msr;
 
@@ -274,14 +231,6 @@ struct msr_domain_policy
         bool cpuid_faulting;
     } plaform_info;
 };
-
-/* RAW msr domain policy: contains the actual values from H/W MSRs */
-extern struct msr_domain_policy raw_msr_domain_policy;
-/*
- * HOST msr domain policy: features that Xen actually decided to use,
- * a subset of RAW policy.
- */
-extern struct msr_domain_policy host_msr_domain_policy;
 
 /* MSR policy object for per-vCPU MSRs */
 struct msr_vcpu_policy

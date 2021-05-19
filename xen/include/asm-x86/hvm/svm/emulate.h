@@ -39,7 +39,6 @@ enum instruction_index {
     INSTR_STGI,
     INSTR_CLGI,
     INSTR_INVLPGA,
-    INSTR_ICEBP,
     INSTR_MAX_COUNT /* Must be last - Number of instructions supported */
 };
 
@@ -53,8 +52,6 @@ static inline int __get_instruction_length(
 {
     return __get_instruction_length_from_list(v, &instr, 1);
 }
-
-unsigned int svm_get_task_switch_insn_len(void);
 
 #endif /* __ASM_X86_HVM_SVM_EMULATE_H__ */
 

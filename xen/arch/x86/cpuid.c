@@ -58,6 +58,21 @@ static int __init parse_xen_cpuid(const char *s)
             if ( !val )
                 setup_clear_cpu_cap(X86_FEATURE_SSBD);
         }
+        else if ( (val = parse_boolean("srbds-ctrl", s, ss)) >= 0 )
+        {
+            if ( !val )
+                setup_clear_cpu_cap(X86_FEATURE_SRBDS_CTRL);
+        }
+        else if ( (val = parse_boolean("rdrand", s, ss)) >= 0 )
+        {
+            if ( !val )
+                setup_clear_cpu_cap(X86_FEATURE_RDRAND);
+        }
+        else if ( (val = parse_boolean("rdseed", s, ss)) >= 0 )
+        {
+            if ( !val )
+                setup_clear_cpu_cap(X86_FEATURE_RDSEED);
+        }
         else
             rc = -EINVAL;
 
@@ -137,42 +152,42 @@ static void recalculate_xstate(struct cpuid_policy *p)
 
     if ( p->basic.avx )
     {
-        xstates |= X86_XCR0_YMM;
+        xstates |= XSTATE_YMM;
         xstate_size = max(xstate_size,
-                          xstate_offsets[X86_XCR0_YMM_POS] +
-                          xstate_sizes[X86_XCR0_YMM_POS]);
+                          xstate_offsets[_XSTATE_YMM] +
+                          xstate_sizes[_XSTATE_YMM]);
     }
 
     if ( p->feat.mpx )
     {
-        xstates |= X86_XCR0_BNDREGS | X86_XCR0_BNDCSR;
+        xstates |= XSTATE_BNDREGS | XSTATE_BNDCSR;
         xstate_size = max(xstate_size,
-                          xstate_offsets[X86_XCR0_BNDCSR_POS] +
-                          xstate_sizes[X86_XCR0_BNDCSR_POS]);
+                          xstate_offsets[_XSTATE_BNDCSR] +
+                          xstate_sizes[_XSTATE_BNDCSR]);
     }
 
     if ( p->feat.avx512f )
     {
-        xstates |= X86_XCR0_OPMASK | X86_XCR0_ZMM | X86_XCR0_HI_ZMM;
+        xstates |= XSTATE_OPMASK | XSTATE_ZMM | XSTATE_HI_ZMM;
         xstate_size = max(xstate_size,
-                          xstate_offsets[X86_XCR0_HI_ZMM_POS] +
-                          xstate_sizes[X86_XCR0_HI_ZMM_POS]);
+                          xstate_offsets[_XSTATE_HI_ZMM] +
+                          xstate_sizes[_XSTATE_HI_ZMM]);
     }
 
     if ( p->feat.pku )
     {
-        xstates |= X86_XCR0_PKRU;
+        xstates |= XSTATE_PKRU;
         xstate_size = max(xstate_size,
-                          xstate_offsets[X86_XCR0_PKRU_POS] +
-                          xstate_sizes[X86_XCR0_PKRU_POS]);
+                          xstate_offsets[_XSTATE_PKRU] +
+                          xstate_sizes[_XSTATE_PKRU]);
     }
 
     if ( p->extd.lwp )
     {
-        xstates |= X86_XCR0_LWP;
+        xstates |= XSTATE_LWP;
         xstate_size = max(xstate_size,
-                          xstate_offsets[X86_XCR0_LWP_POS] +
-                          xstate_sizes[X86_XCR0_LWP_POS]);
+                          xstate_offsets[_XSTATE_LWP] +
+                          xstate_sizes[_XSTATE_LWP]);
     }
 
     p->xstate.max_size  =  xstate_size;
@@ -500,28 +515,6 @@ void __init init_guest_cpuid(void)
     calculate_host_policy();
     calculate_pv_max_policy();
     calculate_hvm_max_policy();
-}
-
-bool recheck_cpu_features(unsigned int cpu)
-{
-    bool okay = true;
-    struct cpuinfo_x86 c;
-    const struct cpuinfo_x86 *bsp = &boot_cpu_data;
-    unsigned int i;
-
-    identify_cpu(&c);
-
-    for ( i = 0; i < NCAPINTS; ++i )
-    {
-        if ( !(~c.x86_capability[i] & bsp->x86_capability[i]) )
-            continue;
-
-        printk(XENLOG_ERR "CPU%u: cap[%2u] is %08x (expected %08x)\n",
-               cpu, i, c.x86_capability[i], bsp->x86_capability[i]);
-        okay = false;
-    }
-
-    return okay;
 }
 
 const uint32_t *lookup_deep_deps(uint32_t feature)
@@ -881,8 +874,7 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
              *    damage itself.
              *
              * - Enlightened CPUID or CPUID faulting available:
-             *    Xen can fully control what is seen here.  When the guest has
-             *    been configured to have XSAVE available, guest kernels need
+             *    Xen can fully control what is seen here.  Guest kernels need
              *    to see the leaked OSXSAVE via the enlightened path, but
              *    guest userspace and the native is given architectural
              *    behaviour.
@@ -892,8 +884,7 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
              */
             /* OSXSAVE clear in policy.  Fast-forward CR4 back in. */
             if ( (v->arch.pv_vcpu.ctrlreg[4] & X86_CR4_OSXSAVE) ||
-                 (p->basic.xsave &&
-                  regs->entry_vector == TRAP_invalid_op &&
+                 (regs->entry_vector == TRAP_invalid_op &&
                   guest_kernel_mode(v, regs) &&
                   (read_cr4() & X86_CR4_OSXSAVE)) )
                 res->c |= cpufeat_mask(X86_FEATURE_OSXSAVE);
@@ -1075,7 +1066,7 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
         break;
 
     case 0x8000001c:
-        if ( (v->arch.xcr0 & X86_XCR0_LWP) && cpu_has_svm )
+        if ( (v->arch.xcr0 & XSTATE_LWP) && cpu_has_svm )
             /* Turn on available bit and other features specified in lwp_cfg. */
             res->a = (res->d & v->arch.hvm_svm.guest_lwp_cfg) | 1;
         break;

@@ -22,7 +22,6 @@
 #include <xen/init.h>
 #include <xen/libelf.h>
 #include <xen/multiboot.h>
-#include <xen/pci.h>
 #include <xen/softirq.h>
 
 #include <acpi/actables.h>
@@ -91,11 +90,12 @@ static int __init pvh_populate_memory_range(struct domain *d,
                                             unsigned long start,
                                             unsigned long nr_pages)
 {
-    unsigned int order = MAX_ORDER, i = 0;
+    unsigned int order, i = 0;
     struct page_info *page;
     int rc;
 #define MAP_MAX_ITER 64
 
+    order = MAX_ORDER;
     while ( nr_pages != 0 )
     {
         unsigned int range_order = get_order_from_pages(nr_pages + 1);
@@ -120,7 +120,7 @@ static int __init pvh_populate_memory_range(struct domain *d,
             continue;
         }
 
-        rc = guest_physmap_add_page(d, _gfn(start), page_to_mfn(page),
+        rc = guest_physmap_add_page(d, _gfn(start), _mfn(page_to_mfn(page)),
                                     order);
         if ( rc != 0 )
         {
@@ -270,7 +270,7 @@ static int __init pvh_setup_vmx_realmode_helpers(struct domain *d)
     }
     write_32bit_pse_identmap(ident_pt);
     unmap_domain_page(ident_pt);
-    put_page(mfn_to_page(mfn));
+    put_page(mfn_to_page(mfn_x(mfn)));
     d->arch.hvm_domain.params[HVM_PARAM_IDENT_PT] = gaddr;
     if ( pvh_add_mem_range(d, gaddr, gaddr + PAGE_SIZE, E820_RESERVED) )
             printk("Unable to set identity page tables as reserved in the memory map\n");
@@ -288,7 +288,7 @@ static void __init pvh_steal_low_ram(struct domain *d, unsigned long start,
 
     for ( mfn = start; mfn < start + nr_pages; mfn++ )
     {
-        struct page_info *pg = mfn_to_page(_mfn(mfn));
+        struct page_info *pg = mfn_to_page(mfn);
         int rc;
 
         rc = unshare_xen_page_with_guest(pg, dom_io);
@@ -298,7 +298,7 @@ static void __init pvh_steal_low_ram(struct domain *d, unsigned long start,
             continue;
         }
 
-        share_xen_page_with_guest(pg, d, SHARE_rw);
+        share_xen_page_with_guest(pg, d, XENSHARE_writable);
         rc = guest_physmap_add_entry(d, _gfn(mfn), _mfn(mfn), 0, p2m_ram_rw);
         if ( rc )
             printk("Unable to add mfn %#lx to p2m: %d\n", mfn, rc);
@@ -375,11 +375,13 @@ static __init void pvh_setup_e820(struct domain *d, unsigned long nr_pages)
 static int __init pvh_setup_p2m(struct domain *d)
 {
     struct vcpu *v = d->vcpu[0];
-    unsigned long nr_pages = dom0_compute_nr_pages(d, NULL, 0);
+    unsigned long nr_pages;
     unsigned int i;
     int rc;
     bool preempted;
 #define MB1_PAGES PFN_DOWN(MB(1))
+
+    nr_pages = dom0_compute_nr_pages(d, NULL, 0);
 
     pvh_setup_e820(d, nr_pages);
     do {
@@ -562,7 +564,7 @@ static int __init pvh_setup_cpus(struct domain *d, paddr_t entry,
                                  paddr_t start_info)
 {
     struct vcpu *v = d->vcpu[0];
-    unsigned int cpu = v->processor, i;
+    unsigned int cpu, i;
     int rc;
     /*
      * This sets the vCPU state according to the state described in
@@ -575,14 +577,17 @@ static int __init pvh_setup_cpus(struct domain *d, paddr_t entry,
         .cpu_regs.x86_32.cr0 = X86_CR0_PE | X86_CR0_ET,
         .cpu_regs.x86_32.cs_limit = ~0u,
         .cpu_regs.x86_32.ds_limit = ~0u,
+        .cpu_regs.x86_32.es_limit = ~0u,
         .cpu_regs.x86_32.ss_limit = ~0u,
         .cpu_regs.x86_32.tr_limit = 0x67,
         .cpu_regs.x86_32.cs_ar = 0xc9b,
         .cpu_regs.x86_32.ds_ar = 0xc93,
+        .cpu_regs.x86_32.es_ar = 0xc93,
         .cpu_regs.x86_32.ss_ar = 0xc93,
         .cpu_regs.x86_32.tr_ar = 0x8b,
     };
 
+    cpu = v->processor;
     for ( i = 1; i < d->max_vcpus; i++ )
     {
         const struct vcpu *p = dom0_setup_vcpu(d, i, cpu);
@@ -616,6 +621,7 @@ static int __init pvh_setup_cpus(struct domain *d, paddr_t entry,
 static int __init acpi_count_intr_ovr(struct acpi_subtable_header *header,
                                      const unsigned long end)
 {
+
     acpi_intr_overrides++;
     return 0;
 }
@@ -635,6 +641,7 @@ static int __init acpi_set_intr_ovr(struct acpi_subtable_header *header,
 static int __init acpi_count_nmi_src(struct acpi_subtable_header *header,
                                      const unsigned long end)
 {
+
     acpi_nmi_sources++;
     return 0;
 }
@@ -774,9 +781,10 @@ static int __init pvh_setup_acpi_madt(struct domain *d, paddr_t *addr)
 static bool __init acpi_memory_banned(unsigned long address,
                                       unsigned long size)
 {
-    unsigned long mfn = PFN_DOWN(address);
-    unsigned long nr_pages = PFN_UP((address & ~PAGE_MASK) + size), i;
+    unsigned long mfn, nr_pages, i;
 
+    mfn = PFN_DOWN(address);
+    nr_pages = PFN_UP((address & ~PAGE_MASK) + size);
     for ( i = 0 ; i < nr_pages; i++ )
         if ( !page_is_ram_type(mfn + i, RAM_TYPE_RESERVED) &&
              !page_is_ram_type(mfn + i, RAM_TYPE_ACPI) )
@@ -785,46 +793,27 @@ static bool __init acpi_memory_banned(unsigned long address,
     return false;
 }
 
-static bool __init pvh_acpi_table_allowed(const char *sig,
-                                          unsigned long address,
-                                          unsigned long size)
+static bool __init pvh_acpi_table_allowed(const char *sig)
 {
-    static const char __initconst allowed_tables[][ACPI_NAME_SIZE] = {
-        ACPI_SIG_DSDT, ACPI_SIG_FADT, ACPI_SIG_FACS, ACPI_SIG_PSDT,
-        ACPI_SIG_SSDT, ACPI_SIG_SBST, ACPI_SIG_MCFG, ACPI_SIG_SLIC,
-        ACPI_SIG_MSDM, ACPI_SIG_WDAT, ACPI_SIG_FPDT, ACPI_SIG_S3PT,
-    };
+    static const char __initconst banned_tables[][ACPI_NAME_SIZE] = {
+        ACPI_SIG_HPET, ACPI_SIG_SLIT, ACPI_SIG_SRAT, ACPI_SIG_MPST,
+        ACPI_SIG_PMTT, ACPI_SIG_MADT, ACPI_SIG_DMAR};
     unsigned int i;
 
-    for ( i = 0 ; i < ARRAY_SIZE(allowed_tables); i++ )
-    {
-        if ( strncmp(sig, allowed_tables[i], ACPI_NAME_SIZE) )
-            continue;
-
-        if ( !acpi_memory_banned(address, size) )
-            return true;
-        else
-        {
-            printk("Skipping table %.4s in non-ACPI non-reserved region\n",
-                   sig);
+    for ( i = 0 ; i < ARRAY_SIZE(banned_tables); i++ )
+        if ( strncmp(sig, banned_tables[i], ACPI_NAME_SIZE) == 0 )
             return false;
-        }
+
+    /* Make sure table doesn't reside in a RAM region. */
+    if ( acpi_memory_banned(acpi_gbl_root_table_list.tables[i].address,
+                            acpi_gbl_root_table_list.tables[i].length) )
+    {
+        printk("Skipping table %.4s because resides in a non-ACPI, non-reserved region\n",
+               sig);
+        return false;
     }
 
-    return false;
-}
-
-static bool __init pvh_acpi_xsdt_table_allowed(const char *sig,
-                                               unsigned long address,
-                                               unsigned long size)
-{
-    /*
-     * DSDT and FACS are pointed to from FADT and thus don't belong
-     * in XSDT.
-     */
-    return (pvh_acpi_table_allowed(sig, address, size) &&
-            strncmp(sig, ACPI_SIG_DSDT, ACPI_NAME_SIZE) &&
-            strncmp(sig, ACPI_SIG_FACS, ACPI_NAME_SIZE));
+    return true;
 }
 
 static int __init pvh_setup_acpi_xsdt(struct domain *d, paddr_t madt_addr,
@@ -833,7 +822,6 @@ static int __init pvh_setup_acpi_xsdt(struct domain *d, paddr_t madt_addr,
     struct acpi_table_xsdt *xsdt;
     struct acpi_table_header *table;
     struct acpi_table_rsdp *rsdp;
-    const struct acpi_table_desc *tables = acpi_gbl_root_table_list.tables;
     unsigned long size = sizeof(*xsdt);
     unsigned int i, j, num_tables = 0;
     paddr_t xsdt_paddr;
@@ -849,8 +837,9 @@ static int __init pvh_setup_acpi_xsdt(struct domain *d, paddr_t madt_addr,
     /* Count the number of tables that will be added to the XSDT. */
     for( i = 0; i < acpi_gbl_root_table_list.count; i++ )
     {
-        if ( pvh_acpi_xsdt_table_allowed(tables[i].signature.ascii,
-                                         tables[i].address, tables[i].length) )
+        const char *sig = acpi_gbl_root_table_list.tables[i].signature.ascii;
+
+        if ( pvh_acpi_table_allowed(sig) )
             num_tables++;
     }
 
@@ -895,9 +884,11 @@ static int __init pvh_setup_acpi_xsdt(struct domain *d, paddr_t madt_addr,
     /* Copy the addresses of the rest of the allowed tables. */
     for( i = 0, j = 1; i < acpi_gbl_root_table_list.count; i++ )
     {
-        if ( pvh_acpi_xsdt_table_allowed(tables[i].signature.ascii,
-                                         tables[i].address, tables[i].length) )
-            xsdt->table_offset_entry[j++] = tables[i].address;
+        const char *sig = acpi_gbl_root_table_list.tables[i].signature.ascii;
+
+        if ( pvh_acpi_table_allowed(sig) )
+            xsdt->table_offset_entry[j++] =
+                acpi_gbl_root_table_list.tables[i].address;
     }
 
     xsdt->header.revision = 1;
@@ -961,7 +952,7 @@ static int __init pvh_setup_acpi(struct domain *d, paddr_t start_info)
          * re-using MADT memory.
          */
         if ( strncmp(sig, ACPI_SIG_MADT, ACPI_NAME_SIZE)
-             ? pvh_acpi_table_allowed(sig, addr, size)
+             ? pvh_acpi_table_allowed(sig)
              : !acpi_memory_banned(addr, size) )
              pvh_add_mem_range(d, addr, addr + size, E820_ACPI);
     }
@@ -1056,33 +1047,16 @@ static int __init pvh_setup_acpi(struct domain *d, paddr_t start_info)
     return 0;
 }
 
-static void __hwdom_init pvh_setup_mmcfg(struct domain *d)
-{
-    unsigned int i;
-    int rc;
-
-    for ( i = 0; i < pci_mmcfg_config_num; i++ )
-    {
-        rc = register_vpci_mmcfg_handler(d, pci_mmcfg_config[i].address,
-                                         pci_mmcfg_config[i].start_bus_number,
-                                         pci_mmcfg_config[i].end_bus_number,
-                                         pci_mmcfg_config[i].pci_segment);
-        if ( rc )
-            printk("Unable to setup MMCFG handler at %#lx for segment %u\n",
-                   pci_mmcfg_config[i].address,
-                   pci_mmcfg_config[i].pci_segment);
-    }
-}
-
 int __init dom0_construct_pvh(struct domain *d, const module_t *image,
                               unsigned long image_headroom,
                               module_t *initrd,
+                              void *(*bootstrap_map)(const module_t *),
                               char *cmdline)
 {
     paddr_t entry, start_info;
     int rc;
 
-    printk(XENLOG_INFO "*** Building a PVH Dom%d ***\n", d->domain_id);
+    printk("** Building a PVH Dom0 **\n");
 
     iommu_hwdom_init(d);
 
@@ -1115,9 +1089,7 @@ int __init dom0_construct_pvh(struct domain *d, const module_t *image,
         return rc;
     }
 
-    pvh_setup_mmcfg(d);
-
-    printk("WARNING: PVH is an experimental mode with limited functionality\n");
+    panic("Building a PVHv2 Dom0 is not yet supported.");
     return 0;
 }
 

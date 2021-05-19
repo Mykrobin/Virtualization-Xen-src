@@ -35,8 +35,6 @@
 #include <xen/arch-x86/hvm/start_info.h>
 #include <xen/io/protocols.h>
 
-#include <xen-tools/libs.h>
-
 #include "xg_private.h"
 #include "xc_dom.h"
 #include "xenctrl.h"
@@ -638,9 +636,6 @@ static int alloc_magic_pages_hvm(struct xc_dom_image *dom)
     start_info_size +=
         HVMLOADER_MODULE_CMDLINE_SIZE * HVMLOADER_MODULE_MAX_COUNT;
 
-    start_info_size +=
-        dom->e820_entries * sizeof(struct hvm_memmap_table_entry);
-
     if ( !dom->device_model )
     {
         if ( dom->cmdline )
@@ -1003,14 +998,17 @@ static int vcpu_hvm(struct xc_dom_image *dom)
     /* Set the cached part of the relevant segment registers. */
     bsp_ctx.cpu.cs_base = 0;
     bsp_ctx.cpu.ds_base = 0;
+    bsp_ctx.cpu.es_base = 0;
     bsp_ctx.cpu.ss_base = 0;
     bsp_ctx.cpu.tr_base = 0;
     bsp_ctx.cpu.cs_limit = ~0u;
     bsp_ctx.cpu.ds_limit = ~0u;
+    bsp_ctx.cpu.es_limit = ~0u;
     bsp_ctx.cpu.ss_limit = ~0u;
     bsp_ctx.cpu.tr_limit = 0x67;
     bsp_ctx.cpu.cs_arbytes = 0xc9b;
     bsp_ctx.cpu.ds_arbytes = 0xc93;
+    bsp_ctx.cpu.es_arbytes = 0xc93;
     bsp_ctx.cpu.ss_arbytes = 0xc93;
     bsp_ctx.cpu.tr_arbytes = 0x8b;
 
@@ -1670,9 +1668,10 @@ static void add_module_to_list(struct xc_dom_image *dom,
                < HVMLOADER_MODULE_CMDLINE_SIZE);
         strncpy(modules_cmdline_start + HVMLOADER_MODULE_CMDLINE_SIZE * index,
                 cmdline, HVMLOADER_MODULE_CMDLINE_SIZE);
-        modlist[index].cmdline_paddr = modules_cmdline_paddr +
-                                       HVMLOADER_MODULE_CMDLINE_SIZE * index;
     }
+
+    modlist[index].cmdline_paddr =
+        modules_cmdline_paddr + HVMLOADER_MODULE_CMDLINE_SIZE * index;
 
     start_info->nr_modules++;
 }
@@ -1682,13 +1681,21 @@ static int bootlate_hvm(struct xc_dom_image *dom)
     uint32_t domid = dom->guest_domid;
     xc_interface *xch = dom->xch;
     struct hvm_start_info *start_info;
-    size_t modsize;
+    size_t start_info_size;
     struct hvm_modlist_entry *modlist;
-    struct hvm_memmap_table_entry *memmap;
     unsigned int i;
 
-    start_info = xc_map_foreign_range(xch, domid, dom->start_info_seg.pages <<
-                                                  XC_DOM_PAGE_SHIFT(dom),
+    start_info_size = sizeof(*start_info) + dom->cmdline_size;
+    start_info_size += sizeof(struct hvm_modlist_entry) * dom->num_modules;
+
+    if ( start_info_size >
+         dom->start_info_seg.pages << XC_DOM_PAGE_SHIFT(dom) )
+    {
+        DOMPRINTF("Trying to map beyond start_info_seg");
+        return -1;
+    }
+
+    start_info = xc_map_foreign_range(xch, domid, start_info_size,
                                       PROT_READ | PROT_WRITE,
                                       dom->start_info_seg.pfn);
     if ( start_info == NULL )
@@ -1739,31 +1746,9 @@ static int bootlate_hvm(struct xc_dom_image *dom)
                             ((uintptr_t)modlist - (uintptr_t)start_info);
     }
 
-    /*
-     * Check a couple of XEN_HVM_MEMMAP_TYPEs to verify consistency with
-     * their corresponding e820 numerical values.
-     */
-    BUILD_BUG_ON(XEN_HVM_MEMMAP_TYPE_RAM != E820_RAM);
-    BUILD_BUG_ON(XEN_HVM_MEMMAP_TYPE_ACPI != E820_ACPI);
-
-    modsize = HVMLOADER_MODULE_MAX_COUNT *
-        (sizeof(*modlist) + HVMLOADER_MODULE_CMDLINE_SIZE);
-    memmap = (void*)modlist + modsize;
-
-    start_info->memmap_paddr = (dom->start_info_seg.pfn << PAGE_SHIFT) +
-        ((uintptr_t)modlist - (uintptr_t)start_info) + modsize;
-    start_info->memmap_entries = dom->e820_entries;
-    for ( i = 0; i < dom->e820_entries; i++ )
-    {
-        memmap[i].addr = dom->e820[i].addr;
-        memmap[i].size = dom->e820[i].size;
-        memmap[i].type = dom->e820[i].type;
-    }
-
     start_info->magic = XEN_HVM_START_MAGIC_VALUE;
-    start_info->version = 1;
 
-    munmap(start_info, dom->start_info_seg.pages << XC_DOM_PAGE_SHIFT(dom));
+    munmap(start_info, start_info_size);
 
     if ( dom->device_model )
     {

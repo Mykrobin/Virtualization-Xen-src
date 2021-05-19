@@ -99,7 +99,7 @@ struct xc_dom_image {
     struct xc_dom_seg p2m_seg;
     struct xc_dom_seg pgtables_seg;
     struct xc_dom_seg devicetree_seg;
-    struct xc_dom_seg start_info_seg;
+    struct xc_dom_seg start_info_seg; /* HVMlite only */
     xen_pfn_t start_info_pfn;
     xen_pfn_t console_pfn;
     xen_pfn_t xenstore_pfn;
@@ -224,11 +224,6 @@ struct xc_dom_image {
     /* Extra SMBIOS structures passed to HVMLOADER */
     struct xc_hvm_firmware_module smbios_module;
 
-#if defined(__i386__) || defined(__x86_64__)
-    struct e820entry *e820;
-    unsigned int e820_entries;
-#endif
-
     xen_pfn_t vuart_gfn;
 };
 
@@ -303,6 +298,7 @@ int xc_dom_mem_init(struct xc_dom_image *dom, unsigned int mem_mb);
 int xc_dom_kernel_check_size(struct xc_dom_image *dom, size_t sz);
 int xc_dom_kernel_max_size(struct xc_dom_image *dom, size_t sz);
 
+int xc_dom_module_check_size(struct xc_dom_image *dom, size_t sz);
 int xc_dom_module_max_size(struct xc_dom_image *dom, size_t sz);
 
 int xc_dom_devicetree_max_size(struct xc_dom_image *dom, size_t sz);

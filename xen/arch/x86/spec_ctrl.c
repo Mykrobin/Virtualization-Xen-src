@@ -63,6 +63,9 @@ static unsigned int __initdata l1d_maxphysaddr;
 static bool __initdata cpu_has_bug_msbds_only; /* => minimal HT impact. */
 static bool __initdata cpu_has_bug_mds; /* Any other M{LP,SB,FB}DS combination. */
 
+static int8_t __initdata opt_srb_lock = -1;
+uint64_t __read_mostly default_xen_mcu_opt_ctrl;
+
 static int __init parse_bti(const char *s)
 {
     const char *ss;
@@ -73,18 +76,7 @@ static int __init parse_bti(const char *s)
         if ( !ss )
             ss = strchr(s, '\0');
 
-        val = parse_bool(s, ss);
-        if ( !val )
-        {
-            opt_thunk = THUNK_JMP;
-            opt_ibrs = 0;
-            opt_ibpb = false;
-            opt_rsb_pv = false;
-            opt_rsb_hvm = false;
-        }
-        else if ( val > 0 )
-            rc = -EINVAL;
-        else if ( !strncmp(s, "thunk=", 6) )
+        if ( !strncmp(s, "thunk=", 6) )
         {
             s += 6;
 
@@ -105,11 +97,6 @@ static int __init parse_bti(const char *s)
             opt_rsb_pv = val;
         else if ( (val = parse_boolean("rsb_vmexit", s, ss)) >= 0 )
             opt_rsb_hvm = val;
-        else if ( (val = parse_boolean("rsb", s, ss)) >= 0 )
-        {
-            opt_rsb_pv = val;
-            opt_rsb_hvm = val;
-        }
         else
             rc = -EINVAL;
 
@@ -166,6 +153,7 @@ static int __init parse_spec_ctrl(const char *s)
             opt_ibpb = false;
             opt_ssbd = false;
             opt_l1d_flush = 0;
+            opt_srb_lock = 0;
         }
         else if ( val > 0 )
             rc = -EINVAL;
@@ -231,6 +219,8 @@ static int __init parse_spec_ctrl(const char *s)
             opt_eager_fpu = val;
         else if ( (val = parse_boolean("l1d-flush", s, ss)) >= 0 )
             opt_l1d_flush = val;
+        else if ( (val = parse_boolean("srb-lock", s, ss)) >= 0 )
+            opt_srb_lock = val;
         else
             rc = -EINVAL;
 
@@ -365,12 +355,13 @@ static void __init print_details(enum ind_thunk thunk, uint64_t caps)
     printk("Speculative mitigation facilities:\n");
 
     /* Hardware features which pertain to speculative mitigations. */
-    printk("  Hardware features:%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
+    printk("  Hardware features:%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
            (_7d0 & cpufeat_mask(X86_FEATURE_IBRSB)) ? " IBRS/IBPB" : "",
            (_7d0 & cpufeat_mask(X86_FEATURE_STIBP)) ? " STIBP"     : "",
            (_7d0 & cpufeat_mask(X86_FEATURE_L1D_FLUSH)) ? " L1D_FLUSH" : "",
            (_7d0 & cpufeat_mask(X86_FEATURE_SSBD))  ? " SSBD"      : "",
            (_7d0 & cpufeat_mask(X86_FEATURE_MD_CLEAR)) ? " MD_CLEAR" : "",
+           (_7d0 & cpufeat_mask(X86_FEATURE_SRBDS_CTRL)) ? " SRBDS_CTRL" : "",
            (e8b  & cpufeat_mask(X86_FEATURE_IBPB))  ? " IBPB"      : "",
            (caps & ARCH_CAPS_IBRS_ALL)              ? " IBRS_ALL"  : "",
            (caps & ARCH_CAPS_RDCL_NO)               ? " RDCL_NO"   : "",
@@ -393,7 +384,7 @@ static void __init print_details(enum ind_thunk thunk, uint64_t caps)
                "\n");
 
     /* Settings for Xen's protection, irrespective of guests. */
-    printk("  Xen settings: BTI-Thunk %s, SPEC_CTRL: %s%s%s, Other:%s%s%s\n",
+    printk("  Xen settings: BTI-Thunk %s, SPEC_CTRL: %s%s%s, Other:%s%s%s%s\n",
            thunk == THUNK_NONE      ? "N/A" :
            thunk == THUNK_RETPOLINE ? "RETPOLINE" :
            thunk == THUNK_LFENCE    ? "LFENCE" :
@@ -404,6 +395,8 @@ static void __init print_details(enum ind_thunk thunk, uint64_t caps)
            (default_xen_spec_ctrl & SPEC_CTRL_SSBD)  ? " SSBD+" : " SSBD-",
            !(caps & ARCH_CAPS_TSX_CTRL)              ? "" :
            (opt_tsx & 1)                             ? " TSX+" : " TSX-",
+           !boot_cpu_has(X86_FEATURE_SRBDS_CTRL)     ? "" :
+           opt_srb_lock                              ? " SRB_LOCK+" : " SRB_LOCK-",
            opt_ibpb                                  ? " IBPB"  : "",
            opt_l1d_flush                             ? " L1D_FLUSH" : "",
            opt_md_clear_pv || opt_md_clear_hvm       ? " VERW"  : "");
@@ -422,7 +415,6 @@ static void __init print_details(enum ind_thunk thunk, uint64_t caps)
     printk("  Support for VMs: PV:%s%s%s%s%s, HVM:%s%s%s%s%s\n",
            (boot_cpu_has(X86_FEATURE_SC_MSR_PV) ||
             boot_cpu_has(X86_FEATURE_SC_RSB_PV) ||
-            boot_cpu_has(X86_FEATURE_MD_CLEAR)  ||
             opt_eager_fpu)                           ? ""               : " None",
            boot_cpu_has(X86_FEATURE_SC_MSR_PV)       ? " MSR_SPEC_CTRL" : "",
            boot_cpu_has(X86_FEATURE_SC_RSB_PV)       ? " RSB"           : "",
@@ -430,7 +422,6 @@ static void __init print_details(enum ind_thunk thunk, uint64_t caps)
            boot_cpu_has(X86_FEATURE_MD_CLEAR)        ? " MD_CLEAR"      : "",
            (boot_cpu_has(X86_FEATURE_SC_MSR_HVM) ||
             boot_cpu_has(X86_FEATURE_SC_RSB_HVM) ||
-            boot_cpu_has(X86_FEATURE_MD_CLEAR)   ||
             opt_eager_fpu)                           ? ""               : " None",
            boot_cpu_has(X86_FEATURE_SC_MSR_HVM)      ? " MSR_SPEC_CTRL" : "",
            boot_cpu_has(X86_FEATURE_SC_RSB_HVM)      ? " RSB"           : "",
@@ -576,11 +567,9 @@ static bool __init retpoline_safe(uint64_t caps)
     case 0x4d: /* Avaton / Rangely (Silvermont) */
     case 0x4c: /* Cherrytrail / Brasswell */
     case 0x4a: /* Merrifield */
-    case 0x57: /* Knights Landing */
     case 0x5a: /* Moorefield */
     case 0x5c: /* Goldmont */
     case 0x5f: /* Denverton */
-    case 0x85: /* Knights Mill */
         return true;
 
     default:
@@ -1195,6 +1184,34 @@ void __init init_speculation_mitigations(void)
         tsx_init();
     }
 
+    /* Calculate suitable defaults for MSR_MCU_OPT_CTRL */
+    if ( boot_cpu_has(X86_FEATURE_SRBDS_CTRL) )
+    {
+        uint64_t val;
+
+        rdmsrl(MSR_MCU_OPT_CTRL, val);
+
+        /*
+         * On some SRBDS-affected hardware, it may be safe to relax srb-lock
+         * by default.
+         *
+         * On parts which enumerate MDS_NO and not TAA_NO, TSX is the only way
+         * to access the Fill Buffer.  If TSX isn't available (inc. SKU
+         * reasons on some models), or TSX is explicitly disabled, then there
+         * is no need for the extra overhead to protect RDRAND/RDSEED.
+         */
+        if ( opt_srb_lock == -1 &&
+             (caps & (ARCH_CAPS_MDS_NO|ARCH_CAPS_TAA_NO)) == ARCH_CAPS_MDS_NO &&
+             (!cpu_has_hle || ((caps & ARCH_CAPS_TSX_CTRL) && opt_tsx == 0)) )
+            opt_srb_lock = 0;
+
+        val &= ~MCU_OPT_CTRL_RNGDS_MITG_DIS;
+        if ( !opt_srb_lock )
+            val |= MCU_OPT_CTRL_RNGDS_MITG_DIS;
+
+        default_xen_mcu_opt_ctrl = val;
+    }
+
     print_details(thunk, caps);
 
     /*
@@ -1226,6 +1243,9 @@ void __init init_speculation_mitigations(void)
 
         wrmsrl(MSR_SPEC_CTRL, bsp_delay_spec_ctrl ? 0 : default_xen_spec_ctrl);
     }
+
+    if ( boot_cpu_has(X86_FEATURE_SRBDS_CTRL) )
+        wrmsrl(MSR_MCU_OPT_CTRL, default_xen_mcu_opt_ctrl);
 }
 
 static void __init __maybe_unused build_assertions(void)

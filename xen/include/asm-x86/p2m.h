@@ -193,8 +193,7 @@ struct p2m_domain {
     /* Shadow translated domain: p2m mapping */
     pagetable_t        phys_table;
 
-    /*
-     * Same as a domain's dirty_cpumask but limited to
+    /* Same as domain_dirty_cpumask but limited to
      * this p2m and those physical cpus whose vcpu's are in
      * guestmode.
      */
@@ -432,7 +431,10 @@ static inline mfn_t __nonnull(3) get_gfn_type(
     return get_gfn_type_access(p2m_get_hostp2m(d), gfn, t, &a, q, NULL);
 }
 
-/* Syntactic sugar: most callers will use one of these. */
+/* Syntactic sugar: most callers will use one of these. 
+ * N.B. get_gfn_query() is the _only_ one guaranteed not to take the
+ * p2m lock; none of the others can be called with the p2m or paging
+ * lock held. */
 #define get_gfn(d, g, t)         get_gfn_type((d), (g), (t), P2M_ALLOC)
 #define get_gfn_query(d, g, t)   get_gfn_type((d), (g), (t), 0)
 #define get_gfn_unshare(d, g, t) get_gfn_type((d), (g), (t), \
@@ -485,7 +487,7 @@ static inline struct page_info *get_page_from_gfn(
     /* Non-translated guests see 1-1 RAM / MMIO mappings everywhere */
     if ( t )
         *t = likely(d != dom_io) ? p2m_ram_rw : p2m_mmio_direct;
-    page = mfn_to_page(_mfn(gfn));
+    page = __mfn_to_page(gfn);
     return mfn_valid(_mfn(gfn)) && get_page(page, d) ? page : NULL;
 }
 
@@ -618,9 +620,6 @@ void p2m_memory_type_changed(struct domain *d);
 int p2m_is_logdirty_range(struct p2m_domain *, unsigned long start,
                           unsigned long end);
 
-/* Set foreign entry in the p2m table (for priv-mapping) */
-int set_foreign_p2m_entry(struct domain *d, unsigned long gfn, mfn_t mfn);
-
 /* Set mmio addresses in the p2m table (for pass-through) */
 int set_mmio_p2m_entry(struct domain *d, unsigned long gfn, mfn_t mfn,
                        unsigned int order, p2m_access_t access);
@@ -690,9 +689,8 @@ void p2m_free_ptp(struct p2m_domain *p2m, struct page_info *pg);
 
 /* Directly set a p2m entry: only for use by p2m code. Does not need
  * a call to put_gfn afterwards/ */
-int __must_check p2m_set_entry(struct p2m_domain *p2m, gfn_t gfn, mfn_t mfn,
-                               unsigned int page_order, p2m_type_t p2mt,
-                               p2m_access_t p2ma);
+int p2m_set_entry(struct p2m_domain *p2m, gfn_t gfn, mfn_t mfn,
+                  unsigned int page_order, p2m_type_t p2mt, p2m_access_t p2ma);
 
 /* Set up function pointers for PT implementation: only for use by p2m code */
 extern void p2m_pt_init(struct p2m_domain *p2m);
@@ -832,9 +830,9 @@ int p2m_change_altp2m_gfn(struct domain *d, unsigned int idx,
                           gfn_t old_gfn, gfn_t new_gfn);
 
 /* Propagate a host p2m change to all alternate p2m's */
-int p2m_altp2m_propagate_change(struct domain *d, gfn_t gfn,
-                                mfn_t mfn, unsigned int page_order,
-                                p2m_type_t p2mt, p2m_access_t p2ma);
+void p2m_altp2m_propagate_change(struct domain *d, gfn_t gfn,
+                                 mfn_t mfn, unsigned int page_order,
+                                 p2m_type_t p2mt, p2m_access_t p2ma);
 
 /*
  * p2m type to IOMMU flags

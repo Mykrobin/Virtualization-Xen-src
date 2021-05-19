@@ -610,7 +610,7 @@ void __init hpet_broadcast_init(void)
         hpet_events[i].shift = 32;
         hpet_events[i].next_event = STIME_MAX;
         spin_lock_init(&hpet_events[i].lock);
-        smp_wmb();
+        wmb();
         hpet_events[i].event_handler = handle_hpet_broadcast;
 
         hpet_events[i].msi.msi_attrib.maskbit = 1;

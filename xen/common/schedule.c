@@ -7,7 +7,7 @@
  *        File: common/schedule.c
  *      Author: Rolf Neugebauer & Keir Fraser
  *              Updated for generic API by Mark Williamson
- *
+ * 
  * Description: Generic CPU scheduling code
  *              implements support functionality for the Xen scheduler API.
  *
@@ -49,7 +49,7 @@ string_param("sched", opt_sched);
 bool_t sched_smt_power_savings = 0;
 boolean_param("sched_smt_power_savings", sched_smt_power_savings);
 
-/* Default scheduling rate limit: 1ms
+/* Default scheduling rate limit: 1ms 
  * The behavior when sched_ratelimit_us is greater than sched_credit_tslice_ms is undefined
  * */
 int sched_ratelimit_us = SCHED_DEFAULT_RATELIMIT_US;
@@ -253,14 +253,21 @@ static void sched_spin_unlock_double(spinlock_t *lock1, spinlock_t *lock2,
     spin_unlock_irqrestore(lock1, flags);
 }
 
-int sched_init_vcpu(struct vcpu *v, unsigned int processor)
+int sched_init_vcpu(struct vcpu *v, unsigned int processor) 
 {
     struct domain *d = v->domain;
-    cpumask_t allcpus;
 
-    cpumask_setall(&allcpus);
-
+    /*
+     * Initialize processor and affinity settings. The idler, and potentially
+     * domain-0 VCPUs, are pinned onto their respective physical CPUs.
+     */
     v->processor = processor;
+    if ( is_idle_domain(d) || d->is_pinned )
+        cpumask_copy(v->cpu_hard_affinity, cpumask_of(processor));
+    else
+        cpumask_setall(v->cpu_hard_affinity);
+
+    cpumask_setall(v->cpu_soft_affinity);
 
     /* Initialise the per-vcpu timers. */
     init_timer(&v->periodic_timer, vcpu_periodic_timer_fn,
@@ -271,18 +278,9 @@ int sched_init_vcpu(struct vcpu *v, unsigned int processor)
                v, v->processor);
 
     v->sched_priv = SCHED_OP(dom_scheduler(d), alloc_vdata, v,
-                     d->sched_priv);
+		             d->sched_priv);
     if ( v->sched_priv == NULL )
         return 1;
-
-    /*
-     * Initialize affinity settings. The idler, and potentially
-     * domain-0 VCPUs, are pinned onto their respective physical CPUs.
-     */
-    if ( is_idle_domain(d) || d->is_pinned )
-        sched_set_affinity(v, cpumask_of(processor), &allcpus);
-    else
-        sched_set_affinity(v, &allcpus, &allcpus);
 
     /* Idle VCPUs are scheduled immediately, so don't put them in runqueue. */
     if ( is_idle_domain(d) )
@@ -320,14 +318,14 @@ int sched_move_domain(struct domain *d, struct cpupool *c)
             return -EBUSY;
     }
 
-    domdata = sched_alloc_domdata(c->sched, d);
-    if ( IS_ERR(domdata) )
-        return PTR_ERR(domdata);
+    domdata = SCHED_OP(c->sched, alloc_domdata, d);
+    if ( domdata == NULL )
+        return -ENOMEM;
 
     vcpu_priv = xzalloc_array(void *, d->max_vcpus);
     if ( vcpu_priv == NULL )
     {
-        sched_free_domdata(c->sched, domdata);
+        SCHED_OP(c->sched, free_domdata, domdata);
         return -ENOMEM;
     }
 
@@ -337,9 +335,9 @@ int sched_move_domain(struct domain *d, struct cpupool *c)
         if ( vcpu_priv[v->vcpu_id] == NULL )
         {
             for_each_vcpu ( d, v )
-                SCHED_OP(c->sched, free_vdata, vcpu_priv[v->vcpu_id]);
+                xfree(vcpu_priv[v->vcpu_id]);
             xfree(vcpu_priv);
-            sched_free_domdata(c->sched, domdata);
+            SCHED_OP(c->sched, free_domdata, domdata);
             return -ENOMEM;
         }
     }
@@ -361,7 +359,6 @@ int sched_move_domain(struct domain *d, struct cpupool *c)
     for_each_vcpu ( d, v )
     {
         spinlock_t *lock;
-        cpumask_t allcpus;
 
         vcpudata = v->sched_priv;
 
@@ -369,12 +366,10 @@ int sched_move_domain(struct domain *d, struct cpupool *c)
         migrate_timer(&v->singleshot_timer, new_p);
         migrate_timer(&v->poll_timer, new_p);
 
-        cpumask_setall(&allcpus);
+        cpumask_setall(v->cpu_hard_affinity);
+        cpumask_setall(v->cpu_soft_affinity);
 
         lock = vcpu_schedule_lock_irq(v);
-
-        sched_set_affinity(v, &allcpus, &allcpus);
-
         v->processor = new_p;
         /*
          * With v->processor modified we must not
@@ -398,7 +393,7 @@ int sched_move_domain(struct domain *d, struct cpupool *c)
 
     domain_unpause(d);
 
-    sched_free_domdata(old_ops, old_domdata);
+    SCHED_OP(old_ops, free_domdata, old_domdata);
 
     xfree(vcpu_priv);
 
@@ -418,41 +413,27 @@ void sched_destroy_vcpu(struct vcpu *v)
 
 int sched_init_domain(struct domain *d, int poolid)
 {
-    void *sdom;
     int ret;
 
     ASSERT(d->cpupool == NULL);
-    ASSERT(d->domain_id < DOMID_FIRST_RESERVED);
 
     if ( (ret = cpupool_add_domain(d, poolid)) )
         return ret;
 
     SCHED_STAT_CRANK(dom_init);
     TRACE_1D(TRC_SCHED_DOM_ADD, d->domain_id);
-
-    sdom = sched_alloc_domdata(dom_scheduler(d), d);
-    if ( IS_ERR(sdom) )
-        return PTR_ERR(sdom);
-
-    d->sched_priv = sdom;
-
-    return 0;
+    return SCHED_OP(dom_scheduler(d), init_domain, d);
 }
 
 void sched_destroy_domain(struct domain *d)
 {
-    ASSERT(d->domain_id < DOMID_FIRST_RESERVED);
+    ASSERT(d->cpupool != NULL || is_idle_domain(d));
 
-    if ( d->cpupool )
-    {
-        SCHED_STAT_CRANK(dom_destroy);
-        TRACE_1D(TRC_SCHED_DOM_REM, d->domain_id);
+    SCHED_STAT_CRANK(dom_destroy);
+    TRACE_1D(TRC_SCHED_DOM_REM, d->domain_id);
+    SCHED_OP(dom_scheduler(d), destroy_domain, d);
 
-        sched_free_domdata(dom_scheduler(d), d->sched_priv);
-        d->sched_priv = NULL;
-
-        cpupool_rm_domain(d);
-    }
+    cpupool_rm_domain(d);
 }
 
 void vcpu_sleep_nosync_locked(struct vcpu *v)
@@ -744,7 +725,7 @@ void restore_vcpu_affinity(struct domain *d)
 
         if ( v->affinity_broken )
         {
-            sched_set_affinity(v, v->cpu_hard_affinity_saved, NULL);
+            cpumask_copy(v->cpu_hard_affinity, v->cpu_hard_affinity_saved);
             v->affinity_broken = 0;
 
         }
@@ -808,8 +789,6 @@ int cpu_disable_scheduler(unsigned int cpu)
             if ( cpumask_empty(&online_affinity) &&
                  cpumask_test_cpu(cpu, v->cpu_hard_affinity) )
             {
-                cpumask_t allcpus;
-
                 if ( v->affinity_broken )
                 {
                     /* The vcpu is temporarily pinned, can't move it. */
@@ -827,8 +806,7 @@ int cpu_disable_scheduler(unsigned int cpu)
                 else
                     printk(XENLOG_DEBUG "Breaking affinity for %pv\n", v);
 
-                cpumask_setall(&allcpus);
-                sched_set_affinity(v, &allcpus, NULL);
+                cpumask_setall(v->cpu_hard_affinity);
             }
 
             if ( v->processor != cpu )
@@ -898,31 +876,8 @@ int cpu_disable_scheduler(unsigned int cpu)
     return ret;
 }
 
-/*
- * In general, this must be called with the scheduler lock held, because the
- * adjust_affinity hook may want to modify the vCPU state. However, when the
- * vCPU is being initialized (either for dom0 or domU) there is no risk of
- * races, and it's fine to not take the look (we're talking about
- * dom0_setup_vcpu() an sched_init_vcpu()).
- */
-void sched_set_affinity(
-    struct vcpu *v, const cpumask_t *hard, const cpumask_t *soft)
-{
-    SCHED_OP(dom_scheduler(v->domain), adjust_affinity, v, hard, soft);
-
-    if ( hard )
-        cpumask_copy(v->cpu_hard_affinity, hard);
-    if ( soft )
-        cpumask_copy(v->cpu_soft_affinity, soft);
-
-    v->soft_aff_effective = !cpumask_subset(v->cpu_hard_affinity,
-                                            v->cpu_soft_affinity) &&
-                            cpumask_intersects(v->cpu_soft_affinity,
-                                               v->cpu_hard_affinity);
-}
-
 static int vcpu_set_affinity(
-    struct vcpu *v, const cpumask_t *affinity, const cpumask_t *which)
+    struct vcpu *v, const cpumask_t *affinity, cpumask_t *which)
 {
     spinlock_t *lock;
     int ret = 0;
@@ -933,19 +888,12 @@ static int vcpu_set_affinity(
         ret = -EBUSY;
     else
     {
+        cpumask_copy(which, affinity);
+
         /*
-         * Tell the scheduler we changes something about affinity,
-         * and ask to re-evaluate vcpu placement.
+         * Always ask the scheduler to re-evaluate placement
+         * when changing the affinity.
          */
-        if ( which == v->cpu_hard_affinity )
-        {
-            sched_set_affinity(v, affinity, NULL);
-        }
-        else
-        {
-            ASSERT(which == v->cpu_soft_affinity);
-            sched_set_affinity(v, NULL, affinity);
-        }
         vcpu_migrate_start(v);
     }
 
@@ -1054,7 +1002,7 @@ static long do_poll(struct sched_poll *sched_poll)
             goto out;
 
         rc = -EINVAL;
-        if ( port >= d->max_evtchns )
+        if ( !port_is_valid(d, port) )
             goto out;
 
         rc = 0;
@@ -1179,7 +1127,7 @@ int vcpu_pin_override(struct vcpu *v, int cpu)
     {
         if ( v->affinity_broken )
         {
-            sched_set_affinity(v, v->cpu_hard_affinity_saved, NULL);
+            cpumask_copy(v->cpu_hard_affinity, v->cpu_hard_affinity_saved);
             v->affinity_broken = 0;
             ret = 0;
         }
@@ -1192,7 +1140,7 @@ int vcpu_pin_override(struct vcpu *v, int cpu)
         {
             cpumask_copy(v->cpu_hard_affinity_saved, v->cpu_hard_affinity);
             v->affinity_broken = 1;
-            sched_set_affinity(v, cpumask_of(cpu), NULL);
+            cpumask_copy(v->cpu_hard_affinity, cpumask_of(cpu));
             ret = 0;
         }
     }
@@ -1357,11 +1305,11 @@ long do_set_timer_op(s_time_t timeout)
               unlikely((offset > 0) && ((uint32_t)(offset >> 50) != 0)) )
     {
         /*
-         * Linux workaround: occasionally we will see timeouts a long way in
-         * the future due to wrapping in Linux's jiffy time handling. We check
-         * for timeouts wrapped negative, and for positive timeouts more than
-         * about 13 days in the future (2^50ns). The correct fix is to trigger
-         * an interrupt immediately (since Linux in fact has pending work to
+         * Linux workaround: occasionally we will see timeouts a long way in 
+         * the future due to wrapping in Linux's jiffy time handling. We check 
+         * for timeouts wrapped negative, and for positive timeouts more than 
+         * about 13 days in the future (2^50ns). The correct fix is to trigger 
+         * an interrupt immediately (since Linux in fact has pending work to 
          * do in this situation). However, older guests also set a long timeout
          * when they have *no* pending timers at all: setting an immediate
          * timeout in this case can burn a lot of CPU. We therefore go for a
@@ -1463,7 +1411,7 @@ static void vcpu_periodic_timer_work(struct vcpu *v)
     set_timer(&v->periodic_timer, periodic_next_event);
 }
 
-/*
+/* 
  * The main function
  * - deschedule the current domain (scheduler independent).
  * - pick a new domain (scheduler dependent).
@@ -1509,7 +1457,7 @@ static void schedule(void)
     now = NOW();
 
     stop_timer(&sd->s_timer);
-
+    
     /* get policy-specific decision on scheduling... */
     sched = this_cpu(scheduler);
     next_slice = sched->do_schedule(sched, now, tasklet_work_scheduled);
@@ -1809,7 +1757,7 @@ void __init scheduler_init(void)
         sched_ratelimit_us = SCHED_DEFAULT_RATELIMIT_US;
     }
 
-    idle_domain = domain_create(DOMID_IDLE, NULL);
+    idle_domain = domain_create(DOMID_IDLE, 0, 0, NULL);
     BUG_ON(IS_ERR(idle_domain));
     idle_domain->vcpu = idle_vcpu;
     idle_domain->max_vcpus = nr_cpu_ids;

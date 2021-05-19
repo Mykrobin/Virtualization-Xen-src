@@ -354,7 +354,7 @@ static void enable_hypercall_page(struct domain *d)
         if ( page )
             put_page(page);
         gdprintk(XENLOG_WARNING, "Bad GMFN %#"PRI_gfn" (MFN %#"PRI_mfn")\n",
-                 gmfn, mfn_x(page ? page_to_mfn(page) : INVALID_MFN));
+                 gmfn, page ? page_to_mfn(page) : mfn_x(INVALID_MFN));
         return;
     }
 
@@ -414,7 +414,7 @@ static void initialize_vp_assist(struct vcpu *v)
 
  fail:
     gdprintk(XENLOG_WARNING, "Bad GMFN %#"PRI_gfn" (MFN %#"PRI_mfn")\n", gmfn,
-             mfn_x(page ? page_to_mfn(page) : INVALID_MFN));
+             page ? page_to_mfn(page) : mfn_x(INVALID_MFN));
 }
 
 static void teardown_vp_assist(struct vcpu *v)
@@ -433,11 +433,14 @@ static void teardown_vp_assist(struct vcpu *v)
     put_page_and_type(page);
 }
 
-void viridian_apic_assist_set(struct vcpu *v)
+void viridian_start_apic_assist(struct vcpu *v, int vector)
 {
     uint32_t *va = v->arch.hvm_vcpu.viridian.vp_assist.va;
 
     if ( !va )
+        return;
+
+    if ( vector < 0x10 )
         return;
 
     /*
@@ -445,32 +448,31 @@ void viridian_apic_assist_set(struct vcpu *v)
      * wrong and the VM will most likely hang so force a crash now
      * to make the problem clear.
      */
-    if ( v->arch.hvm_vcpu.viridian.vp_assist.pending )
+    if ( v->arch.hvm_vcpu.viridian.vp_assist.vector )
         domain_crash(v->domain);
 
-    v->arch.hvm_vcpu.viridian.vp_assist.pending = true;
+    v->arch.hvm_vcpu.viridian.vp_assist.vector = vector;
     *va |= 1u;
 }
 
-bool viridian_apic_assist_completed(struct vcpu *v)
+int viridian_complete_apic_assist(struct vcpu *v)
 {
     uint32_t *va = v->arch.hvm_vcpu.viridian.vp_assist.va;
+    int vector;
 
     if ( !va )
-        return false;
+        return 0;
 
-    if ( v->arch.hvm_vcpu.viridian.vp_assist.pending &&
-         !(*va & 1u) )
-    {
-        /* An EOI has been avoided */
-        v->arch.hvm_vcpu.viridian.vp_assist.pending = false;
-        return true;
-    }
+    if ( *va & 1u )
+        return 0; /* Interrupt not yet processed by the guest. */
 
-    return false;
+    vector = v->arch.hvm_vcpu.viridian.vp_assist.vector;
+    v->arch.hvm_vcpu.viridian.vp_assist.vector = 0;
+
+    return vector;
 }
 
-void viridian_apic_assist_clear(struct vcpu *v)
+void viridian_abort_apic_assist(struct vcpu *v)
 {
     uint32_t *va = v->arch.hvm_vcpu.viridian.vp_assist.va;
 
@@ -478,7 +480,7 @@ void viridian_apic_assist_clear(struct vcpu *v)
         return;
 
     *va &= ~1u;
-    v->arch.hvm_vcpu.viridian.vp_assist.pending = false;
+    v->arch.hvm_vcpu.viridian.vp_assist.vector = 0;
 }
 
 static void update_reference_tsc(struct domain *d, bool_t initialize)
@@ -492,7 +494,7 @@ static void update_reference_tsc(struct domain *d, bool_t initialize)
         if ( page )
             put_page(page);
         gdprintk(XENLOG_WARNING, "Bad GMFN %#"PRI_gfn" (MFN %#"PRI_mfn")\n",
-                 gmfn, mfn_x(page ? page_to_mfn(page) : INVALID_MFN));
+                 gmfn, page ? page_to_mfn(page) : mfn_x(INVALID_MFN));
         return;
     }
 
@@ -827,16 +829,7 @@ void viridian_domain_deinit(struct domain *d)
         teardown_vp_assist(v);
 }
 
-/*
- * Windows should not issue the hypercalls requiring this callback in the
- * case where vcpu_id would exceed the size of the mask.
- */
-static bool need_flush(void *ctxt, struct vcpu *v)
-{
-    uint64_t vcpu_mask = *(uint64_t *)ctxt;
-
-    return vcpu_mask & (1ul << v->vcpu_id);
-}
+static DEFINE_PER_CPU(cpumask_t, ipi_cpumask);
 
 int viridian_hypercall(struct cpu_user_regs *regs)
 {
@@ -901,6 +894,8 @@ int viridian_hypercall(struct cpu_user_regs *regs)
     case HvFlushVirtualAddressSpace:
     case HvFlushVirtualAddressList:
     {
+        cpumask_t *pcpu_mask;
+        struct vcpu *v;
         struct {
             uint64_t address_space;
             uint64_t flags;
@@ -930,12 +925,36 @@ int viridian_hypercall(struct cpu_user_regs *regs)
         if ( input_params.flags & HV_FLUSH_ALL_PROCESSORS )
             input_params.vcpu_mask = ~0ul;
 
+        pcpu_mask = &this_cpu(ipi_cpumask);
+        cpumask_clear(pcpu_mask);
+
         /*
-         * A false return means that another vcpu is currently trying
-         * a similar operation, so back off.
+         * For each specified virtual CPU flush all ASIDs to invalidate
+         * TLB entries the next time it is scheduled and then, if it
+         * is currently running, add its physical CPU to a mask of
+         * those which need to be interrupted to force a flush.
          */
-        if ( !hvm_flush_vcpu_tlb(need_flush, &input_params.vcpu_mask) )
-            return HVM_HCALL_preempted;
+        for_each_vcpu ( currd, v )
+        {
+            if ( v->vcpu_id >= (sizeof(input_params.vcpu_mask) * 8) )
+                break;
+
+            if ( !(input_params.vcpu_mask & (1ul << v->vcpu_id)) )
+                continue;
+
+            hvm_asid_flush_vcpu(v);
+            if ( v != curr && v->is_running )
+                __cpumask_set_cpu(v->processor, pcpu_mask);
+        }
+
+        /*
+         * Since ASIDs have now been flushed it just remains to
+         * force any CPUs currently running target vCPUs out of non-
+         * root mode. It's possible that re-scheduling has taken place
+         * so we may unnecessarily IPI some CPUs.
+         */
+        if ( !cpumask_empty(pcpu_mask) )
+            smp_send_event_check_mask(pcpu_mask);
 
         output.rep_complete = input.rep_count;
 
@@ -1019,7 +1038,7 @@ static int viridian_save_vcpu_ctxt(struct domain *d, hvm_domain_context_t *h)
     for_each_vcpu( d, v ) {
         struct hvm_viridian_vcpu_context ctxt = {
             .vp_assist_msr = v->arch.hvm_vcpu.viridian.vp_assist.msr.raw,
-            .vp_assist_pending = v->arch.hvm_vcpu.viridian.vp_assist.pending,
+            .vp_assist_vector = v->arch.hvm_vcpu.viridian.vp_assist.vector,
         };
 
         if ( hvm_save_entry(VIRIDIAN_VCPU, v->vcpu_id, h, &ctxt) != 0 )
@@ -1054,7 +1073,7 @@ static int viridian_load_vcpu_ctxt(struct domain *d, hvm_domain_context_t *h)
          !v->arch.hvm_vcpu.viridian.vp_assist.va )
         initialize_vp_assist(v);
 
-    v->arch.hvm_vcpu.viridian.vp_assist.pending = !!ctxt.vp_assist_pending;
+    v->arch.hvm_vcpu.viridian.vp_assist.vector = ctxt.vp_assist_vector;
 
     return 0;
 }

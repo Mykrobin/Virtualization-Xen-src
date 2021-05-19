@@ -685,13 +685,6 @@ Specify the backend domain name or id, defaults to dom0.
 
 =back
 
-=item B<pvcalls=[ "backend=domain-id", ... ]>
-
-Creates a Xen pvcalls connection to handle pvcalls requests from
-frontend to backend. It can be used as an alternative networking model.
-For more information about the protocol, see
-https://xenbits.xen.org/docs/unstable/misc/pvcalls.html.
-
 =item B<vfb=[ "VFB_SPEC_STRING", "VFB_SPEC_STRING", ...]>
 
 Specifies the paravirtual framebuffer devices which should be supplied
@@ -993,7 +986,7 @@ settings, from the following list:
 
 =over 4
 
-=item B<type=hostdev>
+=item B<devtype=hostdev>
 
 Specifies USB device type. Currently only "hostdev" is supported.
 
@@ -1931,7 +1924,7 @@ advance the vCPU's virtual time stepwise for each one.
 
 No delay for missed ticks. As above, missed interrupts are delivered,
 but guest time always tracks wallclock (i.e., real) time while doing
-so. This is the default.
+so.
 
 =item B<no_missed_ticks_pending>
 
@@ -2360,6 +2353,12 @@ compatibility mode on more modern Windows OS).
 
 This option is disabled by default.
 
+=item B<apic=BOOLEAN>
+
+Enable the local APIC emulation for the guest. The local APIC information
+will be exposed to the guest in the ACPI tables. This option is enabled by
+default.
+
 =item B<bootloader="PROGRAM">
 
 Run C<PROGRAM> to find the kernel image and ramdisk to use.  Normally
@@ -2390,7 +2389,7 @@ advance the vCPU's virtual time stepwise for each one.
 
 No delay for missed ticks. As above, missed interrupts are delivered,
 but guest time always tracks wallclock (i.e., real) time while doing
-so. This is the default.
+so.
 
 =item B<no_missed_ticks_pending>
 

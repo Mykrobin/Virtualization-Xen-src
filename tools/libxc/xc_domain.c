@@ -40,7 +40,7 @@ int xc_domain_create(xc_interface *xch, uint32_t ssidref,
 
 #if defined (__i386) || defined(__x86_64__)
         if ( flags & XEN_DOMCTL_CDF_hvm_guest )
-            lconfig.emulation_flags = (XEN_X86_EMU_ALL & ~XEN_X86_EMU_VPCI);
+            lconfig.emulation_flags = XEN_X86_EMU_ALL;
 #elif defined (__arm__) || defined(__aarch64__)
         lconfig.gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE;
         lconfig.nr_spis = 0;
@@ -57,12 +57,12 @@ int xc_domain_create(xc_interface *xch, uint32_t ssidref,
     domctl.u.createdomain.flags   = flags;
     memcpy(domctl.u.createdomain.handle, handle, sizeof(xen_domain_handle_t));
     /* xc_domain_configure_t is an alias of arch_domainconfig_t */
-    memcpy(&domctl.u.createdomain.arch, config, sizeof(*config));
+    memcpy(&domctl.u.createdomain.config, config, sizeof(*config));
     if ( (err = do_domctl(xch, &domctl)) != 0 )
         return err;
 
     *pdomid = (uint16_t)domctl.domain;
-    memcpy(config, &domctl.u.createdomain.arch, sizeof(*config));
+    memcpy(config, &domctl.u.createdomain.config, sizeof(*config));
 
     return 0;
 }
@@ -720,6 +720,21 @@ int xc_domain_setmaxmem(xc_interface *xch,
     return do_domctl(xch, &domctl);
 }
 
+int xc_domain_pin_memory_cacheattr(xc_interface *xch,
+                                   uint32_t domid,
+                                   uint64_t start,
+                                   uint64_t end,
+                                   uint32_t type)
+{
+    DECLARE_DOMCTL;
+    domctl.cmd = XEN_DOMCTL_pin_mem_cacheattr;
+    domctl.domain = domid;
+    domctl.u.pin_mem_cacheattr.start = start;
+    domctl.u.pin_mem_cacheattr.end = end;
+    domctl.u.pin_mem_cacheattr.type = type;
+    return do_domctl(xch, &domctl);
+}
+
 #if defined(__i386__) || defined(__x86_64__)
 int xc_domain_set_memory_map(xc_interface *xch,
                                uint32_t domid,
@@ -1088,17 +1103,6 @@ out:
     xc_hypercall_bounce_post(xch, errs);
 
     return rc;
-}
-
-int xc_domain_remove_from_physmap(xc_interface *xch,
-                                  uint32_t domid,
-                                  xen_pfn_t gpfn)
-{
-    struct xen_remove_from_physmap xrfp = {
-        .domid = domid,
-        .gpfn = gpfn,
-    };
-    return do_memory_op(xch, XENMEM_remove_from_physmap, &xrfp, sizeof(xrfp));
 }
 
 int xc_domain_claim_pages(xc_interface *xch,

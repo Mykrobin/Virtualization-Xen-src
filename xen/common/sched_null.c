@@ -120,6 +120,11 @@ static inline struct null_vcpu *null_vcpu(const struct vcpu *v)
     return v->sched_priv;
 }
 
+static inline struct null_dom *null_dom(const struct domain *d)
+{
+    return d->sched_priv;
+}
+
 static inline bool vcpu_check_affinity(struct vcpu *v, unsigned int cpu,
                                        unsigned int balance_step)
 {
@@ -226,7 +231,7 @@ static void * null_alloc_domdata(const struct scheduler *ops,
 
     ndom = xzalloc(struct null_dom);
     if ( ndom == NULL )
-        return ERR_PTR(-ENOMEM);
+        return NULL;
 
     ndom->dom = d;
 
@@ -234,24 +239,40 @@ static void * null_alloc_domdata(const struct scheduler *ops,
     list_add_tail(&ndom->ndom_elem, &null_priv(ops)->ndom);
     spin_unlock_irqrestore(&prv->lock, flags);
 
-    return ndom;
+    return (void*)ndom;
 }
 
 static void null_free_domdata(const struct scheduler *ops, void *data)
 {
+    unsigned long flags;
     struct null_dom *ndom = data;
     struct null_private *prv = null_priv(ops);
 
-    if ( ndom )
-    {
-        unsigned long flags;
+    spin_lock_irqsave(&prv->lock, flags);
+    list_del_init(&ndom->ndom_elem);
+    spin_unlock_irqrestore(&prv->lock, flags);
 
-        spin_lock_irqsave(&prv->lock, flags);
-        list_del_init(&ndom->ndom_elem);
-        spin_unlock_irqrestore(&prv->lock, flags);
+    xfree(data);
+}
 
-        xfree(ndom);
-    }
+static int null_dom_init(const struct scheduler *ops, struct domain *d)
+{
+    struct null_dom *ndom;
+
+    if ( is_idle_domain(d) )
+        return 0;
+
+    ndom = null_alloc_domdata(ops, d);
+    if ( ndom == NULL )
+        return -ENOMEM;
+
+    d->sched_priv = ndom;
+
+    return 0;
+}
+static void null_dom_destroy(const struct scheduler *ops, struct domain *d)
+{
+    null_free_domdata(ops, null_dom(d));
 }
 
 /*
@@ -278,7 +299,8 @@ static unsigned int pick_cpu(struct null_private *prv, struct vcpu *v)
 
     for_each_affinity_balance_step( bs )
     {
-        if ( bs == BALANCE_SOFT_AFFINITY && !has_soft_affinity(v) )
+        if ( bs == BALANCE_SOFT_AFFINITY &&
+             !has_soft_affinity(v, v->cpu_hard_affinity) )
             continue;
 
         affinity_balance_cpumask(v, bs, cpumask_scratch_cpu(cpu));
@@ -490,7 +512,8 @@ static void _vcpu_remove(struct null_private *prv, struct vcpu *v)
     {
         list_for_each_entry( wvc, &prv->waitq, waitq_elem )
         {
-            if ( bs == BALANCE_SOFT_AFFINITY && !has_soft_affinity(wvc->vcpu) )
+            if ( bs == BALANCE_SOFT_AFFINITY &&
+                 !has_soft_affinity(wvc->vcpu, wvc->vcpu->cpu_hard_affinity) )
                 continue;
 
             if ( vcpu_check_affinity(wvc->vcpu, cpu, bs) )
@@ -670,7 +693,7 @@ static void null_vcpu_migrate(const struct scheduler *ops, struct vcpu *v,
 static inline void null_vcpu_check(struct vcpu *v)
 {
     struct null_vcpu * const nvc = null_vcpu(v);
-    struct null_dom * const ndom = v->domain->sched_priv;
+    struct null_dom * const ndom = null_dom(v->domain);
 
     BUG_ON(nvc->vcpu != v);
 
@@ -759,7 +782,7 @@ static struct task_slice null_schedule(const struct scheduler *ops,
             list_for_each_entry( wvc, &prv->waitq, waitq_elem )
             {
                 if ( bs == BALANCE_SOFT_AFFINITY &&
-                     !has_soft_affinity(wvc->vcpu) )
+                     !has_soft_affinity(wvc->vcpu, wvc->vcpu->cpu_hard_affinity) )
                     continue;
 
                 if ( vcpu_check_affinity(wvc->vcpu, cpu, bs) )
@@ -895,6 +918,9 @@ const struct scheduler sched_null_def = {
     .free_vdata     = null_free_vdata,
     .alloc_domdata  = null_alloc_domdata,
     .free_domdata   = null_free_domdata,
+
+    .init_domain    = null_dom_init,
+    .destroy_domain = null_dom_destroy,
 
     .insert_vcpu    = null_vcpu_insert,
     .remove_vcpu    = null_vcpu_remove,

@@ -140,13 +140,14 @@ struct vcpu *__init dom0_setup_vcpu(struct domain *d,
     {
         if ( pv_shim )
         {
-            sched_set_affinity(v, cpumask_of(vcpu_id), cpumask_of(vcpu_id));
+            __cpumask_set_cpu(vcpu_id, v->cpu_hard_affinity);
+            __cpumask_set_cpu(vcpu_id, v->cpu_soft_affinity);
         }
         else
         {
             if ( !d->is_pinned && !dom0_affinity_relaxed )
-                sched_set_affinity(v, &dom0_cpus, NULL);
-            sched_set_affinity(v, NULL, &dom0_cpus);
+                cpumask_copy(v->cpu_hard_affinity, &dom0_cpus);
+            cpumask_copy(v->cpu_soft_affinity, &dom0_cpus);
         }
     }
 
@@ -497,6 +498,7 @@ int __init dom0_setup_permissions(struct domain *d)
 
 int __init construct_dom0(struct domain *d, const module_t *image,
                           unsigned long image_headroom, module_t *initrd,
+                          void *(*bootstrap_map)(const module_t *),
                           char *cmdline)
 {
     int rc;
@@ -517,7 +519,7 @@ int __init construct_dom0(struct domain *d, const module_t *image,
 #endif
 
     rc = (is_hvm_domain(d) ? dom0_construct_pvh : dom0_construct_pv)
-         (d, image, image_headroom, initrd, cmdline);
+         (d, image, image_headroom, initrd, bootstrap_map, cmdline);
     if ( rc )
         return rc;
 

@@ -18,7 +18,7 @@
  */
 #include <asm/procinfo.h>
 
-static DEFINE_PER_CPU(struct processor *, processor);
+static const struct processor *processor = NULL;
 
 void __init processor_setup(void)
 {
@@ -28,15 +28,15 @@ void __init processor_setup(void)
     if ( !procinfo )
         return;
 
-    this_cpu(processor) = procinfo->processor;
+    processor = procinfo->processor;
 }
 
 void processor_vcpu_initialise(struct vcpu *v)
 {
-    if ( !this_cpu(processor) || !this_cpu(processor)->vcpu_initialise )
+    if ( !processor || !processor->vcpu_initialise )
         return;
 
-    this_cpu(processor)->vcpu_initialise(v);
+    processor->vcpu_initialise(v);
 }
 
 /*

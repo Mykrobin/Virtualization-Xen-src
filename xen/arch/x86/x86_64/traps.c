@@ -49,7 +49,7 @@ static void read_registers(struct cpu_user_regs *regs, unsigned long crs[8])
     regs->gs = read_sreg(gs);
     crs[5] = rdfsbase();
     crs[6] = rdgsbase();
-    crs[7] = rdgsshadow();
+    rdmsrl(MSR_SHADOW_GS_BASE, crs[7]);
 }
 
 static void _show_registers(
@@ -256,7 +256,6 @@ void do_double_fault(struct cpu_user_regs *regs)
 
     printk("CPU:    %d\n", cpu);
     _show_registers(regs, crs, CTXT_hypervisor, NULL);
-    show_code(regs);
     show_stack_overflow(cpu, regs);
 
     panic("DOUBLE FAULT -- system shutdown");
@@ -303,8 +302,8 @@ void subarch_percpu_traps_init(void)
     unsigned char *stub_page;
     unsigned int offset;
 
-    /* IST_MAX IST pages + at least 1 guard page + primary stack. */
-    BUILD_BUG_ON((IST_MAX + 1) * PAGE_SIZE + PRIMARY_STACK_SIZE > STACK_SIZE);
+    /* IST_MAX IST pages + 1 syscall page + 1 guard page + primary stack. */
+    BUILD_BUG_ON((IST_MAX + 2) * PAGE_SIZE + PRIMARY_STACK_SIZE > STACK_SIZE);
 
     stub_page = map_domain_page(_mfn(this_cpu(stubs.mfn)));
 

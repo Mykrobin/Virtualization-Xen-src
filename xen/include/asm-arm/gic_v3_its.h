@@ -133,7 +133,11 @@ struct host_its {
 
 extern struct list_head host_its_list;
 
+/* Parse the host DT and pick up all host ITSes. */
+void gicv3_its_dt_init(const struct dt_device_node *node);
+
 #ifdef CONFIG_ACPI
+void gicv3_its_acpi_init(void);
 unsigned long gicv3_its_make_hwdom_madt(const struct domain *d,
                                         void *base_ptr);
 #endif
@@ -198,7 +202,15 @@ void gicv3_lpi_update_host_entry(uint32_t host_lpi, int domain_id,
 
 #else
 
+static inline void gicv3_its_dt_init(const struct dt_device_node *node)
+{
+}
+
 #ifdef CONFIG_ACPI
+static inline void gicv3_its_acpi_init(void)
+{
+}
+
 static inline unsigned long gicv3_its_make_hwdom_madt(const struct domain *d,
                                                       void *base_ptr)
 {

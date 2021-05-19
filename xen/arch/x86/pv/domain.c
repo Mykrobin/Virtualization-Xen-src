@@ -58,7 +58,13 @@ static int parse_pcid(const char *s)
 }
 custom_runtime_param("pcid", parse_pcid);
 
-static void noreturn continue_nonidle_domain(struct vcpu *v)
+/* Override macros from asm/page.h to make them work with mfn_t */
+#undef mfn_to_page
+#define mfn_to_page(mfn) __mfn_to_page(mfn_x(mfn))
+#undef page_to_mfn
+#define page_to_mfn(pg) _mfn(__page_to_mfn(pg))
+
+static void noreturn continue_nonidle_domain(void)
 {
     check_wakeup_from_wait();
     reset_stack_and_jump(ret_from_intr);
@@ -281,7 +287,8 @@ void pv_domain_destroy(struct domain *d)
 }
 
 
-int pv_domain_initialise(struct domain *d)
+int pv_domain_initialise(struct domain *d, unsigned int domcr_flags,
+                         struct xen_arch_domainconfig *config)
 {
     static const struct arch_csw pv_csw = {
         .from = paravirt_ctxt_switch_from,
@@ -351,11 +358,32 @@ int pv_domain_initialise(struct domain *d)
     return rc;
 }
 
-static void _toggle_guest_pt(struct vcpu *v)
+void toggle_guest_mode(struct vcpu *v)
+{
+    if ( is_pv_32bit_vcpu(v) )
+        return;
+
+    /* %fs/%gs bases can only be stale if WR{FS,GS}BASE are usable. */
+    if ( read_cr4() & X86_CR4_FSGSBASE )
+    {
+        if ( v->arch.flags & TF_kernel_mode )
+            v->arch.pv_vcpu.gs_base_kernel = __rdgsbase();
+        else
+            v->arch.pv_vcpu.gs_base_user = __rdgsbase();
+    }
+    asm volatile ( "swapgs" );
+
+    toggle_guest_pt(v);
+}
+
+void toggle_guest_pt(struct vcpu *v)
 {
     const struct domain *d = v->domain;
     struct cpu_info *cpu_info = get_cpu_info();
     unsigned long cr3;
+
+    if ( is_pv_32bit_vcpu(v) )
+        return;
 
     v->arch.flags ^= TF_kernel_mode;
     update_cr3(v);
@@ -395,29 +423,6 @@ static void _toggle_guest_pt(struct vcpu *v)
          update_secondary_system_time(v,
                                       &v->arch.pv_vcpu.pending_system_time) )
         v->arch.pv_vcpu.pending_system_time.version = 0;
-}
-
-void toggle_guest_mode(struct vcpu *v)
-{
-    ASSERT(!is_pv_32bit_vcpu(v));
-
-    /* %fs/%gs bases can only be stale if WR{FS,GS}BASE are usable. */
-    if ( read_cr4() & X86_CR4_FSGSBASE )
-    {
-        if ( v->arch.flags & TF_kernel_mode )
-            v->arch.pv_vcpu.gs_base_kernel = __rdgsbase();
-        else
-            v->arch.pv_vcpu.gs_base_user = __rdgsbase();
-    }
-    asm volatile ( "swapgs" );
-
-    _toggle_guest_pt(v);
-}
-
-void toggle_guest_pt(struct vcpu *v)
-{
-    if ( !is_pv_32bit_vcpu(v) )
-        _toggle_guest_pt(v);
 }
 
 /*

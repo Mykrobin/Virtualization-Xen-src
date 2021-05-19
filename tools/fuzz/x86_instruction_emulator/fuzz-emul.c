@@ -33,7 +33,6 @@ struct fuzz_corpus
     unsigned char data[INPUT_SIZE];
 } input;
 #define DATA_OFFSET offsetof(struct fuzz_corpus, data)
-#define FUZZ_CORPUS_SIZE (sizeof(struct fuzz_corpus))
 
 /*
  * Internal state of the fuzzing harness.  Calculated initially from the input
@@ -347,7 +346,6 @@ static int fuzz_cmpxchg(
     void *old,
     void *new,
     unsigned int bytes,
-    bool lock,
     struct x86_emulate_ctxt *ctxt)
 {
     /*
@@ -459,8 +457,6 @@ static int fuzz_write_cr(
 
     return X86EMUL_OKAY;
 }
-
-#define fuzz_read_xcr emul_test_read_xcr
 
 enum {
     MSRI_IA32_SYSENTER_CS,
@@ -580,7 +576,6 @@ static const struct x86_emulate_ops all_fuzzer_ops = {
     SET(write_io),
     SET(read_cr),
     SET(write_cr),
-    SET(read_xcr),
     SET(read_msr),
     SET(write_msr),
     SET(wbinvd),
@@ -689,7 +684,6 @@ enum {
     HOOK_write_cr,
     HOOK_read_dr,
     HOOK_write_dr,
-    HOOK_read_xcr,
     HOOK_read_msr,
     HOOK_write_msr,
     HOOK_wbinvd,
@@ -734,7 +728,6 @@ static void disable_hooks(struct x86_emulate_ctxt *ctxt)
     MAYBE_DISABLE_HOOK(write_io);
     MAYBE_DISABLE_HOOK(read_cr);
     MAYBE_DISABLE_HOOK(write_cr);
-    MAYBE_DISABLE_HOOK(read_xcr);
     MAYBE_DISABLE_HOOK(read_msr);
     MAYBE_DISABLE_HOOK(write_msr);
     MAYBE_DISABLE_HOOK(wbinvd);
@@ -835,7 +828,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data_p, size_t size)
         return 1;
     }
 
-    if ( size > FUZZ_CORPUS_SIZE )
+    if ( size > INPUT_SIZE )
     {
         printf("Input too large\n");
         return 1;
@@ -866,6 +859,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *data_p, size_t size)
 
 unsigned int fuzz_minimal_input_size(void)
 {
+    BUILD_BUG_ON(DATA_OFFSET > INPUT_SIZE);
+
     return DATA_OFFSET + 1;
 }
 

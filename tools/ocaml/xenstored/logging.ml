@@ -60,11 +60,11 @@ type logger =
 let truncate_line nb_chars line = 
 	if String.length line > nb_chars - 1 then
 		let len = max (nb_chars - 1) 2 in
-		let dst_line = Bytes.create len in
-		Bytes.blit_string line 0 dst_line 0 (len - 2);
-		Bytes.set dst_line (len-2) '.';
-		Bytes.set dst_line (len-1) '.';
-		Bytes.unsafe_to_string dst_line
+		let dst_line = String.create len in
+		String.blit line 0 dst_line 0 (len - 2);
+		dst_line.[len-2] <- '.'; 
+		dst_line.[len-1] <- '.';
+		dst_line
 	else line
 
 let log_rotate ref_ch log_file log_nb_files =
@@ -161,6 +161,8 @@ let xenstored_log_nb_lines = ref 13215
 let xenstored_log_nb_chars = ref (-1)
 let xenstored_logger = ref (None: logger option)
 
+let debug_enabled () = !xenstored_log_level = Debug
+
 let set_xenstored_log_destination s =
 	xenstored_log_destination := log_destination_of_string s
 
@@ -204,6 +206,7 @@ type access_type =
 	| Commit
 	| Newconn
 	| Endconn
+	| Watch_not_fired
 	| XbOp of Xenbus.Xb.Op.operation
 
 let string_of_tid ~con tid =
@@ -217,6 +220,7 @@ let string_of_access_type = function
 	| Commit                  -> "commit   "
 	| Newconn                 -> "newconn  "
 	| Endconn                 -> "endconn  "
+	| Watch_not_fired         -> "w notfired"
 
 	| XbOp op -> match op with
 	| Xenbus.Xb.Op.Debug             -> "debug    "
@@ -252,10 +256,12 @@ let string_of_access_type = function
 	*)
 
 let sanitize_data data =
-	let data = String.init
-		(String.length data)
-		(fun i -> let c = data.[i] in if c = '\000' then ' ' else c)
-	in
+	let data = String.copy data in
+	for i = 0 to String.length data - 1
+	do
+		if data.[i] = '\000' then
+			data.[i] <- ' '
+	done;
 	String.escaped data
 
 let activate_access_log = ref true
@@ -331,3 +337,7 @@ let xb_answer ~tid ~con ~ty data =
 		| _ -> false, Debug
 	in
 	if print then access_logging ~tid ~con ~data (XbOp ty) ~level
+
+let watch_not_fired ~con perms path =
+	let data = Printf.sprintf "EPERM perms=[%s] path=%s" perms path in
+	access_logging ~tid:0 ~con ~data Watch_not_fired ~level:Info

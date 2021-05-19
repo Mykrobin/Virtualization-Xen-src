@@ -207,10 +207,9 @@ void invalidate_interrupt(struct cpu_user_regs *regs)
     unsigned int flags = flush_flags;
     ack_APIC_irq();
     perfc_incr(ipis);
-    if ( (flags & FLUSH_VCPU_STATE) && __sync_local_execstate() )
+    if ( __sync_local_execstate() )
         flags &= ~(FLUSH_TLB | FLUSH_TLB_GLOBAL | FLUSH_ROOT_PGTBL);
-    if ( flags & ~(FLUSH_VCPU_STATE | FLUSH_ORDER_MASK) )
-        flush_area_local(flush_va, flags);
+    flush_area_local(flush_va, flags);
     cpumask_clear_cpu(smp_processor_id(), &flush_cpumask);
 }
 
@@ -220,8 +219,7 @@ void flush_area_mask(const cpumask_t *mask, const void *va, unsigned int flags)
 
     ASSERT(local_irq_is_enabled());
 
-    if ( (flags & ~(FLUSH_VCPU_STATE | FLUSH_ORDER_MASK)) &&
-         cpumask_test_cpu(cpu, mask) )
+    if ( cpumask_test_cpu(cpu, mask) )
         flags = flush_area_local(va, flags);
 
     if ( (flags & ~FLUSH_ORDER_MASK) &&
@@ -302,31 +300,23 @@ static void stop_this_cpu(void *dummy)
  */
 void smp_send_stop(void)
 {
-    unsigned int cpu = smp_processor_id();
+    int timeout = 10;
 
-    if ( num_online_cpus() > 1 )
-    {
-        int timeout = 10;
+    local_irq_disable();
+    fixup_irqs(cpumask_of(smp_processor_id()), 0);
+    local_irq_enable();
 
-        local_irq_disable();
-        fixup_irqs(cpumask_of(cpu), 0);
-        local_irq_enable();
+    smp_call_function(stop_this_cpu, NULL, 0);
 
-        smp_call_function(stop_this_cpu, NULL, 0);
+    /* Wait 10ms for all other CPUs to go offline. */
+    while ( (num_online_cpus() > 1) && (timeout-- > 0) )
+        mdelay(1);
 
-        /* Wait 10ms for all other CPUs to go offline. */
-        while ( (num_online_cpus() > 1) && (timeout-- > 0) )
-            mdelay(1);
-    }
-
-    if ( cpu_online(cpu) )
-    {
-        local_irq_disable();
-        disable_IO_APIC();
-        hpet_disable();
-        __stop_this_cpu();
-        local_irq_enable();
-    }
+    local_irq_disable();
+    disable_IO_APIC();
+    hpet_disable();
+    __stop_this_cpu();
+    local_irq_enable();
 }
 
 void smp_send_nmi_allbutself(void)

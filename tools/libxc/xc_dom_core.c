@@ -225,12 +225,6 @@ void *xc_dom_malloc_filemap(struct xc_dom_image *dom,
                      "tried to map file which is too large");
         goto err;
     }
-    else if ( !*size )
-    {
-        xc_dom_panic(dom->xch, XC_INTERNAL_ERROR,
-                     "'%s': zero length file", filename);
-        goto err;
-    }
 
     block = malloc(sizeof(*block));
     if ( block == NULL ) {
@@ -314,6 +308,22 @@ int xc_dom_kernel_check_size(struct xc_dom_image *dom, size_t sz)
     {
         xc_dom_panic(dom->xch, XC_INVALID_KERNEL,
                      "kernel image too large");
+        return 1;
+    }
+
+    return 0;
+}
+
+int xc_dom_module_check_size(struct xc_dom_image *dom, size_t sz)
+{
+    /* No limit */
+    if ( !dom->max_module_size )
+        return 0;
+
+    if ( sz > dom->max_module_size )
+    {
+        xc_dom_panic(dom->xch, XC_INVALID_KERNEL,
+                     "module image too large");
         return 1;
     }
 
@@ -1016,28 +1026,16 @@ static int xc_dom_build_module(struct xc_dom_image *dom, unsigned int mod)
     char name[10];
 
     if ( !dom->modules[mod].seg.vstart )
+    {
         unziplen = xc_dom_check_gzip(dom->xch,
                                      dom->modules[mod].blob, dom->modules[mod].size);
+        if ( xc_dom_module_check_size(dom, unziplen) != 0 )
+            unziplen = 0;
+    }
     else
         unziplen = 0;
 
-    modulelen = max(unziplen, dom->modules[mod].size);
-    if ( dom->max_module_size )
-    {
-        if ( unziplen && modulelen > dom->max_module_size )
-        {
-            modulelen = min(unziplen, dom->modules[mod].size);
-            if ( unziplen > modulelen )
-                unziplen = 0;
-        }
-        if ( modulelen > dom->max_module_size )
-        {
-            xc_dom_panic(dom->xch, XC_INVALID_KERNEL,
-                         "module %u image too large", mod);
-            goto err;
-        }
-    }
-
+    modulelen = unziplen ? unziplen : dom->modules[mod].size;
     snprintf(name, sizeof(name), "module%u", mod);
     if ( xc_dom_alloc_segment(dom, &dom->modules[mod].seg, name,
                               dom->modules[mod].seg.vstart, modulelen) != 0 )
@@ -1052,18 +1050,11 @@ static int xc_dom_build_module(struct xc_dom_image *dom, unsigned int mod)
     if ( unziplen )
     {
         if ( xc_dom_do_gunzip(dom->xch, dom->modules[mod].blob, dom->modules[mod].size,
-                              modulemap, unziplen) != -1 )
-            return 0;
-        if ( dom->modules[mod].size > modulelen )
+                              modulemap, modulelen) == -1 )
             goto err;
     }
-
-    /* Fall back to handing over the raw blob. */
-    memcpy(modulemap, dom->modules[mod].blob, dom->modules[mod].size);
-    /* If an unzip attempt was made, the buffer may no longer be all zero. */
-    if ( unziplen > dom->modules[mod].size )
-        memset(modulemap + dom->modules[mod].size, 0,
-               unziplen - dom->modules[mod].size);
+    else
+        memcpy(modulemap, dom->modules[mod].blob, dom->modules[mod].size);
 
     return 0;
 

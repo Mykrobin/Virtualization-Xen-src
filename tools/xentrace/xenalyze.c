@@ -358,7 +358,7 @@ char * find_symbol(unsigned long long addr) {
     int i;
     char * lastname="ZERO";
     unsigned long long offset=addr;
-    static char name[144];
+    static char name[128];
 
     if(!p) {
         name[0]=0;
@@ -379,7 +379,7 @@ char * find_symbol(unsigned long long addr) {
         p=p->next;
     }
  finish:
-    snprintf(name, 144, "(%s +%llx)",
+    snprintf(name, 128, "(%s +%llx)",
              lastname, offset);
     return name;
 }

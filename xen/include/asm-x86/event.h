@@ -42,9 +42,15 @@ static inline void local_event_delivery_enable(void)
 }
 
 /* No arch specific virq definition now. Default to global. */
-static inline bool arch_virq_is_global(unsigned int virq)
+static inline int arch_virq_is_global(uint32_t virq)
 {
-    return true;
+    return 1;
 }
+
+#ifdef CONFIG_PV_SHIM
+# include <asm/pv/shim.h>
+# define arch_evtchn_is_special(chn) \
+             (pv_shim && (chn)->port && (chn)->state == ECS_RESERVED)
+#endif
 
 #endif

@@ -48,7 +48,7 @@ ENTRY(vmx_asm_vmexit_handler)
             xor %edx, %edx
             wrmsr
         .endm
-        ALTERNATIVE "", restore_lbr, X86_FEATURE_XEN_LBR
+        ALTERNATIVE __stringify(ASM_NOP14), restore_lbr, X86_FEATURE_XEN_LBR
 
         mov  %rsp,%rdi
         call vmx_vmexit_handler

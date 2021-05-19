@@ -16,8 +16,10 @@ extern char __per_cpu_start[], __per_cpu_data_end[];
 extern unsigned long __per_cpu_offset[NR_CPUS];
 void percpu_init_areas(void);
 
-#define __DEFINE_PER_CPU(attr, type, name) \
-    attr __typeof__(type) per_cpu_ ## name
+/* Separate out the type, so (int[3], foo) works. */
+#define __DEFINE_PER_CPU(type, name, suffix)                    \
+    __section(".bss.percpu" #suffix)                            \
+    __typeof__(type) per_cpu_##name
 
 #define per_cpu(var, cpu)  \
     (*RELOC_HIDE(&per_cpu__##var, __per_cpu_offset[cpu]))

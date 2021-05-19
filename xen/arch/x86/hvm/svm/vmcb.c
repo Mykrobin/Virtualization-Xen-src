@@ -73,7 +73,7 @@ static int construct_vmcb(struct vcpu *v)
         GENERAL2_INTERCEPT_STGI        | GENERAL2_INTERCEPT_CLGI        |
         GENERAL2_INTERCEPT_SKINIT      | GENERAL2_INTERCEPT_MWAIT       |
         GENERAL2_INTERCEPT_WBINVD      | GENERAL2_INTERCEPT_MONITOR     |
-        GENERAL2_INTERCEPT_XSETBV      | GENERAL2_INTERCEPT_ICEBP;
+        GENERAL2_INTERCEPT_XSETBV;
 
     /* Intercept all debug-register writes. */
     vmcb->_dr_intercepts = ~0u;
@@ -83,8 +83,6 @@ static int construct_vmcb(struct vcpu *v)
                              CR_INTERCEPT_CR2_WRITE |
                              CR_INTERCEPT_CR8_READ |
                              CR_INTERCEPT_CR8_WRITE);
-
-    arch_svm->vmcb_sync_state = vmcb_needs_vmload;
 
     /* I/O and MSR permission bitmaps. */
     arch_svm->msrpm = alloc_xenheap_pages(get_order_from_bytes(MSRPM_SIZE), 0);
@@ -212,9 +210,6 @@ static int construct_vmcb(struct vcpu *v)
     {
         vmcb->_pause_filter_count = SVM_PAUSEFILTER_INIT;
         vmcb->_general1_intercepts |= GENERAL1_INTERCEPT_PAUSE;
-
-        if ( cpu_has_pause_thresh )
-            vmcb->_pause_filter_thresh = SVM_PAUSETHRESH_INIT;
     }
 
     vmcb->cleanbits.bytes = 0;

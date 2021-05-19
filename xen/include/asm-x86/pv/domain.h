@@ -57,7 +57,8 @@ static inline unsigned long get_pcid_bits(const struct vcpu *v, bool is_xpti)
 void pv_vcpu_destroy(struct vcpu *v);
 int pv_vcpu_initialise(struct vcpu *v);
 void pv_domain_destroy(struct domain *d);
-int pv_domain_initialise(struct domain *d);
+int pv_domain_initialise(struct domain *d, unsigned int domcr_flags,
+                         struct xen_arch_domainconfig *config);
 
 /*
  * Bits which a PV guest can toggle in its view of cr4.  Some are loaded into
@@ -83,7 +84,12 @@ unsigned long pv_make_cr4(const struct vcpu *v);
 static inline void pv_vcpu_destroy(struct vcpu *v) {}
 static inline int pv_vcpu_initialise(struct vcpu *v) { return -EOPNOTSUPP; }
 static inline void pv_domain_destroy(struct domain *d) {}
-static inline int pv_domain_initialise(struct domain *d) { return -EOPNOTSUPP; }
+static inline int pv_domain_initialise(struct domain *d,
+                                       unsigned int domcr_flags,
+                                       struct xen_arch_domainconfig *config);
+{
+    return -EOPNOTSUPP;
+}
 
 static inline unsigned long pv_make_cr4(const struct vcpu *v) { return ~0ul; }
 

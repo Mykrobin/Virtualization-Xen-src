@@ -224,7 +224,7 @@ int xc_get_pfn_type_batch(xc_interface *xch, uint32_t dom,
     domctl.domain = dom;
     domctl.u.getpageframeinfo3.num = num;
     set_xen_guest_handle(domctl.u.getpageframeinfo3.array, arr);
-    rc = do_domctl_retry_efault(xch, &domctl);
+    rc = do_domctl(xch, &domctl);
     xc_hypercall_bounce_post(xch, arr);
     return rc;
 }
@@ -385,6 +385,33 @@ int xc_machphys_mfn_list(xc_interface *xch,
     xc_hypercall_bounce_post(xch, extent_start);
 
     return rc;
+}
+
+int xc_get_pfn_list(xc_interface *xch,
+                    uint32_t domid,
+                    uint64_t *pfn_buf,
+                    unsigned long max_pfns)
+{
+    DECLARE_DOMCTL;
+    DECLARE_HYPERCALL_BOUNCE(pfn_buf, max_pfns * sizeof(*pfn_buf), XC_HYPERCALL_BUFFER_BOUNCE_OUT);
+    int ret;
+
+    if ( xc_hypercall_bounce_pre(xch, pfn_buf) )
+    {
+        PERROR("xc_get_pfn_list: pfn_buf bounce failed");
+        return -1;
+    }
+
+    domctl.cmd = XEN_DOMCTL_getmemlist;
+    domctl.domain = domid;
+    domctl.u.getmemlist.max_pfns = max_pfns;
+    set_xen_guest_handle(domctl.u.getmemlist.buffer, pfn_buf);
+
+    ret = do_domctl(xch, &domctl);
+
+    xc_hypercall_bounce_post(xch, pfn_buf);
+
+    return (ret < 0) ? -1 : domctl.u.getmemlist.num_pfns;
 }
 
 long xc_get_tot_pages(xc_interface *xch, uint32_t domid)

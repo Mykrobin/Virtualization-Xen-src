@@ -501,9 +501,9 @@ static void mctelem_append_processing(mctelem_class_t which)
 		ltep->mcte_prev = *procltp;
 		*procltp = dangling[target];
 	}
-	smp_wmb();
+	wmb();
 	dangling[target] = NULL;
-	smp_wmb();
+	wmb();
 }
 
 mctelem_cookie_t mctelem_consume_oldest_begin(mctelem_class_t which)
@@ -520,6 +520,7 @@ mctelem_cookie_t mctelem_consume_oldest_begin(mctelem_class_t which)
 	}
 
 	mctelem_processing_hold(tep);
+	wmb();
 	spin_unlock(&processing_lock);
 	return MCTE2COOKIE(tep);
 }
@@ -530,6 +531,7 @@ void mctelem_consume_oldest_end(mctelem_cookie_t cookie)
 
 	spin_lock(&processing_lock);
 	mctelem_processing_release(tep);
+	wmb();
 	spin_unlock(&processing_lock);
 }
 
@@ -545,6 +547,7 @@ void mctelem_ack(mctelem_class_t which, mctelem_cookie_t cookie)
 	spin_lock(&processing_lock);
 	if (tep == mctctl.mctc_processing_head[target])
 		mctelem_processing_release(tep);
+	wmb();
 	spin_unlock(&processing_lock);
 }
 

@@ -18,7 +18,6 @@
 #include <xen/timer.h>
 #include <xen/smp.h>
 #include <xen/irq.h>
-#include <xen/pci_ids.h>
 #include <xen/softirq.h>
 #include <xen/efi.h>
 #include <xen/cpuidle.h>
@@ -365,41 +364,12 @@ static u64 read_hpet_count(void)
     return hpet_read32(HPET_COUNTER);
 }
 
-static int64_t __init init_hpet(struct platform_timesource *pts)
+static s64 __init init_hpet(struct platform_timesource *pts)
 {
-    uint64_t hpet_rate, start;
-    uint32_t count, target;
+    u64 hpet_rate = hpet_setup(), start;
+    u32 count, target;
 
-    if ( hpet_address && strcmp(opt_clocksource, pts->id) &&
-         cpuidle_using_deep_cstate() )
-    {
-        if ( pci_conf_read16(0, 0, 0x1f, 0,
-                             PCI_VENDOR_ID) == PCI_VENDOR_ID_INTEL )
-            switch ( pci_conf_read16(0, 0, 0x1f, 0, PCI_DEVICE_ID) )
-            {
-            /* HPET on Bay Trail platforms will halt in deep C states. */
-            case 0x0f1c:
-            /* HPET on Cherry Trail platforms will halt in deep C states. */
-            case 0x229c:
-                hpet_address = 0;
-                break;
-            }
-
-        /*
-         * Some Coffee Lake platforms have a skewed HPET timer once the SoCs
-         * entered PC10.
-         */
-        if ( pci_conf_read16(0, 0, 0, 0,
-                             PCI_VENDOR_ID) == PCI_VENDOR_ID_INTEL &&
-             pci_conf_read16(0, 0, 0, 0,
-                             PCI_DEVICE_ID) == 0x3ec4 )
-            hpet_address = 0;
-
-        if ( !hpet_address )
-            printk("Disabling HPET for being unreliable\n");
-    }
-
-    if ( (hpet_rate = hpet_setup()) == 0 )
+    if ( hpet_rate == 0 )
         return 0;
 
     pts->frequency = hpet_rate;
@@ -1120,10 +1090,10 @@ static void __update_vcpu_system_time(struct vcpu *v, int force)
 
     /* 1. Update guest kernel version. */
     _u.version = u->version = version_update_begin(u->version);
-    smp_wmb();
+    wmb();
     /* 2. Update all other guest kernel fields. */
     *u = _u;
-    smp_wmb();
+    wmb();
     /* 3. Update guest kernel version. */
     u->version = version_update_end(u->version);
 
@@ -1136,7 +1106,8 @@ bool update_secondary_system_time(struct vcpu *v,
                                   struct vcpu_time_info *u)
 {
     XEN_GUEST_HANDLE(vcpu_time_info_t) user_u = v->arch.time_info_guest;
-    struct guest_memory_policy policy = { .nested_guest_mode = false };
+    struct guest_memory_policy policy =
+        { .smap_policy = SMAP_CHECK_ENABLED, .nested_guest_mode = false };
 
     if ( guest_handle_is_null(user_u) )
         return true;
@@ -1149,10 +1120,10 @@ bool update_secondary_system_time(struct vcpu *v,
         update_guest_memory_policy(v, &policy);
         return false;
     }
-    smp_wmb();
+    wmb();
     /* 2. Update all other userspace fields. */
     __copy_to_guest(user_u, u, 1);
-    smp_wmb();
+    wmb();
     /* 3. Update userspace version. */
     u->version = version_update_end(u->version);
     __copy_field_to_guest(user_u, u, version);
@@ -2053,7 +2024,7 @@ u64 gtsc_to_gtime(struct domain *d, u64 tsc)
     return time;
 }
 
-uint64_t pv_soft_rdtsc(const struct vcpu *v, const struct cpu_user_regs *regs)
+void pv_soft_rdtsc(struct vcpu *v, struct cpu_user_regs *regs, int rdtscp)
 {
     s_time_t now = get_s_time();
     struct domain *d = v->domain;
@@ -2074,7 +2045,11 @@ uint64_t pv_soft_rdtsc(const struct vcpu *v, const struct cpu_user_regs *regs)
 
     spin_unlock(&d->arch.vtsc_lock);
 
-    return gtime_to_gtsc(d, now);
+    msr_split(regs, gtime_to_gtsc(d, now));
+
+    if ( rdtscp )
+         regs->rcx =
+             (d->arch.tsc_mode == TSC_MODE_PVRDTSCP) ? d->arch.incarnation : 0;
 }
 
 bool clocksource_is_tsc(void)
@@ -2153,9 +2128,7 @@ void tsc_set_info(struct domain *d,
                   uint32_t tsc_mode, uint64_t elapsed_nsec,
                   uint32_t gtsc_khz, uint32_t incarnation)
 {
-    ASSERT(!is_system_domain(d));
-
-    if ( is_hardware_domain(d) )
+    if ( is_idle_domain(d) || is_hardware_domain(d) )
     {
         d->arch.vtsc = 0;
         return;

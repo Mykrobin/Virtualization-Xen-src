@@ -21,7 +21,6 @@
 #include <xen/sched.h>
 
 #include <asm/hap.h>
-#include <asm/hvm/cacheattr.h>
 #include <asm/hvm/ioreq.h>
 #include <asm/shadow.h>
 
@@ -189,12 +188,14 @@ static int modified_memory(struct domain *d,
             page = get_page_from_gfn(d, pfn, NULL, P2M_UNSHARE);
             if ( page )
             {
-                paging_mark_pfn_dirty(d, _pfn(pfn));
+                mfn_t gmfn = _mfn(page_to_mfn(page));
+
+                paging_mark_dirty(d, gmfn);
                 /*
                  * These are most probably not page tables any more
                  * don't take a long time and don't die either.
                  */
-                sh_remove_shadows(d, page_to_mfn(page), 1, 0);
+                sh_remove_shadows(d, gmfn, 1, 0);
                 put_page(page);
             }
         }
@@ -360,8 +361,6 @@ static int dm_op(const struct dmop_args *op_args)
         [XEN_DMOP_inject_msi]                       = sizeof(struct xen_dm_op_inject_msi),
         [XEN_DMOP_map_mem_type_to_ioreq_server]     = sizeof(struct xen_dm_op_map_mem_type_to_ioreq_server),
         [XEN_DMOP_remote_shutdown]                  = sizeof(struct xen_dm_op_remote_shutdown),
-        [XEN_DMOP_relocate_memory]                  = sizeof(struct xen_dm_op_relocate_memory),
-        [XEN_DMOP_pin_memory_cacheattr]             = sizeof(struct xen_dm_op_pin_memory_cacheattr),
     };
 
     rc = rcu_lock_remote_domain_by_id(op_args->domid, &d);
@@ -407,6 +406,7 @@ static int dm_op(const struct dmop_args *op_args)
     {
     case XEN_DMOP_create_ioreq_server:
     {
+        struct domain *curr_d = current->domain;
         struct xen_dm_op_create_ioreq_server *data =
             &op.u.create_ioreq_server;
 
@@ -416,8 +416,8 @@ static int dm_op(const struct dmop_args *op_args)
         if ( data->pad[0] || data->pad[1] || data->pad[2] )
             break;
 
-        rc = hvm_create_ioreq_server(d, false, data->handle_bufioreq,
-                                     &data->id);
+        rc = hvm_create_ioreq_server(d, curr_d->domain_id, false,
+                                     data->handle_bufioreq, &data->id);
         break;
     }
 
@@ -425,19 +425,16 @@ static int dm_op(const struct dmop_args *op_args)
     {
         struct xen_dm_op_get_ioreq_server_info *data =
             &op.u.get_ioreq_server_info;
-        const uint16_t valid_flags = XEN_DMOP_no_gfns;
 
         const_op = false;
 
         rc = -EINVAL;
-        if ( data->flags & ~valid_flags )
+        if ( data->pad )
             break;
 
         rc = hvm_get_ioreq_server_info(d, data->id,
-                                       (data->flags & XEN_DMOP_no_gfns) ?
-                                       NULL : &data->ioreq_gfn,
-                                       (data->flags & XEN_DMOP_no_gfns) ?
-                                       NULL : &data->bufioreq_gfn,
+                                       &data->ioreq_gfn,
+                                       &data->bufioreq_gfn,
                                        &data->bufioreq_port);
         break;
     }
@@ -652,53 +649,6 @@ static int dm_op(const struct dmop_args *op_args)
         break;
     }
 
-    case XEN_DMOP_relocate_memory:
-    {
-        struct xen_dm_op_relocate_memory *data = &op.u.relocate_memory;
-        struct xen_add_to_physmap xatp = {
-            .domid = op_args->domid,
-            .size = data->size,
-            .space = XENMAPSPACE_gmfn_range,
-            .idx = data->src_gfn,
-            .gpfn = data->dst_gfn,
-        };
-
-        if ( data->pad )
-        {
-            rc = -EINVAL;
-            break;
-        }
-
-        rc = xenmem_add_to_physmap(d, &xatp, 0);
-        if ( rc == 0 && data->size != xatp.size )
-            rc = xatp.size;
-        if ( rc > 0 )
-        {
-            data->size -= rc;
-            data->src_gfn += rc;
-            data->dst_gfn += rc;
-            const_op = false;
-            rc = -ERESTART;
-        }
-        break;
-    }
-
-    case XEN_DMOP_pin_memory_cacheattr:
-    {
-        const struct xen_dm_op_pin_memory_cacheattr *data =
-            &op.u.pin_memory_cacheattr;
-
-        if ( data->pad )
-        {
-            rc = -EINVAL;
-            break;
-        }
-
-        rc = hvm_set_mem_pinned_cacheattr(d, data->start, data->end,
-                                          data->type);
-        break;
-    }
-
     default:
         rc = -EOPNOTSUPP;
         break;
@@ -729,8 +679,6 @@ CHECK_dm_op_set_mem_type;
 CHECK_dm_op_inject_event;
 CHECK_dm_op_inject_msi;
 CHECK_dm_op_remote_shutdown;
-CHECK_dm_op_relocate_memory;
-CHECK_dm_op_pin_memory_cacheattr;
 
 int compat_dm_op(domid_t domid,
                  unsigned int nr_bufs,

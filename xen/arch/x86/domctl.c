@@ -23,6 +23,7 @@
 #include <asm/irq.h>
 #include <asm/hvm/hvm.h>
 #include <asm/hvm/support.h>
+#include <asm/hvm/cacheattr.h>
 #include <asm/processor.h>
 #include <asm/acpi.h> /* for hvm_acpi_power_button */
 #include <xen/hypercall.h> /* for arch_do_domctl */
@@ -210,15 +211,11 @@ static int update_domain_cpuid_info(struct domain *d,
         if ( is_pv_domain(d) && ((levelling_caps & LCAP_7ab0) == LCAP_7ab0) )
         {
             uint64_t mask = cpuidmask_defaults._7ab0;
+            uint32_t eax = ctl->eax;
+            uint32_t ebx = p->feat._7b0;
 
-            /*
-             * Leaf 7[0].eax is max_subleaf, not a feature mask.  Take it
-             * wholesale from the policy, but clamp the features in 7[0].ebx
-             * per usual.
-             */
             if ( boot_cpu_data.x86_vendor == X86_VENDOR_AMD )
-                mask = (((uint64_t)p->feat.max_subleaf << 32) |
-                        ((uint32_t)mask & p->feat._7b0));
+                mask &= ((uint64_t)eax << 32) | ebx;
 
             d->arch.pv_domain.cpuidmasks->_7ab0 = mask;
         }
@@ -418,6 +415,62 @@ long arch_do_domctl(
         break;
     }
 
+    case XEN_DOMCTL_getmemlist:
+    {
+        unsigned long max_pfns = domctl->u.getmemlist.max_pfns;
+        uint64_t mfn;
+        struct page_info *page;
+
+        if ( unlikely(d->is_dying) )
+        {
+            ret = -EINVAL;
+            break;
+        }
+
+        /*
+         * XSA-74: This sub-hypercall is broken in several ways:
+         * - lock order inversion (p2m locks inside page_alloc_lock)
+         * - no preemption on huge max_pfns input
+         * - not (re-)checking d->is_dying with page_alloc_lock held
+         * - not honoring start_pfn input (which libxc also doesn't set)
+         * Additionally it is rather useless, as the result is stale by the
+         * time the caller gets to look at it.
+         * As it only has a single, non-production consumer (xen-mceinj),
+         * rather than trying to fix it we restrict it for the time being.
+         */
+        if ( /* No nested locks inside copy_to_guest_offset(). */
+             paging_mode_external(currd) ||
+             /* Arbitrary limit capping processing time. */
+             max_pfns > GB(4) / PAGE_SIZE )
+        {
+            ret = -EOPNOTSUPP;
+            break;
+        }
+
+        spin_lock(&d->page_alloc_lock);
+
+        ret = i = 0;
+        page_list_for_each(page, &d->page_list)
+        {
+            if ( i >= max_pfns )
+                break;
+            mfn = page_to_mfn(page);
+            if ( copy_to_guest_offset(domctl->u.getmemlist.buffer,
+                                      i, &mfn, 1) )
+            {
+                ret = -EFAULT;
+                break;
+            }
+			++i;
+		}
+
+        spin_unlock(&d->page_alloc_lock);
+
+        domctl->u.getmemlist.num_pfns = i;
+        copyback = true;
+        break;
+    }
+
     case XEN_DOMCTL_getpageframeinfo3:
     {
         unsigned int num = domctl->u.getpageframeinfo3.num;
@@ -487,26 +540,6 @@ long arch_do_domctl(
             {
                 ret = -EFAULT;
                 break;
-            }
-
-            /*
-             * Avoid checking for preemption when the `hostp2m' lock isn't
-             * involve, i.e. non-translated guest, and avoid preemption on
-             * the last iteration.
-             */
-            if ( paging_mode_translate(d) &&
-                 likely((i + 1) < num) && hypercall_preempt_check() )
-            {
-                domctl->u.getpageframeinfo3.num = num - i - 1;
-                domctl->u.getpageframeinfo3.array.p =
-                    guest_handle + ((i + 1) * width);
-                if ( __copy_to_guest(u_domctl, domctl, 1) )
-                {
-                    ret = -EFAULT;
-                    break;
-                }
-                return hypercall_create_continuation(__HYPERVISOR_domctl,
-                                                     "h", u_domctl);
             }
         }
 
@@ -845,6 +878,13 @@ long arch_do_domctl(
             memory_type_changed(d);
         break;
     }
+
+    case XEN_DOMCTL_pin_mem_cacheattr:
+        ret = hvm_set_mem_pinned_cacheattr(
+            d, domctl->u.pin_mem_cacheattr.start,
+            domctl->u.pin_mem_cacheattr.end,
+            domctl->u.pin_mem_cacheattr.type);
+        break;
 
     case XEN_DOMCTL_set_ext_vcpucontext:
     case XEN_DOMCTL_get_ext_vcpucontext:
@@ -1268,7 +1308,7 @@ long arch_do_domctl(
     case XEN_DOMCTL_set_vcpu_msrs:
     {
         struct xen_domctl_vcpu_msrs *vmsrs = &domctl->u.vcpu_msrs;
-        struct xen_domctl_vcpu_msr msr = {};
+        struct xen_domctl_vcpu_msr msr;
         struct vcpu *v;
         static const uint32_t msrs_to_send[] = {
             MSR_SPEC_CTRL,
@@ -1332,6 +1372,7 @@ long arch_do_domctl(
                     if ( i < vmsrs->msr_count && !ret )
                     {
                         msr.index = msrs_to_send[j];
+                        msr.reserved = 0;
                         msr.value = val;
                         if ( copy_to_guest_offset(vmsrs->msrs, i, &msr, 1) )
                             ret = -EFAULT;
@@ -1346,6 +1387,7 @@ long arch_do_domctl(
                         if ( i < vmsrs->msr_count && !ret )
                         {
                             msr.index = MSR_AMD64_DR0_ADDRESS_MASK;
+                            msr.reserved = 0;
                             msr.value = v->arch.pv_vcpu.dr_mask[0];
                             if ( copy_to_guest_offset(vmsrs->msrs, i, &msr, 1) )
                                 ret = -EFAULT;
@@ -1360,6 +1402,7 @@ long arch_do_domctl(
                         if ( i < vmsrs->msr_count && !ret )
                         {
                             msr.index = MSR_AMD64_DR1_ADDRESS_MASK + j;
+                            msr.reserved = 0;
                             msr.value = v->arch.pv_vcpu.dr_mask[1 + j];
                             if ( copy_to_guest_offset(vmsrs->msrs, i, &msr, 1) )
                                 ret = -EFAULT;
@@ -1464,76 +1507,67 @@ long arch_do_domctl(
         }
         break;
 
-    case XEN_DOMCTL_psr_alloc:
-        switch ( domctl->u.psr_alloc.cmd )
+    case XEN_DOMCTL_psr_cat_op:
+        switch ( domctl->u.psr_cat_op.cmd )
         {
-        case XEN_DOMCTL_PSR_SET_L3_CBM:
-            ret = psr_set_val(d, domctl->u.psr_alloc.target,
-                              domctl->u.psr_alloc.data,
-                              PSR_TYPE_L3_CBM);
+            uint32_t val32;
+
+        case XEN_DOMCTL_PSR_CAT_OP_SET_L3_CBM:
+            ret = psr_set_val(d, domctl->u.psr_cat_op.target,
+                              domctl->u.psr_cat_op.data,
+                              PSR_CBM_TYPE_L3);
             break;
 
-        case XEN_DOMCTL_PSR_SET_L3_CODE:
-            ret = psr_set_val(d, domctl->u.psr_alloc.target,
-                              domctl->u.psr_alloc.data,
-                              PSR_TYPE_L3_CODE);
+        case XEN_DOMCTL_PSR_CAT_OP_SET_L3_CODE:
+            ret = psr_set_val(d, domctl->u.psr_cat_op.target,
+                              domctl->u.psr_cat_op.data,
+                              PSR_CBM_TYPE_L3_CODE);
             break;
 
-        case XEN_DOMCTL_PSR_SET_L3_DATA:
-            ret = psr_set_val(d, domctl->u.psr_alloc.target,
-                              domctl->u.psr_alloc.data,
-                              PSR_TYPE_L3_DATA);
+        case XEN_DOMCTL_PSR_CAT_OP_SET_L3_DATA:
+            ret = psr_set_val(d, domctl->u.psr_cat_op.target,
+                              domctl->u.psr_cat_op.data,
+                              PSR_CBM_TYPE_L3_DATA);
             break;
 
-        case XEN_DOMCTL_PSR_SET_L2_CBM:
-            ret = psr_set_val(d, domctl->u.psr_alloc.target,
-                              domctl->u.psr_alloc.data,
-                              PSR_TYPE_L2_CBM);
+        case XEN_DOMCTL_PSR_CAT_OP_SET_L2_CBM:
+            ret = psr_set_val(d, domctl->u.psr_cat_op.target,
+                              domctl->u.psr_cat_op.data,
+                              PSR_CBM_TYPE_L2);
             break;
 
-        case XEN_DOMCTL_PSR_SET_MBA_THRTL:
-            ret = psr_set_val(d, domctl->u.psr_alloc.target,
-                              domctl->u.psr_alloc.data,
-                              PSR_TYPE_MBA_THRTL);
+        case XEN_DOMCTL_PSR_CAT_OP_GET_L3_CBM:
+            ret = psr_get_val(d, domctl->u.psr_cat_op.target,
+                              &val32, PSR_CBM_TYPE_L3);
+            domctl->u.psr_cat_op.data = val32;
+            copyback = true;
             break;
 
-#define domctl_psr_get_val(d, domctl, type, copyback) ({    \
-    uint32_t v_;                                            \
-    int r_ = psr_get_val((d), (domctl)->u.psr_alloc.target, \
-                         &v_, (type));                      \
-                                                            \
-    (domctl)->u.psr_alloc.data = v_;                        \
-    (copyback) = true;                                      \
-    r_;                                                     \
-})
-
-        case XEN_DOMCTL_PSR_GET_L3_CBM:
-            ret = domctl_psr_get_val(d, domctl, PSR_TYPE_L3_CBM, copyback);
+        case XEN_DOMCTL_PSR_CAT_OP_GET_L3_CODE:
+            ret = psr_get_val(d, domctl->u.psr_cat_op.target,
+                              &val32, PSR_CBM_TYPE_L3_CODE);
+            domctl->u.psr_cat_op.data = val32;
+            copyback = true;
             break;
 
-        case XEN_DOMCTL_PSR_GET_L3_CODE:
-            ret = domctl_psr_get_val(d, domctl, PSR_TYPE_L3_CODE, copyback);
+        case XEN_DOMCTL_PSR_CAT_OP_GET_L3_DATA:
+            ret = psr_get_val(d, domctl->u.psr_cat_op.target,
+                              &val32, PSR_CBM_TYPE_L3_DATA);
+            domctl->u.psr_cat_op.data = val32;
+            copyback = true;
             break;
 
-        case XEN_DOMCTL_PSR_GET_L3_DATA:
-            ret = domctl_psr_get_val(d, domctl, PSR_TYPE_L3_DATA, copyback);
+        case XEN_DOMCTL_PSR_CAT_OP_GET_L2_CBM:
+            ret = psr_get_val(d, domctl->u.psr_cat_op.target,
+                              &val32, PSR_CBM_TYPE_L2);
+            domctl->u.psr_cat_op.data = val32;
+            copyback = true;
             break;
-
-        case XEN_DOMCTL_PSR_GET_L2_CBM:
-            ret = domctl_psr_get_val(d, domctl, PSR_TYPE_L2_CBM, copyback);
-            break;
-
-        case XEN_DOMCTL_PSR_GET_MBA_THRTL:
-            ret = domctl_psr_get_val(d, domctl, PSR_TYPE_MBA_THRTL, copyback);
-            break;
-
-#undef domctl_psr_get_val
 
         default:
             ret = -EOPNOTSUPP;
             break;
         }
-
         break;
 
     case XEN_DOMCTL_disable_migrate:

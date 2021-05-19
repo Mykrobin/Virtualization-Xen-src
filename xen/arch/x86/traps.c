@@ -93,7 +93,7 @@ static char __read_mostly opt_nmi[10] = "fatal";
 #endif
 string_param("nmi", opt_nmi);
 
-DEFINE_PER_CPU(uint64_t, efer);
+DEFINE_PER_CPU(u64, efer);
 static DEFINE_PER_CPU(unsigned long, last_extable_addr);
 
 DEFINE_PER_CPU_READ_MOSTLY(struct desc_struct *, gdt_table);
@@ -106,13 +106,7 @@ idt_entry_t __section(".bss.page_aligned") __aligned(PAGE_SIZE)
 /* Pointer to the IDT of every CPU. */
 idt_entry_t *idt_tables[NR_CPUS] __read_mostly;
 
-/*
- * The TSS is smaller than a page, but we give it a full page to avoid
- * adjacent per-cpu data leaking via Meltdown when XPTI is in use.
- */
-DEFINE_PER_CPU_PAGE_ALIGNED(struct tss_page, tss_page);
-
-bool (*ioemul_handle_quirk)(
+void (*ioemul_handle_quirk)(
     u8 opcode, char *io_emul_stub, struct cpu_user_regs *regs);
 
 static int debug_stack_lines = 20;
@@ -127,35 +121,7 @@ unsigned int __read_mostly ler_msr;
 #define stack_words_per_line 4
 #define ESP_BEFORE_EXCEPTION(regs) ((unsigned long *)regs->rsp)
 
-static void do_trap(struct cpu_user_regs *regs);
-static void do_reserved_trap(struct cpu_user_regs *regs);
-
-void (* const exception_table[TRAP_nr])(struct cpu_user_regs *regs) = {
-    [TRAP_divide_error]                 = do_trap,
-    [TRAP_debug]                        = do_debug,
-    [TRAP_nmi]                          = (void *)do_nmi,
-    [TRAP_int3]                         = do_int3,
-    [TRAP_overflow]                     = do_trap,
-    [TRAP_bounds]                       = do_trap,
-    [TRAP_invalid_op]                   = do_invalid_op,
-    [TRAP_no_device]                    = do_device_not_available,
-    [TRAP_double_fault]                 = do_reserved_trap,
-    [TRAP_copro_seg]                    = do_reserved_trap,
-    [TRAP_invalid_tss]                  = do_trap,
-    [TRAP_no_segment]                   = do_trap,
-    [TRAP_stack_error]                  = do_trap,
-    [TRAP_gp_fault]                     = do_general_protection,
-    [TRAP_page_fault]                   = do_page_fault,
-    [TRAP_spurious_int]                 = do_reserved_trap,
-    [TRAP_copro_error]                  = do_trap,
-    [TRAP_alignment_check]              = do_trap,
-    [TRAP_machine_check]                = (void *)do_machine_check,
-    [TRAP_simd_error]                   = do_trap,
-    [TRAP_virtualisation ...
-     (ARRAY_SIZE(exception_table) - 1)] = do_reserved_trap,
-};
-
-void show_code(const struct cpu_user_regs *regs)
+static void show_code(const struct cpu_user_regs *regs)
 {
     unsigned char insns_before[8] = {}, insns_after[16] = {};
     unsigned int i, tmp, missing_before, missing_after;
@@ -563,7 +529,7 @@ void show_stack_overflow(unsigned int cpu, const struct cpu_user_regs *regs)
 
     printk("Valid stack range: %p-%p, sp=%p, tss.rsp0=%p\n",
            (void *)esp_top, (void *)esp_bottom, (void *)esp,
-           (void *)per_cpu(tss_page, cpu).tss.rsp0);
+           (void *)per_cpu(init_tss, cpu).rsp0);
 
     /*
      * Trigger overflow trace if %esp is anywhere within the guard page, or
@@ -686,7 +652,11 @@ void fatal_trap(const struct cpu_user_regs *regs, bool show_remote)
         show_execution_state(regs);
 
         if ( trapnr == TRAP_page_fault )
-            show_page_walk(read_cr2());
+        {
+            unsigned long cr2 = read_cr2();
+            printk("Faulting linear address: %p\n", _p(cr2));
+            show_page_walk(cr2);
+        }
 
         if ( show_remote )
         {
@@ -723,7 +693,7 @@ void fatal_trap(const struct cpu_user_regs *regs, bool show_remote)
           (regs->eflags & X86_EFLAGS_IF) ? "" : ", IN INTERRUPT CONTEXT");
 }
 
-static void do_reserved_trap(struct cpu_user_regs *regs)
+void do_reserved_trap(struct cpu_user_regs *regs)
 {
     unsigned int trapnr = regs->entry_vector;
 
@@ -734,8 +704,9 @@ static void do_reserved_trap(struct cpu_user_regs *regs)
     panic("FATAL RESERVED TRAP %#x: %s", trapnr, trapstr(trapnr));
 }
 
-static void do_trap(struct cpu_user_regs *regs)
+void do_trap(struct cpu_user_regs *regs)
 {
+    struct vcpu *curr = current;
     unsigned int trapnr = regs->entry_vector;
     unsigned long fixup;
 
@@ -752,6 +723,15 @@ static void do_trap(struct cpu_user_regs *regs)
         pv_inject_hw_exception(trapnr,
                                (TRAP_HAVE_EC & (1u << trapnr))
                                ? regs->error_code : X86_EVENT_NO_EC);
+        return;
+    }
+
+    if ( ((trapnr == TRAP_copro_error) || (trapnr == TRAP_simd_error)) &&
+         system_state >= SYS_STATE_active && is_hvm_vcpu(curr) &&
+         curr->arch.hvm_vcpu.fpu_exception_callback )
+    {
+        curr->arch.hvm_vcpu.fpu_exception_callback(
+            curr->arch.hvm_vcpu.fpu_exception_callback_arg, regs);
         return;
     }
 
@@ -832,8 +812,8 @@ int wrmsr_hypervisor_regs(uint32_t idx, uint64_t val)
             }
 
             gdprintk(XENLOG_WARNING,
-                     "Bad GMFN %lx (MFN %#"PRI_mfn") to MSR %08x\n",
-                     gmfn, mfn_x(page ? page_to_mfn(page) : INVALID_MFN), base);
+                     "Bad GMFN %lx (MFN %lx) to MSR %08x\n",
+                     gmfn, page ? page_to_mfn(page) : -1UL, base);
             return 0;
         }
 
@@ -1124,48 +1104,6 @@ static void reserved_bit_page_fault(unsigned long addr,
     show_execution_state(regs);
 }
 
-static int handle_ldt_mapping_fault(unsigned int offset,
-                                    struct cpu_user_regs *regs)
-{
-    struct vcpu *curr = current;
-
-    /*
-     * Not in PV context?  Something is very broken.  Leave it to the #PF
-     * handler, which will probably result in a panic().
-     */
-    if ( !is_pv_vcpu(curr) )
-        return 0;
-
-    /* Try to copy a mapping from the guest's LDT, if it is valid. */
-    if ( likely(pv_map_ldt_shadow_page(offset)) )
-    {
-        if ( guest_mode(regs) )
-            trace_trap_two_addr(TRC_PV_GDT_LDT_MAPPING_FAULT,
-                                regs->rip, offset);
-    }
-    else
-    {
-        /* In hypervisor mode? Leave it to the #PF handler to fix up. */
-        if ( !guest_mode(regs) )
-            return 0;
-
-        /* Access would have become non-canonical? Pass #GP[sel] back. */
-        if ( unlikely(!is_canonical_address(
-                          curr->arch.pv_vcpu.ldt_base + offset)) )
-        {
-            uint16_t ec = (offset & ~(X86_XEC_EXT | X86_XEC_IDT)) | X86_XEC_TI;
-
-            pv_inject_hw_exception(TRAP_gp_fault, ec);
-        }
-        else
-            /* else pass the #PF back, with adjusted %cr2. */
-            pv_inject_page_fault(regs->error_code,
-                                 curr->arch.pv_vcpu.ldt_base + offset);
-    }
-
-    return EXCRET_fault_fixed;
-}
-
 static int handle_gdt_ldt_mapping_fault(unsigned long offset,
                                         struct cpu_user_regs *regs)
 {
@@ -1187,11 +1125,40 @@ static int handle_gdt_ldt_mapping_fault(unsigned long offset,
     offset &= (1UL << (GDT_LDT_VCPU_VA_SHIFT-1)) - 1UL;
 
     if ( likely(is_ldt_area) )
-        return handle_ldt_mapping_fault(offset, regs);
+    {
+        /* LDT fault: Copy a mapping from the guest's LDT, if it is valid. */
+        if ( likely(pv_map_ldt_shadow_page(offset)) )
+        {
+            if ( guest_mode(regs) )
+                trace_trap_two_addr(TRC_PV_GDT_LDT_MAPPING_FAULT,
+                                    regs->rip, offset);
+        }
+        else
+        {
+            /* In hypervisor mode? Leave it to the #PF handler to fix up. */
+            if ( !guest_mode(regs) )
+                return 0;
 
-    /* GDT fault: handle the fault as #GP[sel]. */
-    regs->error_code = offset & ~(X86_XEC_EXT | X86_XEC_IDT | X86_XEC_TI);
-    do_general_protection(regs);
+            /* Access would have become non-canonical? Pass #GP[sel] back. */
+            if ( unlikely(!is_canonical_address(
+                              curr->arch.pv_vcpu.ldt_base + offset)) )
+            {
+                uint16_t ec = (offset & ~(X86_XEC_EXT | X86_XEC_IDT)) | X86_XEC_TI;
+
+                pv_inject_hw_exception(TRAP_gp_fault, ec);
+            }
+            else
+                /* else pass the #PF back, with adjusted %cr2. */
+                pv_inject_page_fault(regs->error_code,
+                                     curr->arch.pv_vcpu.ldt_base + offset);
+        }
+    }
+    else
+    {
+        /* GDT fault: handle the fault as #GP(selector). */
+        regs->error_code = offset & ~(X86_XEC_EXT | X86_XEC_IDT | X86_XEC_TI);
+        (void)do_general_protection(regs);
+    }
 
     return EXCRET_fault_fixed;
 }
@@ -1785,6 +1752,17 @@ void do_device_not_available(struct cpu_user_regs *regs)
     return;
 }
 
+u64 read_efer(void)
+{
+    return this_cpu(efer);
+}
+
+void write_efer(u64 val)
+{
+    this_cpu(efer) = val;
+    wrmsrl(MSR_EFER, val);
+}
+
 void do_debug(struct cpu_user_regs *regs)
 {
     unsigned long dr6;
@@ -1923,7 +1901,7 @@ static void __init set_intr_gate(unsigned int n, void *addr)
 
 void load_TR(void)
 {
-    struct tss64 *tss = &this_cpu(tss_page).tss;
+    struct tss_struct *tss = &this_cpu(init_tss);
     struct desc_ptr old_gdt, tss_gdt = {
         .base = (long)(this_cpu(gdt_table) - FIRST_RESERVED_GDT_ENTRY),
         .limit = LAST_RESERVED_GDT_BYTE
@@ -1931,10 +1909,14 @@ void load_TR(void)
 
     _set_tssldt_desc(
         this_cpu(gdt_table) + TSS_ENTRY - FIRST_RESERVED_GDT_ENTRY,
-        (unsigned long)tss, sizeof(*tss) - 1, SYS_DESC_tss_avail);
+        (unsigned long)tss,
+        offsetof(struct tss_struct, __cacheline_filler) - 1,
+        SYS_DESC_tss_avail);
     _set_tssldt_desc(
         this_cpu(compat_gdt_table) + TSS_ENTRY - FIRST_RESERVED_GDT_ENTRY,
-        (unsigned long)tss, sizeof(*tss) - 1, SYS_DESC_tss_busy);
+        (unsigned long)tss,
+        offsetof(struct tss_struct, __cacheline_filler) - 1,
+        SYS_DESC_tss_busy);
 
     /* Switch to non-compat GDT (which has B bit clear) to execute LTR. */
     asm volatile (
@@ -2014,7 +1996,10 @@ void __init init_idt_traps(void)
     set_intr_gate(TRAP_simd_error,&simd_coprocessor_error);
 
     /* Specify dedicated interrupt stacks for NMI, #DF, and #MC. */
-    enable_each_ist(idt_table);
+    set_ist(&idt_table[TRAP_double_fault],  IST_DF);
+    set_ist(&idt_table[TRAP_nmi],           IST_NMI);
+    set_ist(&idt_table[TRAP_machine_check], IST_MCE);
+    set_ist(&idt_table[TRAP_debug],         IST_DB);
 
     /* CPU0 uses the master IDT. */
     idt_tables[0] = idt_table;
@@ -2090,24 +2075,34 @@ void activate_debugregs(const struct vcpu *curr)
  */
 long set_debugreg(struct vcpu *v, unsigned int reg, unsigned long value)
 {
+    int i;
     struct vcpu *curr = current;
 
     switch ( reg )
     {
-    case 0 ... 3:
+    case 0:
         if ( !access_ok(value, sizeof(long)) )
             return -EPERM;
-
         if ( v == curr )
-        {
-            switch ( reg )
-            {
-            case 0: write_debugreg(0, value); break;
-            case 1: write_debugreg(1, value); break;
-            case 2: write_debugreg(2, value); break;
-            case 3: write_debugreg(3, value); break;
-            }
-        }
+            write_debugreg(0, value);
+        break;
+    case 1:
+        if ( !access_ok(value, sizeof(long)) )
+            return -EPERM;
+        if ( v == curr )
+            write_debugreg(1, value);
+        break;
+    case 2:
+        if ( !access_ok(value, sizeof(long)) )
+            return -EPERM;
+        if ( v == curr )
+            write_debugreg(2, value);
+        break;
+    case 3:
+        if ( !access_ok(value, sizeof(long)) )
+            return -EPERM;
+        if ( v == curr )
+            write_debugreg(3, value);
         break;
 
     case 4:
@@ -2156,7 +2151,7 @@ long set_debugreg(struct vcpu *v, unsigned int reg, unsigned long value)
         /* DR7.{G,L}E = 0 => debugging disabled for this domain. */
         if ( value & DR7_ACTIVE_MASK )
         {
-            unsigned int i, io_enable = 0;
+            unsigned int io_enable = 0;
 
             for ( i = DR_CONTROL_SHIFT; i < 32; i += DR_CONTROL_SIZE )
             {
@@ -2188,7 +2183,6 @@ long set_debugreg(struct vcpu *v, unsigned int reg, unsigned long value)
         if ( v == curr )
             write_debugreg(7, value);
         break;
-
     default:
         return -ENODEV;
     }

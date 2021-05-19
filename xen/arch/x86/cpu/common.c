@@ -121,18 +121,8 @@ void (* __read_mostly ctxt_switch_masking)(const struct vcpu *next);
 bool __init probe_cpuid_faulting(void)
 {
 	uint64_t val;
-	int rc;
 
-	if ((rc = rdmsr_safe(MSR_INTEL_PLATFORM_INFO, val)) == 0)
-	{
-		struct msr_domain_policy *dp = &raw_msr_domain_policy;
-
-		dp->plaform_info.available = true;
-		if (val & MSR_PLATFORM_INFO_CPUID_FAULTING)
-			dp->plaform_info.cpuid_faulting = true;
-	}
-
-	if (rc ||
+	if (rdmsr_safe(MSR_INTEL_PLATFORM_INFO, val) ||
 	    !(val & MSR_PLATFORM_INFO_CPUID_FAULTING) ||
 	    rdmsr_safe(MSR_INTEL_MISC_FEATURES_ENABLES,
 		       this_cpu(msr_misc_features)))
@@ -472,7 +462,7 @@ void identify_cpu(struct cpuinfo_x86 *c)
 		this_cpu->c_init(c);
 
 
-   	if (c == &boot_cpu_data && !opt_pku)
+   	if ( !opt_pku )
 		setup_clear_cpu_cap(X86_FEATURE_PKU);
 
 	/*
@@ -505,9 +495,6 @@ void identify_cpu(struct cpuinfo_x86 *c)
 		printk(" %08x", c->x86_capability[i]);
 	printk("\n");
 #endif
-
-	if (system_state == SYS_STATE_resume)
-		return;
 
 	/*
 	 * On SMP, boot_cpu_data holds the common feature set between
@@ -734,7 +721,7 @@ void load_system_tables(void)
 	unsigned long stack_bottom = get_stack_bottom(),
 		stack_top = stack_bottom & ~(STACK_SIZE - 1);
 
-	struct tss64 *tss = &this_cpu(tss_page).tss;
+	struct tss_struct *tss = &this_cpu(init_tss);
 	struct desc_struct *gdt =
 		this_cpu(gdt_table) - FIRST_RESERVED_GDT_ENTRY;
 	struct desc_struct *compat_gdt =
@@ -749,7 +736,7 @@ void load_system_tables(void)
 		.limit = (IDT_ENTRIES * sizeof(idt_entry_t)) - 1,
 	};
 
-	*tss = (struct tss64){
+	*tss = (struct tss_struct){
 		/* Main stack for interrupts/exceptions. */
 		.rsp0 = stack_bottom,
 
@@ -774,19 +761,26 @@ void load_system_tables(void)
 		.bitmap = IOBMP_INVALID_OFFSET,
 	};
 
-	BUILD_BUG_ON(sizeof(*tss) <= 0x67); /* Mandated by the architecture. */
+	_set_tssldt_desc(
+		gdt + TSS_ENTRY,
+		(unsigned long)tss,
+		offsetof(struct tss_struct, __cacheline_filler) - 1,
+		SYS_DESC_tss_avail);
+	_set_tssldt_desc(
+		compat_gdt + TSS_ENTRY,
+		(unsigned long)tss,
+		offsetof(struct tss_struct, __cacheline_filler) - 1,
+		SYS_DESC_tss_busy);
 
-	_set_tssldt_desc(gdt + TSS_ENTRY, (unsigned long)tss,
-			 sizeof(*tss) - 1, SYS_DESC_tss_avail);
-	_set_tssldt_desc(compat_gdt + TSS_ENTRY, (unsigned long)tss,
-			 sizeof(*tss) - 1, SYS_DESC_tss_busy);
+	asm volatile ("lgdt %0"  : : "m"  (gdtr) );
+	asm volatile ("lidt %0"  : : "m"  (idtr) );
+	asm volatile ("ltr  %w0" : : "rm" (TSS_ENTRY << 3) );
+	asm volatile ("lldt %w0" : : "rm" (0) );
 
-	lgdt(&gdtr);
-	lidt(&idtr);
-	ltr(TSS_ENTRY << 3);
-	lldt(0);
-
-	enable_each_ist(idt_tables[cpu]);
+	set_ist(&idt_tables[cpu][TRAP_double_fault],  IST_DF);
+	set_ist(&idt_tables[cpu][TRAP_nmi],	      IST_NMI);
+	set_ist(&idt_tables[cpu][TRAP_machine_check], IST_MCE);
+	set_ist(&idt_tables[cpu][TRAP_debug],         IST_DB);
 
 	/*
 	 * Bottom-of-stack must be 16-byte aligned!

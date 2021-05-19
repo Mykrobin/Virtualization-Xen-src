@@ -51,19 +51,13 @@ static inline void set_bit(int nr, volatile void *addr)
  * If it's called on the same region of memory simultaneously, the effect
  * may be that only one operation succeeds.
  */
-static inline void variable_set_bit(int nr, void *addr)
+static inline void __set_bit(int nr, void *addr)
 {
     asm volatile ( "btsl %1,%0" : "+m" (*(int *)addr) : "Ir" (nr) : "memory" );
 }
-static inline void constant_set_bit(int nr, void *addr)
-{
-    ((unsigned int *)addr)[nr >> 5] |= (1u << (nr & 31));
-}
 #define __set_bit(nr, addr) ({                          \
     if ( bitop_bad_size(addr) ) __bitop_bad_size();     \
-    __builtin_constant_p(nr) ?                          \
-        constant_set_bit(nr, addr) :                    \
-        variable_set_bit(nr, addr);                     \
+    __set_bit(nr, addr);                                \
 })
 
 /**
@@ -92,19 +86,13 @@ static inline void clear_bit(int nr, volatile void *addr)
  * If it's called on the same region of memory simultaneously, the effect
  * may be that only one operation succeeds.
  */
-static inline void variable_clear_bit(int nr, void *addr)
+static inline void __clear_bit(int nr, void *addr)
 {
     asm volatile ( "btrl %1,%0" : "+m" (*(int *)addr) : "Ir" (nr) : "memory" );
 }
-static inline void constant_clear_bit(int nr, void *addr)
-{
-    ((unsigned int *)addr)[nr >> 5] &= ~(1u << (nr & 31));
-}
 #define __clear_bit(nr, addr) ({                        \
     if ( bitop_bad_size(addr) ) __bitop_bad_size();     \
-    __builtin_constant_p(nr) ?                          \
-        constant_clear_bit(nr, addr) :                  \
-        variable_clear_bit(nr, addr);                   \
+    __clear_bit(nr, addr);                              \
 })
 
 /**
@@ -116,19 +104,13 @@ static inline void constant_clear_bit(int nr, void *addr)
  * If it's called on the same region of memory simultaneously, the effect
  * may be that only one operation succeeds.
  */
-static inline void variable_change_bit(int nr, void *addr)
+static inline void __change_bit(int nr, void *addr)
 {
     asm volatile ( "btcl %1,%0" : "+m" (*(int *)addr) : "Ir" (nr) : "memory" );
 }
-static inline void constant_change_bit(int nr, void *addr)
-{
-    ((unsigned int *)addr)[nr >> 5] ^= (1u << (nr & 31));
-}
 #define __change_bit(nr, addr) ({                       \
     if ( bitop_bad_size(addr) ) __bitop_bad_size();     \
-    __builtin_constant_p(nr) ?                          \
-        constant_change_bit(nr, addr) :                 \
-        variable_change_bit(nr, addr);                  \
+    __change_bit(nr, addr);                             \
 })
 
 /**
@@ -309,9 +291,9 @@ static inline int variable_test_bit(int nr, const volatile void *addr)
 
 #define test_bit(nr, addr) ({                           \
     if ( bitop_bad_size(addr) ) __bitop_bad_size();     \
-    __builtin_constant_p(nr) ?                          \
-        constant_test_bit(nr, addr) :                   \
-        variable_test_bit(nr, addr);                    \
+    (__builtin_constant_p(nr) ?                         \
+     constant_test_bit((nr),(addr)) :                   \
+     variable_test_bit((nr),(addr)));                   \
 })
 
 extern unsigned int __find_first_bit(

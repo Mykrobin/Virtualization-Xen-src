@@ -87,8 +87,9 @@ int iommu_setup_hpet_msi(struct msi_desc *);
 
 /* While VT-d specific, this must get declared in a generic header. */
 int adjust_vtd_irq_affinities(void);
-int __must_check iommu_pte_flush(struct domain *d, u64 gfn, u64 *pte,
-                                 int order, int present);
+int __must_check iommu_flush_iotlb(struct domain *d, unsigned long gfn,
+                                   bool dma_old_pte_present,
+                                   unsigned int page_count);
 bool_t iommu_supports_eim(void);
 int iommu_enable_x2apic_IR(void);
 void iommu_disable_x2apic_IR(void);
@@ -97,6 +98,13 @@ extern bool untrusted_msi;
 
 int pi_update_irte(const struct pi_desc *pi_desc, const struct pirq *pirq,
                    const uint8_t gvec);
+
+#define iommu_sync_cache(addr, size) ({                 \
+    const struct iommu_ops *ops = iommu_get_ops();      \
+                                                        \
+    if ( ops->sync_cache )                              \
+        ops->sync_cache(addr, size);                    \
+})
 
 #endif /* !__ARCH_X86_IOMMU_H__ */
 /*

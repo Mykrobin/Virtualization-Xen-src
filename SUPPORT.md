@@ -9,13 +9,13 @@ for the definitions of the support status levels etc.
 
 # Release Support
 
-    Xen-Version: 4.11
-    Initial-Release: 2018-07-10
-    Supported-Until: 2020-01-10
-    Security-Support-Until: 2021-07-10
+    Xen-Version: 4.10
+    Initial-Release: 2017-12-13
+    Supported-Until: 2019-06-13
+    Security-Support-Until: 2020-12-13
 
 Release Notes
-: <a href="https://wiki.xenproject.org/wiki/Xen_Project_4.11_Release_Notes">RN</a>
+: <a href="https://wiki.xenproject.org/wiki/Xen_Project_4.10_Release_Notes">RN</a>
 
 # Feature Support
 
@@ -89,12 +89,9 @@ PVH is a next-generation paravirtualized mode
 designed to take advantage of hardware virtualization support when possible.
 During development this was sometimes called HVMLite or PVHv2.
 
-Requires hardware virtualisation support (Intel VMX / AMD SVM).
-
-Dom0 support requires an IOMMU (Intel VT-d / AMD IOMMU).
+Requires hardware virtualisation support (Intel VMX / AMD SVM)
 
     Status, domU: Supported
-    Status, dom0: Experimental
 
 ### ARM
 
@@ -609,16 +606,6 @@ However, this feature can still confer significant security benefit
 when used to remove drivers and backends from domain 0
 (i.e., Driver Domains).
 
-### x86/Multiple IOREQ servers
-
-An IOREQ server provides emulated devices to HVM and PVH guests.
-QEMU is normally the only IOREQ server,
-but Xen has support for multiple IOREQ servers.
-This allows for custom or proprietary device emulators
-to be used in addition to QEMU.
-
-	Status: Experimental
-
 ### ARM/Non-PCI device passthrough
 
     Status: Supported, not security supported
@@ -663,7 +650,7 @@ Note that other devices are available but not security supported.
 
     Status, piix3 ide: Supported
     Status, ahci: Supported
-
+	
 See the section **Blkback** for image formats supported by QEMU.
 
 ### x86/Emulated graphics (QEMU):
@@ -691,6 +678,21 @@ See the section **Blkback** for image formats supported by QEMU.
 ### x86/Host USB passthrough (QEMU):
 
     Status: Supported, not security supported
+
+### qemu-xen-traditional ###
+
+The Xen Project provides an old version of qemu with modifications
+which enable use as a device model stub domain.  The old version is
+normally selected by default only in a stub dm configuration, but it
+can be requested explicitly in other configurations, for example in
+`xl` with `device_model_version="QEMU_XEN_TRADITIONAL"`.
+
+    Status, Device Model Stub Domains: Supported, with caveats
+    Status, as host process device model: No security support, not recommended
+
+qemu-xen-traditional is security supported only for those available
+devices which are supported for mainstream QEMU (see above), with
+trusted driver domains (see Device Model Stub Domains).
 
 ## Virtual Firmware
 

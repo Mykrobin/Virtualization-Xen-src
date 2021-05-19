@@ -34,7 +34,7 @@
         .endm
 
         .macro mb2ht_init type:req, req:req, args:vararg
-        .balign MULTIBOOT2_TAG_ALIGN, 0xc2 /* Avoid padding with long nops. */
+        .align MULTIBOOT2_TAG_ALIGN
 .Lmb2ht_init_start\@:
         .short \type
         .short \req
@@ -48,8 +48,8 @@
 ENTRY(start)
         jmp     __start
 
-        .balign 4
-multiboot1_header:             /*** MULTIBOOT1 HEADER ****/
+        .align 4
+multiboot1_header_start:       /*** MULTIBOOT1 HEADER ****/
 #define MULTIBOOT_HEADER_FLAGS (MULTIBOOT_HEADER_MODS_ALIGNED | \
                                 MULTIBOOT_HEADER_WANT_MEMORY)
         /* Magic number indicating a Multiboot header. */
@@ -58,24 +58,22 @@ multiboot1_header:             /*** MULTIBOOT1 HEADER ****/
         .long   MULTIBOOT_HEADER_FLAGS
         /* Checksum: must be the negated sum of the first two fields. */
         .long   -(MULTIBOOT_HEADER_MAGIC + MULTIBOOT_HEADER_FLAGS)
-
-        .size multiboot1_header, . - multiboot1_header
-        .type multiboot1_header, @object
+multiboot1_header_end:
 
 /*** MULTIBOOT2 HEADER ****/
 /* Some ideas are taken from grub-2.00/grub-core/tests/boot/kernel-i386.S file. */
-        .balign MULTIBOOT2_HEADER_ALIGN, 0xc2  /* Avoid padding the MB1 header with long nops. */
+        .align  MULTIBOOT2_HEADER_ALIGN
 
-multiboot2_header:
+multiboot2_header_start:
         /* Magic number indicating a Multiboot2 header. */
         .long   MULTIBOOT2_HEADER_MAGIC
         /* Architecture: i386. */
         .long   MULTIBOOT2_ARCHITECTURE_I386
         /* Multiboot2 header length. */
-        .long   .Lmultiboot2_header_end - multiboot2_header
+        .long   .Lmultiboot2_header_end - multiboot2_header_start
         /* Multiboot2 header checksum. */
         .long   -(MULTIBOOT2_HEADER_MAGIC + MULTIBOOT2_ARCHITECTURE_I386 + \
-                        (.Lmultiboot2_header_end - multiboot2_header))
+                        (.Lmultiboot2_header_end - multiboot2_header_start))
 
         /* Multiboot2 information request tag. */
         mb2ht_init MB2_HT(INFORMATION_REQUEST), MB2_HT(REQUIRED), \
@@ -111,9 +109,6 @@ multiboot2_header:
         /* Multiboot2 header end tag. */
         mb2ht_init MB2_HT(END), MB2_HT(REQUIRED)
 .Lmultiboot2_header_end:
-
-        .size multiboot2_header, . - multiboot2_header
-        .type multiboot2_header, @object
 
         .section .init.rodata, "a", @progbits
 
@@ -167,7 +162,7 @@ not_multiboot:
          */
         add     $sym_offs(.Lbad_ldr_nbs),%esi   # Error message
         xor     %edi,%edi                       # No VGA text buffer
-        jmp     .Lprint_err
+        jmp     .Lsend_chr
 .Lmb2_efi_ia_32:
         /*
          * Here we are on EFI IA-32 platform. Then reliable vga_text_buffer zap is
@@ -175,10 +170,10 @@ not_multiboot:
          */
         add     $sym_offs(.Lbad_efi_msg),%esi   # Error message
         xor     %edi,%edi                       # No VGA text buffer
-        jmp     .Lprint_err
+        jmp     .Lsend_chr
 .Lget_vtb:
         mov     sym_esi(vga_text_buffer),%edi
-.Lprint_err:
+.Lsend_chr:
         lodsb
         test    %al,%al        # Terminate on '\0' sentinel
         je      .Lhalt
@@ -191,11 +186,11 @@ not_multiboot:
         mov     %bl,%al
         out     %al,%dx        # Send a character over the serial line
         test    %edi,%edi      # Is the VGA text buffer available?
-        jz      .Lprint_err
+        jz      .Lsend_chr
         stosb                  # Write a character to the VGA text buffer
         mov     $7,%al
         stosb                  # Write an attribute to the VGA text buffer
-        jmp     .Lprint_err
+        jmp     .Lsend_chr
 .Lhalt: hlt
         jmp     .Lhalt
 

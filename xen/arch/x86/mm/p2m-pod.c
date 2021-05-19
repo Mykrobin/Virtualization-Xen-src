@@ -29,6 +29,12 @@
 
 #include "mm-locks.h"
 
+/* Override macros from asm/page.h to make them work with mfn_t */
+#undef mfn_to_page
+#define mfn_to_page(_m) __mfn_to_page(mfn_x(_m))
+#undef page_to_mfn
+#define page_to_mfn(_pg) _mfn(__page_to_mfn(_pg))
+
 #define superpage_aligned(_x)  (((_x)&(SUPERPAGE_PAGES-1))==0)
 
 /* Enforce lock ordering when grabbing the "external" page_alloc lock */
@@ -504,10 +510,11 @@ p2m_pod_zero_check_superpage(struct p2m_domain *p2m, gfn_t gfn);
  * Once both of these functions have been completed, we can return and
  * allow decrease_reservation() to handle everything else.
  */
-unsigned long
+int
 p2m_pod_decrease_reservation(struct domain *d, gfn_t gfn, unsigned int order)
 {
-    unsigned long ret = 0, i, n;
+    int ret = 0;
+    unsigned long i, n;
     struct p2m_domain *p2m = p2m_get_hostp2m(d);
     bool_t steal_for_cache;
     long pod, nonpod, ram;
@@ -570,9 +577,9 @@ p2m_pod_decrease_reservation(struct domain *d, gfn_t gfn, unsigned int order)
                 domain_crash(d);
             goto out_unlock;
         }
-        ret = 1UL << order;
-        p2m->pod.entry_count -= ret;
+        p2m->pod.entry_count -= 1UL << order;
         BUG_ON(p2m->pod.entry_count < 0);
+        ret = 1;
         goto out_entry_check;
     }
 
@@ -623,7 +630,6 @@ p2m_pod_decrease_reservation(struct domain *d, gfn_t gfn, unsigned int order)
             p2m->pod.entry_count -= n;
             BUG_ON(p2m->pod.entry_count < 0);
             pod -= n;
-            ret += n;
         }
         else if ( steal_for_cache && p2m_is_ram(t) )
         {
@@ -658,9 +664,15 @@ p2m_pod_decrease_reservation(struct domain *d, gfn_t gfn, unsigned int order)
 
             nonpod -= n;
             ram -= n;
-            ret += n;
         }
     }
+
+    /*
+     * If there are no more non-PoD entries, tell decrease_reservation() that
+     * there's nothing left to do.
+     */
+    if ( nonpod == 0 )
+        ret = 1;
 
 out_entry_check:
     /* If we've reduced our "liabilities" beyond our "assets", free some */
@@ -1209,7 +1221,7 @@ p2m_pod_demand_populate(struct p2m_domain *p2m, gfn_t gfn,
     for( i = 0; i < (1UL << order); i++ )
     {
         set_gpfn_from_mfn(mfn_x(mfn) + i, gfn_x(gfn_aligned) + i);
-        paging_mark_pfn_dirty(d, _pfn(gfn_x(gfn_aligned) + i));
+        paging_mark_dirty(d, mfn_add(mfn, i));
     }
 
     p2m->pod.entry_count -= (1UL << order);

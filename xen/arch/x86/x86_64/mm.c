@@ -111,14 +111,14 @@ static int hotadd_mem_valid(unsigned long pfn, struct mem_hotadd_info *info)
     return (pfn < info->epfn && pfn >= info->spfn);
 }
 
-static mfn_t alloc_hotadd_mfn(struct mem_hotadd_info *info)
+static unsigned long alloc_hotadd_mfn(struct mem_hotadd_info *info)
 {
-    mfn_t mfn;
+    unsigned mfn;
 
     ASSERT((info->cur + ( 1UL << PAGETABLE_ORDER) < info->epfn) &&
             info->cur >= info->spfn);
 
-    mfn = _mfn(info->cur);
+    mfn = info->cur;
     info->cur += (1UL << PAGETABLE_ORDER);
     return mfn;
 }
@@ -156,8 +156,7 @@ static int m2p_mapped(unsigned long spfn)
 
 static int share_hotadd_m2p_table(struct mem_hotadd_info *info)
 {
-    unsigned long i, n, v;
-    mfn_t m2p_start_mfn = INVALID_MFN;
+    unsigned long i, n, v, m2p_start_mfn = 0;
     l3_pgentry_t l3e;
     l2_pgentry_t l2e;
 
@@ -177,17 +176,16 @@ static int share_hotadd_m2p_table(struct mem_hotadd_info *info)
             l2e = l3e_to_l2e(l3e)[l2_table_offset(v)];
             if ( !(l2e_get_flags(l2e) & _PAGE_PRESENT) )
                 continue;
-            m2p_start_mfn = l2e_get_mfn(l2e);
+            m2p_start_mfn = l2e_get_pfn(l2e);
         }
         else
             continue;
 
         for ( i = 0; i < n; i++ )
         {
-            struct page_info *page = mfn_to_page(mfn_add(m2p_start_mfn, i));
-
-            if ( hotadd_mem_valid(mfn_x(mfn_add(m2p_start_mfn, i)), info) )
-                share_xen_page_with_privileged_guests(page, SHARE_ro);
+            struct page_info *page = mfn_to_page(m2p_start_mfn + i);
+            if (hotadd_mem_valid(m2p_start_mfn + i, info))
+                share_xen_page_with_privileged_guests(page, XENSHARE_readonly);
         }
     }
 
@@ -202,14 +200,13 @@ static int share_hotadd_m2p_table(struct mem_hotadd_info *info)
         l2e = l3e_to_l2e(l3e)[l2_table_offset(v)];
         if ( !(l2e_get_flags(l2e) & _PAGE_PRESENT) )
             continue;
-        m2p_start_mfn = l2e_get_mfn(l2e);
+        m2p_start_mfn = l2e_get_pfn(l2e);
 
         for ( i = 0; i < L1_PAGETABLE_ENTRIES; i++ )
         {
-            struct page_info *page = mfn_to_page(mfn_add(m2p_start_mfn, i));
-
-            if ( hotadd_mem_valid(mfn_x(mfn_add(m2p_start_mfn, i)), info) )
-                share_xen_page_with_privileged_guests(page, SHARE_ro);
+            struct page_info *page = mfn_to_page(m2p_start_mfn + i);
+            if (hotadd_mem_valid(m2p_start_mfn + i, info))
+                share_xen_page_with_privileged_guests(page, XENSHARE_readonly);
         }
     }
     return 0;
@@ -320,8 +317,7 @@ static void destroy_m2p_mapping(struct mem_hotadd_info *info)
  */
 static int setup_compat_m2p_table(struct mem_hotadd_info *info)
 {
-    unsigned long i, va, smap, emap, rwva, epfn = info->epfn;
-    mfn_t mfn;
+    unsigned long i, va, smap, emap, rwva, epfn = info->epfn, mfn;
     unsigned int n;
     l3_pgentry_t *l3_ro_mpt = NULL;
     l2_pgentry_t *l2_ro_mpt = NULL;
@@ -382,7 +378,7 @@ static int setup_compat_m2p_table(struct mem_hotadd_info *info)
         memset((void *)rwva, 0xFF, 1UL << L2_PAGETABLE_SHIFT);
         /* NB. Cannot be GLOBAL as the ptes get copied into per-VM space. */
         l2e_write(&l2_ro_mpt[l2_table_offset(va)],
-                  l2e_from_mfn(mfn, _PAGE_PSE|_PAGE_PRESENT));
+                  l2e_from_pfn(mfn, _PAGE_PSE|_PAGE_PRESENT));
     }
 #undef CNT
 #undef MFN
@@ -442,7 +438,7 @@ static int setup_m2p_table(struct mem_hotadd_info *info)
                 break;
         if ( n < CNT )
         {
-            mfn_t mfn = alloc_hotadd_mfn(info);
+            unsigned long mfn = alloc_hotadd_mfn(info);
 
             ret = map_pages_to_xen(
                         RDWR_MPT_VIRT_START + i * sizeof(unsigned long),
@@ -477,7 +473,7 @@ static int setup_m2p_table(struct mem_hotadd_info *info)
             }
 
             /* NB. Cannot be GLOBAL: guest user mode should not see it. */
-            l2e_write(l2_ro_mpt, l2e_from_mfn(mfn,
+            l2e_write(l2_ro_mpt, l2e_from_pfn(mfn,
                    /*_PAGE_GLOBAL|*/_PAGE_PSE|_PAGE_USER|_PAGE_PRESENT));
         }
         if ( !((unsigned long)l2_ro_mpt & ~PAGE_MASK) )
@@ -574,9 +570,8 @@ void __init paging_init(void)
                     page_to_mfn(l1_pg),
                     1UL << (2 * PAGETABLE_ORDER),
                     PAGE_HYPERVISOR);
-                /* Fill with INVALID_M2P_ENTRY. */
                 memset((void *)(RDWR_MPT_VIRT_START + (i << L2_PAGETABLE_SHIFT)),
-                       0xFF, 1UL << L3_PAGETABLE_SHIFT);
+                       0x77, 1UL << L3_PAGETABLE_SHIFT);
 
                 ASSERT(!l2_table_offset(va));
                 /* NB. Cannot be GLOBAL: guest user mode should not see it. */
@@ -667,10 +662,10 @@ void __init paging_init(void)
             page_to_mfn(l1_pg),
             1UL << PAGETABLE_ORDER,
             PAGE_HYPERVISOR);
-        /* Fill with INVALID_M2P_ENTRY. */
         memset((void *)(RDWR_COMPAT_MPT_VIRT_START +
                         (i << L2_PAGETABLE_SHIFT)),
-               0xFF, 1UL << L2_PAGETABLE_SHIFT);
+               0x55,
+               1UL << L2_PAGETABLE_SHIFT);
         /* NB. Cannot be GLOBAL as the ptes get copied into per-VM space. */
         l2e_write(l2_ro_mpt, l2e_from_page(l1_pg, _PAGE_PSE|_PAGE_PRESENT));
     }
@@ -697,7 +692,7 @@ void __init zap_low_mappings(void)
     flush_local(FLUSH_TLB_GLOBAL);
 
     /* Replace with mapping of the boot trampoline only. */
-    map_pages_to_xen(trampoline_phys, maddr_to_mfn(trampoline_phys),
+    map_pages_to_xen(trampoline_phys, trampoline_phys >> PAGE_SHIFT,
                      PFN_UP(trampoline_end - trampoline_start),
                      __PAGE_HYPERVISOR);
 }
@@ -720,16 +715,17 @@ static void cleanup_frame_table(struct mem_hotadd_info *info)
     unsigned long sva, eva;
     l3_pgentry_t l3e;
     l2_pgentry_t l2e;
-    mfn_t spfn, epfn;
+    unsigned long spfn, epfn;
 
-    spfn = _mfn(info->spfn);
-    epfn = _mfn(info->epfn);
+    spfn = info->spfn;
+    epfn = info->epfn;
 
-    sva = (unsigned long)mfn_to_page(spfn);
-    eva = (unsigned long)mfn_to_page(epfn);
+    sva = (unsigned long)pdx_to_page(pfn_to_pdx(spfn));
+    eva = (unsigned long)pdx_to_page(pfn_to_pdx(epfn));
 
     /* Intialize all page */
-    memset((void *)sva, -1, eva - sva);
+    memset(mfn_to_page(spfn), -1,
+           (unsigned long)mfn_to_page(epfn) - (unsigned long)mfn_to_page(spfn));
 
     while (sva < eva)
     {
@@ -774,7 +770,7 @@ static int setup_frametable_chunk(void *start, void *end,
 {
     unsigned long s = (unsigned long)start;
     unsigned long e = (unsigned long)end;
-    mfn_t mfn;
+    unsigned long mfn;
     int err;
 
     ASSERT(!(s & ((1 << L2_PAGETABLE_SHIFT) - 1)));
@@ -795,17 +791,16 @@ static int setup_frametable_chunk(void *start, void *end,
 
 static int extend_frame_table(struct mem_hotadd_info *info)
 {
-    unsigned long cidx, nidx, eidx;
-    mfn_t spfn, epfn;
+    unsigned long cidx, nidx, eidx, spfn, epfn;
 
-    spfn = _mfn(info->spfn);
-    epfn = _mfn(info->epfn);
+    spfn = info->spfn;
+    epfn = info->epfn;
 
-    eidx = (mfn_to_pdx(epfn) + PDX_GROUP_COUNT - 1) / PDX_GROUP_COUNT;
-    nidx = cidx = mfn_to_pdx(spfn)/PDX_GROUP_COUNT;
+    eidx = (pfn_to_pdx(epfn) + PDX_GROUP_COUNT - 1) / PDX_GROUP_COUNT;
+    nidx = cidx = pfn_to_pdx(spfn)/PDX_GROUP_COUNT;
 
-    ASSERT( mfn_to_pdx(epfn) <= (DIRECTMAP_SIZE >> PAGE_SHIFT) &&
-            mfn_to_pdx(epfn) <= FRAMETABLE_NR );
+    ASSERT( pfn_to_pdx(epfn) <= (DIRECTMAP_SIZE >> PAGE_SHIFT) &&
+            pfn_to_pdx(epfn) <= FRAMETABLE_NR );
 
     if ( test_bit(cidx, pdx_group_valid) )
         cidx = find_next_zero_bit(pdx_group_valid, eidx, cidx);
@@ -866,8 +861,10 @@ void __init subarch_init_memory(void)
         }
 
         for ( i = 0; i < n; i++ )
-            share_xen_page_with_privileged_guests(
-                mfn_to_page(_mfn(m2p_start_mfn + i)), SHARE_ro);
+        {
+            struct page_info *page = mfn_to_page(m2p_start_mfn + i);
+            share_xen_page_with_privileged_guests(page, XENSHARE_readonly);
+        }
     }
 
     for ( v  = RDWR_COMPAT_MPT_VIRT_START;
@@ -884,8 +881,10 @@ void __init subarch_init_memory(void)
         m2p_start_mfn = l2e_get_pfn(l2e);
 
         for ( i = 0; i < L1_PAGETABLE_ENTRIES; i++ )
-            share_xen_page_with_privileged_guests(
-                mfn_to_page(_mfn(m2p_start_mfn + i)), SHARE_ro);
+        {
+            struct page_info *page = mfn_to_page(m2p_start_mfn + i);
+            share_xen_page_with_privileged_guests(page, XENSHARE_readonly);
+        }
     }
 
     /* Mark all of direct map NX if hardware supports it. */
@@ -1036,7 +1035,7 @@ long do_set_segment_base(unsigned int which, unsigned long base)
     case SEGBASE_GS_USER:
         if ( is_canonical_address(base) )
         {
-            wrgsshadow(base);
+            wrmsrl(MSR_SHADOW_GS_BASE, base);
             v->arch.pv_vcpu.gs_base_user = base;
         }
         else
@@ -1106,7 +1105,7 @@ int check_descriptor(const struct domain *dom, struct desc_struct *d)
              * 0xf6800000. Extend these to allow access to the larger read-only
              * M2P table available in 32on64 mode.
              */
-            base = (b & 0xff000000) | ((b & 0xff) << 16) | (a >> 16);
+            base = (b & (0xff << 24)) | ((b & 0xff) << 16) | (a >> 16);
 
             limit = (b & 0xf0000) | (a & 0xffff);
             limit++; /* We add one because limit is inclusive. */
@@ -1271,7 +1270,7 @@ static int transfer_pages_to_heap(struct mem_hotadd_info *info)
      */
     for (i = info->spfn; i < info->cur; i++)
     {
-        pg = mfn_to_page(_mfn(i));
+        pg = mfn_to_page(i);
         pg->count_info = PGC_state_inuse;
     }
 
@@ -1370,7 +1369,7 @@ int memory_add(unsigned long spfn, unsigned long epfn, unsigned int pxm)
     i = virt_to_mfn(HYPERVISOR_VIRT_END - 1) + 1;
     if ( spfn < i )
     {
-        ret = map_pages_to_xen((unsigned long)mfn_to_virt(spfn), _mfn(spfn),
+        ret = map_pages_to_xen((unsigned long)mfn_to_virt(spfn), spfn,
                                min(epfn, i) - spfn, PAGE_HYPERVISOR);
         if ( ret )
             goto destroy_directmap;
@@ -1379,7 +1378,7 @@ int memory_add(unsigned long spfn, unsigned long epfn, unsigned int pxm)
     {
         if ( i < spfn )
             i = spfn;
-        ret = map_pages_to_xen((unsigned long)mfn_to_virt(i), _mfn(i),
+        ret = map_pages_to_xen((unsigned long)mfn_to_virt(i), i,
                                epfn - i, __PAGE_HYPERVISOR_RW);
         if ( ret )
             goto destroy_directmap;

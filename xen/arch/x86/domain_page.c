@@ -236,7 +236,8 @@ int mapcache_domain_init(struct domain *d)
     struct mapcache_domain *dcache = &d->arch.pv_domain.mapcache;
     unsigned int bitmap_pages;
 
-    ASSERT(is_pv_domain(d));
+    if ( !is_pv_domain(d) || is_idle_domain(d) )
+        return 0;
 
 #ifdef NDEBUG
     if ( !mem_hotplug && max_page <= PFN_DOWN(__pa(HYPERVISOR_VIRT_END - 1)) )
@@ -330,13 +331,13 @@ void unmap_domain_page_global(const void *ptr)
 }
 
 /* Translate a map-domain-page'd address to the underlying MFN */
-mfn_t domain_page_map_to_mfn(const void *ptr)
+unsigned long domain_page_map_to_mfn(const void *ptr)
 {
     unsigned long va = (unsigned long)ptr;
     const l1_pgentry_t *pl1e;
 
     if ( va >= DIRECTMAP_VIRT_START )
-        return _mfn(virt_to_mfn(ptr));
+        return virt_to_mfn(ptr);
 
     if ( va >= VMAP_VIRT_START && va < VMAP_VIRT_END )
     {
@@ -349,5 +350,5 @@ mfn_t domain_page_map_to_mfn(const void *ptr)
         pl1e = &__linear_l1_table[l1_linear_offset(va)];
     }
 
-    return l1e_get_mfn(*pl1e);
+    return l1e_get_pfn(*pl1e);
 }

@@ -41,7 +41,7 @@ static void clear_iommu_pte_present(unsigned long l1_mfn, unsigned long gfn)
 
     table = map_domain_page(_mfn(l1_mfn));
     pte = table + pfn_to_pde_idx(gfn, IOMMU_PAGING_MODE_LEVEL_1);
-    *pte = 0;
+    write_atomic(pte, 0);
     unmap_domain_page(table);
 }
 
@@ -49,7 +49,7 @@ static bool_t set_iommu_pde_present(u32 *pde, unsigned long next_mfn,
                                     unsigned int next_level,
                                     bool_t iw, bool_t ir)
 {
-    uint64_t addr_lo, addr_hi, maddr_next;
+    uint64_t addr_lo, addr_hi, maddr_next, full;
     u32 entry;
     bool need_flush = false, old_present;
 
@@ -106,7 +106,7 @@ static bool_t set_iommu_pde_present(u32 *pde, unsigned long next_mfn,
     if ( next_level == IOMMU_PAGING_MODE_LEVEL_0 )
         set_field_in_reg_u32(IOMMU_CONTROL_ENABLED, entry,
                              IOMMU_PTE_FC_MASK, IOMMU_PTE_FC_SHIFT, &entry);
-    pde[1] = entry;
+    full = (uint64_t)entry << 32;
 
     /* mark next level as 'present' */
     set_field_in_reg_u32((u32)addr_lo >> PAGE_SHIFT, 0,
@@ -118,7 +118,9 @@ static bool_t set_iommu_pde_present(u32 *pde, unsigned long next_mfn,
     set_field_in_reg_u32(IOMMU_CONTROL_ENABLED, entry,
                          IOMMU_PDE_PRESENT_MASK,
                          IOMMU_PDE_PRESENT_SHIFT, &entry);
-    pde[0] = entry;
+    full |= entry;
+
+    write_atomic((uint64_t *)pde, full);
 
     return need_flush;
 }
@@ -145,7 +147,22 @@ void amd_iommu_set_root_page_table(
     u32 *dte, u64 root_ptr, u16 domain_id, u8 paging_mode, u8 valid)
 {
     u64 addr_hi, addr_lo;
-    u32 entry;
+    u32 entry, dte0 = dte[0];
+
+    if ( valid ||
+         get_field_from_reg_u32(dte0, IOMMU_DEV_TABLE_VALID_MASK,
+                                IOMMU_DEV_TABLE_VALID_SHIFT) )
+    {
+        set_field_in_reg_u32(IOMMU_CONTROL_DISABLED, dte0,
+                             IOMMU_DEV_TABLE_TRANSLATION_VALID_MASK,
+                             IOMMU_DEV_TABLE_TRANSLATION_VALID_SHIFT, &dte0);
+        set_field_in_reg_u32(IOMMU_CONTROL_ENABLED, dte0,
+                             IOMMU_DEV_TABLE_VALID_MASK,
+                             IOMMU_DEV_TABLE_VALID_SHIFT, &dte0);
+        dte[0] = dte0;
+        smp_wmb();
+    }
+
     set_field_in_reg_u32(domain_id, 0,
                          IOMMU_DEV_TABLE_DOMAIN_ID_MASK,
                          IOMMU_DEV_TABLE_DOMAIN_ID_SHIFT, &entry);
@@ -164,8 +181,9 @@ void amd_iommu_set_root_page_table(
                          IOMMU_DEV_TABLE_IO_READ_PERMISSION_MASK,
                          IOMMU_DEV_TABLE_IO_READ_PERMISSION_SHIFT, &entry);
     dte[1] = entry;
+    smp_wmb();
 
-    set_field_in_reg_u32((u32)addr_lo >> PAGE_SHIFT, 0,
+    set_field_in_reg_u32((u32)addr_lo >> PAGE_SHIFT, dte0,
                          IOMMU_DEV_TABLE_PAGE_TABLE_PTR_LOW_MASK,
                          IOMMU_DEV_TABLE_PAGE_TABLE_PTR_LOW_SHIFT, &entry);
     set_field_in_reg_u32(paging_mode, entry,
@@ -178,7 +196,7 @@ void amd_iommu_set_root_page_table(
                          IOMMU_CONTROL_DISABLED, entry,
                          IOMMU_DEV_TABLE_VALID_MASK,
                          IOMMU_DEV_TABLE_VALID_SHIFT, &entry);
-    dte[0] = entry;
+    write_atomic(&dte[0], entry);
 }
 
 void iommu_dte_set_iotlb(u32 *dte, u8 i)
@@ -210,6 +228,7 @@ void __init amd_iommu_set_intremap_table(
                         IOMMU_DEV_TABLE_INT_CONTROL_MASK,
                         IOMMU_DEV_TABLE_INT_CONTROL_SHIFT, &entry);
     dte[5] = entry;
+    smp_wmb();
 
     set_field_in_reg_u32((u32)addr_lo >> 6, 0,
                         IOMMU_DEV_TABLE_INT_TABLE_PTR_LOW_MASK,
@@ -227,7 +246,7 @@ void __init amd_iommu_set_intremap_table(
                          IOMMU_CONTROL_DISABLED, entry,
                          IOMMU_DEV_TABLE_INT_VALID_MASK,
                          IOMMU_DEV_TABLE_INT_VALID_SHIFT, &entry);
-    dte[4] = entry;
+    write_atomic(&dte[4], entry);
 }
 
 void __init iommu_dte_add_device_entry(u32 *dte, struct ivrs_mappings *ivrs_dev)
@@ -477,7 +496,7 @@ static int iommu_pde_from_gfn(struct domain *d, unsigned long pfn,
     if ( pfn >> (PTE_PER_TABLE_SHIFT * level) )
         return 0;
 
-    next_table_mfn = mfn_x(page_to_mfn(table));
+    next_table_mfn = page_to_mfn(table);
 
     if ( level == IOMMU_PAGING_MODE_LEVEL_1 )
     {
@@ -519,7 +538,7 @@ static int iommu_pde_from_gfn(struct domain *d, unsigned long pfn,
                 return 1;
             }
 
-            next_table_mfn = mfn_x(page_to_mfn(table));
+            next_table_mfn = page_to_mfn(table);
             set_iommu_pde_present((u32*)pde, next_table_mfn, next_level, 
                                   !!IOMMUF_writable, !!IOMMUF_readable);
 
@@ -549,7 +568,7 @@ static int iommu_pde_from_gfn(struct domain *d, unsigned long pfn,
                     unmap_domain_page(next_table_vaddr);
                     return 1;
                 }
-                next_table_mfn = mfn_x(page_to_mfn(table));
+                next_table_mfn = page_to_mfn(table);
                 set_iommu_pde_present((u32*)pde, next_table_mfn, next_level,
                                       !!IOMMUF_writable, !!IOMMUF_readable);
             }
@@ -647,7 +666,7 @@ int amd_iommu_map_page(struct domain *d, unsigned long gfn, unsigned long mfn,
         }
 
         /* Deallocate lower level page table */
-        free_amd_iommu_pgtable(mfn_to_page(_mfn(pt_mfn[merge_level - 1])));
+        free_amd_iommu_pgtable(mfn_to_page(pt_mfn[merge_level - 1]));
     }
 
 out:
@@ -728,7 +747,7 @@ void amd_iommu_share_p2m(struct domain *d)
     mfn_t pgd_mfn;
 
     pgd_mfn = pagetable_get_mfn(p2m_get_pagetable(p2m_get_hostp2m(d)));
-    p2m_table = mfn_to_page(pgd_mfn);
+    p2m_table = mfn_to_page(mfn_x(pgd_mfn));
 
     if ( hd->arch.root_table != p2m_table )
     {
@@ -740,66 +759,4 @@ void amd_iommu_share_p2m(struct domain *d)
         AMD_IOMMU_DEBUG("Share p2m table with iommu: p2m table = %#lx\n",
                         mfn_x(pgd_mfn));
     }
-}
-
-int __init amd_iommu_quarantine_init(struct domain *d)
-{
-    struct domain_iommu *hd = dom_iommu(d);
-    unsigned long max_gfn =
-        PFN_DOWN((1ul << DEFAULT_DOMAIN_ADDRESS_WIDTH) - 1);
-    unsigned int level = amd_iommu_get_paging_mode(max_gfn);
-    uint64_t *table;
-
-    if ( hd->arch.root_table )
-    {
-        ASSERT_UNREACHABLE();
-        return 0;
-    }
-
-    spin_lock(&hd->arch.mapping_lock);
-
-    hd->arch.root_table = alloc_amd_iommu_pgtable();
-    if ( !hd->arch.root_table )
-        goto out;
-
-    table = __map_domain_page(hd->arch.root_table);
-    while ( level )
-    {
-        struct page_info *pg;
-        unsigned int i;
-
-        /*
-         * The pgtable allocator is fine for the leaf page, as well as
-         * page table pages, and the resulting allocations are always
-         * zeroed.
-         */
-        pg = alloc_amd_iommu_pgtable();
-        if ( !pg )
-            break;
-
-        for ( i = 0; i < PTE_PER_TABLE_SIZE; i++ )
-        {
-            uint32_t *pde = (uint32_t *)&table[i];
-
-            /*
-             * PDEs are essentially a subset of PTEs, so this function
-             * is fine to use even at the leaf.
-             */
-            set_iommu_pde_present(pde, mfn_x(page_to_mfn(pg)), level - 1,
-                                  false, true);
-        }
-
-        unmap_domain_page(table);
-        table = __map_domain_page(pg);
-        level--;
-    }
-    unmap_domain_page(table);
-
- out:
-    spin_unlock(&hd->arch.mapping_lock);
-
-    amd_iommu_flush_all_pages(d);
-
-    /* Pages leaked in failure case */
-    return level ? -ENOMEM : 0;
 }

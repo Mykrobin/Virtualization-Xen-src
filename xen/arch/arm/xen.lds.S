@@ -65,13 +65,6 @@ SECTIONS
        __param_start = .;
        *(.data.param)
        __param_end = .;
-
-#if defined(CONFIG_HAS_VPCI) && defined(CONFIG_LATE_HWDOM)
-       . = ALIGN(POINTER_ALIGN);
-       __start_vpci_array = .;
-       *(SORT(.data.vpci.*))
-       __end_vpci_array = .;
-#endif
   } :text
 
 #if defined(BUILD_ID)
@@ -161,12 +154,14 @@ SECTIONS
        *(.initcall1.init)
        __initcall_end = .;
 
+#ifdef CONFIG_HAS_ALTERNATIVE
        . = ALIGN(4);
        __alt_instructions = .;
        *(.altinstructions)
        __alt_instructions_end = .;
        . = ALIGN(4);
        *(.altinstr_replacement)
+#endif
 
        *(.init.data)
        *(.init.data.rel)
@@ -178,13 +173,6 @@ SECTIONS
        *(.init_array)
        *(SORT(.init_array.*))
        __ctors_end = .;
-
-#if defined(CONFIG_HAS_VPCI) && !defined(CONFIG_LATE_HWDOM)
-       . = ALIGN(POINTER_ALIGN);
-       __start_vpci_array = .;
-       *(SORT(.data.vpci.*))
-       __end_vpci_array = .;
-#endif
   } :text
   __init_end_efi = .;
   . = ALIGN(STACK_SIZE);
@@ -195,16 +183,14 @@ SECTIONS
        *(.bss.stack_aligned)
        . = ALIGN(PAGE_SIZE);
        *(.bss.page_aligned)
-       . = ALIGN(PAGE_SIZE);
+       *(.bss)
+       . = ALIGN(SMP_CACHE_BYTES);
        __per_cpu_start = .;
-       *(.bss.percpu.page_aligned)
        *(.bss.percpu)
        . = ALIGN(SMP_CACHE_BYTES);
        *(.bss.percpu.read_mostly)
        . = ALIGN(SMP_CACHE_BYTES);
        __per_cpu_data_end = .;
-       *(.bss)
-       . = ALIGN(POINTER_ALIGN);
        __bss_end = .;
   } :text
   _end = . ;

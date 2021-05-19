@@ -40,7 +40,11 @@ int pv_emul_read_descriptor(unsigned int sel, const struct vcpu *v,
           */
          ((sel & 4) && (sel >> 3) >= v->arch.pv_vcpu.ldt_ents) )
         desc.b = desc.a = 0;
-    else if ( __get_user(desc, gdt_ldt_desc_ptr(sel)) )
+    else if ( __get_user(desc,
+                         (const struct desc_struct *)(!(sel & 4)
+                                                      ? GDT_VIRT_START(v)
+                                                      : LDT_VIRT_START(v))
+                         + (sel >> 3)) )
         return 0;
     if ( !insn_fetch )
         desc.b &= ~_SEGMENT_L;

@@ -135,6 +135,8 @@ struct shadow_vcpu {
     l3_pgentry_t l3table[4] __attribute__((__aligned__(32)));
     /* PAE guests: per-vcpu cache of the top-level *guest* entries */
     l3_pgentry_t gl3e[4] __attribute__((__aligned__(32)));
+    /* Non-PAE guests: pointer to guest top-level pagetable */
+    void *guest_vtable;
     /* Last MFN that we emulated a write to as unshadow heuristics. */
     unsigned long last_emulated_mfn_for_unshadow;
     /* MFN of the last shadow that we shot a writeable mapping in */
@@ -328,7 +330,7 @@ struct arch_domain
     const struct arch_csw {
         void (*from)(struct vcpu *);
         void (*to)(struct vcpu *);
-        void (*tail)(struct vcpu *);
+        void noreturn (*tail)(void);
     } *ctxt_switch;
 
     /* nestedhvm: translate l2 guest physical to host physical */
@@ -444,7 +446,6 @@ struct arch_domain
 #define has_vpit(d)        (!!((d)->arch.emulation_flags & XEN_X86_EMU_PIT))
 #define has_pirq(d)        (!!((d)->arch.emulation_flags & \
                             XEN_X86_EMU_USE_PIRQ))
-#define has_vpci(d)        (!!((d)->arch.emulation_flags & XEN_X86_EMU_VPCI))
 
 #define has_arch_pdevs(d)    (!list_empty(&(d)->arch.pdev_list))
 
@@ -493,6 +494,7 @@ struct pv_vcpu
 
     /* Bounce information for propagating an exception to guest OS. */
     struct trap_bounce trap_bounce;
+    struct trap_bounce int80_bounce;
 
     /* I/O-port access bitmap. */
     XEN_GUEST_HANDLE(uint8) iobmp; /* Guest kernel vaddr of the bitmap. */
@@ -512,6 +514,12 @@ struct pv_vcpu
     bool_t need_update_runstate_area;
     struct vcpu_time_info pending_system_time;
 };
+
+typedef enum __packed {
+    SMAP_CHECK_HONOR_CPL_AC,    /* honor the guest's CPL and AC */
+    SMAP_CHECK_ENABLED,         /* enable the check */
+    SMAP_CHECK_DISABLED,        /* disable the check */
+} smap_check_policy_t;
 
 struct arch_vcpu
 {
@@ -573,6 +581,12 @@ struct arch_vcpu
     /* Restore all FPU state (lazy and non-lazy state) on context switch? */
     bool fully_eager_fpu;
 
+    /*
+     * The SMAP check policy when updating runstate_guest(v) and the
+     * secondary system time.
+     */
+    smap_check_policy_t smap_check_policy;
+
     struct vmce vmce;
 
     struct paging_vcpu paging;
@@ -593,6 +607,7 @@ struct arch_vcpu
 
 struct guest_memory_policy
 {
+    smap_check_policy_t smap_policy;
     bool nested_guest_mode;
 };
 

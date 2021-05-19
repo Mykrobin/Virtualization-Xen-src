@@ -15,6 +15,7 @@
 #include <xen/domain_page.h>
 #include <xen/version.h>
 #include <xen/gdbstub.h>
+#include <xen/percpu.h>
 #include <xen/hypercall.h>
 #include <xen/keyhandler.h>
 #include <xen/numa.h>
@@ -50,8 +51,8 @@
 #include <asm/alternative.h>
 #include <asm/mc146818rtc.h>
 #include <asm/cpuid.h>
-#include <asm/spec_ctrl.h>
 #include <asm/guest.h>
+#include <asm/spec_ctrl.h>
 
 /* opt_nosmp: If true, secondary processors are ignored. */
 static bool __initdata opt_nosmp;
@@ -98,6 +99,8 @@ cpumask_t __read_mostly cpu_present_map;
 unsigned long __read_mostly xen_phys_start;
 
 unsigned long __read_mostly xen_virt_end;
+
+DEFINE_PER_CPU(struct tss_struct, init_tss);
 
 char __section(".bss.stack_aligned") __aligned(STACK_SIZE)
     cpu0_stack[STACK_SIZE];
@@ -332,7 +335,7 @@ static void __init normalise_cpu_order(void)
  * Ensure a given physical memory range is present in the bootstrap mappings.
  * Use superpage mappings to ensure that pagetable memory needn't be allocated.
  */
-void *__init bootstrap_map(const module_t *mod)
+static void *__init bootstrap_map(const module_t *mod)
 {
     static unsigned long __initdata map_cur = BOOTSTRAP_MAP_BASE;
     uint64_t start, end, mask = (1L << L2_PAGETABLE_SHIFT) - 1;
@@ -359,8 +362,8 @@ void *__init bootstrap_map(const module_t *mod)
     if ( end - start > BOOTSTRAP_MAP_LIMIT - map_cur )
         return NULL;
 
-    map_pages_to_xen(map_cur, maddr_to_mfn(start),
-                     PFN_DOWN(end - start), PAGE_HYPERVISOR);
+    map_pages_to_xen(map_cur, start >> PAGE_SHIFT,
+                     (end - start) >> PAGE_SHIFT, PAGE_HYPERVISOR);
     map_cur += end - start;
     return ret;
 }
@@ -665,10 +668,10 @@ void __init noreturn __start_xen(unsigned long mbi_p)
 {
     char *memmap_type = NULL;
     char *cmdline, *kextra, *loader;
-    unsigned int initrdidx, num_parked = 0;
+    unsigned int initrdidx, num_parked = 0, domcr_flags = DOMCRF_s3_integrity;
     multiboot_info_t *mbi;
     module_t *mod;
-    unsigned long nr_pages, raw_max_page, modules_headroom, module_map[1];
+    unsigned long nr_pages, raw_max_page, modules_headroom, *module_map;
     int i, j, e820_warn = 0, bytes = 0;
     bool acpi_boot_table_init_done = false, relocated = false;
     struct ns16550_defaults ns16550 = {
@@ -676,9 +679,7 @@ void __init noreturn __start_xen(unsigned long mbi_p)
         .parity    = 'n',
         .stop_bits = 1
     };
-    struct xen_domctl_createdomain dom0_cfg = {
-        .flags = XEN_DOMCTL_CDF_s3_integrity,
-    };
+    struct xen_arch_domainconfig config = { .emulation_flags = 0 };
 
     /* Critical region without IDT or TSS.  Any fault is deadly! */
 
@@ -817,17 +818,6 @@ void __init noreturn __start_xen(unsigned long mbi_p)
     /* Check that we have at least one Multiboot module. */
     if ( !(mbi->flags & MBI_MODULES) || (mbi->mods_count == 0) )
         panic("dom0 kernel not specified. Check bootloader configuration.");
-
-    /* Check that we don't have a silly number of modules. */
-    if ( mbi->mods_count > sizeof(module_map) * 8 )
-    {
-        mbi->mods_count = sizeof(module_map) * 8;
-        printk("Excessive multiboot modules - using the first %u only\n",
-               mbi->mods_count);
-    }
-
-    bitmap_fill(module_map, mbi->mods_count);
-    __clear_bit(0, module_map); /* Dom0 kernel is always first */
 
     if ( pvh_boot )
     {
@@ -1010,8 +1000,8 @@ void __init noreturn __start_xen(unsigned long mbi_p)
         {
             end = min(e, limit);
             set_pdx_range(s >> PAGE_SHIFT, end >> PAGE_SHIFT);
-            map_pages_to_xen((unsigned long)__va(s), maddr_to_mfn(s),
-                             PFN_DOWN(end - s), PAGE_HYPERVISOR);
+            map_pages_to_xen((unsigned long)__va(s), s >> PAGE_SHIFT,
+                             (end - s) >> PAGE_SHIFT, PAGE_HYPERVISOR);
         }
 
         if ( e > min(HYPERVISOR_VIRT_END - DIRECTMAP_VIRT_START,
@@ -1029,12 +1019,7 @@ void __init noreturn __start_xen(unsigned long mbi_p)
         }
         else
             end = 0;
-
-        /*
-         * Is the region size greater than zero and does it begin
-         * at or above the end of current Xen image placement?
-         */
-        if ( (end > s) && (end - reloc_size + XEN_IMG_OFFSET >= __pa(_end)) )
+        if ( end > s )
         {
             l4_pgentry_t *pl4e;
             l3_pgentry_t *pl3e;
@@ -1325,7 +1310,7 @@ void __init noreturn __start_xen(unsigned long mbi_p)
 
             if ( map_e < end )
             {
-                map_pages_to_xen((unsigned long)__va(map_e), maddr_to_mfn(map_e),
+                map_pages_to_xen((unsigned long)__va(map_e), PFN_DOWN(map_e),
                                  PFN_DOWN(end - map_e), PAGE_HYPERVISOR);
                 init_boot_pages(map_e, end);
                 map_e = end;
@@ -1335,13 +1320,13 @@ void __init noreturn __start_xen(unsigned long mbi_p)
         {
             /* This range must not be passed to the boot allocator and
              * must also not be mapped with _PAGE_GLOBAL. */
-            map_pages_to_xen((unsigned long)__va(map_e), maddr_to_mfn(map_e),
+            map_pages_to_xen((unsigned long)__va(map_e), PFN_DOWN(map_e),
                              PFN_DOWN(e - map_e), __PAGE_HYPERVISOR_RW);
         }
         if ( s < map_s )
         {
-            map_pages_to_xen((unsigned long)__va(s), maddr_to_mfn(s),
-                             PFN_DOWN(map_s - s), PAGE_HYPERVISOR);
+            map_pages_to_xen((unsigned long)__va(s), s >> PAGE_SHIFT,
+                             (map_s - s) >> PAGE_SHIFT, PAGE_HYPERVISOR);
             init_boot_pages(s, map_s);
         }
     }
@@ -1351,7 +1336,7 @@ void __init noreturn __start_xen(unsigned long mbi_p)
         set_pdx_range(mod[i].mod_start,
                       mod[i].mod_start + PFN_UP(mod[i].mod_end));
         map_pages_to_xen((unsigned long)mfn_to_virt(mod[i].mod_start),
-                         _mfn(mod[i].mod_start),
+                         mod[i].mod_start,
                          PFN_UP(mod[i].mod_end), PAGE_HYPERVISOR);
     }
 
@@ -1364,7 +1349,7 @@ void __init noreturn __start_xen(unsigned long mbi_p)
 
         if ( e > s ) 
             map_pages_to_xen((unsigned long)__va(kexec_crash_area.start),
-                             _mfn(s), e - s, PAGE_HYPERVISOR);
+                             s, e - s, PAGE_HYPERVISOR);
     }
 #endif
 
@@ -1543,9 +1528,13 @@ void __init noreturn __start_xen(unsigned long mbi_p)
 
     init_IRQ();
 
-    xsm_multiboot_init(module_map, mbi);
+    module_map = xmalloc_array(unsigned long, BITS_TO_LONGS(mbi->mods_count));
+    bitmap_fill(module_map, mbi->mods_count);
+    __clear_bit(0, module_map); /* Dom0 kernel is always first */
 
-    microcode_grab_module(module_map, mbi);
+    xsm_multiboot_init(module_map, mbi, bootstrap_map);
+
+    microcode_grab_module(module_map, mbi, bootstrap_map);
 
     timer_init();
 
@@ -1609,7 +1598,7 @@ void __init noreturn __start_xen(unsigned long mbi_p)
 
     iommu_setup();    /* setup iommu if available */
 
-    smp_prepare_cpus();
+    smp_prepare_cpus(max_cpus);
 
     spin_debug_enable();
 
@@ -1681,16 +1670,14 @@ void __init noreturn __start_xen(unsigned long mbi_p)
 
     if ( dom0_pvh )
     {
-        dom0_cfg.flags |= (XEN_DOMCTL_CDF_hvm_guest |
-                           ((hvm_funcs.hap_supported && !opt_dom0_shadow) ?
-                            XEN_DOMCTL_CDF_hap : 0));
-
-        dom0_cfg.arch.emulation_flags |=
-            XEN_X86_EMU_LAPIC | XEN_X86_EMU_IOAPIC | XEN_X86_EMU_VPCI;
+        domcr_flags |= DOMCRF_hvm |
+                       ((hvm_funcs.hap_supported && !opt_dom0_shadow) ?
+                         DOMCRF_hap : 0);
+        config.emulation_flags = XEN_X86_EMU_LAPIC|XEN_X86_EMU_IOAPIC;
     }
 
     /* Create initial domain 0. */
-    dom0 = domain_create(get_initial_domain_id(), &dom0_cfg);
+    dom0 = domain_create(get_initial_domain_id(), domcr_flags, 0, &config);
     if ( IS_ERR(dom0) || (alloc_dom0_vcpu0(dom0) == NULL) )
         panic("Error creating domain 0");
 
@@ -1758,7 +1745,8 @@ void __init noreturn __start_xen(unsigned long mbi_p)
      */
     if ( construct_dom0(dom0, mod, modules_headroom,
                         (initrdidx > 0) && (initrdidx < mbi->mods_count)
-                        ? mod + initrdidx : NULL, cmdline) != 0)
+                        ? mod + initrdidx : NULL,
+                        bootstrap_map, cmdline) != 0)
         panic("Could not set up DOM0 guest OS");
 
     if ( cpu_has_smap )

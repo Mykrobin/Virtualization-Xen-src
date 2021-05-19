@@ -26,9 +26,9 @@ int unmap_mmio_regions(struct domain *d,
 
 /*
  * Call when decreasing memory reservation to handle PoD entries properly.
- * Returns the number of pages that were successfully processed.
+ * Will return '1' if all entries were handled and nothing more need be done.
  */
-unsigned long
+int
 p2m_pod_decrease_reservation(struct domain *d, gfn_t gfn,
                              unsigned int order);
 

@@ -36,7 +36,6 @@
 #include <xen/rangeset.h>
 #include <xen/monitor.h>
 #include <xen/warning.h>
-#include <xen/vpci.h>
 #include <asm/shadow.h>
 #include <asm/hap.h>
 #include <asm/current.h>
@@ -73,8 +72,6 @@
 #include <public/vm_event.h>
 #include <public/arch-x86/cpuid.h>
 #include <asm/cpuid.h>
-
-#include <compat/hvm/hvm_op.h>
 
 bool_t __read_mostly hvm_enabled;
 
@@ -321,7 +318,7 @@ bool hvm_set_guest_bndcfgs(struct vcpu *v, u64 val)
      * enabled in BNDCFGS.
      */
     if ( (val & IA32_BNDCFGS_ENABLE) &&
-         !(v->arch.xcr0_accum & (X86_XCR0_BNDREGS | X86_XCR0_BNDCSR)) )
+         !(v->arch.xcr0_accum & (XSTATE_BNDREGS | XSTATE_BNDCSR)) )
     {
         uint64_t xcr0 = get_xcr0();
         int rc;
@@ -330,7 +327,7 @@ bool hvm_set_guest_bndcfgs(struct vcpu *v, u64 val)
             return false;
 
         rc = handle_xsetbv(XCR_XFEATURE_ENABLED_MASK,
-                           xcr0 | X86_XCR0_BNDREGS | X86_XCR0_BNDCSR);
+                           xcr0 | XSTATE_BNDREGS | XSTATE_BNDCSR);
 
         if ( rc )
         {
@@ -429,8 +426,6 @@ static void hvm_set_guest_tsc_msr(struct vcpu *v, u64 guest_tsc)
     hvm_set_guest_tsc(v, guest_tsc);
     v->arch.hvm_vcpu.msr_tsc_adjust += v->arch.hvm_vcpu.cache_tsc_offset
                           - tsc_offset;
-    if ( v == current )
-        update_vcpu_system_time(v);
 }
 
 static void hvm_set_guest_tsc_adjust(struct vcpu *v, u64 tsc_adjust)
@@ -439,8 +434,6 @@ static void hvm_set_guest_tsc_adjust(struct vcpu *v, u64 tsc_adjust)
                             - v->arch.hvm_vcpu.msr_tsc_adjust;
     hvm_funcs.set_tsc_offset(v, v->arch.hvm_vcpu.cache_tsc_offset, 0);
     v->arch.hvm_vcpu.msr_tsc_adjust = tsc_adjust;
-    if ( v == current )
-        update_vcpu_system_time(v);
 }
 
 u64 hvm_get_guest_tsc_fixed(struct vcpu *v, uint64_t at_tsc)
@@ -551,11 +544,7 @@ static int hvm_print_line(
     struct domain *cd = current->domain;
     char c = *val;
 
-    ASSERT(bytes == 1 && port == 0xe9);
-
-    /* Deny any input requests. */
-    if ( dir != IOREQ_WRITE )
-        return X86EMUL_UNHANDLEABLE;
+    BUG_ON(bytes != 1);
 
     /* Accept only printable characters, newline, and horizontal tab. */
     if ( !isprint(c) && (c != '\n') && (c != '\t') )
@@ -575,7 +564,8 @@ static int hvm_print_line(
     return X86EMUL_OKAY;
 }
 
-int hvm_domain_initialise(struct domain *d)
+int hvm_domain_initialise(struct domain *d, unsigned long domcr_flags,
+                          struct xen_arch_domainconfig *config)
 {
     unsigned int nr_gsis;
     int rc;
@@ -590,11 +580,8 @@ int hvm_domain_initialise(struct domain *d)
     spin_lock_init(&d->arch.hvm_domain.irq_lock);
     spin_lock_init(&d->arch.hvm_domain.uc_lock);
     spin_lock_init(&d->arch.hvm_domain.write_map.lock);
-    rwlock_init(&d->arch.hvm_domain.mmcfg_lock);
     INIT_LIST_HEAD(&d->arch.hvm_domain.write_map.list);
     INIT_LIST_HEAD(&d->arch.hvm_domain.g2m_ioport_list);
-    INIT_LIST_HEAD(&d->arch.hvm_domain.mmcfg_regions);
-    INIT_LIST_HEAD(&d->arch.hvm_domain.msix_tables);
 
     rc = create_perdomain_mapping(d, PERDOMAIN_VIRT_START, 0, NULL, NULL);
     if ( rc )
@@ -627,6 +614,8 @@ int hvm_domain_initialise(struct domain *d)
     /* need link to containing domain */
     d->arch.hvm_domain.pl_time->domain = d;
 
+    rwlock_init(&d->arch.hvm_domain.pl_time->pt_migrate);
+
     /* Set the default IO Bitmap. */
     if ( is_hardware_domain(d) )
     {
@@ -642,7 +631,6 @@ int hvm_domain_initialise(struct domain *d)
         d->arch.hvm_domain.io_bitmap = hvm_io_bitmap;
 
     register_g2m_portio_handler(d);
-    register_vpci_portio_handler(d);
 
     hvm_ioreq_init(d);
 
@@ -740,8 +728,6 @@ void hvm_domain_destroy(struct domain *d)
         list_del(&ioport->list);
         xfree(ioport);
     }
-
-    destroy_vpci_mmcfg(d);
 }
 
 static int hvm_save_tsc_adjust(struct domain *d, hvm_domain_context_t *h)
@@ -942,8 +928,9 @@ const char *hvm_efer_valid(const struct vcpu *v, uint64_t value,
         X86_CR0_CD | X86_CR0_PG)))
 
 /* These bits in CR4 can be set by the guest. */
-unsigned long hvm_cr4_guest_valid_bits(const struct domain *d, bool restore)
+unsigned long hvm_cr4_guest_valid_bits(const struct vcpu *v, bool restore)
 {
+    const struct domain *d = v->domain;
     const struct cpuid_policy *p = d->arch.cpuid;
     bool mce, vmxe;
 
@@ -1005,7 +992,7 @@ static int hvm_load_cpu_ctxt(struct domain *d, hvm_domain_context_t *h)
         return -EINVAL;
     }
 
-    if ( ctxt.cr4 & ~hvm_cr4_guest_valid_bits(d, true) )
+    if ( ctxt.cr4 & ~hvm_cr4_guest_valid_bits(v, 1) )
     {
         printk(XENLOG_G_ERR "HVM%d restore: bad CR4 %#" PRIx64 "\n",
                d->domain_id, ctxt.cr4);
@@ -1341,7 +1328,7 @@ static int hvm_save_cpu_msrs(struct domain *d, hvm_domain_context_t *h)
 
     for_each_vcpu ( d, v )
     {
-        struct hvm_save_descriptor *desc = _p(&h->data[h->cur]);
+        struct hvm_save_descriptor *d = _p(&h->data[h->cur]);
         struct hvm_msr *ctxt;
         unsigned int i;
 
@@ -1389,7 +1376,7 @@ static int hvm_save_cpu_msrs(struct domain *d, hvm_domain_context_t *h)
         if ( ctxt->count )
         {
             /* Rewrite length to indicate how much space we actually used. */
-            desc->length = HVM_CPU_MSR_SIZE(ctxt->count);
+            d->length = HVM_CPU_MSR_SIZE(ctxt->count);
             h->cur += HVM_CPU_MSR_SIZE(ctxt->count);
         }
         else
@@ -1651,7 +1638,7 @@ void hvm_triple_fault(void)
     struct domain *d = v->domain;
     u8 reason = d->arch.hvm_domain.params[HVM_PARAM_TRIPLE_FAULT_REASON];
 
-    gprintk(XENLOG_ERR,
+    gprintk(XENLOG_INFO,
             "Triple fault - invoking HVM shutdown action %d\n",
             reason);
     vcpu_show_execution_state(v);
@@ -1919,7 +1906,7 @@ int hvm_hap_nested_page_fault(paddr_t gpa, unsigned long gla,
          */
         if ( npfec.write_access )
         {
-            paging_mark_pfn_dirty(currd, _pfn(gfn));
+            paging_mark_dirty(currd, mfn);
             /*
              * If p2m is really an altp2m, unlock here to avoid lock ordering
              * violation when the change below is propagated from host p2m.
@@ -1983,11 +1970,10 @@ int hvm_handle_xsetbv(u32 index, u64 new_bv)
 {
     int rc;
 
-    if ( index == 0 )
-        hvm_monitor_crX(XCR0, new_bv, current->arch.xcr0);
+    hvm_monitor_crX(XCR0, new_bv, current->arch.xcr0);
 
-    rc = x86emul_write_xcr(index, new_bv, NULL);
-    if ( rc != X86EMUL_OKAY )
+    rc = handle_xsetbv(index, new_bv);
+    if ( rc )
         hvm_inject_hw_exception(TRAP_gp_fault, 0);
 
     return rc;
@@ -2084,9 +2070,16 @@ static void hvm_set_uc_mode(struct vcpu *v, bool_t is_in_uc_mode)
 int hvm_mov_to_cr(unsigned int cr, unsigned int gpr)
 {
     struct vcpu *curr = current;
-    unsigned long val = *decode_gpr(guest_cpu_user_regs(), gpr);
+    unsigned long val, *reg;
     int rc;
 
+    if ( (reg = decode_register(gpr, guest_cpu_user_regs(), 0)) == NULL )
+    {
+        gdprintk(XENLOG_ERR, "invalid gpr: %u\n", gpr);
+        goto exit_and_crash;
+    }
+
+    val = *reg;
     HVMTRACE_LONG_2D(CR_WRITE, cr, TRC_PAR_LONG(val));
     HVM_DBG_LOG(DBG_LEVEL_1, "CR%u, value = %lx", cr, val);
 
@@ -2127,7 +2120,13 @@ int hvm_mov_to_cr(unsigned int cr, unsigned int gpr)
 int hvm_mov_from_cr(unsigned int cr, unsigned int gpr)
 {
     struct vcpu *curr = current;
-    unsigned long val = 0, *reg = decode_gpr(guest_cpu_user_regs(), gpr);
+    unsigned long val = 0, *reg;
+
+    if ( (reg = decode_register(gpr, guest_cpu_user_regs(), 0)) == NULL )
+    {
+        gdprintk(XENLOG_ERR, "invalid gpr: %u\n", gpr);
+        goto exit_and_crash;
+    }
 
     switch ( cr )
     {
@@ -2270,7 +2269,7 @@ int hvm_set_cr0(unsigned long value, bool_t may_defer)
             v->arch.guest_table = pagetable_from_page(page);
 
             HVM_DBG_LOG(DBG_LEVEL_VMMU, "Update CR3 value = %lx, mfn = %lx",
-                        v->arch.hvm_vcpu.guest_cr[3], mfn_x(page_to_mfn(page)));
+                        v->arch.hvm_vcpu.guest_cr[3], page_to_mfn(page));
         }
     }
     else if ( !(value & X86_CR0_PG) && (old_value & X86_CR0_PG) )
@@ -2320,7 +2319,6 @@ int hvm_set_cr3(unsigned long value, bool_t may_defer)
     struct vcpu *v = current;
     struct page_info *page;
     unsigned long old = v->arch.hvm_vcpu.guest_cr[3];
-    bool noflush = false;
 
     if ( may_defer && unlikely(v->domain->arch.monitor.write_ctrlreg_enabled &
                                monitor_ctrlreg_bitmask(VM_EVENT_X86_CR3)) )
@@ -2335,12 +2333,6 @@ int hvm_set_cr3(unsigned long value, bool_t may_defer)
 
             return X86EMUL_OKAY;
         }
-    }
-
-    if ( hvm_pcid_enabled(v) ) /* Clear the noflush bit. */
-    {
-        noflush = value & X86_CR3_NOFLUSH;
-        value &= ~X86_CR3_NOFLUSH;
     }
 
     if ( hvm_paging_enabled(v) && !paging_mode_hap(v->domain) &&
@@ -2360,7 +2352,7 @@ int hvm_set_cr3(unsigned long value, bool_t may_defer)
     }
 
     v->arch.hvm_vcpu.guest_cr[3] = value;
-    paging_update_cr3(v, noflush);
+    paging_update_cr3(v);
     return X86EMUL_OKAY;
 
  bad_cr3:
@@ -2374,7 +2366,7 @@ int hvm_set_cr4(unsigned long value, bool_t may_defer)
     struct vcpu *v = current;
     unsigned long old_cr;
 
-    if ( value & ~hvm_cr4_guest_valid_bits(v->domain, false) )
+    if ( value & ~hvm_cr4_guest_valid_bits(v, 0) )
     {
         HVM_DBG_LOG(DBG_LEVEL_1,
                     "Guest attempts to set reserved bit in CR4: %lx",
@@ -2439,10 +2431,10 @@ int hvm_set_cr4(unsigned long value, bool_t may_defer)
      * guest may enable the feature in CR4 without enabling it in XCR0. We
      * need to context switch / migrate PKRU nevertheless.
      */
-    if ( (value & X86_CR4_PKE) && !(v->arch.xcr0_accum & X86_XCR0_PKRU) )
+    if ( (value & X86_CR4_PKE) && !(v->arch.xcr0_accum & XSTATE_PKRU) )
     {
         int rc = handle_xsetbv(XCR_XFEATURE_ENABLED_MASK,
-                               get_xcr0() | X86_XCR0_PKRU);
+                               get_xcr0() | XSTATE_PKRU);
 
         if ( rc )
         {
@@ -2451,7 +2443,7 @@ int hvm_set_cr4(unsigned long value, bool_t may_defer)
         }
 
         if ( handle_xsetbv(XCR_XFEATURE_ENABLED_MASK,
-                           get_xcr0() & ~X86_XCR0_PKRU) )
+                           get_xcr0() & ~XSTATE_PKRU) )
             /* nothing, best effort only */;
     }
 
@@ -2612,7 +2604,7 @@ static void *_hvm_map_guest_frame(unsigned long gfn, bool_t permanent,
         if ( unlikely(p2m_is_discard_write(p2mt)) )
             *writable = 0;
         else if ( !permanent )
-            paging_mark_pfn_dirty(d, _pfn(gfn));
+            paging_mark_dirty(d, _mfn(page_to_mfn(page)));
     }
 
     if ( !permanent )
@@ -2654,7 +2646,7 @@ void *hvm_map_guest_frame_ro(unsigned long gfn, bool_t permanent)
 
 void hvm_unmap_guest_frame(void *p, bool_t permanent)
 {
-    mfn_t mfn;
+    unsigned long mfn;
     struct page_info *page;
 
     if ( !p )
@@ -2675,7 +2667,7 @@ void hvm_unmap_guest_frame(void *p, bool_t permanent)
         list_for_each_entry(track, &d->arch.hvm_domain.write_map.list, list)
             if ( track->page == page )
             {
-                paging_mark_dirty(d, mfn);
+                paging_mark_dirty(d, _mfn(mfn));
                 list_del(&track->list);
                 xfree(track);
                 break;
@@ -2692,7 +2684,7 @@ void hvm_mapped_guest_frames_mark_dirty(struct domain *d)
 
     spin_lock(&d->arch.hvm_domain.write_map.lock);
     list_for_each_entry(track, &d->arch.hvm_domain.write_map.list, list)
-        paging_mark_dirty(d, page_to_mfn(track->page));
+        paging_mark_dirty(d, _mfn(page_to_mfn(track->page)));
     spin_unlock(&d->arch.hvm_domain.write_map.lock);
 }
 
@@ -2916,7 +2908,7 @@ void hvm_prepare_vm86_tss(struct vcpu *v, uint32_t base, uint32_t limit)
 
 void hvm_task_switch(
     uint16_t tss_sel, enum hvm_task_switch_reason taskswitch_reason,
-    int32_t errcode, unsigned int insn_len)
+    int32_t errcode)
 {
     struct vcpu *v = current;
     struct cpu_user_regs *regs = guest_cpu_user_regs();
@@ -2990,7 +2982,7 @@ void hvm_task_switch(
     if ( taskswitch_reason == TSW_iret )
         eflags &= ~X86_EFLAGS_NT;
 
-    tss.eip    = regs->eip + insn_len;
+    tss.eip    = regs->eip;
     tss.eflags = eflags;
     tss.eax    = regs->eax;
     tss.ecx    = regs->ecx;
@@ -3272,8 +3264,8 @@ static enum hvm_translation_result __hvm_copy(
 
                 if ( xchg(&lastpage, gfn_x(gfn)) != gfn_x(gfn) )
                     dprintk(XENLOG_G_DEBUG,
-                            "%pv attempted write to read-only gfn %#lx (mfn=%#"PRI_mfn")\n",
-                            v, gfn_x(gfn), mfn_x(page_to_mfn(page)));
+                            "%pv attempted write to read-only gfn %#lx (mfn=%#lx)\n",
+                            v, gfn_x(gfn), page_to_mfn(page));
             }
             else
             {
@@ -3281,7 +3273,7 @@ static enum hvm_translation_result __hvm_copy(
                     memcpy(p, buf, count);
                 else
                     memset(p, 0, count);
-                paging_mark_pfn_dirty(v->domain, _pfn(gfn_x(gfn)));
+                paging_mark_dirty(v->domain, _mfn(page_to_mfn(page)));
             }
         }
         else
@@ -3561,7 +3553,7 @@ int hvm_msr_read_intercept(unsigned int msr, uint64_t *msr_content)
 }
 
 int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content,
-                            bool may_defer)
+                            bool_t may_defer)
 {
     struct vcpu *v = current;
     struct domain *d = v->domain;
@@ -3572,12 +3564,6 @@ int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content,
 
     if ( may_defer && unlikely(monitored_msr(v->domain, msr)) )
     {
-        uint64_t msr_old_content;
-
-        ret = hvm_msr_read_intercept(msr, &msr_old_content);
-        if ( ret != X86EMUL_OKAY )
-            return ret;
-
         ASSERT(v->arch.vm_event);
 
         /* The actual write will occur in hvm_do_resume() (if permitted). */
@@ -3585,7 +3571,7 @@ int hvm_msr_write_intercept(unsigned int msr, uint64_t msr_content,
         v->arch.vm_event->write_data.msr = msr;
         v->arch.vm_event->write_data.value = msr_content;
 
-        hvm_monitor_msr(msr, msr_content, msr_old_content);
+        hvm_monitor_msr(msr, msr_content);
         return X86EMUL_OKAY;
     }
 
@@ -3919,7 +3905,7 @@ void hvm_vcpu_reset_state(struct vcpu *v, uint16_t cs, uint16_t ip)
     fpu_ctxt->mxcsr = MXCSR_DEFAULT;
     if ( v->arch.xsave_area )
     {
-        v->arch.xsave_area->xsave_hdr.xstate_bv = X86_XCR0_FP;
+        v->arch.xsave_area->xsave_hdr.xstate_bv = XSTATE_FP;
         v->arch.xsave_area->xsave_hdr.xcomp_bv = 0;
     }
 
@@ -4037,71 +4023,45 @@ static void hvm_s3_resume(struct domain *d)
     }
 }
 
-bool hvm_flush_vcpu_tlb(bool (*flush_vcpu)(void *ctxt, struct vcpu *v),
-                        void *ctxt)
+static int hvmop_flush_tlb_all(void)
 {
-    static DEFINE_PER_CPU(cpumask_t, flush_cpumask);
-    cpumask_t *mask = &this_cpu(flush_cpumask);
     struct domain *d = current->domain;
     struct vcpu *v;
 
+    if ( !is_hvm_domain(d) )
+        return -EINVAL;
+
     /* Avoid deadlock if more than one vcpu tries this at the same time. */
     if ( !spin_trylock(&d->hypercall_deadlock_mutex) )
-        return false;
+        return -ERESTART;
 
     /* Pause all other vcpus. */
     for_each_vcpu ( d, v )
-        if ( v != current && flush_vcpu(ctxt, v) )
+        if ( v != current )
             vcpu_pause_nosync(v);
 
     /* Now that all VCPUs are signalled to deschedule, we wait... */
     for_each_vcpu ( d, v )
-        if ( v != current && flush_vcpu(ctxt, v) )
+        if ( v != current )
             while ( !vcpu_runnable(v) && v->is_running )
                 cpu_relax();
 
     /* All other vcpus are paused, safe to unlock now. */
     spin_unlock(&d->hypercall_deadlock_mutex);
 
-    cpumask_clear(mask);
-
     /* Flush paging-mode soft state (e.g., va->gfn cache; PAE PDPE cache). */
     for_each_vcpu ( d, v )
-    {
-        unsigned int cpu;
+        paging_update_cr3(v);
 
-        if ( !flush_vcpu(ctxt, v) )
-            continue;
-
-        paging_update_cr3(v, false);
-
-        cpu = read_atomic(&v->dirty_cpu);
-        if ( is_vcpu_dirty_cpu(cpu) )
-            __cpumask_set_cpu(cpu, mask);
-    }
-
-    /* Flush TLBs on all CPUs with dirty vcpu state. */
-    flush_tlb_mask(mask);
+    /* Flush all dirty TLBs. */
+    flush_tlb_mask(d->domain_dirty_cpumask);
 
     /* Done. */
     for_each_vcpu ( d, v )
-        if ( v != current && flush_vcpu(ctxt, v) )
+        if ( v != current )
             vcpu_unpause(v);
 
-    return true;
-}
-
-static bool always_flush(void *ctxt, struct vcpu *v)
-{
-    return true;
-}
-
-static int hvmop_flush_tlb_all(void)
-{
-    if ( !is_hvm_domain(current->domain) )
-        return -EINVAL;
-
-    return hvm_flush_vcpu_tlb(always_flush, NULL) ? 0 : -ERESTART;
+    return 0;
 }
 
 static int hvmop_set_evtchn_upcall_vector(
@@ -4253,17 +4213,16 @@ static int hvmop_set_param(
         domain_pause(d);
         d->arch.hvm_domain.params[a.index] = a.value;
         for_each_vcpu ( d, v )
-            paging_update_cr3(v, false);
+            paging_update_cr3(v);
         domain_unpause(d);
 
         domctl_lock_release();
         break;
     case HVM_PARAM_DM_DOMAIN:
-        /* The only value this should ever be set to is DOMID_SELF */
-        if ( a.value != DOMID_SELF )
-            rc = -EINVAL;
+        if ( a.value == DOMID_SELF )
+            a.value = curr_d->domain_id;
 
-        a.value = curr_d->domain_id;
+        rc = hvm_set_dm_domain(d, a.value);
         break;
     case HVM_PARAM_ACPI_S_STATE:
         rc = 0;
@@ -4504,7 +4463,9 @@ static int hvmop_get_param(
          */
         if ( !d->creation_finished )
         {
-            rc = hvm_create_ioreq_server(d, true,
+            domid_t domid = d->arch.hvm_domain.params[HVM_PARAM_DM_DOMAIN];
+
+            rc = hvm_create_ioreq_server(d, domid, true,
                                          HVM_IOREQSRV_BUFIOREQ_LEGACY, NULL);
             if ( rc != 0 && rc != -EEXIST )
                 goto out;
@@ -4553,10 +4514,8 @@ static int do_altp2m_op(
     case HVMOP_altp2m_destroy_p2m:
     case HVMOP_altp2m_switch_p2m:
     case HVMOP_altp2m_set_mem_access:
-    case HVMOP_altp2m_set_mem_access_multi:
     case HVMOP_altp2m_change_gfn:
         break;
-
     default:
         return -EOPNOTSUPP;
     }
@@ -4678,37 +4637,6 @@ static int do_altp2m_op(
                                     a.u.set_mem_access.view);
         break;
 
-    case HVMOP_altp2m_set_mem_access_multi:
-        if ( a.u.set_mem_access_multi.pad ||
-             a.u.set_mem_access_multi.opaque > a.u.set_mem_access_multi.nr )
-        {
-            rc = -EINVAL;
-            break;
-        }
-
-        /*
-         * Unlike XENMEM_access_op_set_access_multi, we don't need any bits of
-         * the 'continuation' counter to be zero (to stash a command in).
-         * However, 0x40 is a good 'stride' to make sure that we make
-         * a reasonable amount of forward progress before yielding,
-         * so use a mask of 0x3F here.
-         */
-        rc = p2m_set_mem_access_multi(d, a.u.set_mem_access_multi.pfn_list,
-                                      a.u.set_mem_access_multi.access_list,
-                                      a.u.set_mem_access_multi.nr,
-                                      a.u.set_mem_access_multi.opaque,
-                                      0x3F,
-                                      a.u.set_mem_access_multi.view);
-        if ( rc > 0 )
-        {
-            a.u.set_mem_access_multi.opaque = rc;
-            rc = -ERESTART;
-            if ( __copy_field_to_guest(guest_handle_cast(arg, xen_hvm_altp2m_op_t),
-                                       &a, u.set_mem_access_multi.opaque) )
-                rc = -EFAULT;
-        }
-        break;
-
     case HVMOP_altp2m_change_gfn:
         if ( a.u.change_gfn.pad1 || a.u.change_gfn.pad2 )
             rc = -EINVAL;
@@ -4723,104 +4651,6 @@ static int do_altp2m_op(
 
  out:
     rcu_unlock_domain(d);
-
-    return rc;
-}
-
-DEFINE_XEN_GUEST_HANDLE(compat_hvm_altp2m_op_t);
-
-/*
- * Manually define the CHECK_ macros for hvm_altp2m_op and
- * hvm_altp2m_set_mem_access_multi as the generated versions can't handle
- * correctly the translation of all fields from compat_(*) to xen_(*).
- */
-#ifndef CHECK_hvm_altp2m_op
-#define CHECK_hvm_altp2m_op \
-    CHECK_SIZE_(struct, hvm_altp2m_op); \
-    CHECK_FIELD_(struct, hvm_altp2m_op, version); \
-    CHECK_FIELD_(struct, hvm_altp2m_op, cmd); \
-    CHECK_FIELD_(struct, hvm_altp2m_op, domain); \
-    CHECK_FIELD_(struct, hvm_altp2m_op, pad1); \
-    CHECK_FIELD_(struct, hvm_altp2m_op, pad2)
-#endif /* CHECK_hvm_altp2m_op */
-
-#ifndef CHECK_hvm_altp2m_set_mem_access_multi
-#define CHECK_hvm_altp2m_set_mem_access_multi \
-    CHECK_FIELD_(struct, hvm_altp2m_set_mem_access_multi, view); \
-    CHECK_FIELD_(struct, hvm_altp2m_set_mem_access_multi, pad); \
-    CHECK_FIELD_(struct, hvm_altp2m_set_mem_access_multi, nr); \
-    CHECK_FIELD_(struct, hvm_altp2m_set_mem_access_multi, opaque)
-#endif /* CHECK_hvm_altp2m_set_mem_access_multi */
-
-CHECK_hvm_altp2m_op;
-CHECK_hvm_altp2m_set_mem_access_multi;
-
-static int compat_altp2m_op(
-    XEN_GUEST_HANDLE_PARAM(void) arg)
-{
-    int rc = 0;
-    struct compat_hvm_altp2m_op a;
-    union
-    {
-        XEN_GUEST_HANDLE_PARAM(void) hnd;
-        struct xen_hvm_altp2m_op *altp2m_op;
-    } nat;
-
-    if ( !hvm_altp2m_supported() )
-        return -EOPNOTSUPP;
-
-    if ( copy_from_guest(&a, arg, 1) )
-        return -EFAULT;
-
-    if ( a.pad1 || a.pad2 ||
-         (a.version != HVMOP_ALTP2M_INTERFACE_VERSION) )
-        return -EINVAL;
-
-    set_xen_guest_handle(nat.hnd, COMPAT_ARG_XLAT_VIRT_BASE);
-
-    switch ( a.cmd )
-    {
-    case HVMOP_altp2m_set_mem_access_multi:
-#define XLAT_hvm_altp2m_set_mem_access_multi_HNDL_pfn_list(_d_, _s_); \
-        guest_from_compat_handle((_d_)->pfn_list, (_s_)->pfn_list)
-#define XLAT_hvm_altp2m_set_mem_access_multi_HNDL_access_list(_d_, _s_); \
-        guest_from_compat_handle((_d_)->access_list, (_s_)->access_list)
-        XLAT_hvm_altp2m_set_mem_access_multi(&nat.altp2m_op->u.set_mem_access_multi,
-                                             &a.u.set_mem_access_multi);
-#undef XLAT_hvm_altp2m_set_mem_access_multi_HNDL_pfn_list
-#undef XLAT_hvm_altp2m_set_mem_access_multi_HNDL_access_list
-        break;
-
-    default:
-        return do_altp2m_op(arg);
-    }
-
-    /* Manually fill the common part of the xen_hvm_altp2m_op structure. */
-    nat.altp2m_op->version  = a.version;
-    nat.altp2m_op->cmd      = a.cmd;
-    nat.altp2m_op->domain   = a.domain;
-    nat.altp2m_op->pad1     = a.pad1;
-    nat.altp2m_op->pad2     = a.pad2;
-
-    rc = do_altp2m_op(nat.hnd);
-
-    switch ( a.cmd )
-    {
-    case HVMOP_altp2m_set_mem_access_multi:
-        if ( rc == -ERESTART )
-        {
-            a.u.set_mem_access_multi.opaque =
-                nat.altp2m_op->u.set_mem_access_multi.opaque;
-            if ( __copy_field_to_guest(guest_handle_cast(arg,
-                                                         compat_hvm_altp2m_op_t),
-                                       &a, u.set_mem_access_multi.opaque) )
-                rc = -EFAULT;
-        }
-        break;
-
-    default:
-        ASSERT_UNREACHABLE();
-    }
 
     return rc;
 }
@@ -4972,7 +4802,7 @@ long do_hvm_op(unsigned long op, XEN_GUEST_HANDLE_PARAM(void) arg)
         break;
 
     case HVMOP_altp2m:
-        rc = current->hcall_compat ? compat_altp2m_op(arg) : do_altp2m_op(arg);
+        rc = do_altp2m_op(arg);
         break;
 
     default:
@@ -5023,6 +4853,29 @@ void hvm_toggle_singlestep(struct vcpu *v)
         return;
 
     v->arch.hvm_vcpu.single_step = !v->arch.hvm_vcpu.single_step;
+}
+
+int hvm_set_mode(struct vcpu *v, int mode)
+{
+
+    switch ( mode )
+    {
+    case 4:
+        v->arch.hvm_vcpu.guest_efer &= ~(EFER_LMA | EFER_LME);
+        break;
+    case 8:
+        v->arch.hvm_vcpu.guest_efer |= (EFER_LMA | EFER_LME);
+        break;
+    default:
+        return -EOPNOTSUPP;
+    }
+
+    hvm_update_guest_efer(v);
+
+    if ( hvm_funcs.set_mode )
+        return hvm_funcs.set_mode(v, mode);
+
+    return 0;
 }
 
 void hvm_domain_soft_reset(struct domain *d)
