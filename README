@@ -1,4 +1,4 @@
-Xen Version
+Repository Description & Xen Version.
 
 To gain a comprehensive understanding of Xen, I read the Xen source code and recorded the comments. 
 
@@ -8,9 +8,9 @@ I upload the stable version of Xen to avoid the source code changes and gain an 
 
 Therefore, I could make sure the installation of Xen keeps consistent on multiple hosts. 
 
-To check more versions, view other branches (I upload the stable versions, [3.0.2](https://github.com/Mykrobin/Virtualization-Xen-src/tree/xen-3.0.2), 4.0, 4.4, 4.8, 4.10, 4.11, 4.15).
+To check more versions, view other branches (I upload the stable versions, 3.0.2, 4.0, 4.4, 4.8, 4.10, 4.11, 4.15).
 
-If the non-modified version of Xen 4.11 is needed, checkout branch "Xen-4.11".
+If the non-modified version of Xen 4.11 is needed, checkout branch "xen-4.11".
 
 #################################
 __  __            _  _    _ _
